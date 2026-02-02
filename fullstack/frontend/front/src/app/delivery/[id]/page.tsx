@@ -12,7 +12,7 @@ export default function DeliveryDetailPage() {
 
   useEffect(() => {
     if (params.id) {
-      api.getDelivery(params.id as string)
+      api.deliveries.get(parseInt(params.id as string))
         .then(response => {
           setDelivery(response.data || null);
           setLoading(false);
@@ -28,8 +28,8 @@ export default function DeliveryDetailPage() {
     if (!delivery) return;
     setUpdating(true);
     try {
-      await api.updateDelivery(delivery.id, { status: newStatus });
-      setDelivery({ ...delivery, status: newStatus });
+      await api.deliveries.updateStatus(delivery.id, newStatus);
+      setDelivery({ ...delivery, status: newStatus as any });
     } catch (err) {
       console.error(err);
     }
@@ -78,7 +78,6 @@ export default function DeliveryDetailPage() {
   if (loading) {
     return (
       <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-        <Navigation />
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="flex items-center justify-center h-64">
             <div className="animate-spin w-8 h-8 border-4 border-amber-600 border-t-transparent rounded-full"></div>
@@ -91,7 +90,6 @@ export default function DeliveryDetailPage() {
   if (!delivery) {
     return (
       <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-        <Navigation />
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-6 text-center">
             <p className="text-red-600 dark:text-red-400">Delivery not found</p>
@@ -109,7 +107,6 @@ export default function DeliveryDetailPage() {
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      <Navigation />
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
@@ -127,7 +124,7 @@ export default function DeliveryDetailPage() {
               Delivery #{delivery.id}
             </h1>
             <p className="text-zinc-500 dark:text-zinc-400 mt-1">
-              Job Order #{delivery.job_order_id}
+              Job Order #{delivery.jobOrderId}
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -224,25 +221,25 @@ export default function DeliveryDetailPage() {
               <div className="flex items-center justify-between py-3 border-b border-zinc-100 dark:border-zinc-800">
                 <span className="text-sm text-zinc-500 dark:text-zinc-400">Scheduled Date</span>
                 <span className="text-sm font-medium text-zinc-900 dark:text-white">
-                  {new Date(delivery.scheduled_date).toLocaleDateString()}
+                  {new Date(delivery.scheduledDate).toLocaleDateString()}
                 </span>
               </div>
               <div className="flex items-center justify-between py-3 border-b border-zinc-100 dark:border-zinc-800">
                 <span className="text-sm text-zinc-500 dark:text-zinc-400">Time Slot</span>
                 <span className="text-sm font-medium text-zinc-900 dark:text-white">
-                  {delivery.time_slot || '9:00 AM - 12:00 PM'}
+                  {'9:00 AM - 12:00 PM'}
                 </span>
               </div>
               <div className="flex items-center justify-between py-3 border-b border-zinc-100 dark:border-zinc-800">
                 <span className="text-sm text-zinc-500 dark:text-zinc-400">Driver</span>
                 <span className="text-sm font-medium text-zinc-900 dark:text-white">
-                  {delivery.driver_name || 'Not assigned'}
+                  {'Not assigned'}
                 </span>
               </div>
               <div className="flex items-center justify-between py-3">
                 <span className="text-sm text-zinc-500 dark:text-zinc-400">Vehicle</span>
                 <span className="text-sm font-medium text-zinc-900 dark:text-white">
-                  {delivery.vehicle_assigned || 'Delivery Van 01'}
+                  {'Delivery Van 01'}
                 </span>
               </div>
             </div>
@@ -261,26 +258,26 @@ export default function DeliveryDetailPage() {
               <div>
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">Recipient</p>
                 <p className="text-sm font-medium text-zinc-900 dark:text-white mt-1">
-                  {delivery.recipient_name || delivery.customer_name}
+                  {'Recipient Name'}
                 </p>
               </div>
               <div>
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">Address</p>
                 <p className="text-sm font-medium text-zinc-900 dark:text-white mt-1">
-                  {delivery.delivery_address}
+                  {delivery.address || 'No address provided'}
                 </p>
               </div>
               <div>
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">Contact Number</p>
                 <p className="text-sm font-medium text-zinc-900 dark:text-white mt-1">
-                  {delivery.contact_number || 'N/A'}
+                  {delivery.contactNumber || 'N/A'}
                 </p>
               </div>
-              {delivery.delivery_notes && (
+              {delivery.notes && (
                 <div>
                   <p className="text-sm text-zinc-500 dark:text-zinc-400">Notes</p>
                   <p className="text-sm font-medium text-zinc-900 dark:text-white mt-1">
-                    {delivery.delivery_notes}
+                    {delivery.notes}
                   </p>
                 </div>
               )}
@@ -329,7 +326,7 @@ export default function DeliveryDetailPage() {
         {/* Actions */}
         <div className="mt-6 flex flex-wrap gap-3">
           <button 
-            onClick={() => router.push(`/sales/${delivery.job_order_id}`)}
+            onClick={() => router.push(`/sales/${delivery.jobOrderId}`)}
             className="inline-flex items-center px-4 py-2 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 hover:border-amber-300 text-zinc-700 dark:text-zinc-300 rounded-lg font-medium transition-colors"
           >
             <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">

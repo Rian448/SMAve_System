@@ -14,7 +14,7 @@ export default function JobOrderDetailPage() {
 
   useEffect(() => {
     if (params.id) {
-      api.getJobOrder(params.id as string)
+      api.sales.getJobOrder(parseInt(params.id as string))
         .then(response => {
           setJobOrder(response.data || null);
           setLoading(false);
@@ -30,8 +30,8 @@ export default function JobOrderDetailPage() {
     if (!jobOrder) return;
     setUpdating(true);
     try {
-      await api.updateJobOrder(jobOrder.id, { status: newStatus });
-      setJobOrder({ ...jobOrder, status: newStatus });
+      await api.sales.updateJobOrder(jobOrder.id, { status: newStatus as any });
+      setJobOrder({ ...jobOrder, status: newStatus as any });
     } catch (err) {
       console.error(err);
     }
@@ -52,7 +52,6 @@ export default function JobOrderDetailPage() {
   if (loading) {
     return (
       <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-        <Navigation />
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="flex items-center justify-center h-64">
             <div className="animate-spin w-8 h-8 border-4 border-amber-600 border-t-transparent rounded-full"></div>
@@ -65,7 +64,6 @@ export default function JobOrderDetailPage() {
   if (!jobOrder) {
     return (
       <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-        <Navigation />
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-6 text-center">
             <p className="text-red-600 dark:text-red-400">Job order not found</p>
@@ -83,7 +81,6 @@ export default function JobOrderDetailPage() {
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      <Navigation />
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
@@ -98,10 +95,10 @@ export default function JobOrderDetailPage() {
               Back to Sales
             </button>
             <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">
-              Job Order #{jobOrder.id}
+              Job Order #{jobOrder.jobOrderId}
             </h1>
             <p className="text-zinc-500 dark:text-zinc-400 mt-1">
-              Created on {new Date(jobOrder.created_date).toLocaleDateString()}
+              Created on {new Date(jobOrder.createdAt).toLocaleDateString()}
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -149,15 +146,15 @@ export default function JobOrderDetailPage() {
             <div className="space-y-3">
               <div>
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">Name</p>
-                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.customer_name}</p>
+                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.customerName}</p>
               </div>
               <div>
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">Phone</p>
-                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.customer_phone || 'N/A'}</p>
+                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.customerPhone || 'N/A'}</p>
               </div>
               <div>
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">Email</p>
-                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.customer_email || 'N/A'}</p>
+                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.customerEmail || 'N/A'}</p>
               </div>
               <div>
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">Address</p>
@@ -179,20 +176,20 @@ export default function JobOrderDetailPage() {
               <div>
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">Make & Model</p>
                 <p className="text-sm font-medium text-zinc-900 dark:text-white">
-                  {jobOrder.vehicle_make} {jobOrder.vehicle_model}
+                  {jobOrder.vehicleInfo ? `${jobOrder.vehicleInfo.make} ${jobOrder.vehicleInfo.model}` : 'N/A'}
                 </p>
               </div>
               <div>
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">Year</p>
-                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.vehicle_year || 'N/A'}</p>
+                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.vehicleInfo?.year || 'N/A'}</p>
               </div>
               <div>
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">Color</p>
-                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.vehicle_color || 'N/A'}</p>
+                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.vehicleInfo?.color || 'N/A'}</p>
               </div>
               <div>
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">Plate Number</p>
-                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.plate_number || 'N/A'}</p>
+                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.vehicleInfo?.plateNumber || 'N/A'}</p>
               </div>
             </div>
           </div>
@@ -207,18 +204,18 @@ export default function JobOrderDetailPage() {
             </h2>
             <div className="space-y-3">
               <div>
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">Service Type</p>
-                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.service_type}</p>
-              </div>
-              <div>
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">Description</p>
                 <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.description || 'N/A'}</p>
               </div>
               <div>
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">Due Date</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">Estimated Completion</p>
                 <p className="text-sm font-medium text-zinc-900 dark:text-white">
-                  {jobOrder.due_date ? new Date(jobOrder.due_date).toLocaleDateString() : 'Not set'}
+                  {jobOrder.estimatedCompletion ? new Date(jobOrder.estimatedCompletion).toLocaleDateString() : 'Not set'}
                 </p>
+              </div>
+              <div>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">Items</p>
+                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.items.length} item(s)</p>
               </div>
             </div>
           </div>
@@ -234,76 +231,67 @@ export default function JobOrderDetailPage() {
           </h2>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Materials */}
+            {/* Items */}
             <div>
-              <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-3">Materials Used</h3>
-              {jobOrder.materials && jobOrder.materials.length > 0 ? (
+              <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-3">Order Items</h3>
+              {jobOrder.items && jobOrder.items.length > 0 ? (
                 <div className="space-y-2">
-                  {jobOrder.materials.map((material, index) => (
+                  {jobOrder.items.map((item, index) => (
                     <div key={index} className="flex items-center justify-between py-2 px-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
                       <div>
-                        <p className="text-sm font-medium text-zinc-900 dark:text-white">{material.name}</p>
-                        <p className="text-xs text-zinc-500">{material.quantity} {material.unit}</p>
+                        <p className="text-sm font-medium text-zinc-900 dark:text-white">{item.name}</p>
+                        <p className="text-xs text-zinc-500">{item.quantity} units @ ₱{item.unitPrice?.toLocaleString()}</p>
                       </div>
                       <p className="text-sm font-medium text-zinc-900 dark:text-white">
-                        ₱{(material.unit_cost * material.quantity).toLocaleString()}
+                        ₱{(item.quantity * (item.unitPrice || 0)).toLocaleString()}
                       </p>
                     </div>
                   ))}
                 </div>
               ) : (
-                <p className="text-sm text-zinc-500 dark:text-zinc-400">No materials recorded</p>
+                <p className="text-sm text-zinc-500 dark:text-zinc-400">No items recorded</p>
               )}
             </div>
 
-            {/* Labor */}
+            {/* Cost Summary */}
             <div>
-              <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-3">Labor Costs</h3>
-              {jobOrder.labor_items && jobOrder.labor_items.length > 0 ? (
-                <div className="space-y-2">
-                  {jobOrder.labor_items.map((labor, index) => (
-                    <div key={index} className="flex items-center justify-between py-2 px-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
-                      <div>
-                        <p className="text-sm font-medium text-zinc-900 dark:text-white">{labor.description}</p>
-                        <p className="text-xs text-zinc-500">{labor.hours} hours @ ₱{labor.rate}/hr</p>
-                      </div>
-                      <p className="text-sm font-medium text-zinc-900 dark:text-white">
-                        ₱{(labor.hours * labor.rate).toLocaleString()}
-                      </p>
-                    </div>
-                  ))}
+              <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-3">Cost Summary</h3>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between py-2 px-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                  <p className="text-sm font-medium text-blue-900 dark:text-blue-300">Estimated Cost</p>
+                  <p className="text-sm font-bold text-blue-600 dark:text-blue-400">₱{(jobOrder.estimatedCost || 0).toLocaleString()}</p>
                 </div>
-              ) : (
-                <p className="text-sm text-zinc-500 dark:text-zinc-400">No labor costs recorded</p>
-              )}
+                <div className="flex items-center justify-between py-2 px-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                  <p className="text-sm font-medium text-green-900 dark:text-green-300">Actual Cost</p>
+                  <p className="text-sm font-bold text-green-600 dark:text-green-400">₱{(jobOrder.actualCost || 0).toLocaleString()}</p>
+                </div>
+                <div className="flex items-center justify-between py-2 px-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg border-2 border-amber-200 dark:border-amber-800">
+                  <p className="text-sm font-bold text-amber-900 dark:text-amber-300">Total Price</p>
+                  <p className="text-lg font-bold text-amber-600 dark:text-amber-400">₱{(jobOrder.totalPrice || 0).toLocaleString()}</p>
+                </div>
+              </div>
             </div>
           </div>
 
           {/* Totals */}
           <div className="mt-6 pt-6 border-t border-zinc-200 dark:border-zinc-800">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4 text-center">
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">Materials Cost</p>
-                <p className="text-lg font-bold text-zinc-900 dark:text-white">
-                  ₱{(jobOrder.material_cost || 0).toLocaleString()}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 text-center border border-blue-200 dark:border-blue-800">
+                <p className="text-xs text-blue-600 dark:text-blue-400">Estimated Cost</p>
+                <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">
+                  ₱{(jobOrder.estimatedCost || 0).toLocaleString()}
                 </p>
               </div>
-              <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4 text-center">
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">Labor Cost</p>
-                <p className="text-lg font-bold text-zinc-900 dark:text-white">
-                  ₱{(jobOrder.labor_cost || 0).toLocaleString()}
+              <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-4 text-center border border-green-200 dark:border-green-800">
+                <p className="text-xs text-green-600 dark:text-green-400">Actual Cost</p>
+                <p className="text-2xl font-bold text-green-600 dark:text-green-400">
+                  ₱{(jobOrder.actualCost || 0).toLocaleString()}
                 </p>
               </div>
-              <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4 text-center">
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">Overhead</p>
-                <p className="text-lg font-bold text-zinc-900 dark:text-white">
-                  ₱{(jobOrder.overhead_cost || 0).toLocaleString()}
-                </p>
-              </div>
-              <div className="bg-amber-50 dark:bg-amber-900/20 rounded-lg p-4 text-center">
-                <p className="text-xs text-amber-600 dark:text-amber-400">Total Amount</p>
-                <p className="text-lg font-bold text-amber-600 dark:text-amber-400">
-                  ₱{(jobOrder.total_amount || 0).toLocaleString()}
+              <div className="bg-amber-50 dark:bg-amber-900/20 rounded-lg p-4 text-center border-2 border-amber-300 dark:border-amber-700">
+                <p className="text-xs text-amber-600 dark:text-amber-400 font-bold">TOTAL PRICE</p>
+                <p className="text-2xl font-bold text-amber-600 dark:text-amber-400">
+                  ₱{(jobOrder.totalPrice || 0).toLocaleString()}
                 </p>
               </div>
             </div>
@@ -322,25 +310,25 @@ export default function JobOrderDetailPage() {
             <div>
               <p className="text-xs text-zinc-500 dark:text-zinc-400">Payment Status</p>
               <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full mt-1 ${
-                jobOrder.payment_status === 'paid' 
+                jobOrder.paymentStatus === 'paid' 
                   ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                  : jobOrder.payment_status === 'partial'
+                  : jobOrder.paymentStatus === 'partial'
                   ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
                   : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
               }`}>
-                {(jobOrder.payment_status || 'unpaid').toUpperCase()}
+                {(jobOrder.paymentStatus || 'unpaid').toUpperCase()}
               </span>
             </div>
             <div>
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">Amount Paid</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">Down Payment</p>
               <p className="text-lg font-bold text-green-600 dark:text-green-400">
-                ₱{(jobOrder.amount_paid || 0).toLocaleString()}
+                ₱{(jobOrder.downPayment || 0).toLocaleString()}
               </p>
             </div>
             <div>
               <p className="text-xs text-zinc-500 dark:text-zinc-400">Balance Due</p>
               <p className="text-lg font-bold text-red-600 dark:text-red-400">
-                ₱{((jobOrder.total_amount || 0) - (jobOrder.amount_paid || 0)).toLocaleString()}
+                ₱{(jobOrder.balance || 0).toLocaleString()}
               </p>
             </div>
           </div>
