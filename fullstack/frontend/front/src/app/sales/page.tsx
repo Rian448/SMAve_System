@@ -1,6 +1,5 @@
 'use client';
 import { useState, useEffect } from 'react';
-import Navigation from '@/components/Navigation';
 import { useAuth } from '@/context/AuthContext';
 import { api, JobOrder } from '@/lib/api';
 import Link from 'next/link';
@@ -18,10 +17,11 @@ export default function SalesPage() {
 
   const fetchJobOrders = async () => {
     try {
-      const data = await api.sales.getJobOrders(filter !== 'all' ? { status: filter } : undefined);
-      setJobOrders(data);
+      const response = await api.sales.getJobOrders(filter !== 'all' ? { status: filter } : undefined);
+      setJobOrders(Array.isArray(response) ? response : response.data || []);
     } catch (error) {
       console.error('Error fetching job orders:', error);
+      setJobOrders([]);
     } finally {
       setLoading(false);
     }
@@ -55,14 +55,13 @@ export default function SalesPage() {
   };
 
   const filteredOrders = jobOrders.filter(order =>
-    order.orderNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    order.jobOrderId.toLowerCase().includes(searchTerm.toLowerCase()) ||
     order.customerName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    order.vehicleInfo.toLowerCase().includes(searchTerm.toLowerCase())
+    (order.vehicleInfo ? `${order.vehicleInfo.year} ${order.vehicleInfo.make} ${order.vehicleInfo.model}`.toLowerCase() : '').includes(searchTerm.toLowerCase())
   );
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      <Navigation />
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-8">
@@ -152,7 +151,7 @@ export default function SalesPage() {
                   {filteredOrders.map((order) => (
                     <tr key={order.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="text-sm font-medium text-amber-600 dark:text-amber-400">{order.orderNumber}</span>
+                        <span className="text-sm font-medium text-amber-600 dark:text-amber-400">{order.jobOrderId}</span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div>
@@ -161,13 +160,13 @@ export default function SalesPage() {
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
-                        {order.vehicleInfo}
+                        {order.vehicleInfo ? `${order.vehicleInfo.year} ${order.vehicleInfo.make} ${order.vehicleInfo.model}` : 'N/A'}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
-                        {order.serviceType}
+                        {order.description}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-zinc-900 dark:text-white">
-                        {formatCurrency(order.totalAmount)}
+                        {formatCurrency(order.totalPrice)}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
                         {formatDate(order.createdAt)}
@@ -196,3 +195,4 @@ export default function SalesPage() {
     </div>
   );
 }
+

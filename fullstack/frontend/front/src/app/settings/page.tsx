@@ -1,6 +1,5 @@
 'use client';
 import { useState } from 'react';
-import Navigation from '@/components/Navigation';
 import { useAuth } from '@/context/AuthContext';
 
 type TabType = 'general' | 'users' | 'branches' | 'services' | 'notifications';
@@ -362,7 +361,6 @@ export default function SettingsPage() {
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      <Navigation />
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="mb-8">
@@ -431,3 +429,4 @@ export default function SettingsPage() {
     </div>
   );
 }
+

@@ -1,7 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import Navigation from '@/components/Navigation';
 import { api, RawMaterial } from '@/lib/api';
 
 interface POItem {
@@ -106,7 +105,6 @@ export default function NewPurchaseOrderPage() {
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      <Navigation />
       <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="mb-8">
@@ -385,3 +383,4 @@ export default function NewPurchaseOrderPage() {
     </div>
   );
 }
+

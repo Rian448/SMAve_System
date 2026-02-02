@@ -1,6 +1,5 @@
 'use client';
 import { useState, useEffect } from 'react';
-import Navigation from '@/components/Navigation';
 import { useAuth, hasAccess } from '@/context/AuthContext';
 import { api, DashboardStats, Alert, Activity } from '@/lib/api';
 import Link from 'next/link';
@@ -85,8 +84,7 @@ export default function Dashboard() {
   if (authLoading || loading) {
     return (
       <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-        <Navigation />
-        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="animate-pulse space-y-6">
             <div className="h-8 w-48 bg-zinc-200 dark:bg-zinc-800 rounded"></div>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
@@ -106,7 +104,6 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      <Navigation />
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="mb-8">
@@ -358,3 +355,4 @@ export default function Dashboard() {
     </div>
   );
 }
+
