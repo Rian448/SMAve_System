@@ -28,7 +28,7 @@ export default function NewPurchaseOrderPage() {
   ]);
 
   useEffect(() => {
-    api.getRawMaterials()
+    api.inventory.getRawMaterials()
       .then(response => {
         setMaterials(response.data || []);
         setLoadingMaterials(false);
@@ -56,9 +56,9 @@ export default function NewPurchaseOrderPage() {
       if (material) {
         newItems[index] = {
           ...newItems[index],
-          material_id: material.id,
+          material_id: material.id.toString(),
           material_name: material.name,
-          unit_cost: material.unit_cost,
+          unit_cost: material.price,
           unit: material.unit
         };
       }
@@ -78,17 +78,18 @@ export default function NewPurchaseOrderPage() {
 
     try {
       const purchaseOrder = {
-        supplier_name: supplier,
-        supplier_contact: supplierContact,
-        supplier_email: supplierEmail,
-        expected_date: expectedDate,
-        notes,
-        items: items.filter(item => item.material_id),
-        total_amount: calculateTotal(),
-        status: 'pending'
+        supplierName: supplier,
+        items: items.filter(item => item.material_id).map(item => ({
+          materialId: Number(item.material_id),
+          name: item.material_name,
+          quantity: item.quantity,
+          unit: item.unit,
+          unitPrice: item.unit_cost
+        })),
+        expectedDelivery: expectedDate
       };
 
-      await api.createPurchaseOrder(purchaseOrder);
+      await api.purchaseOrders.create(purchaseOrder);
       router.push('/inventory?tab=purchase-orders');
     } catch (err) {
       console.error(err);
@@ -245,7 +246,7 @@ export default function NewPurchaseOrderPage() {
                         >
                           <option value="">Select material</option>
                           {materials.map(m => (
-                            <option key={m.id} value={m.id}>
+                            <option key={m.id} value={m.id.toString()}>
                               {m.name} ({m.quantity} {m.unit} in stock)
                             </option>
                           ))}
