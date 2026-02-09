@@ -2,6 +2,9 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from datetime import datetime, timedelta
 from functools import wraps
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+import os
 import random
 import hashlib
 import secrets
@@ -11,16 +14,94 @@ app = Flask(__name__)
 CORS(app, origins=["http://localhost:3000"], supports_credentials=True)
 
 # ============================================
-# IN-MEMORY DATABASE (Replace with real DB in production)
+# DATABASE CONFIGURATION (PostgreSQL)
 # ============================================
 
-# Users Database
-users = [
-    {'id': 1, 'username': 'admin', 'password': hashlib.sha256('admin123'.encode()).hexdigest(), 'email': 'admin@seatmakers.com', 'fullName': 'System Administrator', 'role': 'administrator', 'branch': 'Main', 'isActive': True, 'createdAt': '2026-01-01'},
-    {'id': 2, 'username': 'supervisor', 'password': hashlib.sha256('super123'.encode()).hexdigest(), 'email': 'supervisor@seatmakers.com', 'fullName': 'John Supervisor', 'role': 'supervisor', 'branch': 'Main', 'isActive': True, 'createdAt': '2026-01-05'},
-    {'id': 3, 'username': 'salesmanager', 'password': hashlib.sha256('sales123'.encode()).hexdigest(), 'email': 'sales@seatmakers.com', 'fullName': 'Jane Sales', 'role': 'sales_manager', 'branch': 'Branch A', 'isActive': True, 'createdAt': '2026-01-10'},
-    {'id': 4, 'username': 'staff1', 'password': hashlib.sha256('staff123'.encode()).hexdigest(), 'email': 'staff1@seatmakers.com', 'fullName': 'Mike Staff', 'role': 'staff', 'branch': 'Branch B', 'isActive': True, 'createdAt': '2026-01-12'},
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
+    'DATABASE_URL',
+    'postgresql+pg8000://postgres:poiuytrewq@localhost:5432/SmDatabase'
+)
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+
+# ============================================
+# DATABASE MODELS
+# ============================================
+
+class Role(db.Model):
+    __tablename__ = 'roles'
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(50), unique=True, nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+
+class User(db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(100), unique=True, nullable=False)
+    password = db.Column(db.String(64), nullable=False)
+    email = db.Column(db.String(255), unique=True, nullable=False)
+    full_name = db.Column(db.String(255), nullable=False)
+    role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=False)
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
+    branch = db.Column(db.String(100), nullable=True)  # Keep for backward compatibility
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    role = db.relationship('Role')
+    branch_rel = db.relationship('Branch')
+
+class Branch(db.Model):
+    __tablename__ = 'branches'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    code = db.Column(db.String(50), unique=True, nullable=False)
+    address = db.Column(db.String(255), nullable=False)
+    is_warehouse = db.Column(db.Boolean, default=False)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class CustomerOrder(db.Model):
+    __tablename__ = 'customer_orders'
+    id = db.Column(db.Integer, primary_key=True)
+    order_number = db.Column(db.String(50), unique=True, nullable=False)
+    customer_name = db.Column(db.String(255), nullable=False)
+    customer_phone = db.Column(db.String(50), nullable=False)
+    customer_email = db.Column(db.String(255))
+    customer_address = db.Column(db.String(255))
+    vehicle_info = db.Column(db.JSON, nullable=False)
+    services = db.Column(db.JSON, nullable=False)
+    notes = db.Column(db.Text)
+    status = db.Column(db.String(50), default='pending')
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    branch = db.relationship('Branch')
+
+# ============================================
+# SEED DATA
+# ============================================
+
+default_roles = [
+    {'key': 'administrator', 'name': 'Administrator'},
+    {'key': 'supervisor', 'name': 'Supervisor'},
+    {'key': 'sales_manager', 'name': 'Sales Manager'},
+    {'key': 'staff', 'name': 'Staff'},
+    {'key': 'seat_maker', 'name': 'Seat Maker'},
+    {'key': 'sewer', 'name': 'Sewer'}
 ]
+
+default_users = [
+    {'username': 'admin', 'password': 'admin123', 'email': 'admin@seatmakers.com', 'fullName': 'System Administrator', 'role': 'administrator', 'branch': 'Main Warehouse', 'isActive': True},
+    {'username': 'supervisor', 'password': 'super123', 'email': 'supervisor@seatmakers.com', 'fullName': 'John Supervisor', 'role': 'supervisor', 'branch': 'Main Warehouse', 'isActive': True},
+    {'username': 'salesmanager', 'password': 'sales123', 'email': 'sales@seatmakers.com', 'fullName': 'Jane Sales', 'role': 'sales_manager', 'branch': 'Branch A', 'isActive': True},
+    {'username': 'staff1', 'password': 'staff123', 'email': 'staff1@seatmakers.com', 'fullName': 'Mike Staff', 'role': 'staff', 'branch': 'Branch B', 'isActive': True},
+]
+
+# ============================================
+# IN-MEMORY DATABASE (Replace with real DB in production)
+# ============================================
 
 # Sessions for authentication
 sessions = {}
@@ -255,18 +336,125 @@ counters = {
     'lineup_slip': 2,
     'purchase_order': 2,
     'delivery': 3,
-    'audit_log': 4
+    'audit_log': 4,
+    'customer_order': 1
 }
 
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
 
+db_initialized = False
+
+def user_to_dict(user):
+    return {
+        'id': user.id,
+        'username': user.username,
+        'email': user.email,
+        'fullName': user.full_name,
+        'role': user.role.key if user.role else None,
+        'roleName': user.role.name if user.role else None,
+        'branch': user.branch,
+        'branchId': user.branch_id,
+        'branchName': user.branch_rel.name if user.branch_rel else user.branch,
+        'isActive': user.is_active
+    }
+
+def customer_order_to_dict(order):
+    return {
+        'id': order.id,
+        'orderNumber': order.order_number,
+        'customerName': order.customer_name,
+        'customerPhone': order.customer_phone,
+        'customerEmail': order.customer_email,
+        'customerAddress': order.customer_address,
+        'vehicleInfo': order.vehicle_info,
+        'services': order.services,
+        'notes': order.notes,
+        'status': order.status,
+        'branchId': order.branch_id,
+        'branchName': order.branch.name if order.branch else None,
+        'createdAt': order.created_at.isoformat() if order.created_at else None
+    }
+
+def branch_to_dict(branch):
+    return {
+        'id': branch.id,
+        'name': branch.name,
+        'code': branch.code,
+        'address': branch.address,
+        'isWarehouse': branch.is_warehouse,
+        'isActive': branch.is_active,
+        'createdAt': branch.created_at.isoformat() if branch.created_at else None
+    }
+
+def seed_default_users():
+    for user in default_users:
+        existing = User.query.filter_by(username=user['username']).first()
+        if existing:
+            continue
+
+        role = Role.query.filter_by(key=user['role']).first()
+        if not role:
+            continue
+
+        branch = Branch.query.filter_by(name=user['branch']).first()
+
+        db.session.add(User(
+            username=user['username'],
+            password=hashlib.sha256(user['password'].encode()).hexdigest(),
+            email=user['email'],
+            full_name=user['fullName'],
+            role_id=role.id,
+            branch_id=branch.id if branch else None,
+            branch=user['branch'],
+            is_active=user['isActive']
+        ))
+
+    db.session.commit()
+
+def init_db():
+    db.create_all()
+
+    # Seed roles
+    for role in default_roles:
+        existing = Role.query.filter_by(key=role['key']).first()
+        if not existing:
+            db.session.add(Role(key=role['key'], name=role['name']))
+
+    db.session.commit()
+
+    # Seed branches
+    default_branches = [
+        {'name': 'Main Warehouse', 'code': 'MW', 'address': '123 Main St', 'is_warehouse': True},
+        {'name': 'Branch A', 'code': 'BA', 'address': '456 Branch A St', 'is_warehouse': False},
+        {'name': 'Branch B', 'code': 'BB', 'address': '789 Branch B St', 'is_warehouse': False},
+        {'name': 'Branch C', 'code': 'BC', 'address': '321 Branch C St', 'is_warehouse': False},
+    ]
+    
+    for branch_data in default_branches:
+        existing = Branch.query.filter_by(code=branch_data['code']).first()
+        if not existing:
+            db.session.add(Branch(
+                name=branch_data['name'],
+                code=branch_data['code'],
+                address=branch_data['address'],
+                is_warehouse=branch_data['is_warehouse'],
+                is_active=True
+            ))
+    
+    db.session.commit()
+
+    # Seed users
+    seed_default_users()
+
 def get_user_from_token(token):
     """Get user from session token"""
     if token in sessions:
         user_id = sessions[token]['userId']
-        return next((u for u in users if u['id'] == user_id), None)
+        user = User.query.get(user_id)
+        if user:
+            return user_to_dict(user)
     return None
 
 def require_auth(f):
@@ -309,6 +497,16 @@ def log_action(user_id, user_name, action, module, details, ip_address='0.0.0.0'
     })
     counters['audit_log'] += 1
 
+@app.before_request
+def ensure_db_initialized():
+    global db_initialized
+    if not db_initialized:
+        init_db()
+        db_initialized = True
+    else:
+        # Ensure default users exist (safe no-op when already seeded)
+        seed_default_users()
+
 def generate_job_order_id(branch_code):
     """Generate unique job order ID"""
     year = datetime.now().year
@@ -343,7 +541,7 @@ def login():
     username = data.get('username', '')
     password = hashlib.sha256(data.get('password', '').encode()).hexdigest()
     
-    user = next((u for u in users if u['username'] == username and u['password'] == password and u['isActive']), None)
+    user = User.query.filter_by(username=username, password=password, is_active=True).first()
     
     if not user:
         return jsonify({'status': 'error', 'message': 'Invalid credentials'}), 401
@@ -351,24 +549,17 @@ def login():
     # Generate session token
     token = secrets.token_hex(32)
     sessions[token] = {
-        'userId': user['id'],
+        'userId': user.id,
         'createdAt': datetime.now().isoformat()
     }
     
-    log_action(user['id'], user['fullName'], 'LOGIN', 'Auth', 'User logged in', request.remote_addr or '0.0.0.0')
+    log_action(user.id, user.full_name, 'LOGIN', 'Auth', 'User logged in', request.remote_addr or '0.0.0.0')
     
     return jsonify({
         'status': 'success',
         'data': {
             'token': token,
-            'user': {
-                'id': user['id'],
-                'username': user['username'],
-                'email': user['email'],
-                'fullName': user['fullName'],
-                'role': user['role'],
-                'branch': user['branch']
-            }
+            'user': user_to_dict(user)
         }
     })
 
@@ -402,7 +593,7 @@ def recover_account():
     data = request.get_json()
     email = data.get('email', '')
     
-    user = next((u for u in users if u['email'] == email), None)
+    user = User.query.filter_by(email=email).first()
     if not user:
         return jsonify({'status': 'success', 'message': 'If the email exists, a recovery link has been sent'})
     
@@ -455,7 +646,7 @@ def get_dashboard_stats():
     
     # Role-specific data
     if role == 'administrator':
-        stats['totalUsers'] = len([u for u in users if u['isActive']])
+        stats['totalUsers'] = User.query.filter_by(is_active=True).count()
         stats['totalBranches'] = len([b for b in branches if b['isActive']])
     
     return jsonify({'status': 'success', 'data': stats})
@@ -854,6 +1045,42 @@ def void_job_order(order_id):
     
     return jsonify({'status': 'success', 'message': 'Job order voided'})
 
+@app.route('/api/sales/all-orders', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+def get_all_orders():
+    """Get both job orders and customer orders - filtered by branch for non-admin users"""
+    user = request.current_user
+    
+    # Get job orders (from in-memory storage)
+    job_orders_list = job_orders
+    
+    # Get customer orders (from database)
+    if user['role'] == 'administrator':
+        # Administrators can see all orders
+        customer_orders_db = CustomerOrder.query.order_by(CustomerOrder.created_at.desc()).all()
+    else:
+        # Other users can only see orders from their branch
+        user_branch = Branch.query.filter_by(name=user['branch']).first()
+        if user_branch:
+            customer_orders_db = CustomerOrder.query.filter_by(branch_id=user_branch.id).order_by(CustomerOrder.created_at.desc()).all()
+            # Filter job orders by branch too
+            job_orders_list = [jo for jo in job_orders if jo.get('branchName') == user['branch'] or jo.get('branchId') == user_branch.id]
+        else:
+            customer_orders_db = []
+            job_orders_list = []
+    
+    # Convert customer orders to dict
+    customer_orders_list = [customer_order_to_dict(o) for o in customer_orders_db]
+    
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'jobOrders': job_orders_list,
+            'customerOrders': customer_orders_list
+        }
+    })
+
 # ============================================
 # SALES MODULE - LINE-UP SLIPS
 # ============================================
@@ -1235,6 +1462,109 @@ def generate_delivery_receipt(delivery_id):
     return jsonify({'status': 'success', 'data': receipt})
 
 # ============================================
+# CUSTOMER ORDERS MODULE
+# ============================================
+
+@app.route('/api/customer-orders', methods=['POST'])
+def place_customer_order():
+    """Place a new customer order without authentication"""
+    data = request.get_json()
+    
+    required = ['customerName', 'customerPhone', 'vehicleInfo', 'services']
+    if not all(f in data for f in required):
+        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    
+    if not data['services']:
+        return jsonify({'status': 'error', 'message': 'At least one service is required'}), 400
+    
+    # Validate branch if provided
+    branch_id = data.get('branchId')
+    if branch_id:
+        branch = Branch.query.get(branch_id)
+        if not branch or not branch.is_active:
+            return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+    
+    order_count = CustomerOrder.query.count() + 1
+    order_number = f"CO-{order_count:04d}"
+    
+    new_order = CustomerOrder(
+        order_number=order_number,
+        customer_name=data['customerName'],
+        customer_phone=data['customerPhone'],
+        customer_email=data.get('customerEmail', ''),
+        customer_address=data.get('customerAddress', ''),
+        vehicle_info={
+            'make': data['vehicleInfo'].get('make', ''),
+            'model': data['vehicleInfo'].get('model', ''),
+            'year': str(data['vehicleInfo'].get('year', '')),
+            'plateNumber': data['vehicleInfo'].get('plateNumber', '')
+        },
+        services=data['services'],
+        notes=data.get('notes', ''),
+        status='pending',
+        branch_id=branch_id
+    )
+    
+    db.session.add(new_order)
+    db.session.commit()
+    
+    return jsonify({'status': 'success', 'data': customer_order_to_dict(new_order)}), 201
+
+@app.route('/api/customer-orders', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+def get_customer_orders():
+    """Get customer orders - filtered by branch for non-admin users"""
+    user = request.current_user
+    
+    # Administrators can see all orders
+    if user['role'] == 'administrator':
+        orders = CustomerOrder.query.order_by(CustomerOrder.created_at.desc()).all()
+    else:
+        # Other users can only see orders from their branch
+        # First, find the branch ID by matching the branch name
+        user_branch = Branch.query.filter_by(name=user['branch']).first()
+        if user_branch:
+            orders = CustomerOrder.query.filter_by(branch_id=user_branch.id).order_by(CustomerOrder.created_at.desc()).all()
+        else:
+            # If branch not found, return empty list
+            orders = []
+    
+    return jsonify({'status': 'success', 'data': [customer_order_to_dict(o) for o in orders]})
+
+@app.route('/api/customer-orders/<int:order_id>', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def get_customer_order(order_id):
+    """Get a specific customer order"""
+    order = CustomerOrder.query.get(order_id)
+    if order is None:
+        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
+    return jsonify({'status': 'success', 'data': customer_order_to_dict(order)})
+
+@app.route('/api/customer-orders/<int:order_id>/status', methods=['PUT'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def update_customer_order_status(order_id):
+    """Update customer order status"""
+    order = CustomerOrder.query.get(order_id)
+    if order is None:
+        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
+    
+    data = request.get_json()
+    new_status = data.get('status')
+    
+    if new_status not in ['pending', 'processing', 'completed', 'cancelled']:
+        return jsonify({'status': 'error', 'message': 'Invalid status'}), 400
+    
+    order.status = new_status
+    db.session.commit()
+    
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Customer Orders', f"Updated order status: {order.order_number} to {new_status}", request.remote_addr or '0.0.0.0')
+    
+    return jsonify({'status': 'success', 'data': customer_order_to_dict(order)})
+
+# ============================================
 # FORECASTING MODULE
 # ============================================
 
@@ -1444,91 +1774,120 @@ def get_audit_trail():
 def get_users():
     include_inactive = request.args.get('includeInactive', 'false').lower() == 'true'
     
-    user_list = users if include_inactive else [u for u in users if u['isActive']]
+    query = User.query
+    if not include_inactive:
+        query = query.filter_by(is_active=True)
     
-    # Remove password from response
-    safe_users = []
-    for u in user_list:
-        safe_user = {k: v for k, v in u.items() if k != 'password'}
-        safe_users.append(safe_user)
-    
-    return jsonify({'status': 'success', 'data': safe_users})
+    users_list = query.all()
+    return jsonify({'status': 'success', 'data': [user_to_dict(u) for u in users_list]})
 
 @app.route('/api/settings/users', methods=['POST'])
 @require_auth
 @require_roles('administrator')
 def create_user():
-    global counters
     data = request.get_json()
     
-    required = ['username', 'password', 'email', 'fullName', 'role', 'branch']
+    required = ['username', 'password', 'email', 'fullName', 'role']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
     
-    # Check for duplicate username
-    if any(u['username'] == data['username'] for u in users):
+    if User.query.filter_by(username=data['username']).first():
         return jsonify({'status': 'error', 'message': 'Username already exists'}), 400
     
-    valid_roles = ['administrator', 'supervisor', 'sales_manager', 'staff']
-    if data['role'] not in valid_roles:
+    if User.query.filter_by(email=data['email']).first():
+        return jsonify({'status': 'error', 'message': 'Email already exists'}), 400
+    
+    role = Role.query.filter_by(key=data['role']).first()
+    if not role:
         return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
     
-    new_user = {
-        'id': counters['user'],
-        'username': data['username'],
-        'password': hashlib.sha256(data['password'].encode()).hexdigest(),
-        'email': data['email'],
-        'fullName': data['fullName'],
-        'role': data['role'],
-        'branch': data['branch'],
-        'isActive': True,
-        'createdAt': datetime.now().strftime('%Y-%m-%d')
-    }
+        # Handle branch - support both branchId and branch (string)
+        branch_id = data.get('branchId')
+        branch_name = data.get('branch')
     
-    users.append(new_user)
-    counters['user'] += 1
+        if branch_id:
+            branch = Branch.query.get(branch_id)
+            if not branch:
+                return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
+        elif branch_name:
+            branch = Branch.query.filter_by(name=branch_name).first()
+            if not branch:
+                return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
+            branch_id = branch.id
+        else:
+            return jsonify({'status': 'error', 'message': 'Branch is required'}), 400
     
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Settings', f"Created user: {new_user['username']}", request.remote_addr or '0.0.0.0')
+    new_user = User(
+        username=data['username'],
+        password=hashlib.sha256(data['password'].encode()).hexdigest(),
+        email=data['email'],
+        full_name=data['fullName'],
+        role_id=role.id,
+            branch_id=branch_id,
+            branch=branch_name,
+        is_active=True
+    )
     
-    safe_user = {k: v for k, v in new_user.items() if k != 'password'}
-    return jsonify({'status': 'success', 'data': safe_user}), 201
+    db.session.add(new_user)
+    db.session.commit()
+    
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Settings', f"Created user: {new_user.username}", request.remote_addr or '0.0.0.0')
+    
+    return jsonify({'status': 'success', 'data': user_to_dict(new_user)}), 201
 
 @app.route('/api/settings/users/<int:user_id>', methods=['PUT'])
 @require_auth
 @require_roles('administrator')
 def update_user(user_id):
-    user = next((u for u in users if u['id'] == user_id), None)
+    user = User.query.get(user_id)
     if not user:
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
     
     data = request.get_json()
     
-    for key in ['email', 'fullName', 'role', 'branch']:
-        if key in data:
-            user[key] = data[key]
-    
+    if 'email' in data:
+        user.email = data['email']
+    if 'fullName' in data:
+        user.full_name = data['fullName']
+        if 'branchId' in data:
+            if data['branchId']:
+                branch = Branch.query.get(data['branchId'])
+                if not branch:
+                    return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
+                user.branch_id = data['branchId']
+            else:
+                user.branch_id = None
+    if 'branch' in data:
+        user.branch = data['branch']
+    if 'role' in data:
+        role = Role.query.filter_by(key=data['role']).first()
+        if not role:
+            return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
+        user.role_id = role.id
     if 'password' in data and data['password']:
-        user['password'] = hashlib.sha256(data['password'].encode()).hexdigest()
+        user.password = hashlib.sha256(data['password'].encode()).hexdigest()
     
-    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Settings', f"Updated user: {user['username']}", request.remote_addr or '0.0.0.0')
+    db.session.commit()
     
-    safe_user = {k: v for k, v in user.items() if k != 'password'}
-    return jsonify({'status': 'success', 'data': safe_user})
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Settings', f"Updated user: {user.username}", request.remote_addr or '0.0.0.0')
+    
+    return jsonify({'status': 'success', 'data': user_to_dict(user)})
 
 @app.route('/api/settings/users/<int:user_id>/archive', methods=['POST'])
 @require_auth
 @require_roles('administrator')
 def archive_user(user_id):
-    user = next((u for u in users if u['id'] == user_id), None)
+    user = User.query.get(user_id)
     if not user:
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
     
-    if user['id'] == request.current_user['id']:
+    if user.id == request.current_user['id']:
         return jsonify({'status': 'error', 'message': 'Cannot archive yourself'}), 400
     
-    user['isActive'] = False
+    user.is_active = False
+    db.session.commit()
     
-    log_action(request.current_user['id'], request.current_user['fullName'], 'ARCHIVE', 'Settings', f"Archived user: {user['username']}", request.remote_addr or '0.0.0.0')
+    log_action(request.current_user['id'], request.current_user['fullName'], 'ARCHIVE', 'Settings', f"Archived user: {user.username}", request.remote_addr or '0.0.0.0')
     
     return jsonify({'status': 'success', 'message': 'User archived'})
 
@@ -1536,58 +1895,112 @@ def archive_user(user_id):
 @require_auth
 @require_roles('administrator')
 def restore_user(user_id):
-    user = next((u for u in users if u['id'] == user_id), None)
+    user = User.query.get(user_id)
     if not user:
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
     
-    user['isActive'] = True
+    user.is_active = True
+    db.session.commit()
     
-    log_action(request.current_user['id'], request.current_user['fullName'], 'RESTORE', 'Settings', f"Restored user: {user['username']}", request.remote_addr or '0.0.0.0')
+    log_action(request.current_user['id'], request.current_user['fullName'], 'RESTORE', 'Settings', f"Restored user: {user.username}", request.remote_addr or '0.0.0.0')
     
     return jsonify({'status': 'success', 'message': 'User restored'})
 
 @app.route('/api/settings/roles', methods=['GET'])
 @require_auth
 def get_roles():
-    roles = [
-        {'id': 'administrator', 'name': 'Administrator', 'description': 'Full system access'},
-        {'id': 'supervisor', 'name': 'Supervisor', 'description': 'Access to inventory, costing, reports, delivery, settings'},
-        {'id': 'sales_manager', 'name': 'Sales Manager', 'description': 'Access to dashboard and sales module'},
-        {'id': 'staff', 'name': 'Staff', 'description': 'Limited access based on assignment'}
+    roles = Role.query.all()
+    role_list = [
+        {
+            'id': role.key,
+            'name': role.name,
+            'description': ''
+        }
+        for role in roles
     ]
-    return jsonify({'status': 'success', 'data': roles})
+    return jsonify({'status': 'success', 'data': role_list})
 
 @app.route('/api/settings/branches', methods=['GET'])
 @require_auth
 def get_branches():
+    """Get all branches from database"""
     include_inactive = request.args.get('includeInactive', 'false').lower() == 'true'
-    items = branches if include_inactive else [b for b in branches if b['isActive']]
-    return jsonify({'status': 'success', 'data': items})
+    
+    if include_inactive:
+        branches_list = Branch.query.all()
+    else:
+        branches_list = Branch.query.filter_by(is_active=True).all()
+    
+    return jsonify({'status': 'success', 'data': [branch_to_dict(b) for b in branches_list]})
+
+@app.route('/api/settings/branches/public', methods=['GET'])
+def get_branches_public():
+    """Get active branches without authentication (for order form)"""
+    branches_list = Branch.query.filter_by(is_active=True).all()
+    return jsonify({'status': 'success', 'data': [branch_to_dict(b) for b in branches_list]})
 
 @app.route('/api/settings/branches', methods=['POST'])
 @require_auth
 @require_roles('administrator')
 def create_branch():
+    """Create a new branch"""
     data = request.get_json()
     
     required = ['name', 'code', 'address']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
     
-    new_branch = {
-        'id': len(branches) + 1,
-        'name': data['name'],
-        'code': data['code'],
-        'address': data['address'],
-        'isWarehouse': data.get('isWarehouse', False),
-        'isActive': True
-    }
+    # Check if code already exists
+    existing = Branch.query.filter_by(code=data['code']).first()
+    if existing:
+        return jsonify({'status': 'error', 'message': 'Branch code already exists'}), 400
     
-    branches.append(new_branch)
+    new_branch = Branch(
+        name=data['name'],
+        code=data['code'],
+        address=data['address'],
+        is_warehouse=data.get('isWarehouse', False),
+        is_active=True
+    )
     
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Settings', f"Created branch: {new_branch['name']}", request.remote_addr or '0.0.0.0')
+    db.session.add(new_branch)
+    db.session.commit()
     
-    return jsonify({'status': 'success', 'data': new_branch}), 201
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Settings', f"Created branch: {new_branch.name}", request.remote_addr or '0.0.0.0')
+    
+    return jsonify({'status': 'success', 'data': branch_to_dict(new_branch)}), 201
+
+@app.route('/api/settings/branches/<int:branch_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator')
+def update_branch(branch_id):
+    """Update a branch"""
+    branch = Branch.query.get(branch_id)
+    if not branch:
+        return jsonify({'status': 'error', 'message': 'Branch not found'}), 404
+    
+    data = request.get_json()
+    
+    if 'name' in data:
+        branch.name = data['name']
+    if 'code' in data:
+        # Check if new code conflicts with another branch
+        existing = Branch.query.filter_by(code=data['code']).first()
+        if existing and existing.id != branch_id:
+            return jsonify({'status': 'error', 'message': 'Branch code already exists'}), 400
+        branch.code = data['code']
+    if 'address' in data:
+        branch.address = data['address']
+    if 'isWarehouse' in data:
+        branch.is_warehouse = data['isWarehouse']
+    if 'isActive' in data:
+        branch.is_active = data['isActive']
+    
+    db.session.commit()
+    
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Settings', f"Updated branch: {branch.name}", request.remote_addr or '0.0.0.0')
+    
+    return jsonify({'status': 'success', 'data': branch_to_dict(branch)})
 
 # ============================================
 # HEALTH CHECK

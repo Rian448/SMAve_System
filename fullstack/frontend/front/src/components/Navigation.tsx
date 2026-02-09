@@ -61,6 +61,7 @@ export default function Navigation() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const publicRoutes = ['/', '/login', '/place-order'];
 
   // Hide navigation on login page
   if (pathname === '/login') {
@@ -72,18 +73,49 @@ export default function Navigation() {
     return null;
   }
 
-  // Redirect to login if not authenticated
+  // Public navigation for unauthenticated users
   if (!isAuthenticated) {
-    if (typeof window !== 'undefined') {
-      router.push('/login');
+    if (!publicRoutes.includes(pathname)) {
+      if (typeof window !== 'undefined') {
+        router.push('/login');
+      }
+      return null;
     }
-    return null;
+
+    return (
+      <nav className="bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex justify-between h-16">
+            <div className="flex items-center">
+              <div className="flex items-center space-x-2">
+                <div className="w-8 h-8 bg-amber-600 rounded-lg flex items-center justify-center">
+                  <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                  </svg>
+                </div>
+                <span className="text-lg font-bold text-zinc-900 dark:text-white hidden sm:block">
+                  Seatmakers Avenue
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center">
+              <Link
+                href="/login"
+                className="inline-flex items-center px-4 py-2 rounded-lg bg-amber-600 text-white text-sm font-semibold hover:bg-amber-500 transition-colors"
+              >
+                Login
+              </Link>
+            </div>
+          </div>
+        </div>
+      </nav>
+    );
   }
 
   const navItems = [
     { 
       name: 'Dashboard', 
-      path: '/', 
+      path: '/dashboard', 
       icon: DashboardIcon,
       roles: ['administrator', 'supervisor', 'sales_manager', 'staff']
     },

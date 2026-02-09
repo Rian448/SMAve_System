@@ -17,8 +17,12 @@ export interface User {
   username: string;
   email: string;
   fullName: string;
-  role: 'administrator' | 'supervisor' | 'sales_manager' | 'staff';
+    role: 'administrator' | 'supervisor' | 'sales_manager' | 'staff' | 'seat_maker' | 'sewer';
+    roleName?: string;
   branch: string;
+    branchId?: number;
+    branchName?: string;
+    isActive?: boolean;
 }
 
 export interface AuthResponse {
@@ -127,6 +131,29 @@ export interface JobOrder {
   createdAt: string;
   createdBy: number;
   updatedAt: string;
+}
+
+export interface CustomerOrder {
+  id: number;
+  orderNumber: string;
+  customerName: string;
+  customerPhone: string;
+  customerEmail: string;
+  customerAddress: string;
+  vehicleInfo: VehicleInfo;
+  services: Array<{
+    type: string;
+    material?: string;
+    design?: string;
+    pocket?: string;
+    others?: string;
+    description?: string;
+  }>;
+  notes: string;
+  status: 'pending' | 'processing' | 'completed' | 'cancelled';
+  branchId?: number;
+  branchName?: string;
+  createdAt: string;
 }
 
 export interface LineupSlipItem {
@@ -311,6 +338,7 @@ export interface Branch {
   address: string;
   isWarehouse: boolean;
   isActive: boolean;
+  createdAt?: string;
 }
 
 export interface Role {
@@ -483,6 +511,12 @@ export const api = {
       return fetchApi<JobOrder[]>(`/api/sales/job-orders?${query}`);
     },
     
+    // Get both job orders and customer orders together
+    getAllOrders: () => fetchApi<{
+      jobOrders: JobOrder[];
+      customerOrders: CustomerOrder[];
+    }>('/api/sales/all-orders'),
+    
     getJobOrder: (id: number) => fetchApi<JobOrder>(`/api/sales/job-orders/${id}`),
     
     createJobOrder: (order: {
@@ -643,6 +677,49 @@ export const api = {
   },
 
   // ==================
+  // CUSTOMER ORDERS
+  // ==================
+  customerOrders: {
+    placeOrder: (orderData: {
+      customerName: string;
+      customerPhone: string;
+      customerEmail: string;
+      customerAddress: string;
+      vehicleInfo: {
+        make: string;
+        model: string;
+        year: string;
+        plateNumber: string;
+      };
+      services: Array<{
+        type: string;
+        material?: string;
+        design?: string;
+        pocket?: string;
+        others?: string;
+        description?: string;
+      }>;
+      notes: string;
+      orderDate: string;
+      branchId?: number;
+    }) =>
+      fetchApi<{ id: number; orderNumber: string }>('/api/customer-orders', {
+        method: 'POST',
+        body: JSON.stringify(orderData),
+      }),
+
+    getOrders: () => fetchApi<any[]>('/api/customer-orders'),
+
+    getOrder: (id: number) => fetchApi<any>(`/api/customer-orders/${id}`),
+
+    updateStatus: (id: number, status: string) =>
+      fetchApi<any>(`/api/customer-orders/${id}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ status }),
+      }),
+  },
+
+  // ==================
   // FORECASTING
   // ==================
   forecasting: {
@@ -694,7 +771,8 @@ export const api = {
       email: string;
       fullName: string;
       role: string;
-      branch: string;
+        branch?: string;
+        branchId?: number;
     }) =>
       fetchApi<User>('/api/settings/users', {
         method: 'POST',
@@ -722,10 +800,18 @@ export const api = {
       return fetchApi<Branch[]>(`/api/settings/branches${query}`);
     },
     
+    getBranchesPublic: () => fetchApi<Branch[]>('/api/settings/branches/public'),
+    
     createBranch: (branch: { name: string; code: string; address: string; isWarehouse?: boolean }) =>
       fetchApi<Branch>('/api/settings/branches', {
         method: 'POST',
         body: JSON.stringify(branch),
+      }),
+    
+    updateBranch: (id: number, updates: Partial<Branch>) =>
+      fetchApi<Branch>(`/api/settings/branches/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(updates),
       }),
   },
 };

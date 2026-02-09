@@ -1,27 +1,55 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, JobOrder } from '@/lib/api';
+import { api, JobOrder, CustomerOrder } from '@/lib/api';
 import Link from 'next/link';
+
+type UnifiedOrder = (JobOrder | CustomerOrder) & {
+  orderType: 'job' | 'customer';
+  displayId: string;
+  displayStatus: string;
+};
 
 export default function SalesPage() {
   const { user } = useAuth();
-  const [jobOrders, setJobOrders] = useState<JobOrder[]>([]);
+  const [orders, setOrders] = useState<UnifiedOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState('');
 
   useEffect(() => {
-    fetchJobOrders();
-  }, [filter]);
+    fetchOrders();
+  }, []);
 
-  const fetchJobOrders = async () => {
+  const fetchOrders = async () => {
     try {
-      const response = await api.sales.getJobOrders(filter !== 'all' ? { status: filter } : undefined);
-      setJobOrders(Array.isArray(response) ? response : response.data || []);
+      const response = await api.sales.getAllOrders();
+      if (response.status === 'success' && response.data) {
+        // Combine and mark order types
+        const jobOrders: UnifiedOrder[] = response.data.jobOrders.map(jo => ({
+          ...jo,
+          orderType: 'job' as const,
+          displayId: jo.jobOrderId,
+          displayStatus: jo.status
+        }));
+        
+        const customerOrders: UnifiedOrder[] = response.data.customerOrders.map(co => ({
+          ...co,
+          orderType: 'customer' as const,
+          displayId: co.orderNumber,
+          displayStatus: co.status
+        }));
+        
+        // Merge and sort by date
+        const allOrders = [...jobOrders, ...customerOrders].sort((a, b) => 
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        );
+        
+        setOrders(allOrders);
+      }
     } catch (error) {
-      console.error('Error fetching job orders:', error);
-      setJobOrders([]);
+      console.error('Error fetching orders:', error);
+      setOrders([]);
     } finally {
       setLoading(false);
     }
@@ -46,19 +74,56 @@ export default function SalesPage() {
   const getStatusBadge = (status: string) => {
     const statusStyles: Record<string, string> = {
       pending: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400',
+      processing: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
       in_progress: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
       completed: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
       cancelled: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
+      voided: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
       delivered: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
     };
     return statusStyles[status] || 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400';
   };
 
-  const filteredOrders = jobOrders.filter(order =>
-    order.jobOrderId.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    order.customerName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (order.vehicleInfo ? `${order.vehicleInfo.year} ${order.vehicleInfo.make} ${order.vehicleInfo.model}`.toLowerCase() : '').includes(searchTerm.toLowerCase())
-  );
+  const getOrderDescription = (order: UnifiedOrder) => {
+    if (order.orderType === 'job') {
+      return (order as JobOrder).description || 'N/A';
+    } else {
+      const co = order as CustomerOrder;
+      return co.services.map(s => s.type).join(', ') || 'N/A';
+    }
+  };
+
+  const getOrderAmount = (order: UnifiedOrder) => {
+    if (order.orderType === 'job') {
+      return (order as JobOrder).totalPrice || 0;
+    } else {
+      return 0; // Customer orders don't have pricing yet
+    }
+  };
+
+  const filteredOrders = orders.filter(order => {
+    // Status filter
+    if (filter !== 'all' && order.displayStatus !== filter && 
+        !(filter === 'in_progress' && order.displayStatus === 'processing')) {
+      return false;
+    }
+    
+    // Search filter
+    if (searchTerm) {
+      const searchLower = searchTerm.toLowerCase();
+      const customerName = order.customerName.toLowerCase();
+      const orderId = order.displayId.toLowerCase();
+      const vehicleStr = order.vehicleInfo 
+        ? `${order.vehicleInfo.year} ${order.vehicleInfo.make} ${order.vehicleInfo.model}`.toLowerCase()
+        : '';
+      
+      return customerName.includes(searchLower) || 
+             orderId.includes(searchLower) || 
+             vehicleStr.includes(searchLower);
+    }
+    
+    return true;
+  });
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
@@ -100,7 +165,7 @@ export default function SalesPage() {
             </div>
             {/* Status Filter */}
             <div className="flex gap-2 flex-wrap">
-              {['all', 'pending', 'in_progress', 'completed', 'delivered'].map((status) => (
+              {['all', 'pending', 'in_progress', 'completed', 'cancelled'].map((status) => (
                 <button
                   key={status}
                   onClick={() => setFilter(status)}
@@ -117,19 +182,19 @@ export default function SalesPage() {
           </div>
         </div>
 
-        {/* Job Orders Table */}
+        {/* Orders Table */}
         <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 overflow-hidden">
           {loading ? (
             <div className="p-8 text-center">
               <div className="animate-spin w-8 h-8 border-4 border-amber-600 border-t-transparent rounded-full mx-auto"></div>
-              <p className="mt-4 text-zinc-500 dark:text-zinc-400">Loading job orders...</p>
+              <p className="mt-4 text-zinc-500 dark:text-zinc-400">Loading orders...</p>
             </div>
           ) : filteredOrders.length === 0 ? (
             <div className="p-8 text-center">
               <svg className="w-16 h-16 mx-auto text-zinc-300 dark:text-zinc-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
               </svg>
-              <h3 className="text-lg font-medium text-zinc-900 dark:text-white mb-2">No job orders found</h3>
+              <h3 className="text-lg font-medium text-zinc-900 dark:text-white mb-2">No orders found</h3>
               <p className="text-zinc-500 dark:text-zinc-400">Create a new job order to get started.</p>
             </div>
           ) : (
@@ -138,10 +203,11 @@ export default function SalesPage() {
                 <thead className="bg-zinc-50 dark:bg-zinc-800/50">
                   <tr>
                     <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Order #</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Type</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Customer</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Vehicle</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Service</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Amount</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Branch</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Date</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Status</th>
                     <th className="px-6 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Actions</th>
@@ -149,9 +215,18 @@ export default function SalesPage() {
                 </thead>
                 <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
                   {filteredOrders.map((order) => (
-                    <tr key={order.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
+                    <tr key={`${order.orderType}-${order.id}`} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="text-sm font-medium text-amber-600 dark:text-amber-400">{order.jobOrderId}</span>
+                        <span className="text-sm font-medium text-amber-600 dark:text-amber-400">{order.displayId}</span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className={`px-2 py-1 text-xs font-medium rounded-full ${
+                          order.orderType === 'job' 
+                            ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
+                            : 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
+                        }`}>
+                          {order.orderType === 'job' ? 'JOB ORDER' : 'CUSTOMER ORDER'}
+                        </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div>
@@ -162,23 +237,23 @@ export default function SalesPage() {
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
                         {order.vehicleInfo ? `${order.vehicleInfo.year} ${order.vehicleInfo.make} ${order.vehicleInfo.model}` : 'N/A'}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
-                        {order.description}
+                      <td className="px-6 py-4 text-sm text-zinc-600 dark:text-zinc-300 max-w-xs truncate">
+                        {getOrderDescription(order)}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-zinc-900 dark:text-white">
-                        {formatCurrency(order.totalPrice)}
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
+                        {order.orderType === 'job' ? (order as JobOrder).branchName : (order as CustomerOrder).branchName || 'N/A'}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
                         {formatDate(order.createdAt)}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadge(order.status)}`}>
-                          {order.status.replace('_', ' ').toUpperCase()}
+                        <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadge(order.displayStatus)}`}>
+                          {order.displayStatus.replace('_', ' ').toUpperCase()}
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <Link
-                          href={`/sales/${order.id}`}
+                          href={order.orderType === 'job' ? `/sales/${order.id}` : `/customer-orders/${order.id}`}
                           className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium"
                         >
                           View Details

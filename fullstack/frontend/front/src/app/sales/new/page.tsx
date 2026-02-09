@@ -37,10 +37,22 @@ export default function NewJobOrderPage() {
   const [vehiclePlate, setVehiclePlate] = useState('');
   
   // Service Information
-  const [serviceType, setServiceType] = useState('');
-  const [serviceDescription, setServiceDescription] = useState('');
   const [estimatedCompletionDate, setEstimatedCompletionDate] = useState('');
   const [priority, setPriority] = useState('normal');
+  
+  // Services Selection
+  const [flooring, setFlooring] = useState({ selected: false, material: '' });
+  const [reupholstery, setReupholstery] = useState({ selected: false, material: '' });
+  const [ceiling, setCeiling] = useState({ selected: false, material: '' });
+  const [sidings, setSidings] = useState({ selected: false, material: '' });
+  const [seatCovers, setSeatCovers] = useState({
+    selected: false,
+    design: '',
+    material: '',
+    pocket: '',
+    others: ''
+  });
+  const [otherServices, setOtherServices] = useState({ selected: false, description: '' });
   
   // Materials and Labor
   const [materials, setMaterials] = useState<MaterialItem[]>([]);
@@ -50,17 +62,6 @@ export default function NewJobOrderPage() {
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [downPayment, setDownPayment] = useState(0);
   const [notes, setNotes] = useState('');
-
-  const serviceTypes = [
-    'Full Upholstery',
-    'Seat Cover Installation',
-    'Headliner Replacement',
-    'Door Panel Repair',
-    'Dashboard Cover',
-    'Carpet Installation',
-    'Custom Work',
-    'Repair/Restoration'
-  ];
 
   const addMaterial = () => {
     setMaterials([...materials, { id: Date.now().toString(), name: '', quantity: 1, unitPrice: 0 }]);
@@ -101,6 +102,30 @@ export default function NewJobOrderPage() {
     setLoading(true);
     setError('');
 
+    // Build services array
+    const selectedServices = [];
+    if (flooring.selected) selectedServices.push({ type: 'flooring', material: flooring.material });
+    if (reupholstery.selected) selectedServices.push({ type: 'reupholstery', material: reupholstery.material });
+    if (ceiling.selected) selectedServices.push({ type: 'ceiling', material: ceiling.material });
+    if (sidings.selected) selectedServices.push({ type: 'sidings', material: sidings.material });
+    if (seatCovers.selected) selectedServices.push({
+      type: 'seat_covers',
+      design: seatCovers.design,
+      material: seatCovers.material,
+      pocket: seatCovers.pocket,
+      others: seatCovers.others
+    });
+    if (otherServices.selected) selectedServices.push({
+      type: 'other',
+      description: otherServices.description
+    });
+
+    if (selectedServices.length === 0) {
+      setError('Please select at least one service');
+      setLoading(false);
+      return;
+    }
+
     try {
       const jobOrderData = {
         customerName,
@@ -109,8 +134,7 @@ export default function NewJobOrderPage() {
         customerAddress,
         vehicleInfo: `${vehicleYear} ${vehicleMake} ${vehicleModel}`,
         vehiclePlate,
-        serviceType,
-        serviceDescription,
+        services: selectedServices,
         estimatedCompletionDate,
         priority,
         materials,
@@ -260,23 +284,219 @@ export default function NewJobOrderPage() {
         return (
           <div className="space-y-6">
             <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Service Details</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Service Type *
-                </label>
-                <select
-                  value={serviceType}
-                  onChange={(e) => setServiceType(e.target.value)}
-                  required
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                >
-                  <option value="">Select service type</option>
-                  {serviceTypes.map(type => (
-                    <option key={type} value={type}>{type}</option>
-                  ))}
-                </select>
+            
+            {/* Services Selection */}
+            <div className="space-y-4">
+              <p className="text-sm text-zinc-600 dark:text-zinc-400">Select the services needed *</p>
+              
+              {/* Flooring */}
+              <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg p-4">
+                <div className="flex items-start">
+                  <input
+                    type="checkbox"
+                    id="flooring"
+                    checked={flooring.selected}
+                    onChange={(e) => setFlooring({ ...flooring, selected: e.target.checked })}
+                    className="mt-1 rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                  />
+                  <div className="ml-4 flex-1">
+                    <label htmlFor="flooring" className="text-sm font-medium text-zinc-900 dark:text-white cursor-pointer">
+                      Flooring
+                    </label>
+                    <ul className="text-xs text-zinc-600 dark:text-zinc-400 mt-1 space-y-1">
+                      <li>• Auto Standard carpet material</li>
+                      <li>• All sides trim</li>
+                      <li>• With rebonded foam underlay</li>
+                    </ul>
+                    {flooring.selected && (
+                      <input
+                        type="text"
+                        value={flooring.material}
+                        onChange={(e) => setFlooring({ ...flooring, material: e.target.value })}
+                        placeholder="Specify material"
+                        className="mt-3 w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                      />
+                    )}
+                  </div>
+                </div>
               </div>
+
+              {/* Reupholstery */}
+              <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg p-4">
+                <div className="flex items-start">
+                  <input
+                    type="checkbox"
+                    id="reupholstery"
+                    checked={reupholstery.selected}
+                    onChange={(e) => setReupholstery({ ...reupholstery, selected: e.target.checked })}
+                    className="mt-1 rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                  />
+                  <div className="ml-4 flex-1">
+                    <label htmlFor="reupholstery" className="text-sm font-medium text-zinc-900 dark:text-white cursor-pointer">
+                      Reupholstery
+                    </label>
+                    <ul className="text-xs text-zinc-600 dark:text-zinc-400 mt-1 space-y-1">
+                      <li>• Auto Standard material</li>
+                      <li>• To rebuild sag foam with Class A Uratex foam</li>
+                      <li>• Includes spring & frame repair</li>
+                    </ul>
+                    {reupholstery.selected && (
+                      <input
+                        type="text"
+                        value={reupholstery.material}
+                        onChange={(e) => setReupholstery({ ...reupholstery, material: e.target.value })}
+                        placeholder="Specify material"
+                        className="mt-3 w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                      />
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Ceiling */}
+              <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg p-4">
+                <div className="flex items-start">
+                  <input
+                    type="checkbox"
+                    id="ceiling"
+                    checked={ceiling.selected}
+                    onChange={(e) => setCeiling({ ...ceiling, selected: e.target.checked })}
+                    className="mt-1 rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                  />
+                  <div className="ml-4 flex-1">
+                    <label htmlFor="ceiling" className="text-sm font-medium text-zinc-900 dark:text-white cursor-pointer">
+                      Ceiling
+                    </label>
+                    <ul className="text-xs text-zinc-600 dark:text-zinc-400 mt-1 space-y-1">
+                      <li>• Auto Standard ceiling material</li>
+                      <li>• With heat insulation</li>
+                      <li>• Includes all post and sunvisor</li>
+                    </ul>
+                    {ceiling.selected && (
+                      <input
+                        type="text"
+                        value={ceiling.material}
+                        onChange={(e) => setCeiling({ ...ceiling, material: e.target.value })}
+                        placeholder="Specify material"
+                        className="mt-3 w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                      />
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Sidings */}
+              <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg p-4">
+                <div className="flex items-start">
+                  <input
+                    type="checkbox"
+                    id="sidings"
+                    checked={sidings.selected}
+                    onChange={(e) => setSidings({ ...sidings, selected: e.target.checked })}
+                    className="mt-1 rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                  />
+                  <div className="ml-4 flex-1">
+                    <label htmlFor="sidings" className="text-sm font-medium text-zinc-900 dark:text-white cursor-pointer">
+                      Sidings
+                    </label>
+                    <ul className="text-xs text-zinc-600 dark:text-zinc-400 mt-1 space-y-1">
+                      <li>• Electric pressed design</li>
+                      <li>• With 1/8 plyboard base</li>
+                      <li>• Note: SIDINGS clips are not included (₱5.00 each)</li>
+                    </ul>
+                    {sidings.selected && (
+                      <input
+                        type="text"
+                        value={sidings.material}
+                        onChange={(e) => setSidings({ ...sidings, material: e.target.value })}
+                        placeholder="Specify material"
+                        className="mt-3 w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                      />
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Seat Covers */}
+              <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg p-4">
+                <div className="flex items-start">
+                  <input
+                    type="checkbox"
+                    id="seatCovers"
+                    checked={seatCovers.selected}
+                    onChange={(e) => setSeatCovers({ ...seatCovers, selected: e.target.checked })}
+                    className="mt-1 rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                  />
+                  <div className="ml-4 flex-1">
+                    <label htmlFor="seatCovers" className="text-sm font-medium text-zinc-900 dark:text-white cursor-pointer">
+                      Seat Covers
+                    </label>
+                    {seatCovers.selected && (
+                      <div className="mt-3 space-y-3">
+                        <input
+                          type="text"
+                          value={seatCovers.design}
+                          onChange={(e) => setSeatCovers({ ...seatCovers, design: e.target.value })}
+                          placeholder="Design"
+                          className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                        />
+                        <input
+                          type="text"
+                          value={seatCovers.material}
+                          onChange={(e) => setSeatCovers({ ...seatCovers, material: e.target.value })}
+                          placeholder="Material"
+                          className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                        />
+                        <input
+                          type="text"
+                          value={seatCovers.pocket}
+                          onChange={(e) => setSeatCovers({ ...seatCovers, pocket: e.target.value })}
+                          placeholder="Pocket"
+                          className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                        />
+                        <input
+                          type="text"
+                          value={seatCovers.others}
+                          onChange={(e) => setSeatCovers({ ...seatCovers, others: e.target.value })}
+                          placeholder="Others"
+                          className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Other Services */}
+              <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg p-4">
+                <div className="flex items-start">
+                  <input
+                    type="checkbox"
+                    id="otherServices"
+                    checked={otherServices.selected}
+                    onChange={(e) => setOtherServices({ ...otherServices, selected: e.target.checked })}
+                    className="mt-1 rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                  />
+                  <div className="ml-4 flex-1">
+                    <label htmlFor="otherServices" className="text-sm font-medium text-zinc-900 dark:text-white cursor-pointer">
+                      Other Services
+                    </label>
+                    {otherServices.selected && (
+                      <input
+                        type="text"
+                        value={otherServices.description}
+                        onChange={(e) => setOtherServices({ ...otherServices, description: e.target.value })}
+                        placeholder="Describe your service needs"
+                        className="mt-3 w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                      />
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Additional Details */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
               <div>
                 <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
                   Priority
@@ -303,18 +523,6 @@ export default function NewJobOrderPage() {
                   className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
                 />
               </div>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                Service Description
-              </label>
-              <textarea
-                value={serviceDescription}
-                onChange={(e) => setServiceDescription(e.target.value)}
-                rows={4}
-                className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                placeholder="Describe the work to be done..."
-              />
             </div>
           </div>
         );

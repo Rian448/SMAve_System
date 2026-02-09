@@ -1,6 +1,7 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
+import { api, Branch, User as UserType, Role } from '@/lib/api';
 
 type TabType = 'general' | 'users' | 'branches' | 'services' | 'notifications';
 
@@ -8,6 +9,237 @@ export default function SettingsPage() {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<TabType>('general');
   const [saving, setSaving] = useState(false);
+  
+    // Users state
+    const [users, setUsers] = useState<UserType[]>([]);
+    const [loadingUsers, setLoadingUsers] = useState(false);
+    const [showUserModal, setShowUserModal] = useState(false);
+    const [editingUser, setEditingUser] = useState<UserType | null>(null);
+    const [userFormData, setUserFormData] = useState({
+      username: '',
+      password: '',
+      email: '',
+      fullName: '',
+      role: 'staff',
+      branchId: 0
+    });
+    const [userError, setUserError] = useState('');
+    const [roles, setRoles] = useState<Role[]>([]);
+  
+  // Branches state
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [loadingBranches, setLoadingBranches] = useState(false);
+  const [showBranchModal, setShowBranchModal] = useState(false);
+  const [editingBranch, setEditingBranch] = useState<Branch | null>(null);
+  const [branchFormData, setBranchFormData] = useState({
+    name: '',
+    code: '',
+    address: '',
+    isWarehouse: false
+  });
+  const [branchError, setBranchError] = useState('');
+
+  // Load branches when branches tab is active
+  useEffect(() => {
+    if (activeTab === 'users') {
+      loadUsers();
+      loadRoles();
+      loadBranches(false);
+    }
+    if (activeTab === 'branches') {
+      loadBranches(true);
+    }
+  }, [activeTab]);
+
+  const loadUsers = async () => {
+    setLoadingUsers(true);
+    try {
+      const response = await api.settings.getUsers(true);
+      if (response.status === 'success' && response.data) {
+        setUsers(response.data);
+      }
+    } catch (err) {
+      console.error('Failed to load users:', err);
+    } finally {
+      setLoadingUsers(false);
+    }
+  };
+
+  const loadRoles = async () => {
+    try {
+      const response = await api.settings.getRoles();
+      if (response.status === 'success' && response.data) {
+        setRoles(response.data);
+      }
+    } catch (err) {
+      console.error('Failed to load roles:', err);
+    }
+  };
+
+  const loadBranches = async (includeInactive = false) => {
+    setLoadingBranches(true);
+    try {
+      const response = await api.settings.getBranches(includeInactive);
+      if (response.status === 'success' && response.data) {
+        setBranches(response.data);
+      }
+    } catch (err) {
+      console.error('Failed to load branches:', err);
+    } finally {
+      setLoadingBranches(false);
+    }
+  };
+
+  const handleAddUser = () => {
+    setUserFormData({ 
+      username: '', 
+      password: '', 
+      email: '', 
+      fullName: '', 
+      role: 'staff',
+      branchId: branches.length > 0 ? branches[0].id : 0
+    });
+    setEditingUser(null);
+    setUserError('');
+    setShowUserModal(true);
+  };
+
+  const handleEditUser = (user: UserType) => {
+    setUserFormData({
+      username: user.username,
+      password: '',
+      email: user.email,
+      fullName: user.fullName,
+      role: user.role,
+      branchId: user.branchId || 0
+    });
+    setEditingUser(user);
+    setUserError('');
+    setShowUserModal(true);
+  };
+
+  const handleSaveUser = async () => {
+    if (!userFormData.username || !userFormData.email || !userFormData.fullName || !userFormData.role) {
+      setUserError('Please fill in all required fields');
+      return;
+    }
+
+    if (!userFormData.branchId) {
+      setUserError('Please select a branch');
+      return;
+    }
+
+    if (!editingUser && !userFormData.password) {
+      setUserError('Password is required for new users');
+      return;
+    }
+
+      setSaving(true);
+      setUserError('');
+
+      try {
+        if (editingUser) {
+          // Update existing user
+          const updateData: any = {
+            email: userFormData.email,
+            fullName: userFormData.fullName,
+            role: userFormData.role,
+            branchId: userFormData.branchId || null
+          };
+          if (userFormData.password) {
+            updateData.password = userFormData.password;
+          }
+          await api.settings.updateUser(editingUser.id, updateData);
+        } else {
+          // Create new user
+          await api.settings.createUser({
+            username: userFormData.username,
+            password: userFormData.password,
+            email: userFormData.email,
+            fullName: userFormData.fullName,
+            role: userFormData.role,
+              branchId: userFormData.branchId || undefined
+          });
+        }
+      
+        setShowUserModal(false);
+        loadUsers();
+      } catch (err: any) {
+        setUserError(err.message || 'Failed to save user');
+      } finally {
+        setSaving(false);
+      }
+    };
+
+    const handleToggleUserStatus = async (user: UserType) => {
+      try {
+        if (user.isActive) {
+          await api.settings.archiveUser(user.id);
+        } else {
+          await api.settings.restoreUser(user.id);
+        }
+        loadUsers();
+      } catch (err) {
+        console.error('Failed to update user status:', err);
+      }
+    };
+
+  const handleAddBranch = () => {
+    setBranchFormData({ name: '', code: '', address: '', isWarehouse: false });
+    setEditingBranch(null);
+    setBranchError('');
+    setShowBranchModal(true);
+  };
+
+  const handleEditBranch = (branch: Branch) => {
+    setBranchFormData({
+      name: branch.name,
+      code: branch.code,
+      address: branch.address,
+      isWarehouse: branch.isWarehouse
+    });
+    setEditingBranch(branch);
+    setBranchError('');
+    setShowBranchModal(true);
+  };
+
+  const handleSaveBranch = async () => {
+    if (!branchFormData.name || !branchFormData.code || !branchFormData.address) {
+      setBranchError('Please fill in all required fields');
+      return;
+    }
+
+    setSaving(true);
+    setBranchError('');
+
+    try {
+      if (editingBranch) {
+        // Update existing branch
+        await api.settings.updateBranch(editingBranch.id, branchFormData);
+      } else {
+        // Create new branch
+        await api.settings.createBranch(branchFormData);
+      }
+      
+      setShowBranchModal(false);
+      loadBranches();
+    } catch (err: any) {
+      setBranchError(err.message || 'Failed to save branch');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleToggleBranchStatus = async (branch: Branch) => {
+    try {
+      await api.settings.updateBranch(branch.id, {
+        isActive: !branch.isActive
+      });
+      loadBranches();
+    } catch (err) {
+      console.error('Failed to update branch status:', err);
+    }
+  };
 
   // General Settings State
   const [companyName, setCompanyName] = useState('Seatmakers Automotive Upholstery');
@@ -133,14 +365,32 @@ export default function SettingsPage() {
           <div>
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">User Management</h3>
-              <button className="inline-flex items-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors">
+                {user?.role === 'administrator' && (
+                  <button 
+                    onClick={handleAddUser}
+                    className="inline-flex items-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors"
+                  >
                 <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                 </svg>
                 Add User
               </button>
+                )}
             </div>
-            <div className="overflow-x-auto">
+
+              {loadingUsers ? (
+                <div className="flex items-center justify-center py-12">
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-600"></div>
+                </div>
+              ) : users.length === 0 ? (
+                <div className="text-center py-12">
+                  <svg className="w-16 h-16 mx-auto text-zinc-400 dark:text-zinc-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                  </svg>
+                  <p className="text-zinc-500 dark:text-zinc-400">No users found</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
               <table className="w-full">
                 <thead className="bg-zinc-50 dark:bg-zinc-800/50">
                   <tr>
@@ -152,20 +402,15 @@ export default function SettingsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                  {[
-                    { name: 'Admin User', email: 'admin@seatmakers.com', role: 'administrator', branch: 'Main Branch', status: 'active' },
-                    { name: 'John Supervisor', email: 'john@seatmakers.com', role: 'supervisor', branch: 'Main Branch', status: 'active' },
-                    { name: 'Maria Sales', email: 'maria@seatmakers.com', role: 'sales_manager', branch: 'Quezon City', status: 'active' },
-                    { name: 'Pedro Staff', email: 'pedro@seatmakers.com', role: 'staff', branch: 'Main Branch', status: 'inactive' },
-                  ].map((u, index) => (
-                    <tr key={index} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                    {users.map((u) => (
+                      <tr key={u.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div className="flex items-center">
                           <div className="w-10 h-10 rounded-full bg-amber-600 flex items-center justify-center mr-3">
-                            <span className="text-white font-medium">{u.name.charAt(0)}</span>
+                              <span className="text-white font-medium">{u.fullName.charAt(0)}</span>
                           </div>
                           <div>
-                            <p className="text-sm font-medium text-zinc-900 dark:text-white">{u.name}</p>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">{u.fullName}</p>
                             <p className="text-xs text-zinc-500 dark:text-zinc-400">{u.email}</p>
                           </div>
                         </div>
@@ -178,36 +423,55 @@ export default function SettingsPage() {
                             ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
                             : u.role === 'sales_manager'
                             ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                              : u.role === 'seat_maker'
+                              ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
+                              : u.role === 'sewer'
+                              ? 'bg-pink-100 text-pink-700 dark:bg-pink-900/30 dark:text-pink-400'
                             : 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400'
                         }`}>
-                          {u.role.replace('_', ' ').toUpperCase()}
+                            {(u.roleName || u.role.replace('_', ' ')).toUpperCase()}
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
-                        {u.branch}
+                          {u.branchName || u.branch || 'N/A'}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <span className={`px-2 py-1 text-xs font-medium rounded-full ${
-                          u.status === 'active'
+                            u.isActive
                             ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
                             : 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400'
                         }`}>
-                          {u.status.toUpperCase()}
+                            {u.isActive ? 'ACTIVE' : 'INACTIVE'}
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right">
-                        <button className="text-amber-600 dark:text-amber-400 hover:text-amber-700 text-sm font-medium mr-3">
+                          {user?.role === 'administrator' && (
+                            <>
+                              <button 
+                                onClick={() => handleEditUser(u)}
+                                className="text-amber-600 dark:text-amber-400 hover:text-amber-700 text-sm font-medium mr-3"
+                              >
                           Edit
                         </button>
-                        <button className="text-red-600 dark:text-red-400 hover:text-red-700 text-sm font-medium">
-                          Delete
+                              <button 
+                                onClick={() => handleToggleUserStatus(u)}
+                                className={`text-sm font-medium ${
+                                  u.isActive
+                                    ? 'text-red-600 dark:text-red-400 hover:text-red-700'
+                                    : 'text-green-600 dark:text-green-400 hover:text-green-700'
+                                }`}
+                              >
+                                {u.isActive ? 'Deactivate' : 'Activate'}
                         </button>
+                            </>
+                          )}
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+              )}
           </div>
         );
 
@@ -216,65 +480,101 @@ export default function SettingsPage() {
           <div>
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Branch Management</h3>
-              <button className="inline-flex items-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors">
-                <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              {user?.role === 'administrator' && (
+                <button 
+                  onClick={handleAddBranch}
+                  className="inline-flex items-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors"
+                >
+                  <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  </svg>
+                  Add Branch
+                </button>
+              )}
+            </div>
+
+            {loadingBranches ? (
+              <div className="flex items-center justify-center py-12">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-600"></div>
+              </div>
+            ) : branches.length === 0 ? (
+              <div className="text-center py-12">
+                <svg className="w-16 h-16 mx-auto text-zinc-400 dark:text-zinc-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
                 </svg>
-                Add Branch
-              </button>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {[
-                { name: 'Main Branch', address: '123 Makati Ave, Makati City', phone: '(02) 8123-4567', manager: 'Admin User', status: 'active' },
-                { name: 'Quezon City Branch', address: '456 EDSA, Quezon City', phone: '(02) 8234-5678', manager: 'Maria Sales', status: 'active' },
-              ].map((branch, index) => (
-                <div key={index} className="bg-zinc-50 dark:bg-zinc-800/50 rounded-xl p-6">
-                  <div className="flex items-start justify-between mb-4">
-                    <div className="flex items-center">
-                      <div className="w-12 h-12 rounded-xl bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center mr-4">
-                        <svg className="w-6 h-6 text-amber-600 dark:text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                <p className="text-zinc-500 dark:text-zinc-400">No branches found</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {branches.map((branch) => (
+                  <div key={branch.id} className="bg-zinc-50 dark:bg-zinc-800/50 rounded-xl p-6">
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="flex items-center">
+                        <div className="w-12 h-12 rounded-xl bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center mr-4">
+                          <svg className="w-6 h-6 text-amber-600 dark:text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                          </svg>
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h4 className="text-lg font-semibold text-zinc-900 dark:text-white">{branch.name}</h4>
+                            {branch.isWarehouse && (
+                              <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
+                                WAREHOUSE
+                              </span>
+                            )}
+                          </div>
+                          <span className={`inline-block mt-1 px-2 py-0.5 text-xs font-medium rounded-full ${
+                            branch.isActive
+                              ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                              : 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400'
+                          }`}>
+                            {branch.isActive ? 'ACTIVE' : 'INACTIVE'}
+                          </span>
+                        </div>
+                      </div>
+                      {user?.role === 'administrator' && (
+                        <button 
+                          onClick={() => handleEditBranch(branch)}
+                          className="text-amber-600 dark:text-amber-400 hover:text-amber-700 text-sm font-medium"
+                        >
+                          Edit
+                        </button>
+                      )}
+                    </div>
+                    <div className="space-y-2 text-sm">
+                      <div className="flex items-center text-zinc-600 dark:text-zinc-400">
+                        <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
                         </svg>
+                        Code: {branch.code}
                       </div>
-                      <div>
-                        <h4 className="text-lg font-semibold text-zinc-900 dark:text-white">{branch.name}</h4>
-                        <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
-                          branch.status === 'active'
-                            ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                            : 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400'
-                        }`}>
-                          {branch.status.toUpperCase()}
-                        </span>
+                      <div className="flex items-center text-zinc-600 dark:text-zinc-400">
+                        <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                        {branch.address}
                       </div>
                     </div>
-                    <button className="text-amber-600 dark:text-amber-400 hover:text-amber-700 text-sm font-medium">
-                      Edit
-                    </button>
+                    {user?.role === 'administrator' && (
+                      <div className="mt-4 pt-4 border-t border-zinc-200 dark:border-zinc-700">
+                        <button
+                          onClick={() => handleToggleBranchStatus(branch)}
+                          className={`text-sm font-medium ${
+                            branch.isActive
+                              ? 'text-red-600 dark:text-red-400 hover:text-red-700'
+                              : 'text-green-600 dark:text-green-400 hover:text-green-700'
+                          }`}
+                        >
+                          {branch.isActive ? 'Deactivate' : 'Activate'}
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  <div className="space-y-2 text-sm">
-                    <div className="flex items-center text-zinc-600 dark:text-zinc-400">
-                      <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                      </svg>
-                      {branch.address}
-                    </div>
-                    <div className="flex items-center text-zinc-600 dark:text-zinc-400">
-                      <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
-                      </svg>
-                      {branch.phone}
-                    </div>
-                    <div className="flex items-center text-zinc-600 dark:text-zinc-400">
-                      <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                      </svg>
-                      Manager: {branch.manager}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         );
 
@@ -426,6 +726,248 @@ export default function SettingsPage() {
           </div>
         </div>
       </main>
+
+      {/* Branch Modal */}
+      {showBranchModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-xl max-w-md w-full p-6">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-xl font-bold text-zinc-900 dark:text-white">
+                {editingBranch ? 'Edit Branch' : 'Add New Branch'}
+              </h3>
+              <button
+                onClick={() => setShowBranchModal(false)}
+                className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+              >
+                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {branchError && (
+              <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400 text-sm">
+                {branchError}
+              </div>
+            )}
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  Branch Name *
+                </label>
+                <input
+                  type="text"
+                  value={branchFormData.name}
+                  onChange={(e) => setBranchFormData({ ...branchFormData, name: e.target.value })}
+                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="e.g., Branch D"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  Branch Code *
+                </label>
+                <input
+                  type="text"
+                  value={branchFormData.code}
+                  onChange={(e) => setBranchFormData({ ...branchFormData, code: e.target.value.toUpperCase() })}
+                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="e.g., BD"
+                  maxLength={10}
+                  disabled={!!editingBranch}
+                />
+                {editingBranch && (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+                    Branch code cannot be changed after creation
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  Address *
+                </label>
+                <textarea
+                  value={branchFormData.address}
+                  onChange={(e) => setBranchFormData({ ...branchFormData, address: e.target.value })}
+                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="Full address"
+                  rows={3}
+                />
+              </div>
+
+              <div className="flex items-center">
+                <input
+                  type="checkbox"
+                  id="isWarehouse"
+                  checked={branchFormData.isWarehouse}
+                  onChange={(e) => setBranchFormData({ ...branchFormData, isWarehouse: e.target.checked })}
+                  className="rounded border-zinc-300 text-amber-600 focus:ring-amber-500"
+                />
+                <label htmlFor="isWarehouse" className="ml-2 text-sm text-zinc-700 dark:text-zinc-300">
+                  This is a warehouse location
+                </label>
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setShowBranchModal(false)}
+                className="flex-1 px-4 py-2 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-lg font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveBranch}
+                disabled={saving}
+                className="flex-1 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
+              >
+                {saving ? 'Saving...' : editingBranch ? 'Update' : 'Create'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+        {/* User Modal */}
+        {showUserModal && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-xl max-w-md w-full p-6 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-xl font-bold text-zinc-900 dark:text-white">
+                  {editingUser ? 'Edit User' : 'Add New User'}
+                </h3>
+                <button
+                  onClick={() => setShowUserModal(false)}
+                  className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+                >
+                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              {userError && (
+                <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400 text-sm">
+                  {userError}
+                </div>
+              )}
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Username *
+                  </label>
+                  <input
+                    type="text"
+                    value={userFormData.username}
+                    onChange={(e) => setUserFormData({ ...userFormData, username: e.target.value })}
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="e.g., jsmith"
+                    disabled={!!editingUser}
+                  />
+                  {editingUser && (
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+                      Username cannot be changed after creation
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Full Name *
+                  </label>
+                  <input
+                    type="text"
+                    value={userFormData.fullName}
+                    onChange={(e) => setUserFormData({ ...userFormData, fullName: e.target.value })}
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="e.g., John Smith"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Email *
+                  </label>
+                  <input
+                    type="email"
+                    value={userFormData.email}
+                    onChange={(e) => setUserFormData({ ...userFormData, email: e.target.value })}
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="e.g., jsmith@seatmakers.com"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Password {editingUser ? '(leave blank to keep current)' : '*'}
+                  </label>
+                  <input
+                    type="password"
+                    value={userFormData.password}
+                    onChange={(e) => setUserFormData({ ...userFormData, password: e.target.value })}
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder={editingUser ? 'Leave blank to keep current password' : 'Enter password'}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Role *
+                  </label>
+                  <select
+                    value={userFormData.role}
+                    onChange={(e) => setUserFormData({ ...userFormData, role: e.target.value })}
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  >
+                    {roles.map((role) => (
+                      <option key={role.id} value={role.id}>
+                        {role.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Branch *
+                  </label>
+                  <select
+                    value={userFormData.branchId}
+                    onChange={(e) => setUserFormData({ ...userFormData, branchId: Number(e.target.value) })}
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  >
+                    <option value={0}>Select a branch</option>
+                    {branches.map((branch) => (
+                      <option key={branch.id} value={branch.id}>
+                        {branch.name} ({branch.code})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex gap-3 mt-6">
+                <button
+                  onClick={() => setShowUserModal(false)}
+                  className="flex-1 px-4 py-2 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-lg font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveUser}
+                  disabled={saving}
+                  className="flex-1 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
+                >
+                  {saving ? 'Saving...' : editingUser ? 'Update' : 'Create'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
     </div>
   );
 }
