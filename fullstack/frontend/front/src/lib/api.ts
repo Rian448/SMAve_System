@@ -63,6 +63,35 @@ export interface Alert {
   itemId: number;
 }
 
+export interface WorkerProfile {
+  id: number;
+  userId: number;
+  userName: string;
+  workerType: 'staff';
+  isAvailable: boolean;
+  specialization?: 'seat_maker' | 'sewer' | 'general' | string;
+  branchId?: number;
+}
+
+export interface WorkTask {
+  id: number;
+  taskNumber: string;
+  jobOrderId: string;
+  workerId?: number;
+  title: string;
+  description?: string;
+  taskType: string;
+  priority: 'low' | 'normal' | 'high' | 'urgent';
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
+  estimatedHours?: number;
+  actualHours?: number;
+  dueDate?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  notes?: string;
+}
+
 export interface RawMaterial {
   id: number;
   name: string;
@@ -392,6 +421,15 @@ async function fetchApi<T>(
     });
 
     const data = await response.json();
+
+    // Handle 401 Unauthorized - clear token and redirect to login
+    if (response.status === 401) {
+      setAuthToken(null);
+      if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
+        window.location.href = '/login';
+      }
+      throw new Error('Session expired. Please login again.');
+    }
 
     if (!response.ok) {
       throw new Error(data.message || `HTTP error! status: ${response.status}`);
@@ -812,6 +850,47 @@ export const api = {
       fetchApi<Branch>(`/api/settings/branches/${id}`, {
         method: 'PUT',
         body: JSON.stringify(updates),
+      }),
+  },
+
+  // ==================
+  // WORKERS
+  // ==================
+  workers: {
+    getProfile: () => fetchApi<{ worker: WorkerProfile }>('/api/workers/profile'),
+    
+    toggleAvailability: (isAvailable: boolean) =>
+      fetchApi<{ isAvailable: boolean }>('/api/workers/availability', {
+        method: 'POST',
+        body: JSON.stringify({ isAvailable }),
+      }),
+    
+    getTasks: (status?: string) => {
+      const query = status ? `?status=${status}` : '';
+      return fetchApi<{ tasks: WorkTask[] }>(`/api/workers/tasks${query}`);
+    },
+    
+    getTaskDetail: (taskId: number) =>
+      fetchApi<{ task: WorkTask }>(`/api/workers/tasks/${taskId}`),
+    
+    updateTaskStatus: (taskId: number, data: { status: string; actualHours?: number; notes?: string }) =>
+      fetchApi<{ task: WorkTask }>(`/api/workers/tasks/${taskId}/status`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    
+    createTask: (task: any) =>
+      fetchApi<{ task: WorkTask }>('/api/workers/tasks', {
+        method: 'POST',
+        body: JSON.stringify(task),
+      }),
+    
+    getWorkersList: () =>
+      fetchApi<{ workers: WorkerProfile[] }>('/api/workers/list'),
+    
+    syncWorkerProfiles: () =>
+      fetchApi<{ status: string; message: string; created: number }>('/api/workers/sync', {
+        method: 'POST',
       }),
   },
 };

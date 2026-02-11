@@ -7,7 +7,7 @@ interface AuthContextType {
   user: User | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string) => Promise<{ token: string; user: User } | undefined>;
   logout: () => Promise<void>;
   checkAuth: () => Promise<void>;
 }
@@ -48,6 +48,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (response.data) {
       setAuthToken(response.data.token);
       setUser(response.data.user);
+      return response.data;
     }
   };
 

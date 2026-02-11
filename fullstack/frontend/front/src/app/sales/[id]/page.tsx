@@ -221,6 +221,45 @@ export default function JobOrderDetailPage() {
           </div>
         </div>
 
+        {/* Assigned Workers/Tasks Section */}
+        {(jobOrder as any).tasks && (jobOrder as any).tasks.length > 0 && (
+          <div className="mt-6 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4 flex items-center">
+              <svg className="w-5 h-5 mr-2 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+              </svg>
+              Assigned Workers
+            </h2>
+            <div className="space-y-3">
+              {(jobOrder as any).tasks.map((task: any) => (
+                <div key={task.id} className="flex items-center justify-between py-3 px-4 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-zinc-900 dark:text-white">{task.title}</p>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">Task #{task.taskNumber}</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {task.worker ? (
+                      <div className="text-right">
+                        <p className="text-sm font-medium text-zinc-900 dark:text-white">{task.worker.name}</p>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">{task.worker.specialization}</p>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-zinc-500 dark:text-zinc-400 italic">Unassigned</p>
+                    )}
+                    <span className={`px-2 py-1 text-xs rounded-full ${
+                      task.status === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
+                      task.status === 'in_progress' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' :
+                      'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                    }`}>
+                      {task.status.replace('_', ' ')}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Costing Breakdown */}
         <div className="mt-6 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">
           <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4 flex items-center">

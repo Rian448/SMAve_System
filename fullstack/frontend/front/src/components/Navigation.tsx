@@ -54,6 +54,12 @@ const SettingsIcon = () => (
   </svg>
 );
 
+const WorkerIcon = () => (
+  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+  </svg>
+);
+
 export default function Navigation() {
   const pathname = usePathname();
   const router = useRouter();
@@ -120,6 +126,12 @@ export default function Navigation() {
       roles: ['administrator', 'supervisor', 'sales_manager', 'staff']
     },
     { 
+      name: 'Worker Dashboard', 
+      path: '/worker-dashboard', 
+      icon: WorkerIcon,
+      roles: ['seat_maker', 'sewer', 'staff']
+    },
+    { 
       name: 'Sales', 
       path: '/sales', 
       icon: SalesIcon,
@@ -161,6 +173,12 @@ export default function Navigation() {
       icon: SettingsIcon,
       roles: ['administrator', 'supervisor']
     },
+    { 
+      name: 'Task Management', 
+      path: '/task-management', 
+      icon: WorkerIcon,
+      roles: ['administrator', 'supervisor']
+    },
   ];
 
   const filteredNavItems = navItems.filter(item => 
@@ -187,6 +205,10 @@ export default function Navigation() {
         return 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400';
       case 'sales_manager':
         return 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
+      case 'seat_maker':
+        return 'bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400';
+      case 'sewer':
+        return 'bg-pink-100 text-pink-800 dark:bg-pink-900/30 dark:text-pink-400';
       default:
         return 'bg-zinc-100 text-zinc-800 dark:bg-zinc-700 dark:text-zinc-300';
     }

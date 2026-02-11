@@ -1,32 +1,32 @@
 'use client';
 import Link from 'next/link';
+import Image from 'next/image';
 
 export default function LandingPage() {
   const catalogItems = [
     {
-      name: 'Aurora Series',
-      description: 'Modern silhouettes with premium upholstery and clean lines.',
+      name: 'Toyota Vios 2025',
+      image: '/pictures/Toyota Vios 2025.jpg',
+      description: 'Latest model with modern features and exceptional fuel efficiency.',
+      tag: 'New Arrival'
+    },
+    {
+      name: 'Mitsubishi TRITON 2025',
+      image: '/pictures/Mitsubishi TRITON 2025.jpg',
+      description: 'Powerful pickup truck built for adventure and heavy-duty performance.',
       tag: 'Best Seller'
     },
     {
-      name: 'Verona Classic',
-      description: 'Timeless frames with ergonomic support for long stays.',
-      tag: 'Classic'
-    },
-    {
-      name: 'Metro Modular',
-      description: 'Mix-and-match pieces for scalable seating arrangements.',
-      tag: 'Modular'
-    },
-    {
-      name: 'Heritage Leather',
-      description: 'Crafted leather seating with hand-finished detailing.',
+      name: 'Toyota Grandia GL 2024',
+      image: '/pictures/Toyota_Grandia_GL_2024.jpg',
+      description: 'Spacious family van with premium comfort and reliability.',
       tag: 'Premium'
     },
     {
-      name: 'Harbor Outdoor',
-      description: 'Weather-ready seating designed for patios and terraces.',
-      tag: 'Outdoor'
+      name: 'Toyota Vios 2020',
+      image: '/pictures/Toyota Vios 2020.jpg',
+      description: 'Trusted sedan with proven performance and value.',
+      tag: 'Classic'
     }
   ];
 
@@ -36,14 +36,14 @@ export default function LandingPage() {
         <section className="grid lg:grid-cols-2 gap-10 items-center">
           <div>
             <p className="text-sm uppercase tracking-[0.2em] text-amber-600 dark:text-amber-400 font-semibold">
-              Seatmakers Avenue
+              Premium Automotive
             </p>
             <h1 className="text-4xl sm:text-5xl font-bold text-zinc-900 dark:text-white mt-3">
-              Custom seating that elevates every space.
+              Quality vehicles that drive your journey forward.
             </h1>
             <p className="text-lg text-zinc-600 dark:text-zinc-300 mt-5">
-              Discover handcrafted chairs, sofas, and modular systems built for hospitality,
-              residential, and commercial interiors.
+              Discover our range of reliable Toyota and Mitsubishi vehicles,
+              from efficient sedans to powerful pickup trucks and spacious family vans.
             </p>
             <div className="flex flex-col sm:flex-row sm:items-center gap-3 mt-8">
               <a
@@ -61,23 +61,23 @@ export default function LandingPage() {
             <div className="absolute -inset-4 bg-gradient-to-tr from-amber-200/40 via-amber-100/10 to-transparent rounded-3xl blur-2xl" />
             <div className="relative rounded-3xl border border-zinc-200 dark:border-zinc-800 bg-white/80 dark:bg-zinc-900/80 p-8 shadow-xl">
               <div className="flex items-center justify-between">
-                <h2 className="text-lg font-semibold text-zinc-900 dark:text-white">Signature Craft</h2>
+                <h2 className="text-lg font-semibold text-zinc-900 dark:text-white">Quality Selection</h2>
                 <span className="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
                   2026 Collection
                 </span>
               </div>
               <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-3">
-                From boutique lounges to hotel lobbies, our seating is engineered for durability,
-                comfort, and bespoke finishes.
+                From daily commuters to family adventures, our vehicles are selected for reliability,
+                performance, and value. Every vehicle is backed by trusted brands.
               </p>
               <div className="mt-6 grid grid-cols-2 gap-4 text-sm">
                 <div className="rounded-2xl bg-zinc-100 dark:bg-zinc-800 p-4">
-                  <p className="text-zinc-500 dark:text-zinc-400">Lead Time</p>
-                  <p className="text-lg font-semibold text-zinc-900 dark:text-white">3-6 Weeks</p>
+                  <p className="text-zinc-500 dark:text-zinc-400">Delivery Time</p>
+                  <p className="text-lg font-semibold text-zinc-900 dark:text-white">2-4 Weeks</p>
                 </div>
                 <div className="rounded-2xl bg-zinc-100 dark:bg-zinc-800 p-4">
-                  <p className="text-zinc-500 dark:text-zinc-400">Custom Options</p>
-                  <p className="text-lg font-semibold text-zinc-900 dark:text-white">120+ Fabrics</p>
+                  <p className="text-zinc-500 dark:text-zinc-400">Available Models</p>
+                  <p className="text-lg font-semibold text-zinc-900 dark:text-white">15+ Options</p>
                 </div>
               </div>
             </div>
@@ -88,7 +88,7 @@ export default function LandingPage() {
           <div className="flex items-center justify-between mb-6">
             <div>
               <h2 className="text-2xl font-bold text-zinc-900 dark:text-white">Catalog Highlights</h2>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400">Swipe to explore featured collections.</p>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">Swipe to explore our featured vehicles.</p>
             </div>
             <span className="text-xs text-zinc-400 dark:text-zinc-500">Swipe →</span>
           </div>
@@ -104,7 +104,14 @@ export default function LandingPage() {
                     {item.tag}
                   </span>
                 </div>
-                <div className="mt-4 h-32 rounded-xl bg-gradient-to-br from-zinc-100 via-zinc-50 to-white dark:from-zinc-800 dark:via-zinc-900 dark:to-zinc-950" />
+                <div className="mt-4 h-48 rounded-xl overflow-hidden bg-zinc-100 dark:bg-zinc-800 relative">
+                  <Image 
+                    src={item.image}
+                    alt={item.name}
+                    fill
+                    className="object-cover"
+                  />
+                </div>
                 <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-4">
                   {item.description}
                 </p>
@@ -125,11 +132,11 @@ export default function LandingPage() {
       <footer className="border-t border-zinc-200 dark:border-zinc-800">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <p className="text-sm font-semibold text-zinc-900 dark:text-white">Seatmakers Avenue</p>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">Crafted seating and bespoke interiors.</p>
+            <p className="text-sm font-semibold text-zinc-900 dark:text-white">Premium Automotive</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Quality vehicles and trusted service.</p>
           </div>
           <div className="text-xs text-zinc-500 dark:text-zinc-400">
-            © 2026 Seatmakers Avenue. All rights reserved.
+            © 2026 Premium Automotive. All rights reserved.
           </div>
         </div>
       </footer>
