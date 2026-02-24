@@ -1216,33 +1216,53 @@ def create_job_order():
 @require_auth
 @require_roles('administrator', 'supervisor', 'sales_manager')
 def update_job_order(order_id):
-    order = next((jo for jo in job_orders if jo['id'] == order_id), None)
+    # Use database instead of in-memory list
+    order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
     
     data = request.get_json()
     
     # Update allowed fields
-    for key in ['status', 'paymentStatus', 'downPayment', 'actualCost', 'notes']:
-        if key in data:
-            order[key] = data[key]
+    if 'status' in data:
+        order.status = data['status']
+    if 'paymentStatus' in data:
+        order.payment_status = data['paymentStatus']
+    if 'downPayment' in data:
+        order.down_payment = data['downPayment']
+    if 'actualCost' in data:
+        order.actual_cost = data['actualCost']
     
     # Recalculate balance
     if 'downPayment' in data:
-        order['balance'] = order['totalPrice'] - order['downPayment']
-        if order['downPayment'] >= order['totalPrice']:
-            order['paymentStatus'] = 'paid'
-        elif order['downPayment'] > 0:
-            order['paymentStatus'] = 'partial'
+        order.balance = order.total_price - order.down_payment
+        if order.down_payment >= order.total_price:
+            order.payment_status = 'paid'
+        elif order.down_payment > 0:
+            order.payment_status = 'partial'
     
     if data.get('status') == 'completed':
-        order['completedAt'] = datetime.now().strftime('%Y-%m-%d')
+        order.completed_at = datetime.now()
     
-    order['updatedAt'] = datetime.now().strftime('%Y-%m-%d')
+    order.updated_at = datetime.now()
+    db.session.commit()
     
-    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Sales', f"Updated job order: {order['jobOrderId']}", request.remote_addr or '0.0.0.0')
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Sales', f"Updated job order: {order.job_order_id}", request.remote_addr or '0.0.0.0')
     
-    return jsonify({'status': 'success', 'data': order})
+    return jsonify({
+        'status': 'success', 
+        'data': {
+            'id': order.id,
+            'jobOrderId': order.job_order_id,
+            'status': order.status,
+            'paymentStatus': order.payment_status,
+            'downPayment': order.down_payment,
+            'balance': order.balance,
+            'actualCost': order.actual_cost,
+            'completedAt': order.completed_at.strftime('%Y-%m-%d') if order.completed_at else None,
+            'updatedAt': order.updated_at.strftime('%Y-%m-%d')
+        }
+    })
 
 @app.route('/api/sales/job-orders/<int:order_id>/void', methods=['POST'])
 @require_auth
@@ -1905,8 +1925,10 @@ def update_customer_order_status(order_id):
     data = request.get_json()
     new_status = data.get('status')
     
-    if new_status not in ['pending', 'processing', 'completed', 'cancelled']:
-        return jsonify({'status': 'error', 'message': 'Invalid status'}), 400
+    # Accept more status options
+    valid_statuses = ['pending', 'processing', 'in_progress', 'ready_for_installation', 'completed', 'delivered', 'cancelled']
+    if new_status not in valid_statuses:
+        return jsonify({'status': 'error', 'message': f'Invalid status. Valid options: {", ".join(valid_statuses)}'}), 400
     
     order.status = new_status
     db.session.commit()
@@ -2498,8 +2520,10 @@ def toggle_worker_availability():
     db.session.commit()
     
     return jsonify({
-        'success': True,
-        'isAvailable': worker.is_available,
+        'status': 'success',
+        'data': {
+            'isAvailable': worker.is_available
+        },
         'message': f'Availability updated to {"Available" if worker.is_available else "Unavailable"}'
     })
 
@@ -2543,9 +2567,12 @@ def get_worker_tasks():
                 'notes': task.notes
             })
         
+        print(f"DEBUG: Returning {len(task_list)} tasks for worker {worker.id}")
         return jsonify({
-            'success': True,
-            'tasks': task_list
+            'status': 'success',
+            'data': {
+                'tasks': task_list
+            }
         })
     except Exception as e:
         print(f"Error in get_worker_tasks: {str(e)}")
@@ -2568,23 +2595,25 @@ def get_worker_task_detail(task_id):
         return jsonify({'error': 'Task not found'}), 404
     
     return jsonify({
-        'success': True,
-        'task': {
-            'id': task.id,
-            'taskNumber': task.task_number,
-            'jobOrderId': task.job_order_id,
-            'title': task.title,
-            'description': task.description,
-            'taskType': task.task_type,
-            'priority': task.priority,
-            'status': task.status,
-            'estimatedHours': task.estimated_hours,
-            'actualHours': task.actual_hours,
-            'dueDate': task.due_date.isoformat() if task.due_date else None,
-            'startedAt': task.started_at.isoformat() if task.started_at else None,
-            'completedAt': task.completed_at.isoformat() if task.completed_at else None,
-            'createdAt': task.created_at.isoformat(),
-            'notes': task.notes
+        'status': 'success',
+        'data': {
+            'task': {
+                'id': task.id,
+                'taskNumber': task.task_number,
+                'jobOrderId': task.job_order_id,
+                'title': task.title,
+                'description': task.description,
+                'taskType': task.task_type,
+                'priority': task.priority,
+                'status': task.status,
+                'estimatedHours': task.estimated_hours,
+                'actualHours': task.actual_hours,
+                'dueDate': task.due_date.isoformat() if task.due_date else None,
+                'startedAt': task.started_at.isoformat() if task.started_at else None,
+                'completedAt': task.completed_at.isoformat() if task.completed_at else None,
+                'createdAt': task.created_at.isoformat(),
+                'notes': task.notes
+            }
         }
     })
 
@@ -2622,13 +2651,15 @@ def update_task_status(task_id):
     db.session.commit()
     
     return jsonify({
-        'success': True,
+        'status': 'success',
         'message': 'Task updated successfully',
-        'task': {
-            'id': task.id,
-            'status': task.status,
-            'startedAt': task.started_at.isoformat() if task.started_at else None,
-            'completedAt': task.completed_at.isoformat() if task.completed_at else None
+        'data': {
+            'task': {
+                'id': task.id,
+                'status': task.status,
+                'startedAt': task.started_at.isoformat() if task.started_at else None,
+                'completedAt': task.completed_at.isoformat() if task.completed_at else None
+            }
         }
     })
 
@@ -2645,13 +2676,12 @@ def create_work_task():
     
     data = request.json
     
-    # Validate worker exists and is available
+    # Validate worker exists
     if data.get('workerId'):
         worker = Worker.query.get(data['workerId'])
         if not worker:
             return jsonify({'error': 'Worker not found'}), 404
-        if not worker.is_available:
-            return jsonify({'error': 'Worker is not available. Tasks can only be assigned to available workers.'}), 400
+        # Allow task assignment regardless of availability status
     
     # Generate task number
     task_count = WorkTask.query.count() + 1
@@ -2680,15 +2710,89 @@ def create_work_task():
     db.session.commit()
     
     return jsonify({
-        'success': True,
+        'status': 'success',
         'message': 'Task created successfully',
-        'task': {
+        'data': {
+            'task': {
+                'id': task.id,
+                'taskNumber': task.task_number,
+                'jobOrderId': task.job_order_id,
+                'workerId': task.worker_id,
+                'title': task.title,
+                'status': task.status
+            }
+        }
+    })
+
+@app.route('/api/workers/all-tasks', methods=['GET'])
+def get_all_tasks_admin():
+    """Admin/Supervisor endpoint to get all tasks"""
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not token or token not in sessions:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    user = sessions[token]
+    if user.get('role') not in ['administrator', 'supervisor', 'sales_manager']:
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    
+    status = request.args.get('status')
+    job_order_id = request.args.get('jobOrderId')
+    
+    query = WorkTask.query
+    
+    # Filter by status if provided
+    if status:
+        query = query.filter_by(status=status)
+    
+    # Filter by job order if provided
+    if job_order_id:
+        query = query.filter_by(job_order_id=job_order_id)
+    
+    # Branch filtering for non-admin users
+    if user.get('role') != 'administrator':
+        user_branch_id = user.get('branchId')
+        if user_branch_id:
+            # Get workers from this branch
+            branch_workers = Worker.query.filter_by(branch_id=user_branch_id).all()
+            worker_ids = [w.id for w in branch_workers]
+            if worker_ids:
+                query = query.filter(WorkTask.worker_id.in_(worker_ids))
+    
+    tasks = query.order_by(WorkTask.created_at.desc()).all()
+    
+    task_list = []
+    for task in tasks:
+        worker_name = None
+        if task.worker_id:
+            worker = Worker.query.get(task.worker_id)
+            if worker:
+                user_data = User.query.get(worker.user_id)
+                worker_name = user_data.full_name if user_data else 'Unknown'
+        
+        task_list.append({
             'id': task.id,
             'taskNumber': task.task_number,
             'jobOrderId': task.job_order_id,
             'workerId': task.worker_id,
+            'workerName': worker_name,
             'title': task.title,
-            'status': task.status
+            'description': task.description,
+            'taskType': task.task_type,
+            'priority': task.priority,
+            'status': task.status,
+            'estimatedHours': task.estimated_hours,
+            'actualHours': task.actual_hours,
+            'dueDate': task.due_date.isoformat() if task.due_date else None,
+            'startedAt': task.started_at.isoformat() if task.started_at else None,
+            'completedAt': task.completed_at.isoformat() if task.completed_at else None,
+            'createdAt': task.created_at.isoformat(),
+            'notes': task.notes
+        })
+    
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'tasks': task_list
         }
     })
 

@@ -42,11 +42,20 @@ export default function JobOrderDetailPage() {
     switch (status) {
       case 'pending': return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400';
       case 'in_progress': return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400';
+      case 'ready_for_installation': return 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400';
       case 'completed': return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
       case 'delivered': return 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400';
       case 'cancelled': return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
       default: return 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400';
     }
+  };
+
+  const formatCurrency = (amount: number) => {
+    return new Intl.NumberFormat('en-PH', {
+      style: 'currency',
+      currency: 'PHP',
+      minimumFractionDigits: 0
+    }).format(amount || 0);
   };
 
   if (loading) {
@@ -78,6 +87,29 @@ export default function JobOrderDetailPage() {
       </div>
     );
   }
+
+  const itemBreakdown = (jobOrder.items || []).map((item) => {
+    const quantity = Number(item.quantity) || 0;
+    const unitPrice = Number(item.unitPrice) || 0;
+    const materialCostPerUnit = Number(item.materialCost) || 0;
+    const laborCostPerUnit = Number(item.laborCost) || 0;
+
+    return {
+      ...item,
+      quantity,
+      unitPrice,
+      materialCostPerUnit,
+      laborCostPerUnit,
+      linePrice: quantity * unitPrice,
+      lineMaterialCost: quantity * materialCostPerUnit,
+      lineLaborCost: quantity * laborCostPerUnit,
+    };
+  });
+
+  const itemSubtotal = itemBreakdown.reduce((total, item) => total + item.linePrice, 0);
+  const materialSubtotal = itemBreakdown.reduce((total, item) => total + item.lineMaterialCost, 0);
+  const laborSubtotal = itemBreakdown.reduce((total, item) => total + item.lineLaborCost, 0);
+  const computedCostSubtotal = materialSubtotal + laborSubtotal;
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
@@ -158,7 +190,7 @@ export default function JobOrderDetailPage() {
               </div>
               <div>
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">Address</p>
-                <p className="text-sm font-medium text-zinc-900 dark:text-white">{jobOrder.customer_address || 'N/A'}</p>
+                <p className="text-sm font-medium text-zinc-900 dark:text-white">{(jobOrder as any).customer_address || (jobOrder as any).customerAddress || 'N/A'}</p>
               </div>
             </div>
           </div>
@@ -269,45 +301,69 @@ export default function JobOrderDetailPage() {
             Cost Breakdown
           </h2>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Items */}
-            <div>
-              <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-3">Order Items</h3>
-              {jobOrder.items && jobOrder.items.length > 0 ? (
-                <div className="space-y-2">
-                  {jobOrder.items.map((item, index) => (
-                    <div key={index} className="flex items-center justify-between py-2 px-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
-                      <div>
-                        <p className="text-sm font-medium text-zinc-900 dark:text-white">{item.name}</p>
-                        <p className="text-xs text-zinc-500">{item.quantity} units @ ₱{item.unitPrice?.toLocaleString()}</p>
-                      </div>
-                      <p className="text-sm font-medium text-zinc-900 dark:text-white">
-                        ₱{(item.quantity * (item.unitPrice || 0)).toLocaleString()}
-                      </p>
-                    </div>
+          {itemBreakdown.length > 0 ? (
+            <div className="overflow-x-auto border border-zinc-200 dark:border-zinc-800 rounded-lg">
+              <table className="w-full min-w-215">
+                <thead className="bg-zinc-50 dark:bg-zinc-800/50">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Material / Item</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Qty</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Unit Price</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Material Cost</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Labor Cost</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Line Price</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                  {itemBreakdown.map((item, index) => (
+                    <tr key={`${item.name}-${index}`} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors">
+                      <td className="px-4 py-3 text-sm font-medium text-zinc-900 dark:text-white">{item.name || `Item ${index + 1}`}</td>
+                      <td className="px-4 py-3 text-sm text-right text-zinc-700 dark:text-zinc-300">{item.quantity}</td>
+                      <td className="px-4 py-3 text-sm text-right text-zinc-700 dark:text-zinc-300">{formatCurrency(item.unitPrice)}</td>
+                      <td className="px-4 py-3 text-sm text-right text-zinc-700 dark:text-zinc-300">{formatCurrency(item.lineMaterialCost)}</td>
+                      <td className="px-4 py-3 text-sm text-right text-zinc-700 dark:text-zinc-300">{formatCurrency(item.lineLaborCost)}</td>
+                      <td className="px-4 py-3 text-sm text-right font-semibold text-zinc-900 dark:text-white">{formatCurrency(item.linePrice)}</td>
+                    </tr>
                   ))}
-                </div>
-              ) : (
-                <p className="text-sm text-zinc-500 dark:text-zinc-400">No items recorded</p>
-              )}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">No material or item details recorded for this order.</p>
+          )}
+
+          <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between py-2 px-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
+                <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Item Price Subtotal</p>
+                <p className="text-sm font-semibold text-zinc-900 dark:text-white">{formatCurrency(itemSubtotal)}</p>
+              </div>
+              <div className="flex items-center justify-between py-2 px-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
+                <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Material Cost Subtotal</p>
+                <p className="text-sm font-semibold text-zinc-900 dark:text-white">{formatCurrency(materialSubtotal)}</p>
+              </div>
+              <div className="flex items-center justify-between py-2 px-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
+                <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Labor Cost Subtotal</p>
+                <p className="text-sm font-semibold text-zinc-900 dark:text-white">{formatCurrency(laborSubtotal)}</p>
+              </div>
+              <div className="flex items-center justify-between py-2 px-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+                <p className="text-sm font-medium text-blue-900 dark:text-blue-300">Computed Total Cost</p>
+                <p className="text-sm font-bold text-blue-600 dark:text-blue-400">{formatCurrency(computedCostSubtotal)}</p>
+              </div>
             </div>
 
-            {/* Cost Summary */}
-            <div>
-              <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-3">Cost Summary</h3>
-              <div className="space-y-2">
-                <div className="flex items-center justify-between py-2 px-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-                  <p className="text-sm font-medium text-blue-900 dark:text-blue-300">Estimated Cost</p>
-                  <p className="text-sm font-bold text-blue-600 dark:text-blue-400">₱{(jobOrder.estimatedCost || 0).toLocaleString()}</p>
-                </div>
-                <div className="flex items-center justify-between py-2 px-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
-                  <p className="text-sm font-medium text-green-900 dark:text-green-300">Actual Cost</p>
-                  <p className="text-sm font-bold text-green-600 dark:text-green-400">₱{(jobOrder.actualCost || 0).toLocaleString()}</p>
-                </div>
-                <div className="flex items-center justify-between py-2 px-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg border-2 border-amber-200 dark:border-amber-800">
-                  <p className="text-sm font-bold text-amber-900 dark:text-amber-300">Total Price</p>
-                  <p className="text-lg font-bold text-amber-600 dark:text-amber-400">₱{(jobOrder.totalPrice || 0).toLocaleString()}</p>
-                </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between py-2 px-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                <p className="text-sm font-medium text-blue-900 dark:text-blue-300">Estimated Cost</p>
+                <p className="text-sm font-bold text-blue-600 dark:text-blue-400">{formatCurrency(jobOrder.estimatedCost || 0)}</p>
+              </div>
+              <div className="flex items-center justify-between py-2 px-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                <p className="text-sm font-medium text-green-900 dark:text-green-300">Actual Cost</p>
+                <p className="text-sm font-bold text-green-600 dark:text-green-400">{formatCurrency(jobOrder.actualCost || 0)}</p>
+              </div>
+              <div className="flex items-center justify-between py-2 px-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg border-2 border-amber-200 dark:border-amber-800">
+                <p className="text-sm font-bold text-amber-900 dark:text-amber-300">Total Price</p>
+                <p className="text-lg font-bold text-amber-600 dark:text-amber-400">{formatCurrency(jobOrder.totalPrice || 0)}</p>
               </div>
             </div>
           </div>
@@ -318,19 +374,19 @@ export default function JobOrderDetailPage() {
               <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 text-center border border-blue-200 dark:border-blue-800">
                 <p className="text-xs text-blue-600 dark:text-blue-400">Estimated Cost</p>
                 <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">
-                  ₱{(jobOrder.estimatedCost || 0).toLocaleString()}
+                  {formatCurrency(jobOrder.estimatedCost || 0)}
                 </p>
               </div>
               <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-4 text-center border border-green-200 dark:border-green-800">
                 <p className="text-xs text-green-600 dark:text-green-400">Actual Cost</p>
                 <p className="text-2xl font-bold text-green-600 dark:text-green-400">
-                  ₱{(jobOrder.actualCost || 0).toLocaleString()}
+                  {formatCurrency(jobOrder.actualCost || 0)}
                 </p>
               </div>
               <div className="bg-amber-50 dark:bg-amber-900/20 rounded-lg p-4 text-center border-2 border-amber-300 dark:border-amber-700">
                 <p className="text-xs text-amber-600 dark:text-amber-400 font-bold">TOTAL PRICE</p>
                 <p className="text-2xl font-bold text-amber-600 dark:text-amber-400">
-                  ₱{(jobOrder.totalPrice || 0).toLocaleString()}
+                  {formatCurrency(jobOrder.totalPrice || 0)}
                 </p>
               </div>
             </div>

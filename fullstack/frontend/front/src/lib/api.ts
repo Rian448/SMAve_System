@@ -134,6 +134,7 @@ export interface VehicleInfo {
   model: string;
   year: number;
   plateNumber: string;
+  color?: string;
 }
 
 export interface JobOrder {
@@ -151,7 +152,7 @@ export interface JobOrder {
   estimatedCost: number;
   actualCost: number;
   totalPrice: number;
-  status: 'pending' | 'in_progress' | 'completed' | 'voided' | 'cancelled';
+  status: 'pending' | 'in_progress' | 'completed' | 'voided' | 'cancelled' | 'delivered';
   paymentStatus: 'unpaid' | 'partial' | 'paid';
   downPayment: number;
   balance: number;
@@ -884,6 +885,13 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(task),
       }),
+    
+    getAllTasks: (params?: { status?: string; jobOrderId?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.status) query.append('status', params.status);
+      if (params?.jobOrderId) query.append('jobOrderId', params.jobOrderId);
+      return fetchApi<{ tasks: (WorkTask & { workerName?: string })[] }>(`/api/workers/all-tasks?${query}`);
+    },
     
     getWorkersList: () =>
       fetchApi<{ workers: WorkerProfile[] }>('/api/workers/list'),

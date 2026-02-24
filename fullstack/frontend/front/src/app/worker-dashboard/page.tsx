@@ -9,16 +9,16 @@ interface WorkTask {
   taskNumber: string;
   jobOrderId: string;
   title: string;
-  description: string;
-  taskType: string;
+  description?: string;
+  taskType?: string;
   priority: string;
   status: string;
-  estimatedHours: number;
-  actualHours: number;
-  dueDate: string;
-  startedAt: string;
-  completedAt: string;
-  notes: string;
+  estimatedHours?: number;
+  actualHours?: number;
+  dueDate?: string;
+  startedAt?: string;
+  completedAt?: string;
+  notes?: string;
 }
 
 interface WorkerProfile {
@@ -26,14 +26,14 @@ interface WorkerProfile {
   userId: number;
   workerType: string;
   isAvailable: boolean;
-  specialization: string;
-  branchId: number;
+  specialization?: string;
+  branchId?: number;
   userName: string;
 }
 
 export default function WorkerDashboard() {
   const router = useRouter();
-  const { user, loading: authLoading } = useAuth();
+  const { user, isLoading: authLoading } = useAuth();
   const [profile, setProfile] = useState<WorkerProfile | null>(null);
   const [tasks, setTasks] = useState<WorkTask[]>([]);
   const [loading, setLoading] = useState(true);
@@ -60,10 +60,13 @@ export default function WorkerDashboard() {
       
       // Fetch worker profile
       const profileRes = await api.workers.getProfile();
-      setProfile(profileRes.data?.worker);
+      console.log('Worker profile response:', profileRes);
+      setProfile(profileRes.data?.worker || null);
       
-      // Fetch tasks
-      await fetchTasks(filter);
+      // Fetch tasks for this worker
+      const tasksRes = await api.workers.getTasks();
+      console.log('Worker tasks response:', tasksRes);
+      setTasks(tasksRes.data?.tasks || []);
     } catch (error: any) {
       console.error('Error fetching worker data:', error);
       if (error.response?.status === 403) {
@@ -77,6 +80,7 @@ export default function WorkerDashboard() {
   const fetchTasks = async (status?: string) => {
     try {
       const res = await api.workers.getTasks(status && status !== 'all' ? status : undefined);
+      console.log('Fetch tasks response:', res);
       setTasks(res.data?.tasks || []);
     } catch (error) {
       console.error('Error fetching tasks:', error);
@@ -132,13 +136,14 @@ export default function WorkerDashboard() {
     switch (status) {
       case 'completed': return 'text-green-700 bg-green-50 border-green-200';
       case 'in_progress': return 'text-blue-700 bg-blue-50 border-blue-200';
+      case 'ready_for_installation': return 'text-orange-700 bg-orange-50 border-orange-200';
       case 'pending': return 'text-yellow-700 bg-yellow-50 border-yellow-200';
       case 'cancelled': return 'text-red-700 bg-red-50 border-red-200';
       default: return 'text-gray-700 bg-gray-50 border-gray-200';
     }
   };
 
-  const formatDate = (dateStr: string) => {
+  const formatDate = (dateStr?: string) => {
     if (!dateStr) return 'N/A';
     const date = new Date(dateStr);
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
