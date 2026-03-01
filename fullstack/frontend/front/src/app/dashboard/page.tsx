@@ -111,11 +111,73 @@ export default function Dashboard() {
             Welcome back, {user?.fullName?.split(' ')[0]}!
           </h1>
           <p className="text-zinc-500 dark:text-zinc-400 mt-1">
-            Here&apos;s what&apos;s happening at {user?.branch || 'your branch'} today.
+            {user?.role === 'customer' 
+              ? 'Track your orders and view quotations here.'
+              : `Here's what's happening at ${user?.branch || 'your branch'} today.`
+            }
           </p>
         </div>
 
-        {/* Stats Cards */}
+        {/* Customer Dashboard */}
+        {user?.role === 'customer' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">
+              <div className="flex items-center space-x-4 mb-4">
+                <div className="w-12 h-12 rounded-xl bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
+                  <svg className="w-6 h-6 text-amber-600 dark:text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-lg font-semibold text-zinc-900 dark:text-white">My Orders</h2>
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">View and track your placed orders</p>
+                </div>
+              </div>
+              <p className="text-sm text-zinc-600 dark:text-zinc-400 mb-4">
+                Check the status of your orders, view quotations, and respond to price offers from our team.
+              </p>
+              <Link 
+                href="/my-orders" 
+                className="inline-flex items-center px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors font-medium"
+              >
+                <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                </svg>
+                View My Orders
+              </Link>
+            </div>
+
+            <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">
+              <div className="flex items-center space-x-4 mb-4">
+                <div className="w-12 h-12 rounded-xl bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
+                  <svg className="w-6 h-6 text-green-600 dark:text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-lg font-semibold text-zinc-900 dark:text-white">Place New Order</h2>
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">Request a service for your vehicle</p>
+                </div>
+              </div>
+              <p className="text-sm text-zinc-600 dark:text-zinc-400 mb-4">
+                Submit a new order request for flooring, reupholstery, ceiling, sidings, or seat covers.
+              </p>
+              <Link 
+                href="/place-order" 
+                className="inline-flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium"
+              >
+                <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                </svg>
+                Place New Order
+              </Link>
+            </div>
+          </div>
+        )}
+
+        {/* Stats Cards - For staff only */}
+        {user?.role !== 'customer' && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           {/* Active Job Orders */}
           <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">
@@ -205,8 +267,10 @@ export default function Dashboard() {
             )}
           </div>
         </div>
+        )}
 
-        {/* Main Content Grid */}
+        {/* Main Content Grid - For staff only */}
+        {user?.role !== 'customer' && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Alerts Section */}
           <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 overflow-hidden">
@@ -291,6 +355,7 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+        )}
 
         {/* Quick Actions */}
         {hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager']) && (

@@ -77,7 +77,20 @@ class CustomerOrder(db.Model):
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
+    # Customer user link (for logged-in customers)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    
+    # Quotation fields
+    quotation_items = db.Column(db.JSON)  # [{name, description, quantity, unitPrice, total}]
+    quotation_total = db.Column(db.Float, default=0)
+    quotation_status = db.Column(db.String(50), default='pending_quotation')  # pending_quotation, quoted, accepted, rejected
+    quotation_notes = db.Column(db.Text)  # Admin notes for quotation
+    customer_response_notes = db.Column(db.Text)  # Customer notes when accepting/rejecting
+    quoted_at = db.Column(db.DateTime)  # When admin sent quotation
+    responded_at = db.Column(db.DateTime)  # When customer responded
+    
     branch = db.relationship('Branch')
+    customer_user = db.relationship('User', foreign_keys=[user_id])
 
 class JobOrder(db.Model):
     __tablename__ = 'job_orders'
@@ -152,7 +165,8 @@ default_roles = [
     {'key': 'sales_manager', 'name': 'Sales Manager'},
     {'key': 'staff', 'name': 'Staff'},
     {'key': 'seat_maker', 'name': 'Seat Maker'},
-    {'key': 'sewer', 'name': 'Sewer'}
+    {'key': 'sewer', 'name': 'Sewer'},
+    {'key': 'customer', 'name': 'Customer'}
 ]
 
 default_users = [
@@ -437,7 +451,16 @@ def customer_order_to_dict(order):
         'status': order.status,
         'branchId': order.branch_id,
         'branchName': order.branch.name if order.branch else None,
-        'createdAt': order.created_at.isoformat() if order.created_at else None
+        'createdAt': order.created_at.isoformat() if order.created_at else None,
+        # Quotation fields
+        'userId': order.user_id,
+        'quotationItems': order.quotation_items,
+        'quotationTotal': order.quotation_total,
+        'quotationStatus': order.quotation_status,
+        'quotationNotes': order.quotation_notes,
+        'customerResponseNotes': order.customer_response_notes,
+        'quotedAt': order.quoted_at.isoformat() if order.quoted_at else None,
+        'respondedAt': order.responded_at.isoformat() if order.responded_at else None
     }
 
 def branch_to_dict(branch):
@@ -1809,7 +1832,7 @@ def generate_delivery_receipt(delivery_id):
 
 @app.route('/api/customer-orders', methods=['POST'])
 def place_customer_order():
-    """Place a new customer order without authentication"""
+    """Place a new customer order - supports both authenticated and guest users"""
     data = request.get_json()
     
     required = ['customerName', 'customerPhone', 'vehicleInfo', 'services']
@@ -1825,6 +1848,14 @@ def place_customer_order():
         branch = Branch.query.get(branch_id)
         if not branch or not branch.is_active:
             return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+    
+    # Check if user is authenticated (optional)
+    user_id = None
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if token:
+        user = get_user_from_token(token)
+        if user:
+            user_id = user['id']
     
     order_count = CustomerOrder.query.count() + 1
     order_number = f"CO-{order_count:04d}"
@@ -1844,7 +1875,9 @@ def place_customer_order():
         services=data['services'],
         notes=data.get('notes', ''),
         status='pending',
-        branch_id=branch_id
+        branch_id=branch_id,
+        user_id=user_id,
+        quotation_status='pending_quotation'
     )
     
     db.session.add(new_order)
@@ -1934,6 +1967,164 @@ def update_customer_order_status(order_id):
     db.session.commit()
     
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Customer Orders', f"Updated order status: {order.order_number} to {new_status}", request.remote_addr or '0.0.0.0')
+    
+    return jsonify({'status': 'success', 'data': customer_order_to_dict(order)})
+
+@app.route('/api/auth/register', methods=['POST'])
+def register_customer():
+    """Register a new customer account"""
+    data = request.get_json()
+    
+    required = ['username', 'password', 'email', 'fullName', 'phone']
+    if not all(f in data for f in required):
+        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    
+    # Check if username or email already exists
+    if User.query.filter_by(username=data['username']).first():
+        return jsonify({'status': 'error', 'message': 'Username already exists'}), 400
+    
+    if User.query.filter_by(email=data['email']).first():
+        return jsonify({'status': 'error', 'message': 'Email already exists'}), 400
+    
+    # Get customer role
+    customer_role = Role.query.filter_by(key='customer').first()
+    if not customer_role:
+        return jsonify({'status': 'error', 'message': 'Customer role not configured'}), 500
+    
+    # Create new customer user
+    new_user = User(
+        username=data['username'],
+        password=hashlib.sha256(data['password'].encode()).hexdigest(),
+        email=data['email'],
+        full_name=data['fullName'],
+        role_id=customer_role.id,
+        branch_id=None,
+        branch=None,
+        is_active=True
+    )
+    
+    db.session.add(new_user)
+    db.session.commit()
+    
+    # Generate session token
+    token = secrets.token_hex(32)
+    sessions[token] = {
+        'userId': new_user.id,
+        'createdAt': datetime.utcnow().isoformat()
+    }
+    
+    log_action(new_user.id, new_user.full_name, 'REGISTER', 'Auth', 'New customer registered', request.remote_addr or '0.0.0.0')
+    
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'token': token,
+            'user': user_to_dict(new_user)
+        }
+    }), 201
+
+@app.route('/api/customer-orders/my-orders', methods=['GET'])
+@require_auth
+@require_roles('customer')
+def get_my_customer_orders():
+    """Get orders for the logged-in customer"""
+    user = request.current_user
+    
+    orders = CustomerOrder.query.filter_by(user_id=user['id']).order_by(CustomerOrder.created_at.desc()).all()
+    
+    return jsonify({'status': 'success', 'data': [customer_order_to_dict(o) for o in orders]})
+
+@app.route('/api/customer-orders/my-orders/<int:order_id>', methods=['GET'])
+@require_auth
+@require_roles('customer')
+def get_my_customer_order(order_id):
+    """Get a specific order for the logged-in customer"""
+    user = request.current_user
+    
+    order = CustomerOrder.query.filter_by(id=order_id, user_id=user['id']).first()
+    if not order:
+        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
+    
+    return jsonify({'status': 'success', 'data': customer_order_to_dict(order)})
+
+@app.route('/api/customer-orders/<int:order_id>/quotation', methods=['PUT'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def set_customer_order_quotation(order_id):
+    """Set quotation for a customer order"""
+    user = request.current_user
+    order = CustomerOrder.query.get(order_id)
+    
+    if order is None:
+        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
+    
+    # Branch-level access control
+    if user['role'] != 'administrator':
+        user_branch_id = user.get('branchId')
+        if not user_branch_id and user.get('branch'):
+            user_branch = Branch.query.filter_by(name=user['branch']).first()
+            user_branch_id = user_branch.id if user_branch else None
+        
+        if not user_branch_id or order.branch_id != user_branch_id:
+            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+    
+    data = request.get_json()
+    
+    # Validate quotation items
+    items = data.get('items', [])
+    if not items:
+        return jsonify({'status': 'error', 'message': 'Quotation items are required'}), 400
+    
+    # Calculate total
+    total = 0
+    for item in items:
+        item_total = float(item.get('quantity', 1)) * float(item.get('unitPrice', 0))
+        item['total'] = item_total
+        total += item_total
+    
+    order.quotation_items = items
+    order.quotation_total = total
+    order.quotation_notes = data.get('notes', '')
+    order.quotation_status = 'quoted'
+    order.quoted_at = datetime.utcnow()
+    
+    db.session.commit()
+    
+    log_action(user['id'], user['fullName'], 'QUOTATION', 'Customer Orders', f"Sent quotation for order: {order.order_number}, Total: {total}", request.remote_addr or '0.0.0.0')
+    
+    return jsonify({'status': 'success', 'data': customer_order_to_dict(order)})
+
+@app.route('/api/customer-orders/<int:order_id>/respond', methods=['PUT'])
+@require_auth
+@require_roles('customer')
+def respond_to_quotation(order_id):
+    """Customer responds to quotation (accept/reject)"""
+    user = request.current_user
+    
+    order = CustomerOrder.query.filter_by(id=order_id, user_id=user['id']).first()
+    if not order:
+        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
+    
+    if order.quotation_status != 'quoted':
+        return jsonify({'status': 'error', 'message': 'No quotation to respond to'}), 400
+    
+    data = request.get_json()
+    response = data.get('response')  # 'accept' or 'reject'
+    
+    if response not in ['accept', 'reject']:
+        return jsonify({'status': 'error', 'message': 'Invalid response. Use "accept" or "reject"'}), 400
+    
+    order.quotation_status = 'accepted' if response == 'accept' else 'rejected'
+    order.customer_response_notes = data.get('notes', '')
+    order.responded_at = datetime.utcnow()
+    
+    # If accepted, update order status to processing
+    if response == 'accept':
+        order.status = 'processing'
+    
+    db.session.commit()
+    
+    log_action(user['id'], user['fullName'], 'RESPOND', 'Customer Orders', f"Customer {response}ed quotation for order: {order.order_number}", request.remote_addr or '0.0.0.0')
     
     return jsonify({'status': 'success', 'data': customer_order_to_dict(order)})
 

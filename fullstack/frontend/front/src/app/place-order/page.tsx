@@ -1,14 +1,9 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { api } from '@/lib/api';
+import { api, setAuthToken } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
-
-interface ServiceDetail {
-  type: 'flooring' | 'reupholstery' | 'ceiling' | 'sidings' | 'seat_covers' | 'other';
-  material: string;
-  [key: string]: string | boolean;
-}
 
 interface Branch {
   id: number;
@@ -21,13 +16,29 @@ interface Branch {
 
 export default function PlaceOrderPage() {
   const router = useRouter();
+  const { user, isLoading: authLoading, isAuthenticated, checkAuth } = useAuth();
+  
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [branches, setBranches] = useState<Branch[]>([]);
   const [loadingBranches, setLoadingBranches] = useState(true);
 
-  // Customer Info
+  // Auth mode state
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authError, setAuthError] = useState('');
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+
+  // Login/Register form
+  const [loginUsername, setLoginUsername] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [registerUsername, setRegisterUsername] = useState('');
+  const [registerPassword, setRegisterPassword] = useState('');
+  const [registerEmail, setRegisterEmail] = useState('');
+  const [registerFullName, setRegisterFullName] = useState('');
+  const [registerPhone, setRegisterPhone] = useState('');
+
+  // Customer Info (pre-filled for logged-in users)
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
   const [customerEmail, setCustomerEmail] = useState('');
@@ -59,13 +70,21 @@ export default function PlaceOrderPage() {
   const [notes, setNotes] = useState('');
   const [agreeTerms, setAgreeTerms] = useState(false);
 
+  // Pre-fill customer info when user is logged in
+  useEffect(() => {
+    if (user) {
+      setCustomerName(user.fullName || '');
+      setCustomerEmail(user.email || '');
+      setCustomerPhone(user.phone || '');
+    }
+  }, [user]);
+
   // Load branches on mount
   useEffect(() => {
     const loadBranches = async () => {
       try {
         const response = await api.settings.getBranchesPublic();
         if (response.status === 'success' && response.data) {
-          // Filter out warehouse branches for customer orders
           const activeBranches = response.data.filter(b => !b.isWarehouse);
           setBranches(activeBranches);
         }
@@ -77,6 +96,48 @@ export default function PlaceOrderPage() {
     };
     loadBranches();
   }, []);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsAuthLoading(true);
+    setAuthError('');
+
+    try {
+      const response = await api.auth.login(loginUsername, loginPassword);
+      if (response.data) {
+        setAuthToken(response.data.token);
+        await checkAuth();
+      }
+    } catch (err: any) {
+      setAuthError(err.message || 'Login failed. Please try again.');
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsAuthLoading(true);
+    setAuthError('');
+
+    try {
+      const response = await api.auth.register({
+        username: registerUsername,
+        password: registerPassword,
+        email: registerEmail,
+        fullName: registerFullName,
+        phone: registerPhone
+      });
+      if (response.data) {
+        setAuthToken(response.data.token);
+        await checkAuth();
+      }
+    } catch (err: any) {
+      setAuthError(err.message || 'Registration failed. Please try again.');
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -135,10 +196,10 @@ export default function PlaceOrderPage() {
       };
 
       await api.customerOrders.placeOrder(orderData);
-      setSuccessMessage('Order placed successfully! Our team will contact you soon.');
+      setSuccessMessage('Order placed successfully! You can track your order status in My Orders.');
       
       setTimeout(() => {
-        router.push('/');
+        router.push('/my-orders');
       }, 2000);
     } catch (err) {
       setError('Failed to place order. Please try again.');
@@ -147,6 +208,184 @@ export default function PlaceOrderPage() {
       setLoading(false);
     }
   };
+
+  // Show loading state while checking auth
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 flex items-center justify-center">
+        <div className="animate-spin w-8 h-8 border-4 border-amber-600 border-t-transparent rounded-full"></div>
+      </div>
+    );
+  }
+
+  // Show login/register form if not authenticated
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
+        <div className="bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800">
+          <div className="max-w-md mx-auto px-4 sm:px-6 lg:px-8 py-6">
+            <Link href="/" className="text-amber-600 dark:text-amber-400 text-sm font-medium mb-4 inline-block">
+              ← Back to Home
+            </Link>
+            <h1 className="text-3xl font-bold text-zinc-900 dark:text-white">Place Your Order</h1>
+            <p className="text-zinc-600 dark:text-zinc-400 mt-2">
+              Please login or create an account to place an order and track its status.
+            </p>
+          </div>
+        </div>
+
+        <main className="max-w-md mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">
+            {/* Auth Mode Toggle */}
+            <div className="flex mb-6 bg-zinc-100 dark:bg-zinc-800 rounded-lg p-1">
+              <button
+                type="button"
+                onClick={() => setAuthMode('login')}
+                className={`flex-1 py-2 text-sm font-medium rounded-md transition-colors ${
+                  authMode === 'login'
+                    ? 'bg-white dark:bg-zinc-700 text-zinc-900 dark:text-white shadow-sm'
+                    : 'text-zinc-600 dark:text-zinc-400'
+                }`}
+              >
+                Login
+              </button>
+              <button
+                type="button"
+                onClick={() => setAuthMode('register')}
+                className={`flex-1 py-2 text-sm font-medium rounded-md transition-colors ${
+                  authMode === 'register'
+                    ? 'bg-white dark:bg-zinc-700 text-zinc-900 dark:text-white shadow-sm'
+                    : 'text-zinc-600 dark:text-zinc-400'
+                }`}
+              >
+                Register
+              </button>
+            </div>
+
+            {authError && (
+              <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400 text-sm">
+                {authError}
+              </div>
+            )}
+
+            {authMode === 'login' ? (
+              <form onSubmit={handleLogin} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Username
+                  </label>
+                  <input
+                    type="text"
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value)}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="Enter your username"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Password
+                  </label>
+                  <input
+                    type="password"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="Enter your password"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={isAuthLoading}
+                  className="w-full px-4 py-3 rounded-lg bg-amber-600 text-white font-semibold hover:bg-amber-700 disabled:opacity-50 transition-colors"
+                >
+                  {isAuthLoading ? 'Logging in...' : 'Login to Continue'}
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleRegister} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Full Name *
+                  </label>
+                  <input
+                    type="text"
+                    value={registerFullName}
+                    onChange={(e) => setRegisterFullName(e.target.value)}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="Your full name"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Email *
+                  </label>
+                  <input
+                    type="email"
+                    value={registerEmail}
+                    onChange={(e) => setRegisterEmail(e.target.value)}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="your@email.com"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Phone Number *
+                  </label>
+                  <input
+                    type="tel"
+                    value={registerPhone}
+                    onChange={(e) => setRegisterPhone(e.target.value)}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="09XX XXX XXXX"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Username *
+                  </label>
+                  <input
+                    type="text"
+                    value={registerUsername}
+                    onChange={(e) => setRegisterUsername(e.target.value)}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="Choose a username"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Password *
+                  </label>
+                  <input
+                    type="password"
+                    value={registerPassword}
+                    onChange={(e) => setRegisterPassword(e.target.value)}
+                    required
+                    minLength={6}
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="Choose a password (min 6 characters)"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={isAuthLoading}
+                  className="w-full px-4 py-3 rounded-lg bg-amber-600 text-white font-semibold hover:bg-amber-700 disabled:opacity-50 transition-colors"
+                >
+                  {isAuthLoading ? 'Creating Account...' : 'Create Account & Continue'}
+                </button>
+              </form>
+            )}
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
@@ -158,7 +397,7 @@ export default function PlaceOrderPage() {
           </Link>
           <h1 className="text-3xl font-bold text-zinc-900 dark:text-white">Place Your Order</h1>
           <p className="text-zinc-600 dark:text-zinc-400 mt-2">
-            Select the services you need for your vehicle and provide your details below.
+            Welcome back, {user?.fullName}! Select the services you need and we&apos;ll send you a quotation.
           </p>
         </div>
       </div>
@@ -562,6 +801,25 @@ export default function PlaceOrderPage() {
             />
           </div>
 
+          {/* Info Box */}
+          <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-xl p-6">
+            <div className="flex items-start gap-3">
+              <svg className="w-6 h-6 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div className="flex-1">
+                <p className="text-sm text-blue-700 dark:text-blue-300 font-medium mb-1">How it works:</p>
+                <ol className="text-sm text-blue-600 dark:text-blue-400 space-y-1 list-decimal list-inside">
+                  <li>Submit your order request with the services you need</li>
+                  <li>Our team will review your request and prepare a quotation</li>
+                  <li>You&apos;ll receive the quotation in your &quot;My Orders&quot; page</li>
+                  <li>Accept or request changes to the quotation</li>
+                  <li>Once accepted, we&apos;ll begin working on your order</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+
           {/* Terms and Conditions */}
           <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-6">
             <div className="flex items-start gap-3">
@@ -593,7 +851,7 @@ export default function PlaceOrderPage() {
               disabled={loading}
               className="flex-1 px-6 py-3 rounded-lg bg-amber-600 text-white font-semibold hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              {loading ? 'Placing Order...' : 'Place Order'}
+              {loading ? 'Placing Order...' : 'Submit Order Request'}
             </button>
           </div>
         </form>

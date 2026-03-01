@@ -17,12 +17,13 @@ export interface User {
   username: string;
   email: string;
   fullName: string;
-    role: 'administrator' | 'supervisor' | 'sales_manager' | 'staff' | 'seat_maker' | 'sewer';
-    roleName?: string;
+  role: 'administrator' | 'supervisor' | 'sales_manager' | 'staff' | 'seat_maker' | 'sewer' | 'customer';
+  roleName?: string;
   branch: string;
-    branchId?: number;
-    branchName?: string;
-    isActive?: boolean;
+  branchId?: number;
+  branchName?: string;
+  isActive?: boolean;
+  phone?: string;
 }
 
 export interface AuthResponse {
@@ -163,6 +164,14 @@ export interface JobOrder {
   updatedAt: string;
 }
 
+export interface QuotationItem {
+  name: string;
+  description?: string;
+  quantity: number;
+  unitPrice: number;
+  total: number;
+}
+
 export interface CustomerOrder {
   id: number;
   orderNumber: string;
@@ -180,10 +189,19 @@ export interface CustomerOrder {
     description?: string;
   }>;
   notes: string;
-  status: 'pending' | 'processing' | 'completed' | 'cancelled';
+  status: 'pending' | 'processing' | 'in_progress' | 'ready_for_installation' | 'completed' | 'delivered' | 'cancelled';
   branchId?: number;
   branchName?: string;
   createdAt: string;
+  // Quotation fields
+  userId?: number;
+  quotationItems?: QuotationItem[];
+  quotationTotal?: number;
+  quotationStatus?: 'pending_quotation' | 'quoted' | 'accepted' | 'rejected';
+  quotationNotes?: string;
+  customerResponseNotes?: string;
+  quotedAt?: string;
+  respondedAt?: string;
 }
 
 export interface LineupSlipItem {
@@ -471,6 +489,12 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ email }),
       }),
+    
+    register: (data: { username: string; password: string; email: string; fullName: string; phone: string }) =>
+      fetchApi<AuthResponse>('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
   },
 
   // ==================
@@ -747,14 +771,35 @@ export const api = {
         body: JSON.stringify(orderData),
       }),
 
-    getOrders: () => fetchApi<any[]>('/api/customer-orders'),
+    getOrders: () => fetchApi<CustomerOrder[]>('/api/customer-orders'),
 
-    getOrder: (id: number) => fetchApi<any>(`/api/customer-orders/${id}`),
+    getOrder: (id: number) => fetchApi<CustomerOrder>(`/api/customer-orders/${id}`),
 
     updateStatus: (id: number, status: string) =>
-      fetchApi<any>(`/api/customer-orders/${id}/status`, {
+      fetchApi<CustomerOrder>(`/api/customer-orders/${id}/status`, {
         method: 'PUT',
         body: JSON.stringify({ status }),
+      }),
+
+    // Customer's own orders
+    getMyOrders: () => fetchApi<CustomerOrder[]>('/api/customer-orders/my-orders'),
+
+    getMyOrder: (id: number) => fetchApi<CustomerOrder>(`/api/customer-orders/my-orders/${id}`),
+
+    // Quotation management
+    setQuotation: (id: number, data: {
+      items: Array<{ name: string; description?: string; quantity: number; unitPrice: number }>;
+      notes?: string;
+    }) =>
+      fetchApi<CustomerOrder>(`/api/customer-orders/${id}/quotation`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    respondToQuotation: (id: number, response: 'accept' | 'reject', notes?: string) =>
+      fetchApi<CustomerOrder>(`/api/customer-orders/${id}/respond`, {
+        method: 'PUT',
+        body: JSON.stringify({ response, notes }),
       }),
   },
 
