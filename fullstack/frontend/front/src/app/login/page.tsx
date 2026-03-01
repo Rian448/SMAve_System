@@ -21,8 +21,18 @@ export default function LoginPage() {
     setIsLoading(true);
 
     try {
-      await login(username, password);
-      router.push('/');
+      const result = await login(username, password);
+      // Redirect based on user role
+      if (result && result.user) {
+        const workerRoles = ['seat_maker', 'sewer'];
+        if (workerRoles.includes(result.user.role)) {
+          router.push('/worker-dashboard');
+        } else {
+          router.push('/dashboard');
+        }
+      } else {
+        router.push('/dashboard');
+      }
     } catch (err) {
       setError('Invalid username or password');
     } finally {
@@ -187,3 +197,5 @@ export default function LoginPage() {
     </div>
   );
 }
+
+

@@ -17,8 +17,12 @@ export interface User {
   username: string;
   email: string;
   fullName: string;
-  role: 'administrator' | 'supervisor' | 'sales_manager' | 'staff';
+    role: 'administrator' | 'supervisor' | 'sales_manager' | 'staff' | 'seat_maker' | 'sewer';
+    roleName?: string;
   branch: string;
+    branchId?: number;
+    branchName?: string;
+    isActive?: boolean;
 }
 
 export interface AuthResponse {
@@ -57,6 +61,35 @@ export interface Alert {
   title: string;
   description: string;
   itemId: number;
+}
+
+export interface WorkerProfile {
+  id: number;
+  userId: number;
+  userName: string;
+  workerType: 'staff';
+  isAvailable: boolean;
+  specialization?: 'seat_maker' | 'sewer' | 'general' | string;
+  branchId?: number;
+}
+
+export interface WorkTask {
+  id: number;
+  taskNumber: string;
+  jobOrderId: string;
+  workerId?: number;
+  title: string;
+  description?: string;
+  taskType: string;
+  priority: 'low' | 'normal' | 'high' | 'urgent';
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
+  estimatedHours?: number;
+  actualHours?: number;
+  dueDate?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  notes?: string;
 }
 
 export interface RawMaterial {
@@ -101,6 +134,7 @@ export interface VehicleInfo {
   model: string;
   year: number;
   plateNumber: string;
+  color?: string;
 }
 
 export interface JobOrder {
@@ -118,7 +152,7 @@ export interface JobOrder {
   estimatedCost: number;
   actualCost: number;
   totalPrice: number;
-  status: 'pending' | 'in_progress' | 'completed' | 'voided' | 'cancelled';
+  status: 'pending' | 'in_progress' | 'completed' | 'voided' | 'cancelled' | 'delivered';
   paymentStatus: 'unpaid' | 'partial' | 'paid';
   downPayment: number;
   balance: number;
@@ -127,6 +161,29 @@ export interface JobOrder {
   createdAt: string;
   createdBy: number;
   updatedAt: string;
+}
+
+export interface CustomerOrder {
+  id: number;
+  orderNumber: string;
+  customerName: string;
+  customerPhone: string;
+  customerEmail: string;
+  customerAddress: string;
+  vehicleInfo: VehicleInfo;
+  services: Array<{
+    type: string;
+    material?: string;
+    design?: string;
+    pocket?: string;
+    others?: string;
+    description?: string;
+  }>;
+  notes: string;
+  status: 'pending' | 'processing' | 'completed' | 'cancelled';
+  branchId?: number;
+  branchName?: string;
+  createdAt: string;
 }
 
 export interface LineupSlipItem {
@@ -311,6 +368,7 @@ export interface Branch {
   address: string;
   isWarehouse: boolean;
   isActive: boolean;
+  createdAt?: string;
 }
 
 export interface Role {
@@ -364,6 +422,15 @@ async function fetchApi<T>(
     });
 
     const data = await response.json();
+
+    // Handle 401 Unauthorized - clear token and redirect to login
+    if (response.status === 401) {
+      setAuthToken(null);
+      if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
+        window.location.href = '/login';
+      }
+      throw new Error('Session expired. Please login again.');
+    }
 
     if (!response.ok) {
       throw new Error(data.message || `HTTP error! status: ${response.status}`);
@@ -482,6 +549,12 @@ export const api = {
       if (params?.branchId) query.append('branchId', params.branchId.toString());
       return fetchApi<JobOrder[]>(`/api/sales/job-orders?${query}`);
     },
+    
+    // Get both job orders and customer orders together
+    getAllOrders: () => fetchApi<{
+      jobOrders: JobOrder[];
+      customerOrders: CustomerOrder[];
+    }>('/api/sales/all-orders'),
     
     getJobOrder: (id: number) => fetchApi<JobOrder>(`/api/sales/job-orders/${id}`),
     
@@ -643,6 +716,49 @@ export const api = {
   },
 
   // ==================
+  // CUSTOMER ORDERS
+  // ==================
+  customerOrders: {
+    placeOrder: (orderData: {
+      customerName: string;
+      customerPhone: string;
+      customerEmail: string;
+      customerAddress: string;
+      vehicleInfo: {
+        make: string;
+        model: string;
+        year: string;
+        plateNumber: string;
+      };
+      services: Array<{
+        type: string;
+        material?: string;
+        design?: string;
+        pocket?: string;
+        others?: string;
+        description?: string;
+      }>;
+      notes: string;
+      orderDate: string;
+      branchId?: number;
+    }) =>
+      fetchApi<{ id: number; orderNumber: string }>('/api/customer-orders', {
+        method: 'POST',
+        body: JSON.stringify(orderData),
+      }),
+
+    getOrders: () => fetchApi<any[]>('/api/customer-orders'),
+
+    getOrder: (id: number) => fetchApi<any>(`/api/customer-orders/${id}`),
+
+    updateStatus: (id: number, status: string) =>
+      fetchApi<any>(`/api/customer-orders/${id}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ status }),
+      }),
+  },
+
+  // ==================
   // FORECASTING
   // ==================
   forecasting: {
@@ -694,7 +810,8 @@ export const api = {
       email: string;
       fullName: string;
       role: string;
-      branch: string;
+        branch?: string;
+        branchId?: number;
     }) =>
       fetchApi<User>('/api/settings/users', {
         method: 'POST',
@@ -722,10 +839,66 @@ export const api = {
       return fetchApi<Branch[]>(`/api/settings/branches${query}`);
     },
     
+    getBranchesPublic: () => fetchApi<Branch[]>('/api/settings/branches/public'),
+    
     createBranch: (branch: { name: string; code: string; address: string; isWarehouse?: boolean }) =>
       fetchApi<Branch>('/api/settings/branches', {
         method: 'POST',
         body: JSON.stringify(branch),
+      }),
+    
+    updateBranch: (id: number, updates: Partial<Branch>) =>
+      fetchApi<Branch>(`/api/settings/branches/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(updates),
+      }),
+  },
+
+  // ==================
+  // WORKERS
+  // ==================
+  workers: {
+    getProfile: () => fetchApi<{ worker: WorkerProfile }>('/api/workers/profile'),
+    
+    toggleAvailability: (isAvailable: boolean) =>
+      fetchApi<{ isAvailable: boolean }>('/api/workers/availability', {
+        method: 'POST',
+        body: JSON.stringify({ isAvailable }),
+      }),
+    
+    getTasks: (status?: string) => {
+      const query = status ? `?status=${status}` : '';
+      return fetchApi<{ tasks: WorkTask[] }>(`/api/workers/tasks${query}`);
+    },
+    
+    getTaskDetail: (taskId: number) =>
+      fetchApi<{ task: WorkTask }>(`/api/workers/tasks/${taskId}`),
+    
+    updateTaskStatus: (taskId: number, data: { status: string; actualHours?: number; notes?: string }) =>
+      fetchApi<{ task: WorkTask }>(`/api/workers/tasks/${taskId}/status`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    
+    createTask: (task: any) =>
+      fetchApi<{ task: WorkTask }>('/api/workers/tasks', {
+        method: 'POST',
+        body: JSON.stringify(task),
+      }),
+    
+    getAllTasks: (params?: { status?: string; jobOrderId?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.status) query.append('status', params.status);
+      if (params?.jobOrderId) query.append('jobOrderId', params.jobOrderId);
+      return fetchApi<{ tasks: (WorkTask & { workerName?: string })[] }>(`/api/workers/all-tasks?${query}`);
+    },
+    
+    getWorkersList: () =>
+      fetchApi<{ workers: WorkerProfile[] }>('/api/workers/list'),
+    
+    syncWorkerProfiles: () =>
+      fetchApi<{ status: string; message: string; created: number }>('/api/workers/sync', {
+        method: 'POST',
       }),
   },
 };

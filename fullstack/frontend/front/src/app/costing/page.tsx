@@ -1,6 +1,5 @@
 'use client';
 import { useState, useEffect } from 'react';
-import Navigation from '@/components/Navigation';
 import { useAuth } from '@/context/AuthContext';
 import { api, JobOrderCost } from '@/lib/api';
 import Link from 'next/link';
@@ -51,7 +50,6 @@ export default function CostingPage() {
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      <Navigation />
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-8">
@@ -346,3 +344,5 @@ export default function CostingPage() {
     </div>
   );
 }
+
+

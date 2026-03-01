@@ -1,7 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import Navigation from '@/components/Navigation';
 import { api, RawMaterial } from '@/lib/api';
 
 interface POItem {
@@ -29,7 +28,7 @@ export default function NewPurchaseOrderPage() {
   ]);
 
   useEffect(() => {
-    api.getRawMaterials()
+    api.inventory.getRawMaterials()
       .then(response => {
         setMaterials(response.data || []);
         setLoadingMaterials(false);
@@ -57,9 +56,9 @@ export default function NewPurchaseOrderPage() {
       if (material) {
         newItems[index] = {
           ...newItems[index],
-          material_id: material.id,
+          material_id: material.id.toString(),
           material_name: material.name,
-          unit_cost: material.unit_cost,
+          unit_cost: material.price,
           unit: material.unit
         };
       }
@@ -79,17 +78,18 @@ export default function NewPurchaseOrderPage() {
 
     try {
       const purchaseOrder = {
-        supplier_name: supplier,
-        supplier_contact: supplierContact,
-        supplier_email: supplierEmail,
-        expected_date: expectedDate,
-        notes,
-        items: items.filter(item => item.material_id),
-        total_amount: calculateTotal(),
-        status: 'pending'
+        supplierName: supplier,
+        items: items.filter(item => item.material_id).map(item => ({
+          materialId: Number(item.material_id),
+          name: item.material_name,
+          quantity: item.quantity,
+          unit: item.unit,
+          unitPrice: item.unit_cost
+        })),
+        expectedDelivery: expectedDate
       };
 
-      await api.createPurchaseOrder(purchaseOrder);
+      await api.purchaseOrders.create(purchaseOrder);
       router.push('/inventory?tab=purchase-orders');
     } catch (err) {
       console.error(err);
@@ -106,7 +106,6 @@ export default function NewPurchaseOrderPage() {
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      <Navigation />
       <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="mb-8">
@@ -247,7 +246,7 @@ export default function NewPurchaseOrderPage() {
                         >
                           <option value="">Select material</option>
                           {materials.map(m => (
-                            <option key={m.id} value={m.id}>
+                            <option key={m.id} value={m.id.toString()}>
                               {m.name} ({m.quantity} {m.unit} in stock)
                             </option>
                           ))}
@@ -385,3 +384,5 @@ export default function NewPurchaseOrderPage() {
     </div>
   );
 }
+
+
