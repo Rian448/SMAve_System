@@ -155,6 +155,49 @@ class WorkTask(db.Model):
     
     worker = db.relationship('Worker', backref='tasks')
 
+class Appointment(db.Model):
+    __tablename__ = 'appointments'
+    id = db.Column(db.Integer, primary_key=True)
+    appointment_number = db.Column(db.String(50), unique=True, nullable=False)
+    customer_name = db.Column(db.String(255), nullable=False)
+    customer_phone = db.Column(db.String(50), nullable=False)
+    customer_email = db.Column(db.String(255))
+    contact_method = db.Column(db.String(50), nullable=False)  # 'branch_visit' or 'phone_call'
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)  # Only if branch_visit
+    preferred_date = db.Column(db.Date, nullable=False)
+    preferred_time = db.Column(db.String(50))  # morning, afternoon, evening
+    description = db.Column(db.Text)  # What the customer needs
+    vehicle_info = db.Column(db.JSON)  # Optional vehicle info
+    status = db.Column(db.String(50), default='pending')  # pending, confirmed, completed, cancelled
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    admin_notes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    branch = db.relationship('Branch')
+    customer_user = db.relationship('User', foreign_keys=[user_id])
+
+class ProductOrder(db.Model):
+    __tablename__ = 'product_orders'
+    id = db.Column(db.Integer, primary_key=True)
+    order_number = db.Column(db.String(50), unique=True, nullable=False)
+    customer_name = db.Column(db.String(255), nullable=False)
+    customer_phone = db.Column(db.String(50), nullable=False)
+    customer_email = db.Column(db.String(255))
+    customer_address = db.Column(db.String(255))
+    items = db.Column(db.JSON, nullable=False)  # [{productId, name, quantity, price}]
+    total_amount = db.Column(db.Float, nullable=False)
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
+    status = db.Column(db.String(50), default='pending')  # pending, processing, ready, completed, cancelled
+    payment_status = db.Column(db.String(50), default='unpaid')  # unpaid, paid
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    notes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    branch = db.relationship('Branch')
+    customer_user = db.relationship('User', foreign_keys=[user_id])
+
 # ============================================
 # SEED DATA
 # ============================================
@@ -1000,6 +1043,35 @@ def create_finished_good():
     
     return jsonify({'status': 'success', 'data': new_item}), 201
 
+@app.route('/api/inventory/finished-goods/public', methods=['GET'])
+def get_finished_goods_public():
+    """Public API to get available finished goods (products) for customers"""
+    branch_id = request.args.get('branchId')
+    category = request.args.get('category')
+    
+    # Only return non-archived items with quantity > 0
+    items = [fg for fg in finished_goods if not fg['isArchived'] and fg['quantity'] > 0]
+    
+    if branch_id:
+        items = [fg for fg in items if fg['branchId'] == int(branch_id)]
+    
+    if category:
+        items = [fg for fg in items if fg['category'].lower() == category.lower()]
+    
+    # Return only public-facing info (hide cost)
+    public_items = [{
+        'id': item['id'],
+        'name': item['name'],
+        'sku': item['sku'],
+        'quantity': item['quantity'],
+        'unit': item['unit'],
+        'category': item['category'],
+        'price': item['price'],
+        'branchId': item['branchId']
+    } for item in items]
+    
+    return jsonify({'status': 'success', 'data': public_items})
+
 @app.route('/api/inventory/categories', methods=['GET'])
 @require_auth
 def get_categories():
@@ -1825,6 +1897,317 @@ def generate_delivery_receipt(delivery_id):
     }
     
     return jsonify({'status': 'success', 'data': receipt})
+
+# ============================================
+# APPOINTMENTS MODULE
+# ============================================
+
+def appointment_to_dict(appointment):
+    """Helper to convert Appointment model to dictionary"""
+    branch_name = None
+    if appointment.branch:
+        branch_name = appointment.branch.name
+    
+    return {
+        'id': appointment.id,
+        'appointmentNumber': appointment.appointment_number,
+        'customerName': appointment.customer_name,
+        'customerPhone': appointment.customer_phone,
+        'customerEmail': appointment.customer_email,
+        'contactMethod': appointment.contact_method,
+        'branchId': appointment.branch_id,
+        'branchName': branch_name,
+        'preferredDate': appointment.preferred_date.isoformat() if appointment.preferred_date else None,
+        'preferredTime': appointment.preferred_time,
+        'description': appointment.description,
+        'vehicleInfo': appointment.vehicle_info,
+        'status': appointment.status,
+        'adminNotes': appointment.admin_notes,
+        'createdAt': appointment.created_at.isoformat() if appointment.created_at else None,
+        'updatedAt': appointment.updated_at.isoformat() if appointment.updated_at else None
+    }
+
+@app.route('/api/appointments', methods=['POST'])
+def create_appointment():
+    """Create a new appointment request - public endpoint"""
+    data = request.get_json()
+    
+    required = ['customerName', 'customerPhone', 'contactMethod', 'preferredDate']
+    if not all(f in data for f in required):
+        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    
+    contact_method = data['contactMethod']
+    if contact_method not in ['branch_visit', 'phone_call']:
+        return jsonify({'status': 'error', 'message': 'Invalid contact method'}), 400
+    
+    # If branch_visit, branch is required
+    branch_id = data.get('branchId')
+    if contact_method == 'branch_visit' and not branch_id:
+        return jsonify({'status': 'error', 'message': 'Branch is required for branch visit'}), 400
+    
+    # Validate branch if provided
+    if branch_id:
+        branch = Branch.query.get(branch_id)
+        if not branch or not branch.is_active:
+            return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+    
+    # Check if user is authenticated (optional)
+    user_id = None
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if token:
+        user = get_user_from_token(token)
+        if user:
+            user_id = user['id']
+    
+    # Generate appointment number
+    appointment_count = Appointment.query.count() + 1
+    appointment_number = f"APT-{appointment_count:04d}"
+    
+    # Parse date
+    try:
+        preferred_date = datetime.strptime(data['preferredDate'], '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Invalid date format. Use YYYY-MM-DD'}), 400
+    
+    new_appointment = Appointment(
+        appointment_number=appointment_number,
+        customer_name=data['customerName'],
+        customer_phone=data['customerPhone'],
+        customer_email=data.get('customerEmail', ''),
+        contact_method=contact_method,
+        branch_id=branch_id if contact_method == 'branch_visit' else None,
+        preferred_date=preferred_date,
+        preferred_time=data.get('preferredTime', ''),
+        description=data.get('description', ''),
+        vehicle_info=data.get('vehicleInfo'),
+        status='pending',
+        user_id=user_id
+    )
+    
+    db.session.add(new_appointment)
+    db.session.commit()
+    
+    return jsonify({'status': 'success', 'data': appointment_to_dict(new_appointment)}), 201
+
+@app.route('/api/appointments', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+def get_appointments():
+    """Get all appointments - staff endpoint"""
+    user = request.current_user
+    status = request.args.get('status')
+    
+    query = Appointment.query
+    
+    # Filter by status if provided
+    if status:
+        query = query.filter_by(status=status)
+    
+    # Filter by branch for non-admin users
+    if user['role'] != 'administrator':
+        if user.get('branchId'):
+            query = query.filter(
+                (Appointment.branch_id == user['branchId']) | 
+                (Appointment.contact_method == 'phone_call')
+            )
+    
+    appointments = query.order_by(Appointment.preferred_date.desc()).all()
+    
+    return jsonify({'status': 'success', 'data': [appointment_to_dict(a) for a in appointments]})
+
+@app.route('/api/appointments/<int:appointment_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+def update_appointment(appointment_id):
+    """Update an appointment status or notes"""
+    appointment = Appointment.query.get(appointment_id)
+    if not appointment:
+        return jsonify({'status': 'error', 'message': 'Appointment not found'}), 404
+    
+    data = request.get_json()
+    
+    if 'status' in data:
+        appointment.status = data['status']
+    if 'adminNotes' in data:
+        appointment.admin_notes = data['adminNotes']
+    
+    db.session.commit()
+    
+    return jsonify({'status': 'success', 'data': appointment_to_dict(appointment)})
+
+@app.route('/api/appointments/my-appointments', methods=['GET'])
+@require_auth
+def get_my_appointments():
+    """Get appointments for the logged-in customer"""
+    user_id = request.current_user['id']
+    appointments = Appointment.query.filter_by(user_id=user_id).order_by(Appointment.created_at.desc()).all()
+    return jsonify({'status': 'success', 'data': [appointment_to_dict(a) for a in appointments]})
+
+# ============================================
+# PRODUCT ORDERS MODULE (Premade Products)
+# ============================================
+
+def product_order_to_dict(order):
+    """Helper to convert ProductOrder model to dictionary"""
+    branch_name = None
+    if order.branch:
+        branch_name = order.branch.name
+    
+    return {
+        'id': order.id,
+        'orderNumber': order.order_number,
+        'customerName': order.customer_name,
+        'customerPhone': order.customer_phone,
+        'customerEmail': order.customer_email,
+        'customerAddress': order.customer_address,
+        'items': order.items,
+        'totalAmount': order.total_amount,
+        'branchId': order.branch_id,
+        'branchName': branch_name,
+        'status': order.status,
+        'paymentStatus': order.payment_status,
+        'notes': order.notes,
+        'createdAt': order.created_at.isoformat() if order.created_at else None,
+        'updatedAt': order.updated_at.isoformat() if order.updated_at else None
+    }
+
+@app.route('/api/product-orders', methods=['POST'])
+def create_product_order():
+    """Create a new product order - public endpoint for ordering premade products"""
+    data = request.get_json()
+    
+    required = ['customerName', 'customerPhone', 'items', 'branchId']
+    if not all(f in data for f in required):
+        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    
+    if not data['items'] or len(data['items']) == 0:
+        return jsonify({'status': 'error', 'message': 'At least one item is required'}), 400
+    
+    # Validate branch
+    branch_id = data['branchId']
+    branch = Branch.query.get(branch_id)
+    if not branch or not branch.is_active:
+        return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+    
+    # Check if user is authenticated (optional)
+    user_id = None
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if token:
+        user = get_user_from_token(token)
+        if user:
+            user_id = user['id']
+    
+    # Validate items and calculate total
+    total_amount = 0
+    validated_items = []
+    
+    for item in data['items']:
+        product_id = item.get('productId')
+        quantity = item.get('quantity', 1)
+        
+        # Find product in finished goods
+        product = next((fg for fg in finished_goods if fg['id'] == product_id and not fg['isArchived']), None)
+        if not product:
+            return jsonify({'status': 'error', 'message': f'Product with ID {product_id} not found'}), 400
+        
+        if product['quantity'] < quantity:
+            return jsonify({'status': 'error', 'message': f'Insufficient stock for {product["name"]}'}), 400
+        
+        item_total = product['price'] * quantity
+        total_amount += item_total
+        
+        validated_items.append({
+            'productId': product_id,
+            'name': product['name'],
+            'sku': product['sku'],
+            'quantity': quantity,
+            'unitPrice': product['price'],
+            'total': item_total
+        })
+    
+    # Generate order number
+    order_count = ProductOrder.query.count() + 1
+    order_number = f"PO-{order_count:04d}"
+    
+    new_order = ProductOrder(
+        order_number=order_number,
+        customer_name=data['customerName'],
+        customer_phone=data['customerPhone'],
+        customer_email=data.get('customerEmail', ''),
+        customer_address=data.get('customerAddress', ''),
+        items=validated_items,
+        total_amount=total_amount,
+        branch_id=branch_id,
+        status='pending',
+        payment_status='unpaid',
+        user_id=user_id,
+        notes=data.get('notes', '')
+    )
+    
+    db.session.add(new_order)
+    db.session.commit()
+    
+    return jsonify({'status': 'success', 'data': product_order_to_dict(new_order)}), 201
+
+@app.route('/api/product-orders', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+def get_product_orders():
+    """Get all product orders - staff endpoint"""
+    user = request.current_user
+    status = request.args.get('status')
+    
+    query = ProductOrder.query
+    
+    if status:
+        query = query.filter_by(status=status)
+    
+    # Filter by branch for non-admin users
+    if user['role'] != 'administrator':
+        if user.get('branchId'):
+            query = query.filter_by(branch_id=user['branchId'])
+    
+    orders = query.order_by(ProductOrder.created_at.desc()).all()
+    
+    return jsonify({'status': 'success', 'data': [product_order_to_dict(o) for o in orders]})
+
+@app.route('/api/product-orders/<int:order_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+def update_product_order(order_id):
+    """Update a product order status"""
+    order = ProductOrder.query.get(order_id)
+    if not order:
+        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
+    
+    data = request.get_json()
+    
+    if 'status' in data:
+        order.status = data['status']
+        # If completed, update inventory
+        if data['status'] == 'completed':
+            for item in order.items:
+                product = next((fg for fg in finished_goods if fg['id'] == item['productId']), None)
+                if product:
+                    product['quantity'] = max(0, product['quantity'] - item['quantity'])
+    
+    if 'paymentStatus' in data:
+        order.payment_status = data['paymentStatus']
+    
+    if 'notes' in data:
+        order.notes = data['notes']
+    
+    db.session.commit()
+    
+    return jsonify({'status': 'success', 'data': product_order_to_dict(order)})
+
+@app.route('/api/product-orders/my-orders', methods=['GET'])
+@require_auth
+def get_my_product_orders():
+    """Get product orders for the logged-in customer"""
+    user_id = request.current_user['id']
+    orders = ProductOrder.query.filter_by(user_id=user_id).order_by(ProductOrder.created_at.desc()).all()
+    return jsonify({'status': 'success', 'data': [product_order_to_dict(o) for o in orders]})
 
 # ============================================
 # CUSTOMER ORDERS MODULE

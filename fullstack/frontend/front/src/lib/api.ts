@@ -93,6 +93,63 @@ export interface WorkTask {
   notes?: string;
 }
 
+export interface Appointment {
+  id: number;
+  appointmentNumber: string;
+  customerName: string;
+  customerPhone: string;
+  customerEmail?: string;
+  contactMethod: 'branch_visit' | 'phone_call';
+  branchId?: number;
+  branchName?: string;
+  preferredDate: string;
+  preferredTime?: string;
+  description?: string;
+  vehicleInfo?: VehicleInfo;
+  status: 'pending' | 'confirmed' | 'completed' | 'cancelled';
+  adminNotes?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface ProductOrderItem {
+  productId: number;
+  name: string;
+  sku: string;
+  quantity: number;
+  unitPrice: number;
+  total: number;
+}
+
+export interface ProductOrder {
+  id: number;
+  orderNumber: string;
+  customerName: string;
+  customerPhone: string;
+  customerEmail?: string;
+  customerAddress?: string;
+  items: ProductOrderItem[];
+  totalAmount: number;
+  branchId: number;
+  branchName?: string;
+  status: 'pending' | 'processing' | 'ready' | 'completed' | 'cancelled';
+  paymentStatus: 'unpaid' | 'paid';
+  notes?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface PublicProduct {
+  id: number;
+  name: string;
+  sku: string;
+  quantity: number;
+  unit: string;
+  category: string;
+  price: number;
+  branchId: number;
+}
+
 export interface RawMaterial {
   id: number;
   name: string;
@@ -555,6 +612,14 @@ export const api = {
         body: JSON.stringify(item),
       }),
     
+    // Public Products (for customer ordering)
+    getPublicProducts: (params?: { branchId?: number; category?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.branchId) query.append('branchId', params.branchId.toString());
+      if (params?.category) query.append('category', params.category);
+      return fetchApi<PublicProduct[]>(`/api/inventory/finished-goods/public?${query}`);
+    },
+    
     // Categories
     getCategories: () => fetchApi<{ rawMaterials: string[]; finishedGoods: string[] }>('/api/inventory/categories'),
     
@@ -801,6 +866,72 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify({ response, notes }),
       }),
+  },
+
+  // ==================
+  // APPOINTMENTS
+  // ==================
+  appointments: {
+    create: (data: {
+      customerName: string;
+      customerPhone: string;
+      customerEmail?: string;
+      contactMethod: 'branch_visit' | 'phone_call';
+      branchId?: number;
+      preferredDate: string;
+      preferredTime?: string;
+      description?: string;
+      vehicleInfo?: VehicleInfo;
+    }) =>
+      fetchApi<Appointment>('/api/appointments', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    getAll: (status?: string) => {
+      const query = status ? `?status=${status}` : '';
+      return fetchApi<Appointment[]>(`/api/appointments${query}`);
+    },
+
+    update: (id: number, data: { status?: string; adminNotes?: string }) =>
+      fetchApi<Appointment>(`/api/appointments/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    getMyAppointments: () => fetchApi<Appointment[]>('/api/appointments/my-appointments'),
+  },
+
+  // ==================
+  // PRODUCT ORDERS (Premade Products)
+  // ==================
+  productOrders: {
+    create: (data: {
+      customerName: string;
+      customerPhone: string;
+      customerEmail?: string;
+      customerAddress?: string;
+      items: Array<{ productId: number; quantity: number }>;
+      branchId: number;
+      notes?: string;
+    }) =>
+      fetchApi<ProductOrder>('/api/product-orders', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    getAll: (status?: string) => {
+      const query = status ? `?status=${status}` : '';
+      return fetchApi<ProductOrder[]>(`/api/product-orders${query}`);
+    },
+
+    update: (id: number, data: { status?: string; paymentStatus?: string; notes?: string }) =>
+      fetchApi<ProductOrder>(`/api/product-orders/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    getMyOrders: () => fetchApi<ProductOrder[]>('/api/product-orders/my-orders'),
   },
 
   // ==================
