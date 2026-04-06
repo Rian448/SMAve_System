@@ -118,12 +118,18 @@ export default function LandingPage() {
               </div>
             ))}
           </div>
-          <div className="mt-8 text-center">
+          <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-3">
             <Link
-              href="/place-order"
+              href="/place-order?tab=appointment"
               className="inline-flex items-center justify-center px-8 py-3 rounded-xl bg-amber-600 text-white font-semibold hover:bg-amber-700 transition-colors"
             >
-              Place Your Order Now
+              Book Appointment
+            </Link>
+            <Link
+              href="/place-order?tab=products"
+              className="inline-flex items-center justify-center px-8 py-3 rounded-xl border border-amber-600 text-amber-700 dark:text-amber-400 font-semibold hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors"
+            >
+              Purchase Premade Products
             </Link>
           </div>
         </section>

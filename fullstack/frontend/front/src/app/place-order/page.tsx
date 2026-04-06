@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { api, setAuthToken, PublicProduct, VehicleInfo } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
@@ -23,6 +23,7 @@ type OrderTab = 'products' | 'appointment';
 
 export default function PlaceOrderPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { user, isLoading: authLoading, isAuthenticated, checkAuth } = useAuth();
   
   const [activeTab, setActiveTab] = useState<OrderTab>('products');
@@ -75,6 +76,14 @@ export default function PlaceOrderPage() {
 
   const [notes, setNotes] = useState('');
   const [agreeTerms, setAgreeTerms] = useState(false);
+
+  // Allow external links to pre-select tab via /place-order?tab=appointment|products
+  useEffect(() => {
+    const tabParam = searchParams.get('tab');
+    if (tabParam === 'appointment' || tabParam === 'products') {
+      setActiveTab(tabParam);
+    }
+  }, [searchParams]);
 
   // Pre-fill customer info when user is logged in
   useEffect(() => {
@@ -257,8 +266,8 @@ export default function PlaceOrderPage() {
       return;
     }
 
-    if (appointmentContactMethod === 'branch_visit' && !appointmentBranch) {
-      setError('Please select a branch for your visit');
+    if (!appointmentBranch) {
+      setError('Please select a branch for your appointment');
       return;
     }
 
@@ -283,7 +292,7 @@ export default function PlaceOrderPage() {
         customerPhone,
         customerEmail,
         contactMethod: appointmentContactMethod,
-        branchId: appointmentContactMethod === 'branch_visit' ? appointmentBranch as number : undefined,
+        branchId: appointmentBranch as number,
         preferredDate: appointmentDate,
         preferredTime: appointmentTime,
         description: appointmentDescription,
@@ -922,51 +931,52 @@ export default function PlaceOrderPage() {
               </div>
             </div>
 
-            {/* Branch Selection (only for branch_visit) */}
-            {appointmentContactMethod === 'branch_visit' && (
-              <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">
-                <h2 className="text-xl font-semibold text-zinc-900 dark:text-white mb-6">Select Branch to Visit *</h2>
-                {loadingBranches ? (
-                  <div className="text-center py-4 text-zinc-500 dark:text-zinc-400">
-                    Loading branches...
-                  </div>
-                ) : branches.length === 0 ? (
-                  <div className="text-center py-4 text-zinc-500 dark:text-zinc-400">
-                    No branches available
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {branches.map((branch) => (
-                      <label
-                        key={branch.id}
-                        className={`flex items-start p-4 rounded-lg border-2 cursor-pointer transition-colors ${
-                          appointmentBranch === branch.id
-                            ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20'
-                            : 'border-zinc-200 dark:border-zinc-700 hover:border-amber-300 dark:hover:border-amber-700'
-                        }`}
-                      >
-                        <input
-                          type="radio"
-                          name="appointmentBranch"
-                          value={branch.id}
-                          checked={appointmentBranch === branch.id}
-                          onChange={() => setAppointmentBranch(branch.id)}
-                          className="mt-1 rounded-full border-zinc-300 text-amber-600 focus:ring-amber-500"
-                        />
-                        <div className="ml-3 flex-1">
-                          <div className="text-sm font-semibold text-zinc-900 dark:text-white">
-                            {branch.name}
-                          </div>
-                          <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
-                            {branch.address}
-                          </div>
+            {/* Branch Selection */}
+            <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">
+              <h2 className="text-xl font-semibold text-zinc-900 dark:text-white mb-6">Select Branch *</h2>
+              <p className="text-sm text-zinc-600 dark:text-zinc-400 mb-4">
+                Choose the branch that will handle your appointment request.
+              </p>
+              {loadingBranches ? (
+                <div className="text-center py-4 text-zinc-500 dark:text-zinc-400">
+                  Loading branches...
+                </div>
+              ) : branches.length === 0 ? (
+                <div className="text-center py-4 text-zinc-500 dark:text-zinc-400">
+                  No branches available
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {branches.map((branch) => (
+                    <label
+                      key={branch.id}
+                      className={`flex items-start p-4 rounded-lg border-2 cursor-pointer transition-colors ${
+                        appointmentBranch === branch.id
+                          ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20'
+                          : 'border-zinc-200 dark:border-zinc-700 hover:border-amber-300 dark:hover:border-amber-700'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="appointmentBranch"
+                        value={branch.id}
+                        checked={appointmentBranch === branch.id}
+                        onChange={() => setAppointmentBranch(branch.id)}
+                        className="mt-1 rounded-full border-zinc-300 text-amber-600 focus:ring-amber-500"
+                      />
+                      <div className="ml-3 flex-1">
+                        <div className="text-sm font-semibold text-zinc-900 dark:text-white">
+                          {branch.name}
                         </div>
-                      </label>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
+                        <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
+                          {branch.address}
+                        </div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
 
             {/* Schedule */}
             <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">

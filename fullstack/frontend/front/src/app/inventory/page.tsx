@@ -12,7 +12,39 @@ export default function InventoryPage() {
   const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([]);
   const [finishedGoods, setFinishedGoods] = useState<FinishedGood[]>([]);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [formError, setFormError] = useState('');
+  const [newMaterial, setNewMaterial] = useState({
+    name: '',
+    quantity: '',
+    price: '',
+    lengthValue: '',
+    lengthUnit: 'yards'
+  });
+  const [editingMaterialId, setEditingMaterialId] = useState<number | null>(null);
+  const [editMaterial, setEditMaterial] = useState({
+    quantity: '',
+    price: '',
+    lengthValue: '',
+    lengthUnit: 'yards'
+  });
+
+  const lengthUnits = ['yards', 'feet', 'meters', 'inches', 'centimeters'];
+  const [newPremade, setNewPremade] = useState({
+    name: '',
+    quantity: '',
+    price: '',
+    unit: 'pcs',
+    category: 'General'
+  });
+  const [editingPremadeId, setEditingPremadeId] = useState<number | null>(null);
+  const [editPremade, setEditPremade] = useState({
+    quantity: '',
+    price: '',
+    unit: 'pcs'
+  });
+  const premadeUnits = ['pcs', 'sets', 'pairs', 'boxes'];
 
   useEffect(() => {
     fetchInventory();
@@ -32,6 +64,178 @@ export default function InventoryPage() {
       console.error('Error fetching inventory:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCreateMaterial = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError('');
+
+    if (!newMaterial.name.trim()) {
+      setFormError('Material name is required.');
+      return;
+    }
+
+    const quantity = Number(newMaterial.quantity);
+    const price = Number(newMaterial.price);
+    const lengthValue = Number(newMaterial.lengthValue);
+
+    if (Number.isNaN(quantity) || Number.isNaN(price) || Number.isNaN(lengthValue)) {
+      setFormError('Amount, price, and length must be valid numbers.');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await api.inventory.createRawMaterial({
+        name: newMaterial.name.trim(),
+        quantity,
+        price,
+        lengthValue,
+        lengthUnit: newMaterial.lengthUnit,
+        unit: newMaterial.lengthUnit,
+        branchId: user?.branchId || 1,
+        category: 'General',
+        reorderPoint: 0,
+        supplier: ''
+      });
+
+      setNewMaterial({
+        name: '',
+        quantity: '',
+        price: '',
+        lengthValue: '',
+        lengthUnit: 'yards'
+      });
+
+      await fetchInventory();
+    } catch (error: any) {
+      setFormError(error?.message || 'Failed to add material.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const startEditMaterial = (material: RawMaterial) => {
+    setEditingMaterialId(material.id);
+    setEditMaterial({
+      quantity: String(material.quantity),
+      price: String(material.price),
+      lengthValue: String(material.lengthValue ?? material.quantity),
+      lengthUnit: material.lengthUnit || material.unit || 'yards'
+    });
+  };
+
+  const handleSaveMaterial = async (materialId: number) => {
+    setFormError('');
+
+    const quantity = Number(editMaterial.quantity);
+    const price = Number(editMaterial.price);
+    const lengthValue = Number(editMaterial.lengthValue);
+
+    if (Number.isNaN(quantity) || Number.isNaN(price) || Number.isNaN(lengthValue)) {
+      setFormError('Amount, price, and length must be valid numbers.');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await api.inventory.updateRawMaterial(materialId, {
+        quantity,
+        price,
+        lengthValue,
+        lengthUnit: editMaterial.lengthUnit,
+        unit: editMaterial.lengthUnit
+      });
+
+      setEditingMaterialId(null);
+      await fetchInventory();
+    } catch (error: any) {
+      setFormError(error?.message || 'Failed to update material.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCreatePremade = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError('');
+
+    if (!newPremade.name.trim()) {
+      setFormError('Premade product name is required.');
+      return;
+    }
+
+    const quantity = Number(newPremade.quantity);
+    const price = Number(newPremade.price);
+
+    if (Number.isNaN(quantity) || Number.isNaN(price)) {
+      setFormError('Premade product quantity and price must be valid numbers.');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await api.inventory.createFinishedGood({
+        name: newPremade.name.trim(),
+        quantity,
+        unit: newPremade.unit,
+        category: newPremade.category,
+        price,
+        cost: 0,
+        branchId: user?.branchId || 1
+      });
+
+      setNewPremade({
+        name: '',
+        quantity: '',
+        price: '',
+        unit: 'pcs',
+        category: 'General'
+      });
+
+      await fetchInventory();
+    } catch (error: any) {
+      setFormError(error?.message || 'Failed to add premade product.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const startEditPremade = (item: FinishedGood) => {
+    setEditingPremadeId(item.id);
+    setEditPremade({
+      quantity: String(item.quantity),
+      price: String(item.price),
+      unit: item.unit || 'pcs'
+    });
+  };
+
+  const handleSavePremade = async (itemId: number) => {
+    setFormError('');
+
+    const quantity = Number(editPremade.quantity);
+    const price = Number(editPremade.price);
+
+    if (Number.isNaN(quantity) || Number.isNaN(price)) {
+      setFormError('Premade product quantity and price must be valid numbers.');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await api.inventory.updateFinishedGood(itemId, {
+        quantity,
+        price,
+        unit: editPremade.unit
+      });
+
+      setEditingPremadeId(null);
+      await fetchInventory();
+    } catch (error: any) {
+      setFormError(error?.message || 'Failed to update premade product.');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -104,6 +308,134 @@ export default function InventoryPage() {
             </Link>
           </div>
         </div>
+
+        {formError && (
+          <div className="mb-4 p-3 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-sm text-red-700 dark:text-red-300">
+            {formError}
+          </div>
+        )}
+
+        {activeTab === 'raw-materials' && (
+          <form onSubmit={handleCreateMaterial} className="mb-6 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">Add Material</h2>
+            <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+              <input
+                type="text"
+                value={newMaterial.name}
+                onChange={(e) => setNewMaterial((prev) => ({ ...prev, name: e.target.value }))}
+                placeholder="Material name"
+                className="md:col-span-2 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+              />
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={newMaterial.quantity}
+                onChange={(e) => setNewMaterial((prev) => ({ ...prev, quantity: e.target.value }))}
+                placeholder="Amount"
+                className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+              />
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={newMaterial.price}
+                onChange={(e) => setNewMaterial((prev) => ({ ...prev, price: e.target.value }))}
+                placeholder="Price"
+                className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+              />
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={newMaterial.lengthValue}
+                  onChange={(e) => setNewMaterial((prev) => ({ ...prev, lengthValue: e.target.value }))}
+                  placeholder="Length"
+                  className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+                />
+                <select
+                  value={newMaterial.lengthUnit}
+                  onChange={(e) => setNewMaterial((prev) => ({ ...prev, lengthUnit: e.target.value }))}
+                  className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+                >
+                  {lengthUnits.map((unit) => (
+                    <option key={unit} value={unit}>{unit}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="mt-4">
+              <button
+                type="submit"
+                disabled={saving}
+                className="inline-flex items-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors disabled:opacity-60"
+              >
+                {saving ? 'Saving...' : 'Add Material'}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {activeTab === 'finished-goods' && (
+          <form onSubmit={handleCreatePremade} className="mb-6 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">Add Premade Product</h2>
+            <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+              <input
+                type="text"
+                value={newPremade.name}
+                onChange={(e) => setNewPremade((prev) => ({ ...prev, name: e.target.value }))}
+                placeholder="Product name"
+                className="md:col-span-2 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+              />
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={newPremade.quantity}
+                onChange={(e) => setNewPremade((prev) => ({ ...prev, quantity: e.target.value }))}
+                placeholder="Amount"
+                className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+              />
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={newPremade.price}
+                onChange={(e) => setNewPremade((prev) => ({ ...prev, price: e.target.value }))}
+                placeholder="Price"
+                className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+              />
+              <div className="flex gap-2">
+                <select
+                  value={newPremade.unit}
+                  onChange={(e) => setNewPremade((prev) => ({ ...prev, unit: e.target.value }))}
+                  className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+                >
+                  {premadeUnits.map((unit) => (
+                    <option key={unit} value={unit}>{unit}</option>
+                  ))}
+                </select>
+                <input
+                  type="text"
+                  value={newPremade.category}
+                  onChange={(e) => setNewPremade((prev) => ({ ...prev, category: e.target.value }))}
+                  placeholder="Category"
+                  className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+                />
+              </div>
+            </div>
+            <div className="mt-4">
+              <button
+                type="submit"
+                disabled={saving}
+                className="inline-flex items-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors disabled:opacity-60"
+              >
+                {saving ? 'Saving...' : 'Add Premade Product'}
+              </button>
+            </div>
+          </form>
+        )}
 
         {/* Tabs */}
         <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 mb-6">
@@ -194,14 +526,62 @@ export default function InventoryPage() {
                             {material.category}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
-                            <span className="text-sm font-medium text-zinc-900 dark:text-white">{material.quantity}</span>
-                            <span className="text-sm text-zinc-500 dark:text-zinc-400 ml-1">{material.unit}</span>
+                            {editingMaterialId === material.id ? (
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={editMaterial.quantity}
+                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, quantity: e.target.value }))}
+                                className="w-28 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                              />
+                            ) : (
+                              <>
+                                <span className="text-sm font-medium text-zinc-900 dark:text-white">{material.quantity}</span>
+                                <span className="text-sm text-zinc-500 dark:text-zinc-400 ml-1">{material.unit}</span>
+                              </>
+                            )}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
-                            {formatCurrency(material.price)}
+                            {editingMaterialId === material.id ? (
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={editMaterial.price}
+                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, price: e.target.value }))}
+                                className="w-28 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                              />
+                            ) : (
+                              formatCurrency(material.price)
+                            )}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-zinc-900 dark:text-white">
-                            {formatCurrency(material.quantity * material.price)}
+                            {editingMaterialId === material.id ? (
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={editMaterial.lengthValue}
+                                  onChange={(e) => setEditMaterial((prev) => ({ ...prev, lengthValue: e.target.value }))}
+                                  className="w-24 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                                />
+                                <select
+                                  value={editMaterial.lengthUnit}
+                                  onChange={(e) => setEditMaterial((prev) => ({ ...prev, lengthUnit: e.target.value }))}
+                                  className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                                >
+                                  {lengthUnits.map((unit) => (
+                                    <option key={unit} value={unit}>{unit}</option>
+                                  ))}
+                                </select>
+                              </div>
+                            ) : (
+                              <>
+                                {material.lengthValue ?? material.quantity} {material.lengthUnit || material.unit}
+                              </>
+                            )}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
                             <span className={`px-2 py-1 text-xs font-medium rounded-full ${status.class}`}>
@@ -212,7 +592,29 @@ export default function InventoryPage() {
                             {material.supplier || '-'}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-right">
-                            <span className="text-zinc-400 dark:text-zinc-500 text-sm">-</span>
+                            {editingMaterialId === material.id ? (
+                              <div className="flex items-center justify-end gap-2">
+                                <button
+                                  onClick={() => handleSaveMaterial(material.id)}
+                                  className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  onClick={() => setEditingMaterialId(null)}
+                                  className="text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 text-sm font-medium"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => startEditMaterial(material)}
+                                className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium"
+                              >
+                                Edit
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );
@@ -265,11 +667,46 @@ export default function InventoryPage() {
                             {item.category}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
-                            <span className="text-sm font-medium text-zinc-900 dark:text-white">{item.quantity}</span>
-                            <span className="text-sm text-zinc-500 dark:text-zinc-400 ml-1">{item.unit}</span>
+                            {editingPremadeId === item.id ? (
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={editPremade.quantity}
+                                  onChange={(e) => setEditPremade((prev) => ({ ...prev, quantity: e.target.value }))}
+                                  className="w-24 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                                />
+                                <select
+                                  value={editPremade.unit}
+                                  onChange={(e) => setEditPremade((prev) => ({ ...prev, unit: e.target.value }))}
+                                  className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                                >
+                                  {premadeUnits.map((unit) => (
+                                    <option key={unit} value={unit}>{unit}</option>
+                                  ))}
+                                </select>
+                              </div>
+                            ) : (
+                              <>
+                                <span className="text-sm font-medium text-zinc-900 dark:text-white">{item.quantity}</span>
+                                <span className="text-sm text-zinc-500 dark:text-zinc-400 ml-1">{item.unit}</span>
+                              </>
+                            )}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
-                            {formatCurrency(item.price)}
+                            {editingPremadeId === item.id ? (
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={editPremade.price}
+                                onChange={(e) => setEditPremade((prev) => ({ ...prev, price: e.target.value }))}
+                                className="w-28 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                              />
+                            ) : (
+                              formatCurrency(item.price)
+                            )}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
                             <span className={`px-2 py-1 text-xs font-medium rounded-full ${status.class}`}>
@@ -277,9 +714,29 @@ export default function InventoryPage() {
                             </span>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-right">
-                            <button className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium">
-                              View Details
-                            </button>
+                            {editingPremadeId === item.id ? (
+                              <div className="flex items-center justify-end gap-2">
+                                <button
+                                  onClick={() => handleSavePremade(item.id)}
+                                  className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  onClick={() => setEditingPremadeId(null)}
+                                  className="text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 text-sm font-medium"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => startEditPremade(item)}
+                                className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium"
+                              >
+                                Edit
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );

@@ -160,9 +160,24 @@ export interface RawMaterial {
   price: number;
   reorderPoint: number;
   supplier: string;
+  lengthValue?: number;
+  lengthUnit?: string;
   branchId: number;
   isArchived: boolean;
   lastUpdated: string;
+}
+
+export interface RawMaterialInput {
+  name: string;
+  quantity: number;
+  price: number;
+  lengthValue: number;
+  lengthUnit: string;
+  unit?: string;
+  category?: string;
+  reorderPoint?: number;
+  supplier?: string;
+  branchId: number;
 }
 
 export interface FinishedGood {
@@ -177,6 +192,17 @@ export interface FinishedGood {
   branchId: number;
   isArchived: boolean;
   lastUpdated: string;
+}
+
+export interface PremadeProductInput {
+  name: string;
+  quantity: number;
+  unit: string;
+  category: string;
+  price: number;
+  cost: number;
+  branchId: number;
+  sku?: string;
 }
 
 export interface JobOrderItem {
@@ -580,13 +606,13 @@ export const api = {
     
     getRawMaterial: (id: number) => fetchApi<RawMaterial>(`/api/inventory/raw-materials/${id}`),
     
-    createRawMaterial: (material: Omit<RawMaterial, 'id' | 'isArchived' | 'lastUpdated'>) =>
+    createRawMaterial: (material: RawMaterialInput) =>
       fetchApi<RawMaterial>('/api/inventory/raw-materials', {
         method: 'POST',
         body: JSON.stringify(material),
       }),
     
-    updateRawMaterial: (id: number, material: Partial<RawMaterial>) =>
+    updateRawMaterial: (id: number, material: Partial<RawMaterialInput>) =>
       fetchApi<RawMaterial>(`/api/inventory/raw-materials/${id}`, {
         method: 'PUT',
         body: JSON.stringify(material),
@@ -606,9 +632,15 @@ export const api = {
       return fetchApi<FinishedGood[]>(`/api/inventory/finished-goods?${query}`);
     },
     
-    createFinishedGood: (item: Omit<FinishedGood, 'id' | 'isArchived' | 'lastUpdated'>) =>
+    createFinishedGood: (item: PremadeProductInput) =>
       fetchApi<FinishedGood>('/api/inventory/finished-goods', {
         method: 'POST',
+        body: JSON.stringify(item),
+      }),
+
+    updateFinishedGood: (id: number, item: Partial<PremadeProductInput>) =>
+      fetchApi<FinishedGood>(`/api/inventory/finished-goods/${id}`, {
+        method: 'PUT',
         body: JSON.stringify(item),
       }),
     
@@ -877,7 +909,7 @@ export const api = {
       customerPhone: string;
       customerEmail?: string;
       contactMethod: 'branch_visit' | 'phone_call';
-      branchId?: number;
+      branchId: number;
       preferredDate: string;
       preferredTime?: string;
       description?: string;

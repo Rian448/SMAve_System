@@ -198,6 +198,43 @@ class ProductOrder(db.Model):
     branch = db.relationship('Branch')
     customer_user = db.relationship('User', foreign_keys=[user_id])
 
+class InventoryMaterial(db.Model):
+    __tablename__ = 'inventory_materials'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    sku = db.Column(db.String(100), unique=True, nullable=False)
+    quantity = db.Column(db.Float, default=0)
+    unit = db.Column(db.String(50), default='yards')
+    category = db.Column(db.String(100), default='General')
+    price = db.Column(db.Float, default=0)
+    reorder_point = db.Column(db.Float, default=0)
+    supplier = db.Column(db.String(255), default='')
+    length_value = db.Column(db.Float, default=0)
+    length_unit = db.Column(db.String(50), default='yards')
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
+    is_archived = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    branch = db.relationship('Branch')
+
+class PremadeProduct(db.Model):
+    __tablename__ = 'premade_products'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    sku = db.Column(db.String(100), unique=True, nullable=False)
+    quantity = db.Column(db.Float, default=0)
+    unit = db.Column(db.String(50), default='pcs')
+    category = db.Column(db.String(100), default='General')
+    price = db.Column(db.Float, default=0)
+    cost = db.Column(db.Float, default=0)
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
+    is_archived = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    branch = db.relationship('Branch')
+
 # ============================================
 # SEED DATA
 # ============================================
@@ -562,6 +599,40 @@ def seed_default_users():
 
     db.session.commit()
 
+def seed_inventory_items():
+    if InventoryMaterial.query.count() == 0:
+        for material in raw_materials:
+            db.session.add(InventoryMaterial(
+                name=material['name'],
+                sku=material.get('sku') or f"RM-{material['id']:03d}",
+                quantity=float(material.get('quantity', 0)),
+                unit=material.get('unit', 'yards'),
+                category=material.get('category', 'General'),
+                price=float(material.get('price', 0)),
+                reorder_point=float(material.get('reorderPoint', 0)),
+                supplier=material.get('supplier', ''),
+                length_value=float(material.get('quantity', 0)),
+                length_unit=material.get('unit', 'yards'),
+                branch_id=material.get('branchId', 1),
+                is_archived=material.get('isArchived', False)
+            ))
+
+    if PremadeProduct.query.count() == 0:
+        for product in finished_goods:
+            db.session.add(PremadeProduct(
+                name=product['name'],
+                sku=product.get('sku') or f"FG-{product['id']:03d}",
+                quantity=float(product.get('quantity', 0)),
+                unit=product.get('unit', 'pcs'),
+                category=product.get('category', 'General'),
+                price=float(product.get('price', 0)),
+                cost=float(product.get('cost', 0)),
+                branch_id=product.get('branchId', 1),
+                is_archived=product.get('isArchived', False)
+            ))
+
+    db.session.commit()
+
 def init_db():
     db.create_all()
 
@@ -596,6 +667,7 @@ def init_db():
 
     # Seed users
     seed_default_users()
+    seed_inventory_items()
 
 def get_user_from_token(token):
     """Get user from session token"""
@@ -886,111 +958,174 @@ def get_alerts():
 # INVENTORY ROUTES - RAW MATERIALS
 # ============================================
 
+def material_to_dict(material):
+    return {
+        'id': material.id,
+        'name': material.name,
+        'sku': material.sku,
+        'quantity': float(material.quantity),
+        'unit': material.unit,
+        'category': material.category,
+        'price': float(material.price),
+        'reorderPoint': float(material.reorder_point),
+        'supplier': material.supplier,
+        'lengthValue': float(material.length_value),
+        'lengthUnit': material.length_unit,
+        'branchId': material.branch_id,
+        'isArchived': material.is_archived,
+        'lastUpdated': material.updated_at.strftime('%Y-%m-%d') if material.updated_at else None
+    }
+
+def premade_product_to_dict(product):
+    return {
+        'id': product.id,
+        'name': product.name,
+        'sku': product.sku,
+        'quantity': float(product.quantity),
+        'unit': product.unit,
+        'category': product.category,
+        'price': float(product.price),
+        'cost': float(product.cost),
+        'branchId': product.branch_id,
+        'isArchived': product.is_archived,
+        'lastUpdated': product.updated_at.strftime('%Y-%m-%d') if product.updated_at else None
+    }
+
 @app.route('/api/inventory/raw-materials', methods=['GET'])
 @require_auth
 def get_raw_materials():
     include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
     branch_id = request.args.get('branchId')
     category = request.args.get('category')
-    
-    items = raw_materials
+
+    query = InventoryMaterial.query
     if not include_archived:
-        items = [m for m in items if not m['isArchived']]
+        query = query.filter_by(is_archived=False)
     if branch_id:
-        items = [m for m in items if m['branchId'] == int(branch_id)]
+        query = query.filter_by(branch_id=int(branch_id))
     if category:
-        items = [m for m in items if m['category'] == category]
-    
-    return jsonify({'status': 'success', 'data': items})
+        query = query.filter_by(category=category)
+
+    items = query.order_by(InventoryMaterial.name.asc()).all()
+    return jsonify({'status': 'success', 'data': [material_to_dict(m) for m in items]})
 
 @app.route('/api/inventory/raw-materials/<int:material_id>', methods=['GET'])
 @require_auth
 def get_raw_material(material_id):
-    material = next((m for m in raw_materials if m['id'] == material_id), None)
+    material = InventoryMaterial.query.get(material_id)
     if not material:
         return jsonify({'status': 'error', 'message': 'Material not found'}), 404
-    return jsonify({'status': 'success', 'data': material})
+    return jsonify({'status': 'success', 'data': material_to_dict(material)})
 
 @app.route('/api/inventory/raw-materials', methods=['POST'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def create_raw_material():
-    global counters
     data = request.get_json()
-    
-    required = ['name', 'quantity', 'unit', 'category', 'price', 'reorderPoint', 'supplier', 'branchId']
+
+    required = ['name', 'quantity', 'price', 'lengthValue', 'lengthUnit', 'branchId']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
-    
-    new_material = {
-        'id': counters['raw_material'],
-        'name': data['name'],
-        'sku': data.get('sku', f"RM-{counters['raw_material']:03d}"),
-        'quantity': data['quantity'],
-        'unit': data['unit'],
-        'category': data['category'],
-        'price': data['price'],
-        'reorderPoint': data['reorderPoint'],
-        'supplier': data['supplier'],
-        'branchId': data['branchId'],
-        'isArchived': False,
-        'lastUpdated': datetime.now().strftime('%Y-%m-%d')
-    }
-    
-    raw_materials.append(new_material)
-    counters['raw_material'] += 1
-    
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory', f"Created raw material: {new_material['name']}", request.remote_addr or '0.0.0.0')
-    
-    return jsonify({'status': 'success', 'data': new_material}), 201
+
+    branch = Branch.query.get(data['branchId'])
+    if not branch or not branch.is_active:
+        return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+
+    next_id = (db.session.query(db.func.max(InventoryMaterial.id)).scalar() or 0) + 1
+    material = InventoryMaterial(
+        name=data['name'].strip(),
+        sku=data.get('sku') or f"RM-{next_id:03d}",
+        quantity=float(data['quantity']),
+        unit=data.get('unit', data['lengthUnit']),
+        category=data.get('category', 'General'),
+        price=float(data['price']),
+        reorder_point=float(data.get('reorderPoint', 0)),
+        supplier=data.get('supplier', ''),
+        length_value=float(data['lengthValue']),
+        length_unit=data['lengthUnit'],
+        branch_id=int(data['branchId']),
+        is_archived=False
+    )
+
+    db.session.add(material)
+    db.session.commit()
+
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory', f"Created raw material: {material.name}", request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': material_to_dict(material)}), 201
 
 @app.route('/api/inventory/raw-materials/<int:material_id>', methods=['PUT'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def update_raw_material(material_id):
-    material = next((m for m in raw_materials if m['id'] == material_id), None)
+    material = InventoryMaterial.query.get(material_id)
     if not material:
         return jsonify({'status': 'error', 'message': 'Material not found'}), 404
-    
+
     data = request.get_json()
-    for key in ['name', 'sku', 'quantity', 'unit', 'category', 'price', 'reorderPoint', 'supplier', 'branchId']:
-        if key in data:
-            material[key] = data[key]
-    
-    material['lastUpdated'] = datetime.now().strftime('%Y-%m-%d')
-    
-    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated raw material: {material['name']}", request.remote_addr or '0.0.0.0')
-    
-    return jsonify({'status': 'success', 'data': material})
+
+    if 'name' in data:
+        material.name = data['name'].strip()
+    if 'sku' in data:
+        material.sku = data['sku']
+    if 'quantity' in data:
+        material.quantity = float(data['quantity'])
+    if 'unit' in data:
+        material.unit = data['unit']
+    if 'category' in data:
+        material.category = data['category']
+    if 'price' in data:
+        material.price = float(data['price'])
+    if 'reorderPoint' in data:
+        material.reorder_point = float(data['reorderPoint'])
+    if 'supplier' in data:
+        material.supplier = data['supplier']
+    if 'lengthValue' in data:
+        material.length_value = float(data['lengthValue'])
+    if 'lengthUnit' in data:
+        material.length_unit = data['lengthUnit']
+        if 'unit' not in data:
+            material.unit = data['lengthUnit']
+    if 'branchId' in data:
+        branch = Branch.query.get(data['branchId'])
+        if not branch or not branch.is_active:
+            return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+        material.branch_id = int(data['branchId'])
+
+    db.session.commit()
+
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated raw material: {material.name}", request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': material_to_dict(material)})
 
 @app.route('/api/inventory/raw-materials/<int:material_id>/archive', methods=['POST'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def archive_raw_material(material_id):
-    material = next((m for m in raw_materials if m['id'] == material_id), None)
+    material = InventoryMaterial.query.get(material_id)
     if not material:
         return jsonify({'status': 'error', 'message': 'Material not found'}), 404
-    
-    material['isArchived'] = True
-    material['lastUpdated'] = datetime.now().strftime('%Y-%m-%d')
-    
-    log_action(request.current_user['id'], request.current_user['fullName'], 'ARCHIVE', 'Inventory', f"Archived raw material: {material['name']}", request.remote_addr or '0.0.0.0')
-    
+
+    material.is_archived = True
+    db.session.commit()
+
+    log_action(request.current_user['id'], request.current_user['fullName'], 'ARCHIVE', 'Inventory', f"Archived raw material: {material.name}", request.remote_addr or '0.0.0.0')
+
     return jsonify({'status': 'success', 'message': 'Material archived'})
 
 @app.route('/api/inventory/raw-materials/<int:material_id>/restore', methods=['POST'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def restore_raw_material(material_id):
-    material = next((m for m in raw_materials if m['id'] == material_id), None)
+    material = InventoryMaterial.query.get(material_id)
     if not material:
         return jsonify({'status': 'error', 'message': 'Material not found'}), 404
-    
-    material['isArchived'] = False
-    material['lastUpdated'] = datetime.now().strftime('%Y-%m-%d')
-    
-    log_action(request.current_user['id'], request.current_user['fullName'], 'RESTORE', 'Inventory', f"Restored raw material: {material['name']}", request.remote_addr or '0.0.0.0')
-    
+
+    material.is_archived = False
+    db.session.commit()
+
+    log_action(request.current_user['id'], request.current_user['fullName'], 'RESTORE', 'Inventory', f"Restored raw material: {material.name}", request.remote_addr or '0.0.0.0')
+
     return jsonify({'status': 'success', 'message': 'Material restored'})
 
 # ============================================
@@ -1002,72 +1137,116 @@ def restore_raw_material(material_id):
 def get_finished_goods():
     include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
     branch_id = request.args.get('branchId')
-    
-    items = finished_goods
+
+    query = PremadeProduct.query
     if not include_archived:
-        items = [fg for fg in items if not fg['isArchived']]
+        query = query.filter_by(is_archived=False)
     if branch_id:
-        items = [fg for fg in items if fg['branchId'] == int(branch_id)]
-    
-    return jsonify({'status': 'success', 'data': items})
+        query = query.filter_by(branch_id=int(branch_id))
+
+    items = query.order_by(PremadeProduct.name.asc()).all()
+
+    return jsonify({'status': 'success', 'data': [premade_product_to_dict(i) for i in items]})
 
 @app.route('/api/inventory/finished-goods', methods=['POST'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def create_finished_good():
-    global counters
     data = request.get_json()
-    
+
     required = ['name', 'quantity', 'unit', 'category', 'price', 'cost', 'branchId']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
-    
-    new_item = {
-        'id': counters['finished_good'],
-        'name': data['name'],
-        'sku': data.get('sku', f"FG-{counters['finished_good']:03d}"),
-        'quantity': data['quantity'],
-        'unit': data['unit'],
-        'category': data['category'],
-        'price': data['price'],
-        'cost': data['cost'],
-        'branchId': data['branchId'],
-        'isArchived': False,
-        'lastUpdated': datetime.now().strftime('%Y-%m-%d')
-    }
-    
-    finished_goods.append(new_item)
-    counters['finished_good'] += 1
-    
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory', f"Created finished good: {new_item['name']}", request.remote_addr or '0.0.0.0')
-    
-    return jsonify({'status': 'success', 'data': new_item}), 201
+
+    branch = Branch.query.get(data['branchId'])
+    if not branch or not branch.is_active:
+        return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+
+    next_id = (db.session.query(db.func.max(PremadeProduct.id)).scalar() or 0) + 1
+    product = PremadeProduct(
+        name=data['name'].strip(),
+        sku=data.get('sku') or f"FG-{next_id:03d}",
+        quantity=float(data['quantity']),
+        unit=data['unit'],
+        category=data['category'],
+        price=float(data['price']),
+        cost=float(data['cost']),
+        branch_id=int(data['branchId']),
+        is_archived=False
+    )
+
+    db.session.add(product)
+    db.session.commit()
+
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory', f"Created finished good: {product.name}", request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': premade_product_to_dict(product)}), 201
+
+@app.route('/api/inventory/finished-goods/<int:item_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def update_finished_good(item_id):
+    product = PremadeProduct.query.get(item_id)
+    if not product:
+        return jsonify({'status': 'error', 'message': 'Premade product not found'}), 404
+
+    data = request.get_json()
+
+    if 'name' in data:
+        product.name = data['name'].strip()
+    if 'sku' in data:
+        product.sku = data['sku']
+    if 'quantity' in data:
+        product.quantity = float(data['quantity'])
+    if 'unit' in data:
+        product.unit = data['unit']
+    if 'category' in data:
+        product.category = data['category']
+    if 'price' in data:
+        product.price = float(data['price'])
+    if 'cost' in data:
+        product.cost = float(data['cost'])
+    if 'branchId' in data:
+        branch = Branch.query.get(data['branchId'])
+        if not branch or not branch.is_active:
+            return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+        product.branch_id = int(data['branchId'])
+
+    db.session.commit()
+
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated finished good: {product.name}", request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': premade_product_to_dict(product)})
 
 @app.route('/api/inventory/finished-goods/public', methods=['GET'])
 def get_finished_goods_public():
     """Public API to get available finished goods (products) for customers"""
     branch_id = request.args.get('branchId')
     category = request.args.get('category')
-    
-    # Only return non-archived items with quantity > 0
-    items = [fg for fg in finished_goods if not fg['isArchived'] and fg['quantity'] > 0]
-    
+
+    query = PremadeProduct.query.filter(
+        PremadeProduct.is_archived.is_(False),
+        PremadeProduct.quantity > 0
+    )
+
     if branch_id:
-        items = [fg for fg in items if fg['branchId'] == int(branch_id)]
-    
+        query = query.filter_by(branch_id=int(branch_id))
+
     if category:
-        items = [fg for fg in items if fg['category'].lower() == category.lower()]
-    
+        query = query.filter(db.func.lower(PremadeProduct.category) == category.lower())
+
+    items = query.order_by(PremadeProduct.name.asc()).all()
+
     # Return only public-facing info (hide cost)
     public_items = [{
-        'id': item['id'],
-        'name': item['name'],
-        'sku': item['sku'],
-        'quantity': item['quantity'],
-        'unit': item['unit'],
-        'category': item['category'],
-        'price': item['price'],
-        'branchId': item['branchId']
+        'id': item.id,
+        'name': item.name,
+        'sku': item.sku,
+        'quantity': float(item.quantity),
+        'unit': item.unit,
+        'category': item.category,
+        'price': float(item.price),
+        'branchId': item.branch_id
     } for item in items]
     
     return jsonify({'status': 'success', 'data': public_items})
@@ -1075,8 +1254,8 @@ def get_finished_goods_public():
 @app.route('/api/inventory/categories', methods=['GET'])
 @require_auth
 def get_categories():
-    rm_categories = list(set(m['category'] for m in raw_materials if not m['isArchived']))
-    fg_categories = list(set(fg['category'] for fg in finished_goods if not fg['isArchived']))
+    rm_categories = sorted({m.category for m in InventoryMaterial.query.filter_by(is_archived=False).all() if m.category})
+    fg_categories = sorted({p.category for p in PremadeProduct.query.filter_by(is_archived=False).all() if p.category})
     
     return jsonify({
         'status': 'success',
@@ -1089,8 +1268,11 @@ def get_categories():
 @app.route('/api/inventory/low-stock', methods=['GET'])
 @require_auth
 def get_low_stock_items():
-    low_stock = [m for m in raw_materials if m['quantity'] <= m['reorderPoint'] and not m['isArchived']]
-    return jsonify({'status': 'success', 'data': low_stock})
+    low_stock = InventoryMaterial.query.filter(
+        InventoryMaterial.is_archived.is_(False),
+        InventoryMaterial.quantity <= InventoryMaterial.reorder_point
+    ).order_by(InventoryMaterial.quantity.asc()).all()
+    return jsonify({'status': 'success', 'data': [material_to_dict(m) for m in low_stock]})
 
 # ============================================
 # SALES MODULE - JOB ORDERS
@@ -1736,13 +1918,14 @@ def receive_purchase_order(po_id):
     
     # Update inventory
     for item in po['items']:
-        material = next((m for m in raw_materials if m['id'] == item.get('materialId')), None)
+        material = InventoryMaterial.query.get(item.get('materialId'))
         if material:
-            material['quantity'] += item['quantity']
-            material['lastUpdated'] = datetime.now().strftime('%Y-%m-%d')
+            material.quantity = float(material.quantity) + float(item['quantity'])
     
     po['status'] = 'received'
     po['receivedAt'] = datetime.now().strftime('%Y-%m-%d')
+
+    db.session.commit()
     
     log_action(request.current_user['id'], request.current_user['fullName'], 'RECEIVE', 'Purchase Orders', f"Received PO: {po['poNumber']}", request.remote_addr or '0.0.0.0')
     
@@ -1940,16 +2123,15 @@ def create_appointment():
     if contact_method not in ['branch_visit', 'phone_call']:
         return jsonify({'status': 'error', 'message': 'Invalid contact method'}), 400
     
-    # If branch_visit, branch is required
+    # Branch is always required so appointments are routed to the selected branch.
     branch_id = data.get('branchId')
-    if contact_method == 'branch_visit' and not branch_id:
-        return jsonify({'status': 'error', 'message': 'Branch is required for branch visit'}), 400
+    if not branch_id:
+        return jsonify({'status': 'error', 'message': 'Please select a branch for this appointment'}), 400
     
-    # Validate branch if provided
-    if branch_id:
-        branch = Branch.query.get(branch_id)
-        if not branch or not branch.is_active:
-            return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+    # Validate selected branch
+    branch = Branch.query.get(branch_id)
+    if not branch or not branch.is_active:
+        return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
     
     # Check if user is authenticated (optional)
     user_id = None
@@ -1975,7 +2157,7 @@ def create_appointment():
         customer_phone=data['customerPhone'],
         customer_email=data.get('customerEmail', ''),
         contact_method=contact_method,
-        branch_id=branch_id if contact_method == 'branch_visit' else None,
+        branch_id=branch_id,
         preferred_date=preferred_date,
         preferred_time=data.get('preferredTime', ''),
         description=data.get('description', ''),
@@ -1991,7 +2173,7 @@ def create_appointment():
 
 @app.route('/api/appointments', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+@require_roles('administrator', 'supervisor')
 def get_appointments():
     """Get all appointments - staff endpoint"""
     user = request.current_user
@@ -2003,13 +2185,11 @@ def get_appointments():
     if status:
         query = query.filter_by(status=status)
     
-    # Filter by branch for non-admin users
-    if user['role'] != 'administrator':
-        if user.get('branchId'):
-            query = query.filter(
-                (Appointment.branch_id == user['branchId']) | 
-                (Appointment.contact_method == 'phone_call')
-            )
+    # Supervisors only see appointments for their assigned branch.
+    if user['role'] == 'supervisor':
+        if not user.get('branchId'):
+            return jsonify({'status': 'error', 'message': 'Supervisor account has no assigned branch'}), 400
+        query = query.filter(Appointment.branch_id == user['branchId'])
     
     appointments = query.order_by(Appointment.preferred_date.desc()).all()
     
@@ -2017,12 +2197,19 @@ def get_appointments():
 
 @app.route('/api/appointments/<int:appointment_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+@require_roles('administrator', 'supervisor')
 def update_appointment(appointment_id):
     """Update an appointment status or notes"""
     appointment = Appointment.query.get(appointment_id)
     if not appointment:
         return jsonify({'status': 'error', 'message': 'Appointment not found'}), 404
+
+    user = request.current_user
+    if user['role'] == 'supervisor':
+        if not user.get('branchId'):
+            return jsonify({'status': 'error', 'message': 'Supervisor account has no assigned branch'}), 400
+        if appointment.branch_id != user['branchId']:
+            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
     
     data = request.get_json()
     
@@ -2104,24 +2291,24 @@ def create_product_order():
     for item in data['items']:
         product_id = item.get('productId')
         quantity = item.get('quantity', 1)
-        
-        # Find product in finished goods
-        product = next((fg for fg in finished_goods if fg['id'] == product_id and not fg['isArchived']), None)
+
+        # Find product in database-backed premade products
+        product = PremadeProduct.query.filter_by(id=product_id, is_archived=False).first()
         if not product:
             return jsonify({'status': 'error', 'message': f'Product with ID {product_id} not found'}), 400
-        
-        if product['quantity'] < quantity:
-            return jsonify({'status': 'error', 'message': f'Insufficient stock for {product["name"]}'}), 400
-        
-        item_total = product['price'] * quantity
+
+        if float(product.quantity) < quantity:
+            return jsonify({'status': 'error', 'message': f'Insufficient stock for {product.name}'}), 400
+
+        item_total = float(product.price) * quantity
         total_amount += item_total
-        
+
         validated_items.append({
             'productId': product_id,
-            'name': product['name'],
-            'sku': product['sku'],
+            'name': product.name,
+            'sku': product.sku,
             'quantity': quantity,
-            'unitPrice': product['price'],
+            'unitPrice': float(product.price),
             'total': item_total
         })
     
@@ -2187,9 +2374,9 @@ def update_product_order(order_id):
         # If completed, update inventory
         if data['status'] == 'completed':
             for item in order.items:
-                product = next((fg for fg in finished_goods if fg['id'] == item['productId']), None)
+                product = PremadeProduct.query.get(item['productId'])
                 if product:
-                    product['quantity'] = max(0, product['quantity'] - item['quantity'])
+                    product.quantity = max(0, float(product.quantity) - float(item['quantity']))
     
     if 'paymentStatus' in data:
         order.payment_status = data['paymentStatus']
@@ -3567,6 +3754,8 @@ def debug_branches_and_orders():
 
 if __name__ == '__main__':
     with app.app_context():
+        # Ensure tables and seed data exist before startup diagnostics.
+        init_db()
         print("=" * 60)
         print("STARTUP DIAGNOSTICS")
         print("=" * 60)
