@@ -189,7 +189,7 @@ class ProductOrder(db.Model):
     total_amount = db.Column(db.Float, nullable=False)
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
     status = db.Column(db.String(50), default='pending')  # pending, processing, ready, completed, cancelled
-    payment_status = db.Column(db.String(50), default='unpaid')  # unpaid, paid
+    payment_status = db.Column(db.String(50), default='unpaid')  # unpaid, partial, paid
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     notes = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -1854,6 +1854,15 @@ def get_purchase_orders():
         items = [po for po in items if po['status'] == status]
     return jsonify({'status': 'success', 'data': items})
 
+@app.route('/api/purchase-orders/<int:po_id>', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def get_purchase_order(po_id):
+    po = next((p for p in purchase_orders if p['id'] == po_id), None)
+    if not po:
+        return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    return jsonify({'status': 'success', 'data': po})
+
 @app.route('/api/purchase-orders', methods=['POST'])
 @require_auth
 @require_roles('administrator', 'supervisor')
@@ -2258,6 +2267,65 @@ def product_order_to_dict(order):
         'updatedAt': order.updated_at.isoformat() if order.updated_at else None
     }
 
+def can_manage_product_order(user, order):
+    """Check if current user can manage this product order."""
+    if user['role'] == 'administrator':
+        return True
+
+    if user['role'] == 'supervisor':
+        user_branch_id = user.get('branchId')
+        return bool(user_branch_id and order.branch_id == user_branch_id)
+
+    return False
+
+def build_product_order_timeline(order):
+    """Build timeline events for a product order using order fields and audit logs."""
+    events = []
+
+    if order.created_at:
+        events.append({
+            'type': 'created',
+            'title': 'Order Placed',
+            'description': f"Customer placed order {order.order_number}",
+            'timestamp': order.created_at.isoformat(),
+            'by': order.customer_name or 'Customer'
+        })
+
+    if order.status and order.status != 'pending':
+        events.append({
+            'type': 'status',
+            'title': 'Status Updated',
+            'description': f"Order status is now {order.status}",
+            'timestamp': order.updated_at.isoformat() if order.updated_at else order.created_at.isoformat(),
+            'by': 'Branch Staff'
+        })
+
+    if order.payment_status and order.payment_status != 'unpaid':
+        events.append({
+            'type': 'payment',
+            'title': 'Payment Updated',
+            'description': f"Payment status is now {order.payment_status}",
+            'timestamp': order.updated_at.isoformat() if order.updated_at else order.created_at.isoformat(),
+            'by': 'Branch Staff'
+        })
+
+    related_logs = [
+        l for l in audit_logs
+        if l.get('module') == 'Product Orders' and order.order_number in (l.get('details') or '')
+    ]
+
+    for log in related_logs:
+        events.append({
+            'type': 'audit',
+            'title': f"{log.get('action', 'UPDATE').title()} by {log.get('userName', 'User')}",
+            'description': log.get('details', ''),
+            'timestamp': log.get('timestamp', ''),
+            'by': log.get('userName', 'User')
+        })
+
+    events.sort(key=lambda e: e.get('timestamp') or '', reverse=True)
+    return events
+
 @app.route('/api/product-orders', methods=['POST'])
 def create_product_order():
     """Create a new product order - public endpoint for ordering premade products"""
@@ -2300,6 +2368,10 @@ def create_product_order():
         if float(product.quantity) < quantity:
             return jsonify({'status': 'error', 'message': f'Insufficient stock for {product.name}'}), 400
 
+        # Enforce that all products come from the selected pickup branch.
+        if int(product.branch_id) != int(branch_id):
+            return jsonify({'status': 'error', 'message': f'{product.name} is not available in the selected branch'}), 400
+
         item_total = float(product.price) * quantity
         total_amount += item_total
 
@@ -2333,12 +2405,21 @@ def create_product_order():
     
     db.session.add(new_order)
     db.session.commit()
+
+    log_action(
+        user_id if user_id else 0,
+        data.get('customerName', 'Customer'),
+        'CREATE',
+        'Product Orders',
+        f"Created product order {new_order.order_number} for branch {branch.name}",
+        request.remote_addr or '0.0.0.0'
+    )
     
     return jsonify({'status': 'success', 'data': product_order_to_dict(new_order)}), 201
 
 @app.route('/api/product-orders', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+@require_roles('administrator', 'supervisor')
 def get_product_orders():
     """Get all product orders - staff endpoint"""
     user = request.current_user
@@ -2349,10 +2430,11 @@ def get_product_orders():
     if status:
         query = query.filter_by(status=status)
     
-    # Filter by branch for non-admin users
-    if user['role'] != 'administrator':
-        if user.get('branchId'):
-            query = query.filter_by(branch_id=user['branchId'])
+    # Supervisors only see orders assigned to their branch.
+    if user['role'] == 'supervisor':
+        if not user.get('branchId'):
+            return jsonify({'status': 'error', 'message': 'Supervisor account has no assigned branch'}), 400
+        query = query.filter_by(branch_id=user['branchId'])
     
     orders = query.order_by(ProductOrder.created_at.desc()).all()
     
@@ -2360,16 +2442,29 @@ def get_product_orders():
 
 @app.route('/api/product-orders/<int:order_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+@require_roles('administrator', 'supervisor')
 def update_product_order(order_id):
     """Update a product order status"""
     order = ProductOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     
+    user = request.current_user
+    if not can_manage_product_order(user, order):
+        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+
     data = request.get_json()
+
+    valid_statuses = {'pending', 'processing', 'ready', 'completed', 'cancelled'}
+    valid_payment_statuses = {'unpaid', 'partial', 'paid'}
     
+    updated_fields = []
+
     if 'status' in data:
+        if data['status'] not in valid_statuses:
+            return jsonify({'status': 'error', 'message': 'Invalid status'}), 400
+        if order.status != data['status']:
+            updated_fields.append(f"status: {order.status} -> {data['status']}")
         order.status = data['status']
         # If completed, update inventory
         if data['status'] == 'completed':
@@ -2379,14 +2474,60 @@ def update_product_order(order_id):
                     product.quantity = max(0, float(product.quantity) - float(item['quantity']))
     
     if 'paymentStatus' in data:
+        if data['paymentStatus'] not in valid_payment_statuses:
+            return jsonify({'status': 'error', 'message': 'Invalid payment status'}), 400
+        if order.payment_status != data['paymentStatus']:
+            updated_fields.append(f"payment: {order.payment_status} -> {data['paymentStatus']}")
         order.payment_status = data['paymentStatus']
     
     if 'notes' in data:
+        if order.notes != data['notes']:
+            updated_fields.append('notes updated')
         order.notes = data['notes']
     
     db.session.commit()
+
+    if updated_fields:
+        log_action(
+            user['id'],
+            user['fullName'],
+            'UPDATE',
+            'Product Orders',
+            f"Updated product order {order.order_number} ({'; '.join(updated_fields)})",
+            request.remote_addr or '0.0.0.0'
+        )
     
     return jsonify({'status': 'success', 'data': product_order_to_dict(order)})
+
+@app.route('/api/product-orders/<int:order_id>', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def get_product_order(order_id):
+    """Get detailed product order by ID for branch admin/supervisor."""
+    order = ProductOrder.query.get(order_id)
+    if not order:
+        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
+
+    user = request.current_user
+    if not can_manage_product_order(user, order):
+        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+
+    return jsonify({'status': 'success', 'data': product_order_to_dict(order)})
+
+@app.route('/api/product-orders/<int:order_id>/timeline', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def get_product_order_timeline(order_id):
+    """Get timeline events for a product order."""
+    order = ProductOrder.query.get(order_id)
+    if not order:
+        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
+
+    user = request.current_user
+    if not can_manage_product_order(user, order):
+        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+
+    return jsonify({'status': 'success', 'data': build_product_order_timeline(order)})
 
 @app.route('/api/product-orders/my-orders', methods=['GET'])
 @require_auth

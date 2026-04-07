@@ -93,6 +93,18 @@ export interface WorkTask {
   notes?: string;
 }
 
+export interface WorkTaskInput {
+  jobOrderId: string;
+  title: string;
+  taskType: string;
+  description?: string;
+  priority?: 'low' | 'normal' | 'high' | 'urgent';
+  estimatedHours?: number;
+  dueDate?: string;
+  workerId?: number;
+  notes?: string;
+}
+
 export interface Appointment {
   id: number;
   appointmentNumber: string;
@@ -133,10 +145,18 @@ export interface ProductOrder {
   branchId: number;
   branchName?: string;
   status: 'pending' | 'processing' | 'ready' | 'completed' | 'cancelled';
-  paymentStatus: 'unpaid' | 'paid';
+  paymentStatus: 'unpaid' | 'partial' | 'paid';
   notes?: string;
   createdAt: string;
   updatedAt?: string;
+}
+
+export interface ProductOrderTimelineEvent {
+  type: 'created' | 'status' | 'payment' | 'audit' | string;
+  title: string;
+  description: string;
+  timestamp: string;
+  by?: string;
 }
 
 export interface PublicProduct {
@@ -761,6 +781,9 @@ export const api = {
       return fetchApi<PurchaseOrder[]>(`/api/purchase-orders${query}`);
     },
     
+    getById: (id: number) =>
+      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}`),
+    
     create: (po: {
       supplierName: string;
       supplierId?: number;
@@ -957,7 +980,11 @@ export const api = {
       return fetchApi<ProductOrder[]>(`/api/product-orders${query}`);
     },
 
-    update: (id: number, data: { status?: string; paymentStatus?: string; notes?: string }) =>
+    get: (id: number) => fetchApi<ProductOrder>(`/api/product-orders/${id}`),
+
+    getTimeline: (id: number) => fetchApi<ProductOrderTimelineEvent[]>(`/api/product-orders/${id}/timeline`),
+
+    update: (id: number, data: { status?: ProductOrder['status']; paymentStatus?: ProductOrder['paymentStatus']; notes?: string }) =>
       fetchApi<ProductOrder>(`/api/product-orders/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -1088,7 +1115,7 @@ export const api = {
         body: JSON.stringify(data),
       }),
     
-    createTask: (task: any) =>
+    createTask: (task: WorkTaskInput) =>
       fetchApi<{ task: WorkTask }>('/api/workers/tasks', {
         method: 'POST',
         body: JSON.stringify(task),
