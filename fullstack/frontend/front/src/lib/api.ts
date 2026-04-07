@@ -17,12 +17,13 @@ export interface User {
   username: string;
   email: string;
   fullName: string;
-    role: 'administrator' | 'supervisor' | 'sales_manager' | 'staff' | 'seat_maker' | 'sewer';
-    roleName?: string;
+  role: 'administrator' | 'supervisor' | 'sales_manager' | 'staff' | 'seat_maker' | 'sewer' | 'customer';
+  roleName?: string;
   branch: string;
-    branchId?: number;
-    branchName?: string;
-    isActive?: boolean;
+  branchId?: number;
+  branchName?: string;
+  isActive?: boolean;
+  phone?: string;
 }
 
 export interface AuthResponse {
@@ -92,6 +93,63 @@ export interface WorkTask {
   notes?: string;
 }
 
+export interface Appointment {
+  id: number;
+  appointmentNumber: string;
+  customerName: string;
+  customerPhone: string;
+  customerEmail?: string;
+  contactMethod: 'branch_visit' | 'phone_call';
+  branchId?: number;
+  branchName?: string;
+  preferredDate: string;
+  preferredTime?: string;
+  description?: string;
+  vehicleInfo?: VehicleInfo;
+  status: 'pending' | 'confirmed' | 'completed' | 'cancelled';
+  adminNotes?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface ProductOrderItem {
+  productId: number;
+  name: string;
+  sku: string;
+  quantity: number;
+  unitPrice: number;
+  total: number;
+}
+
+export interface ProductOrder {
+  id: number;
+  orderNumber: string;
+  customerName: string;
+  customerPhone: string;
+  customerEmail?: string;
+  customerAddress?: string;
+  items: ProductOrderItem[];
+  totalAmount: number;
+  branchId: number;
+  branchName?: string;
+  status: 'pending' | 'processing' | 'ready' | 'completed' | 'cancelled';
+  paymentStatus: 'unpaid' | 'paid';
+  notes?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface PublicProduct {
+  id: number;
+  name: string;
+  sku: string;
+  quantity: number;
+  unit: string;
+  category: string;
+  price: number;
+  branchId: number;
+}
+
 export interface RawMaterial {
   id: number;
   name: string;
@@ -102,9 +160,24 @@ export interface RawMaterial {
   price: number;
   reorderPoint: number;
   supplier: string;
+  lengthValue?: number;
+  lengthUnit?: string;
   branchId: number;
   isArchived: boolean;
   lastUpdated: string;
+}
+
+export interface RawMaterialInput {
+  name: string;
+  quantity: number;
+  price: number;
+  lengthValue: number;
+  lengthUnit: string;
+  unit?: string;
+  category?: string;
+  reorderPoint?: number;
+  supplier?: string;
+  branchId: number;
 }
 
 export interface FinishedGood {
@@ -119,6 +192,17 @@ export interface FinishedGood {
   branchId: number;
   isArchived: boolean;
   lastUpdated: string;
+}
+
+export interface PremadeProductInput {
+  name: string;
+  quantity: number;
+  unit: string;
+  category: string;
+  price: number;
+  cost: number;
+  branchId: number;
+  sku?: string;
 }
 
 export interface JobOrderItem {
@@ -163,6 +247,14 @@ export interface JobOrder {
   updatedAt: string;
 }
 
+export interface QuotationItem {
+  name: string;
+  description?: string;
+  quantity: number;
+  unitPrice: number;
+  total: number;
+}
+
 export interface CustomerOrder {
   id: number;
   orderNumber: string;
@@ -180,10 +272,19 @@ export interface CustomerOrder {
     description?: string;
   }>;
   notes: string;
-  status: 'pending' | 'processing' | 'completed' | 'cancelled';
+  status: 'pending' | 'processing' | 'in_progress' | 'ready_for_installation' | 'completed' | 'delivered' | 'cancelled';
   branchId?: number;
   branchName?: string;
   createdAt: string;
+  // Quotation fields
+  userId?: number;
+  quotationItems?: QuotationItem[];
+  quotationTotal?: number;
+  quotationStatus?: 'pending_quotation' | 'quoted' | 'accepted' | 'rejected';
+  quotationNotes?: string;
+  customerResponseNotes?: string;
+  quotedAt?: string;
+  respondedAt?: string;
 }
 
 export interface LineupSlipItem {
@@ -471,6 +572,12 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ email }),
       }),
+    
+    register: (data: { username: string; password: string; email: string; fullName: string; phone: string }) =>
+      fetchApi<AuthResponse>('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
   },
 
   // ==================
@@ -499,13 +606,13 @@ export const api = {
     
     getRawMaterial: (id: number) => fetchApi<RawMaterial>(`/api/inventory/raw-materials/${id}`),
     
-    createRawMaterial: (material: Omit<RawMaterial, 'id' | 'isArchived' | 'lastUpdated'>) =>
+    createRawMaterial: (material: RawMaterialInput) =>
       fetchApi<RawMaterial>('/api/inventory/raw-materials', {
         method: 'POST',
         body: JSON.stringify(material),
       }),
     
-    updateRawMaterial: (id: number, material: Partial<RawMaterial>) =>
+    updateRawMaterial: (id: number, material: Partial<RawMaterialInput>) =>
       fetchApi<RawMaterial>(`/api/inventory/raw-materials/${id}`, {
         method: 'PUT',
         body: JSON.stringify(material),
@@ -525,11 +632,25 @@ export const api = {
       return fetchApi<FinishedGood[]>(`/api/inventory/finished-goods?${query}`);
     },
     
-    createFinishedGood: (item: Omit<FinishedGood, 'id' | 'isArchived' | 'lastUpdated'>) =>
+    createFinishedGood: (item: PremadeProductInput) =>
       fetchApi<FinishedGood>('/api/inventory/finished-goods', {
         method: 'POST',
         body: JSON.stringify(item),
       }),
+
+    updateFinishedGood: (id: number, item: Partial<PremadeProductInput>) =>
+      fetchApi<FinishedGood>(`/api/inventory/finished-goods/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(item),
+      }),
+    
+    // Public Products (for customer ordering)
+    getPublicProducts: (params?: { branchId?: number; category?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.branchId) query.append('branchId', params.branchId.toString());
+      if (params?.category) query.append('category', params.category);
+      return fetchApi<PublicProduct[]>(`/api/inventory/finished-goods/public?${query}`);
+    },
     
     // Categories
     getCategories: () => fetchApi<{ rawMaterials: string[]; finishedGoods: string[] }>('/api/inventory/categories'),
@@ -747,15 +868,102 @@ export const api = {
         body: JSON.stringify(orderData),
       }),
 
-    getOrders: () => fetchApi<any[]>('/api/customer-orders'),
+    getOrders: () => fetchApi<CustomerOrder[]>('/api/customer-orders'),
 
-    getOrder: (id: number) => fetchApi<any>(`/api/customer-orders/${id}`),
+    getOrder: (id: number) => fetchApi<CustomerOrder>(`/api/customer-orders/${id}`),
 
     updateStatus: (id: number, status: string) =>
-      fetchApi<any>(`/api/customer-orders/${id}/status`, {
+      fetchApi<CustomerOrder>(`/api/customer-orders/${id}/status`, {
         method: 'PUT',
         body: JSON.stringify({ status }),
       }),
+
+    // Customer's own orders
+    getMyOrders: () => fetchApi<CustomerOrder[]>('/api/customer-orders/my-orders'),
+
+    getMyOrder: (id: number) => fetchApi<CustomerOrder>(`/api/customer-orders/my-orders/${id}`),
+
+    // Quotation management
+    setQuotation: (id: number, data: {
+      items: Array<{ name: string; description?: string; quantity: number; unitPrice: number }>;
+      notes?: string;
+    }) =>
+      fetchApi<CustomerOrder>(`/api/customer-orders/${id}/quotation`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    respondToQuotation: (id: number, response: 'accept' | 'reject', notes?: string) =>
+      fetchApi<CustomerOrder>(`/api/customer-orders/${id}/respond`, {
+        method: 'PUT',
+        body: JSON.stringify({ response, notes }),
+      }),
+  },
+
+  // ==================
+  // APPOINTMENTS
+  // ==================
+  appointments: {
+    create: (data: {
+      customerName: string;
+      customerPhone: string;
+      customerEmail?: string;
+      contactMethod: 'branch_visit' | 'phone_call';
+      branchId: number;
+      preferredDate: string;
+      preferredTime?: string;
+      description?: string;
+      vehicleInfo?: VehicleInfo;
+    }) =>
+      fetchApi<Appointment>('/api/appointments', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    getAll: (status?: string) => {
+      const query = status ? `?status=${status}` : '';
+      return fetchApi<Appointment[]>(`/api/appointments${query}`);
+    },
+
+    update: (id: number, data: { status?: string; adminNotes?: string }) =>
+      fetchApi<Appointment>(`/api/appointments/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    getMyAppointments: () => fetchApi<Appointment[]>('/api/appointments/my-appointments'),
+  },
+
+  // ==================
+  // PRODUCT ORDERS (Premade Products)
+  // ==================
+  productOrders: {
+    create: (data: {
+      customerName: string;
+      customerPhone: string;
+      customerEmail?: string;
+      customerAddress?: string;
+      items: Array<{ productId: number; quantity: number }>;
+      branchId: number;
+      notes?: string;
+    }) =>
+      fetchApi<ProductOrder>('/api/product-orders', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    getAll: (status?: string) => {
+      const query = status ? `?status=${status}` : '';
+      return fetchApi<ProductOrder[]>(`/api/product-orders${query}`);
+    },
+
+    update: (id: number, data: { status?: string; paymentStatus?: string; notes?: string }) =>
+      fetchApi<ProductOrder>(`/api/product-orders/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    getMyOrders: () => fetchApi<ProductOrder[]>('/api/product-orders/my-orders'),
   },
 
   // ==================
