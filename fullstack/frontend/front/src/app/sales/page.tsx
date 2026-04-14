@@ -1,11 +1,12 @@
 'use client';
 import { useState, useEffect } from 'react';
+import { useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, JobOrder, CustomerOrder } from '@/lib/api';
+import { api, JobOrder, CustomerOrder, ProductOrder } from '@/lib/api';
 import Link from 'next/link';
 
-type UnifiedOrder = (JobOrder | CustomerOrder) & {
-  orderType: 'job' | 'customer';
+type UnifiedOrder = (JobOrder | CustomerOrder | ProductOrder) & {
+  orderType: 'job' | 'customer' | 'product';
   displayId: string;
   displayStatus: string;
 };
@@ -17,13 +18,13 @@ export default function SalesPage() {
   const [filter, setFilter] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState('');
 
-  useEffect(() => {
-    fetchOrders();
-  }, []);
-
-  const fetchOrders = async () => {
+  const fetchOrders = useCallback(async () => {
     try {
       const response = await api.sales.getAllOrders();
+      const productResponse = user && ['administrator', 'supervisor'].includes(user.role)
+        ? await api.productOrders.getAll()
+        : null;
+
       if (response.status === 'success' && response.data) {
         // Combine and mark order types
         const jobOrders: UnifiedOrder[] = response.data.jobOrders.map(jo => ({
@@ -39,9 +40,16 @@ export default function SalesPage() {
           displayId: co.orderNumber,
           displayStatus: co.status
         }));
+
+        const productOrders: UnifiedOrder[] = (productResponse?.data || []).map(po => ({
+          ...po,
+          orderType: 'product' as const,
+          displayId: po.orderNumber,
+          displayStatus: po.status
+        }));
         
         // Merge and sort by date
-        const allOrders = [...jobOrders, ...customerOrders].sort((a, b) => 
+        const allOrders = [...jobOrders, ...customerOrders, ...productOrders].sort((a, b) => 
           new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
         );
         
@@ -53,15 +61,11 @@ export default function SalesPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [user]);
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-PH', {
-      style: 'currency',
-      currency: 'PHP',
-      minimumFractionDigits: 0
-    }).format(amount);
-  };
+  useEffect(() => {
+    fetchOrders();
+  }, [fetchOrders]);
 
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString('en-PH', {
@@ -77,6 +81,7 @@ export default function SalesPage() {
       processing: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
       in_progress: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
       ready_for_installation: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
+      ready: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
       completed: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
       cancelled: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
       voided: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
@@ -88,6 +93,8 @@ export default function SalesPage() {
   const getOrderDescription = (order: UnifiedOrder) => {
     if (order.orderType === 'job') {
       return (order as JobOrder).description || 'N/A';
+    } else if (order.orderType === 'product') {
+      return 'Premade product purchase';
     } else {
       const co = order as CustomerOrder;
       return co.services.map(s => s.type).join(', ') || 'N/A';
@@ -97,6 +104,8 @@ export default function SalesPage() {
   const getOrderAmount = (order: UnifiedOrder) => {
     if (order.orderType === 'job') {
       return (order as JobOrder).totalPrice || 0;
+    } else if (order.orderType === 'product') {
+      return (order as ProductOrder).totalAmount || 0;
     } else {
       return 0; // Customer orders don't have pricing yet
     }
@@ -117,10 +126,12 @@ export default function SalesPage() {
       const vehicleStr = order.vehicleInfo 
         ? `${order.vehicleInfo.year} ${order.vehicleInfo.make} ${order.vehicleInfo.model}`.toLowerCase()
         : '';
+            const orderTypeText = order.orderType === 'product' ? 'premade purchase' : '';
       
       return customerName.includes(searchLower) || 
              orderId.includes(searchLower) || 
-             vehicleStr.includes(searchLower);
+              vehicleStr.includes(searchLower) ||
+              orderTypeText.includes(searchLower);
     }
     
     return true;
@@ -209,6 +220,7 @@ export default function SalesPage() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Vehicle</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Service</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Branch</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Amount</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Date</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Status</th>
                     <th className="px-6 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Actions</th>
@@ -224,9 +236,11 @@ export default function SalesPage() {
                         <span className={`px-2 py-1 text-xs font-medium rounded-full ${
                           order.orderType === 'job' 
                             ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
-                            : 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
+                            : order.orderType === 'customer'
+                              ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
+                              : 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400'
                         }`}>
-                          {order.orderType === 'job' ? 'JOB ORDER' : 'CUSTOMER ORDER'}
+                          {order.orderType === 'job' ? 'JOB ORDER' : order.orderType === 'customer' ? 'CUSTOMER ORDER' : 'PREMADE PURCHASE'}
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
@@ -242,7 +256,14 @@ export default function SalesPage() {
                         {getOrderDescription(order)}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
-                        {order.orderType === 'job' ? (order as JobOrder).branchName : (order as CustomerOrder).branchName || 'N/A'}
+                        {order.orderType === 'job'
+                          ? (order as JobOrder).branchName
+                          : order.orderType === 'customer'
+                            ? (order as CustomerOrder).branchName || 'N/A'
+                            : (order as ProductOrder).branchName || 'N/A'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
+                        {getOrderAmount(order) > 0 ? `₱${getOrderAmount(order).toLocaleString()}` : 'N/A'}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
                         {formatDate(order.createdAt)}
@@ -254,7 +275,7 @@ export default function SalesPage() {
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <Link
-                          href={order.orderType === 'job' ? `/sales/${order.id}` : `/customer-orders/${order.id}`}
+                          href={order.orderType === 'job' ? `/sales/${order.id}` : order.orderType === 'customer' ? `/customer-orders/${order.id}` : `/product-orders/${order.id}`}
                           className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium"
                         >
                           View Details

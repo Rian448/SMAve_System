@@ -155,6 +155,12 @@ export default function Navigation() {
       icon: InventoryIcon,
       roles: ['administrator', 'supervisor']
     },
+    {
+      name: 'Product Orders',
+      path: '/product-orders',
+      icon: SalesIcon,
+      roles: ['administrator', 'supervisor']
+    },
     { 
       name: 'Costing', 
       path: '/costing', 

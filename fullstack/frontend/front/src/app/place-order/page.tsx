@@ -205,6 +205,17 @@ export default function PlaceOrderPage() {
   };
 
   const cartTotal = cart.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
+  const filteredProducts = selectedBranch
+    ? products.filter((product) => product.branchId === selectedBranch)
+    : products;
+
+  useEffect(() => {
+    if (!selectedBranch) {
+      return;
+    }
+
+    setCart((prev) => prev.filter((item) => item.product.branchId === selectedBranch));
+  }, [selectedBranch]);
 
   // Submit product order
   const handleProductOrderSubmit = async (e: React.FormEvent) => {
@@ -664,13 +675,15 @@ export default function PlaceOrderPage() {
                   <div className="text-center py-8 text-zinc-500 dark:text-zinc-400">
                     Loading products...
                   </div>
-                ) : products.length === 0 ? (
+                ) : filteredProducts.length === 0 ? (
                   <div className="text-center py-8 text-zinc-500 dark:text-zinc-400">
-                    No products available at the moment
+                    {selectedBranch
+                      ? 'No premade products available for this branch yet'
+                      : 'Select a branch to view available premade products'}
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {products.map((product) => {
+                    {filteredProducts.map((product) => {
                       const cartItem = cart.find(item => item.product.id === product.id);
                       return (
                         <div

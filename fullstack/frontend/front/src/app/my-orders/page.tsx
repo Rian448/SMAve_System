@@ -1,14 +1,18 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { useAuth, hasAccess } from '@/context/AuthContext';
-import { api, CustomerOrder } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
+import { api, CustomerOrder, ProductOrder } from '@/lib/api';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+
+type OrderTab = 'custom' | 'premade';
 
 export default function MyOrdersPage() {
   const { user, isLoading: authLoading } = useAuth();
   const router = useRouter();
-  const [orders, setOrders] = useState<CustomerOrder[]>([]);
+  const [customOrders, setCustomOrders] = useState<CustomerOrder[]>([]);
+  const [productOrders, setProductOrders] = useState<ProductOrder[]>([]);
+  const [activeTab, setActiveTab] = useState<OrderTab>('custom');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -25,8 +29,13 @@ export default function MyOrdersPage() {
   const fetchOrders = async () => {
     try {
       setLoading(true);
-      const response = await api.customerOrders.getMyOrders();
-      setOrders(response.data || []);
+      const [customResponse, productResponse] = await Promise.all([
+        api.customerOrders.getMyOrders(),
+        api.productOrders.getMyOrders()
+      ]);
+
+      setCustomOrders(customResponse.data || []);
+      setProductOrders(productResponse.data || []);
     } catch (err) {
       setError('Failed to load your orders');
       console.error(err);
@@ -43,6 +52,7 @@ export default function MyOrdersPage() {
       case 'in_progress':
         return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400';
       case 'ready_for_installation':
+      case 'ready':
         return 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400';
       case 'completed':
         return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
@@ -52,6 +62,18 @@ export default function MyOrdersPage() {
         return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
       default:
         return 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400';
+    }
+  };
+
+  const getPaymentStatusColor = (status: string) => {
+    switch (status) {
+      case 'paid':
+        return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
+      case 'partial':
+        return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400';
+      case 'unpaid':
+      default:
+        return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
     }
   };
 
@@ -116,7 +138,6 @@ export default function MyOrdersPage() {
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      {/* Header */}
       <div className="bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <Link href="/" className="text-amber-600 dark:text-amber-400 text-sm font-medium mb-4 inline-block">
@@ -124,7 +145,7 @@ export default function MyOrdersPage() {
           </Link>
           <h1 className="text-3xl font-bold text-zinc-900 dark:text-white">My Orders</h1>
           <p className="text-zinc-600 dark:text-zinc-400 mt-2">
-            Track your orders and respond to quotations
+            Track custom service orders and premade product purchases
           </p>
         </div>
       </div>
@@ -136,8 +157,7 @@ export default function MyOrdersPage() {
           </div>
         )}
 
-        {/* New Order Button */}
-        <div className="mb-6">
+        <div className="mb-6 flex gap-3 flex-wrap">
           <Link
             href="/place-order"
             className="inline-flex items-center px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors font-medium"
@@ -147,112 +167,150 @@ export default function MyOrdersPage() {
             </svg>
             Place New Order
           </Link>
+
+          <button
+            onClick={() => setActiveTab('custom')}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              activeTab === 'custom'
+                ? 'bg-zinc-900 text-white dark:bg-zinc-200 dark:text-zinc-900'
+                : 'bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-800'
+            }`}
+          >
+            Custom Orders ({customOrders.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('premade')}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              activeTab === 'premade'
+                ? 'bg-zinc-900 text-white dark:bg-zinc-200 dark:text-zinc-900'
+                : 'bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-800'
+            }`}
+          >
+            Premade Purchases ({productOrders.length})
+          </button>
         </div>
 
-        {/* Orders List */}
-        {orders.length === 0 ? (
-          <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-12 text-center">
-            <svg className="w-16 h-16 mx-auto text-zinc-300 dark:text-zinc-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
-            </svg>
-            <p className="text-zinc-600 dark:text-zinc-400 mb-4">You haven&apos;t placed any orders yet</p>
-            <Link
-              href="/place-order"
-              className="inline-flex items-center px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors font-medium"
-            >
-              Place Your First Order
-            </Link>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {orders.map((order) => (
-              <div
-                key={order.id}
-                className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-6 hover:shadow-md transition-shadow"
-              >
-                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-4">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3 flex-wrap">
-                      <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">
-                        {order.orderNumber}
-                      </h3>
-                      <span className={`text-xs px-2 py-1 rounded-full font-medium ${getStatusColor(order.status)}`}>
-                        {order.status.replace(/_/g, ' ').toUpperCase()}
-                      </span>
-                      {order.quotationStatus && (
-                        <span className={`text-xs px-2 py-1 rounded-full font-medium ${getQuotationStatusColor(order.quotationStatus)}`}>
-                          {getQuotationStatusLabel(order.quotationStatus)}
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
-                      {new Date(order.createdAt).toLocaleDateString('en-PH', {
-                        year: 'numeric',
-                        month: 'short',
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit'
-                      })}
-                    </p>
-                    <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
-                      Branch: {order.branchName || 'N/A'}
-                    </p>
-                  </div>
+        {activeTab === 'custom' && (
+          <>
+            {customOrders.length === 0 ? (
+              <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-12 text-center">
+                <p className="text-zinc-600 dark:text-zinc-400 mb-4">You have no custom service orders yet</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {customOrders.map((order) => (
+                  <div
+                    key={order.id}
+                    className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-6 hover:shadow-md transition-shadow"
+                  >
+                    <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-4">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-3 flex-wrap">
+                          <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">{order.orderNumber}</h3>
+                          <span className={`text-xs px-2 py-1 rounded-full font-medium ${getStatusColor(order.status)}`}>
+                            {order.status.replace(/_/g, ' ').toUpperCase()}
+                          </span>
+                          {order.quotationStatus && (
+                            <span className={`text-xs px-2 py-1 rounded-full font-medium ${getQuotationStatusColor(order.quotationStatus)}`}>
+                              {getQuotationStatusLabel(order.quotationStatus)}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+                          {new Date(order.createdAt).toLocaleDateString('en-PH', {
+                            year: 'numeric',
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })}
+                        </p>
+                        <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+                          Branch: {order.branchName || 'N/A'}
+                        </p>
+                      </div>
 
-                  {/* Action buttons based on quotation status */}
-                  <div className="flex gap-2">
-                    {order.quotationStatus === 'quoted' && (
-                      <Link
-                        href={`/my-orders/${order.id}`}
-                        className="inline-flex items-center px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors font-medium text-sm"
-                      >
-                        View & Respond to Quotation
-                      </Link>
-                    )}
-                    {order.quotationStatus !== 'quoted' && (
                       <Link
                         href={`/my-orders/${order.id}`}
                         className="inline-flex items-center px-4 py-2 bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors font-medium text-sm"
                       >
                         View Details
                       </Link>
-                    )}
-                  </div>
-                </div>
+                    </div>
 
-                {/* Vehicle Info */}
-                {order.vehicleInfo && (
-                  <div className="mb-3 pb-3 border-b border-zinc-200 dark:border-zinc-800">
-                    <p className="text-sm text-zinc-900 dark:text-white">
-                      <span className="font-medium">Vehicle:</span> {order.vehicleInfo.year} {order.vehicleInfo.make} {order.vehicleInfo.model}
-                      {order.vehicleInfo.plateNumber && ` (${order.vehicleInfo.plateNumber})`}
-                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {order.services?.map((service, index) => (
+                        <span
+                          key={index}
+                          className="text-xs px-2 py-1 bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 rounded-md"
+                        >
+                          {getServiceLabel(service.type)}
+                        </span>
+                      ))}
+                    </div>
                   </div>
-                )}
-
-                {/* Services */}
-                <div className="flex flex-wrap gap-2">
-                  {order.services?.map((service, index) => (
-                    <span
-                      key={index}
-                      className="text-xs px-2 py-1 bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 rounded-md"
-                    >
-                      {getServiceLabel(service.type)}
-                    </span>
-                  ))}
-                </div>
-
-                {/* Quotation Total if available */}
-                {order.quotationStatus !== 'pending_quotation' && order.quotationTotal && order.quotationTotal > 0 && (
-                  <div className="mt-4 pt-4 border-t border-zinc-200 dark:border-zinc-800">
-                    <p className="text-lg font-semibold text-zinc-900 dark:text-white">
-                      Quotation Total: <span className="text-amber-600">₱{order.quotationTotal.toLocaleString()}</span>
-                    </p>
-                  </div>
-                )}
+                ))}
               </div>
-            ))}
-          </div>
+            )}
+          </>
+        )}
+
+        {activeTab === 'premade' && (
+          <>
+            {productOrders.length === 0 ? (
+              <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-12 text-center">
+                <p className="text-zinc-600 dark:text-zinc-400 mb-4">You have no premade product purchases yet</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {productOrders.map((order) => (
+                  <div
+                    key={order.id}
+                    className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-6"
+                  >
+                    <div className="flex items-start justify-between gap-4 mb-4">
+                      <div>
+                        <div className="flex items-center gap-3 flex-wrap">
+                          <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">{order.orderNumber}</h3>
+                          <span className={`text-xs px-2 py-1 rounded-full font-medium ${getStatusColor(order.status)}`}>
+                            {order.status.toUpperCase()}
+                          </span>
+                          <span className={`text-xs px-2 py-1 rounded-full font-medium ${getPaymentStatusColor(order.paymentStatus)}`}>
+                            PAYMENT: {order.paymentStatus.toUpperCase()}
+                          </span>
+                        </div>
+                        <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+                          {new Date(order.createdAt).toLocaleDateString('en-PH', {
+                            year: 'numeric',
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })}
+                        </p>
+                        <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+                          Branch: {order.branchName || 'N/A'}
+                        </p>
+                      </div>
+
+                      <p className="text-lg font-semibold text-amber-600">₱{order.totalAmount.toLocaleString()}</p>
+                    </div>
+
+                    <div className="space-y-2">
+                      {order.items.map((item, index) => (
+                        <div key={index} className="flex items-center justify-between text-sm">
+                          <span className="text-zinc-800 dark:text-zinc-200">
+                            {item.quantity}x {item.name}
+                          </span>
+                          <span className="text-zinc-600 dark:text-zinc-400">₱{item.total.toLocaleString()}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </main>
     </div>

@@ -1,8 +1,8 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { api } from '@/lib/api';
+import { api, type FinishedGood } from '@/lib/api';
 
 interface MaterialItem {
   id: string;
@@ -17,12 +17,25 @@ interface LaborItem {
   rate: number;
 }
 
+interface PremadeSelection {
+  id: string;
+  productId: number | '';
+  quantity: number;
+}
+
 export default function NewJobOrderPage() {
   const router = useRouter();
   const { user } = useAuth();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [orderType, setOrderType] = useState<'normal' | 'premade'>('normal');
   const [step, setStep] = useState(1);
+  const premadeSelectionIdRef = useRef(1);
+  const [premadeSelections, setPremadeSelections] = useState<PremadeSelection[]>([
+    { id: 'premade-1', productId: '', quantity: 1 }
+  ]);
+  const [premadeItems, setPremadeItems] = useState<FinishedGood[]>([]);
+  const [premadeLoading, setPremadeLoading] = useState(false);
   
   // Customer Information
   const [customerName, setCustomerName] = useState('');
@@ -63,6 +76,71 @@ export default function NewJobOrderPage() {
   const [downPayment, setDownPayment] = useState(0);
   const [notes, setNotes] = useState('');
 
+  useEffect(() => {
+    const loadPremadeItems = async () => {
+      if (orderType !== 'premade') {
+        return;
+      }
+
+      setPremadeLoading(true);
+      try {
+        const response = await api.inventory.getFinishedGoods(
+          user?.branchId ? { branchId: user.branchId } : undefined
+        );
+        setPremadeItems(response.data || []);
+      } catch (err) {
+        console.error(err);
+        setError('Failed to load premade inventory items.');
+      } finally {
+        setPremadeLoading(false);
+      }
+    };
+
+    loadPremadeItems();
+  }, [orderType, user?.branchId]);
+
+  const addPremadeSelection = () => {
+    premadeSelectionIdRef.current += 1;
+    setPremadeSelections((prev) => [
+      ...prev,
+      { id: `premade-${premadeSelectionIdRef.current}`, productId: '', quantity: 1 }
+    ]);
+  };
+
+  const removePremadeSelection = (id: string) => {
+    setPremadeSelections((prev) => {
+      if (prev.length === 1) {
+        return prev;
+      }
+      return prev.filter((selection) => selection.id !== id);
+    });
+  };
+
+  const updatePremadeSelection = (
+    id: string,
+    field: keyof PremadeSelection,
+    value: number | ''
+  ) => {
+    setPremadeSelections((prev) =>
+      prev.map((selection) =>
+        selection.id === id ? { ...selection, [field]: value } : selection
+      )
+    );
+  };
+
+  const premadeTotal = premadeSelections.reduce((sum, selection) => {
+    if (!selection.productId) {
+      return sum;
+    }
+
+    const item = premadeItems.find((premadeItem) => premadeItem.id === selection.productId);
+    if (!item) {
+      return sum;
+    }
+
+    return sum + (item.price * selection.quantity);
+  }, 0);
+
   const addMaterial = () => {
     setMaterials([...materials, { id: Date.now().toString(), name: '', quantity: 1, unitPrice: 0 }]);
   };
@@ -101,6 +179,109 @@ export default function NewJobOrderPage() {
     e.preventDefault();
     setLoading(true);
     setError('');
+
+    if (orderType === 'premade') {
+      const selectedPremadeItems = premadeSelections.filter(
+        (selection) => selection.productId && selection.quantity > 0
+      );
+
+      if (!customerName.trim() || !customerPhone.trim()) {
+        setError('Customer name and phone are required for premade orders.');
+        setLoading(false);
+        return;
+      }
+
+      if (selectedPremadeItems.length === 0) {
+        setError('Please select at least one premade inventory item.');
+        setLoading(false);
+        return;
+      }
+
+      const requestedByProduct = new Map<number, number>();
+      for (const selection of selectedPremadeItems) {
+        const productId = selection.productId as number;
+        requestedByProduct.set(
+          productId,
+          (requestedByProduct.get(productId) || 0) + selection.quantity
+        );
+      }
+
+      for (const [productId, totalRequested] of requestedByProduct.entries()) {
+        const product = premadeItems.find((item) => item.id === productId);
+        if (!product) {
+          setError('One or more selected premade items are no longer available.');
+          setLoading(false);
+          return;
+        }
+
+        if (totalRequested > Number(product.quantity)) {
+          setError(`Requested quantity for ${product.name} exceeds available stock (${product.quantity}).`);
+          setLoading(false);
+          return;
+        }
+      }
+
+      try {
+        const selectedProducts = selectedPremadeItems
+          .map((selection) => premadeItems.find((item) => item.id === selection.productId))
+          .filter((item): item is FinishedGood => Boolean(item));
+
+        if (selectedProducts.length === 0) {
+          setError('Selected finished goods are no longer available. Please reselect items.');
+          setLoading(false);
+          return;
+        }
+
+        const inferredBranchId = selectedProducts[0].branchId;
+        const mixedBranch = selectedProducts.some((item) => item.branchId !== inferredBranchId);
+        if (mixedBranch) {
+          setError('Please select finished goods from one branch only.');
+          setLoading(false);
+          return;
+        }
+
+        const branchId = user?.branchId || inferredBranchId;
+
+        if (user?.branchId && user.branchId !== inferredBranchId) {
+          setError('Selected finished goods do not match your assigned branch.');
+          setLoading(false);
+          return;
+        }
+
+        const premadeNotes = [
+          notes,
+          `Order Source: Walk-in`,
+          `Payment Method: ${paymentMethod}`
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+        await api.productOrders.create({
+          customerName,
+          customerPhone,
+          customerEmail,
+          customerAddress,
+          branchId,
+          notes: premadeNotes,
+          items: selectedPremadeItems.map((selection) => ({
+            productId: selection.productId as number,
+            quantity: selection.quantity
+          }))
+        });
+
+        router.push('/product-orders');
+      } catch (err) {
+        const errorMessage = err instanceof Error && err.message
+          ? err.message
+          : 'Failed to create premade order. Please try again.';
+        setError(errorMessage);
+        console.error(err);
+      } finally {
+        setLoading(false);
+      }
+
+      return;
+    }
 
     // Build services array
     const selectedServices = [];
@@ -159,128 +340,208 @@ export default function NewJobOrderPage() {
     }
   };
 
+  const renderPremadeForm = () => {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h3 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">Walk-in Premade Order</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                Customer Name *
+              </label>
+              <input
+                type="text"
+                value={customerName}
+                onChange={(e) => setCustomerName(e.target.value)}
+                required
+                className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                placeholder="Walk-in customer name"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                Phone Number *
+              </label>
+              <input
+                type="tel"
+                value={customerPhone}
+                onChange={(e) => setCustomerPhone(e.target.value)}
+                required
+                className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                placeholder="09XX XXX XXXX"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                Email Address
+              </label>
+              <input
+                type="email"
+                value={customerEmail}
+                onChange={(e) => setCustomerEmail(e.target.value)}
+                className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                placeholder="customer@email.com"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                Address
+              </label>
+              <input
+                type="text"
+                value={customerAddress}
+                onChange={(e) => setCustomerAddress(e.target.value)}
+                className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                placeholder="Customer address"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Finished Goods</h3>
+            <button
+              type="button"
+              onClick={addPremadeSelection}
+              className="inline-flex items-center px-3 py-1.5 bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 rounded-lg text-sm font-medium hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors"
+            >
+              Add Item
+            </button>
+          </div>
+
+          {premadeLoading ? (
+            <div className="text-sm text-zinc-500 dark:text-zinc-400">Loading premade inventory...</div>
+          ) : (
+            <>
+              {premadeItems.length === 0 && (
+                <div className="text-sm text-zinc-500 dark:text-zinc-400 mb-3">
+                  No finished goods found in inventory.
+                </div>
+              )}
+              <div className="space-y-3">
+              {premadeSelections.map((selection) => {
+                const selectedItem = premadeItems.find((item) => item.id === selection.productId);
+
+                return (
+                  <div
+                    key={selection.id}
+                    className="grid grid-cols-1 md:grid-cols-12 gap-3 p-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg"
+                  >
+                    <div className="md:col-span-7">
+                      <select
+                        value={selection.productId}
+                        onChange={(e) => updatePremadeSelection(selection.id, 'productId', e.target.value ? Number(e.target.value) : '')}
+                        className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
+                        disabled={premadeItems.length === 0}
+                      >
+                        <option value="">Select finished good item</option>
+                        {premadeItems.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.name} ({item.sku}) - Stock: {item.quantity} - {item.price.toLocaleString()}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="md:col-span-2">
+                      <input
+                        type="number"
+                        min={1}
+                        max={selectedItem ? Number(selectedItem.quantity) : undefined}
+                        value={selection.quantity}
+                        onChange={(e) => {
+                          const nextValue = Math.max(1, parseInt(e.target.value) || 1);
+                          const boundedValue = selectedItem
+                            ? Math.min(nextValue, Number(selectedItem.quantity))
+                            : nextValue;
+                          updatePremadeSelection(selection.id, 'quantity', boundedValue);
+                        }}
+                        className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
+                      />
+                    </div>
+                    <div className="md:col-span-2 flex items-center text-sm font-medium text-zinc-900 dark:text-white">
+                      {selectedItem ? `₱${(selectedItem.price * selection.quantity).toLocaleString()}` : '-'}
+                    </div>
+                    <div className="md:col-span-1 flex items-center justify-end">
+                      <button
+                        type="button"
+                        onClick={() => removePremadeSelection(selection.id)}
+                        disabled={premadeSelections.length === 1}
+                        className="p-2 text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        X
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4 flex justify-between items-center">
+          <span className="text-sm text-zinc-600 dark:text-zinc-400">Premade Order Total</span>
+          <span className="text-lg font-semibold text-zinc-900 dark:text-white">₱{premadeTotal.toLocaleString()}</span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div>
+            <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+              Payment Method
+            </label>
+            <select
+              value={paymentMethod}
+              onChange={(e) => setPaymentMethod(e.target.value)}
+              className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+            >
+              <option value="cash">Cash</option>
+              <option value="gcash">GCash</option>
+              <option value="bank_transfer">Bank Transfer</option>
+              <option value="credit_card">Credit Card</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+              Additional Notes
+            </label>
+            <input
+              type="text"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+              placeholder="Walk-in order notes"
+            />
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderStep = () => {
     switch (step) {
       case 1:
         return (
           <div className="space-y-6">
-            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Customer Information</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Customer Name *
-                </label>
-                <input
-                  type="text"
-                  value={customerName}
-                  onChange={(e) => setCustomerName(e.target.value)}
-                  required
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="Juan dela Cruz"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Phone Number *
-                </label>
-                <input
-                  type="tel"
-                  value={customerPhone}
-                  onChange={(e) => setCustomerPhone(e.target.value)}
-                  required
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="09XX XXX XXXX"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Email Address
-                </label>
-                <input
-                  type="email"
-                  value={customerEmail}
-                  onChange={(e) => setCustomerEmail(e.target.value)}
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="customer@email.com"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Address
-                </label>
-                <input
-                  type="text"
-                  value={customerAddress}
-                  onChange={(e) => setCustomerAddress(e.target.value)}
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="123 Main St, City"
-                />
-              </div>
+            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Customer Name</h3>
+            <div>
+              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                Customer Name *
+              </label>
+              <input
+                type="text"
+                value={customerName}
+                onChange={(e) => setCustomerName(e.target.value)}
+                required
+                className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                placeholder="Juan dela Cruz"
+              />
             </div>
           </div>
         );
       
       case 2:
-        return (
-          <div className="space-y-6">
-            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Vehicle Information</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Vehicle Make *
-                </label>
-                <input
-                  type="text"
-                  value={vehicleMake}
-                  onChange={(e) => setVehicleMake(e.target.value)}
-                  required
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="Toyota"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Vehicle Model *
-                </label>
-                <input
-                  type="text"
-                  value={vehicleModel}
-                  onChange={(e) => setVehicleModel(e.target.value)}
-                  required
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="Fortuner"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Year *
-                </label>
-                <input
-                  type="text"
-                  value={vehicleYear}
-                  onChange={(e) => setVehicleYear(e.target.value)}
-                  required
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="2023"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Plate Number
-                </label>
-                <input
-                  type="text"
-                  value={vehiclePlate}
-                  onChange={(e) => setVehiclePlate(e.target.value)}
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="ABC 1234"
-                />
-              </div>
-            </div>
-          </div>
-        );
-      
-      case 3:
         return (
           <div className="space-y-6">
             <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Service Details</h3>
@@ -527,7 +788,113 @@ export default function NewJobOrderPage() {
           </div>
         );
       
+      case 3:
+        return (
+          <div className="space-y-6">
+            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Customer Information</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  Phone Number *
+                </label>
+                <input
+                  type="tel"
+                  value={customerPhone}
+                  onChange={(e) => setCustomerPhone(e.target.value)}
+                  required
+                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="09XX XXX XXXX"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  Email Address
+                </label>
+                <input
+                  type="email"
+                  value={customerEmail}
+                  onChange={(e) => setCustomerEmail(e.target.value)}
+                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="customer@email.com"
+                />
+              </div>
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  Address
+                </label>
+                <input
+                  type="text"
+                  value={customerAddress}
+                  onChange={(e) => setCustomerAddress(e.target.value)}
+                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="123 Main St, City"
+                />
+              </div>
+            </div>
+          </div>
+        );
+      
       case 4:
+        return (
+          <div className="space-y-6">
+            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Vehicle Information</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  Vehicle Make *
+                </label>
+                <input
+                  type="text"
+                  value={vehicleMake}
+                  onChange={(e) => setVehicleMake(e.target.value)}
+                  required
+                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="Toyota"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  Vehicle Model *
+                </label>
+                <input
+                  type="text"
+                  value={vehicleModel}
+                  onChange={(e) => setVehicleModel(e.target.value)}
+                  required
+                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="Fortuner"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  Year *
+                </label>
+                <input
+                  type="text"
+                  value={vehicleYear}
+                  onChange={(e) => setVehicleYear(e.target.value)}
+                  required
+                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="2023"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  Plate Number
+                </label>
+                <input
+                  type="text"
+                  value={vehiclePlate}
+                  onChange={(e) => setVehiclePlate(e.target.value)}
+                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="ABC 1234"
+                />
+              </div>
+            </div>
+          </div>
+        );
+      
+      case 5:
         return (
           <div className="space-y-6">
             <div>
@@ -654,7 +1021,7 @@ export default function NewJobOrderPage() {
           </div>
         );
       
-      case 5:
+      case 6:
         return (
           <div className="space-y-6">
             <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Payment & Summary</h3>
@@ -758,40 +1125,73 @@ export default function NewJobOrderPage() {
         </div>
 
         {/* Progress Steps */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between">
-            {[
-              { num: 1, label: 'Customer' },
-              { num: 2, label: 'Vehicle' },
-              { num: 3, label: 'Service' },
-              { num: 4, label: 'Costing' },
-              { num: 5, label: 'Payment' }
-            ].map((s, index) => (
-              <div key={s.num} className="flex items-center">
-                <button
-                  onClick={() => setStep(s.num)}
-                  className={`flex items-center justify-center w-10 h-10 rounded-full font-medium transition-colors ${
-                    step >= s.num
-                      ? 'bg-amber-600 text-white'
-                      : 'bg-zinc-200 dark:bg-zinc-700 text-zinc-500 dark:text-zinc-400'
-                  }`}
-                >
-                  {s.num}
-                </button>
-                <span className={`ml-2 text-sm font-medium hidden sm:block ${
-                  step >= s.num ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-500 dark:text-zinc-400'
-                }`}>
-                  {s.label}
-                </span>
-                {index < 4 && (
-                  <div className={`w-8 sm:w-16 h-1 mx-2 rounded ${
-                    step > s.num ? 'bg-amber-600' : 'bg-zinc-200 dark:bg-zinc-700'
-                  }`} />
-                )}
-              </div>
-            ))}
+        <div className="mb-6 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-4">
+          <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-3">Order Type</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => setOrderType('normal')}
+              className={`text-left px-4 py-3 rounded-lg border transition-colors ${
+                orderType === 'normal'
+                  ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300'
+                  : 'border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800'
+              }`}
+            >
+              <div className="font-semibold">Normal Job Order</div>
+              <div className="text-xs opacity-80">Custom service work order flow</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setOrderType('premade')}
+              className={`text-left px-4 py-3 rounded-lg border transition-colors ${
+                orderType === 'premade'
+                  ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300'
+                  : 'border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800'
+              }`}
+            >
+              <div className="font-semibold">Premade Order</div>
+              <div className="text-xs opacity-80">Walk-in sale from finished goods inventory</div>
+            </button>
           </div>
         </div>
+
+        {orderType === 'normal' && (
+          <div className="mb-8">
+            <div className="flex items-center justify-between">
+              {[
+                { num: 1, label: 'Name' },
+                { num: 2, label: 'Service' },
+                { num: 3, label: 'Customer Info' },
+                { num: 4, label: 'Vehicle' },
+                { num: 5, label: 'Costing' },
+                { num: 6, label: 'Payment' }
+              ].map((s, index) => (
+                <div key={s.num} className="flex items-center">
+                  <button
+                    onClick={() => setStep(s.num)}
+                    className={`flex items-center justify-center w-10 h-10 rounded-full font-medium transition-colors ${
+                      step >= s.num
+                        ? 'bg-amber-600 text-white'
+                        : 'bg-zinc-200 dark:bg-zinc-700 text-zinc-500 dark:text-zinc-400'
+                    }`}
+                  >
+                    {s.num}
+                  </button>
+                  <span className={`ml-2 text-sm font-medium hidden sm:block ${
+                    step >= s.num ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-500 dark:text-zinc-400'
+                  }`}>
+                    {s.label}
+                  </span>
+                  {index < 5 && (
+                    <div className={`w-8 sm:w-16 h-1 mx-2 rounded ${
+                      step > s.num ? 'bg-amber-600' : 'bg-zinc-200 dark:bg-zinc-700'
+                    }`} />
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Form */}
         <form onSubmit={handleSubmit}>
@@ -801,32 +1201,51 @@ export default function NewJobOrderPage() {
                 {error}
               </div>
             )}
-            {renderStep()}
+            {orderType === 'normal' ? renderStep() : renderPremadeForm()}
           </div>
 
           {/* Navigation Buttons */}
-          <div className="flex justify-between">
-            <button
-              type="button"
-              onClick={() => setStep(step - 1)}
-              disabled={step === 1}
-              className={`px-6 py-2 rounded-lg font-medium transition-colors ${
-                step === 1
-                  ? 'bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-600 cursor-not-allowed'
-                  : 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
-              }`}
-            >
-              Previous
-            </button>
-            {step < 5 ? (
+          {orderType === 'normal' ? (
+            <div className="flex justify-between">
               <button
                 type="button"
-                onClick={() => setStep(step + 1)}
-                className="px-6 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors"
+                onClick={() => setStep(step - 1)}
+                disabled={step === 1}
+                className={`px-6 py-2 rounded-lg font-medium transition-colors ${
+                  step === 1
+                    ? 'bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-600 cursor-not-allowed'
+                    : 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                }`}
               >
-                Next
+                Previous
               </button>
-            ) : (
+              {step < 6 ? (
+                <button
+                  type="button"
+                  onClick={() => setStep(step + 1)}
+                  className="px-6 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors"
+                >
+                  Next
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="px-6 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center"
+                >
+                  {loading ? (
+                    <>
+                      <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></div>
+                      Creating...
+                    </>
+                  ) : (
+                    'Create Job Order'
+                  )}
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="flex justify-end">
               <button
                 type="submit"
                 disabled={loading}
@@ -838,11 +1257,11 @@ export default function NewJobOrderPage() {
                     Creating...
                   </>
                 ) : (
-                  'Create Job Order'
+                  'Create Premade Order'
                 )}
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </form>
       </main>
     </div>

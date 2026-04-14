@@ -2461,17 +2461,37 @@ def update_product_order(order_id):
     updated_fields = []
 
     if 'status' in data:
-        if data['status'] not in valid_statuses:
+        incoming_status = data['status']
+        if incoming_status in {'done', 'finished'}:
+            incoming_status = 'completed'
+
+        if incoming_status not in valid_statuses:
             return jsonify({'status': 'error', 'message': 'Invalid status'}), 400
-        if order.status != data['status']:
-            updated_fields.append(f"status: {order.status} -> {data['status']}")
-        order.status = data['status']
-        # If completed, update inventory
-        if data['status'] == 'completed':
+        previous_status = order.status
+        if previous_status != incoming_status:
+            updated_fields.append(f"status: {previous_status} -> {incoming_status}")
+        order.status = incoming_status
+
+        # Deduct inventory only once when transitioning into completed.
+        if previous_status != 'completed' and incoming_status == 'completed':
+            stock_deductions = []
             for item in order.items:
                 product = PremadeProduct.query.get(item['productId'])
-                if product:
-                    product.quantity = max(0, float(product.quantity) - float(item['quantity']))
+                if not product:
+                    return jsonify({'status': 'error', 'message': f"Product with ID {item['productId']} not found"}), 400
+
+                requested_qty = float(item.get('quantity', 0))
+                current_qty = float(product.quantity)
+                if current_qty < requested_qty:
+                    return jsonify({
+                        'status': 'error',
+                        'message': f"Cannot complete order. Insufficient stock for {product.name}. Current stock: {current_qty:g}, required: {requested_qty:g}"
+                    }), 400
+
+                stock_deductions.append((product, requested_qty))
+
+            for product, requested_qty in stock_deductions:
+                product.quantity = float(product.quantity) - requested_qty
     
     if 'paymentStatus' in data:
         if data['paymentStatus'] not in valid_payment_statuses:
