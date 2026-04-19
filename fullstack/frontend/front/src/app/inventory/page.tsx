@@ -1,16 +1,18 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, RawMaterial, FinishedGood } from '@/lib/api';
+import { api, RawMaterial, FinishedGood, MaterialUsageLog, RawMaterialSummaryGroup } from '@/lib/api';
 import Link from 'next/link';
 
-type TabType = 'raw-materials' | 'finished-goods' | 'purchase-orders';
+type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'purchase-orders';
 
 export default function InventoryPage() {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<TabType>('raw-materials');
   const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([]);
+  const [rawMaterialGroups, setRawMaterialGroups] = useState<RawMaterialSummaryGroup[]>([]);
   const [finishedGoods, setFinishedGoods] = useState<FinishedGood[]>([]);
+  const [materialUsageLogs, setMaterialUsageLogs] = useState<MaterialUsageLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -23,6 +25,9 @@ export default function InventoryPage() {
     lengthUnit: 'yards'
   });
   const [editingMaterialId, setEditingMaterialId] = useState<number | null>(null);
+  const [expandedMaterialKey, setExpandedMaterialKey] = useState<string | null>(null);
+  const [expandedMaterialDetails, setExpandedMaterialDetails] = useState<Record<string, RawMaterialSummaryGroup>>({});
+  const [loadingDetailKey, setLoadingDetailKey] = useState<string | null>(null);
   const [editMaterial, setEditMaterial] = useState({
     quantity: '',
     price: '',
@@ -35,16 +40,16 @@ export default function InventoryPage() {
     name: '',
     quantity: '',
     price: '',
-    unit: 'pcs',
     category: 'General'
   });
+  const [premadeMaterials, setPremadeMaterials] = useState<Array<{ materialId: string; quantityUsed: string }>>([
+    { materialId: '', quantityUsed: '' }
+  ]);
   const [editingPremadeId, setEditingPremadeId] = useState<number | null>(null);
   const [editPremade, setEditPremade] = useState({
     quantity: '',
-    price: '',
-    unit: 'pcs'
+    price: ''
   });
-  const premadeUnits = ['pcs', 'sets', 'pairs', 'boxes'];
 
   useEffect(() => {
     fetchInventory();
@@ -54,11 +59,22 @@ export default function InventoryPage() {
     setLoading(true);
     try {
       if (activeTab === 'raw-materials') {
-        const response = await api.inventory.getRawMaterials();
-        setRawMaterials(response.data || []);
+        const [summaryResponse, materialsResponse] = await Promise.all([
+          api.inventory.getRawMaterialsSummary({ branchId: user?.branchId, includeComponents: false }),
+          api.inventory.getRawMaterials({ branchId: user?.branchId })
+        ]);
+        setRawMaterialGroups(summaryResponse.data || []);
+        setRawMaterials(materialsResponse.data || []);
       } else if (activeTab === 'finished-goods') {
-        const response = await api.inventory.getFinishedGoods();
-        setFinishedGoods(response.data || []);
+        const [finishedGoodsResponse, rawMaterialsResponse] = await Promise.all([
+          api.inventory.getFinishedGoods(),
+          api.inventory.getRawMaterials({ branchId: user?.branchId })
+        ]);
+        setFinishedGoods(finishedGoodsResponse.data || []);
+        setRawMaterials(rawMaterialsResponse.data || []);
+      } else if (activeTab === 'material-usage') {
+        const response = await api.inventory.getMaterialUsage({ branchId: user?.branchId });
+        setMaterialUsageLogs(response.data || []);
       }
     } catch (error) {
       console.error('Error fetching inventory:', error);
@@ -81,7 +97,7 @@ export default function InventoryPage() {
     const lengthValue = Number(newMaterial.lengthValue);
 
     if (Number.isNaN(quantity) || Number.isNaN(price) || Number.isNaN(lengthValue)) {
-      setFormError('Amount, price, and length must be valid numbers.');
+      setFormError('Quantity, price, and length per quantity must be valid numbers.');
       return;
     }
 
@@ -134,7 +150,7 @@ export default function InventoryPage() {
     const lengthValue = Number(editMaterial.lengthValue);
 
     if (Number.isNaN(quantity) || Number.isNaN(price) || Number.isNaN(lengthValue)) {
-      setFormError('Amount, price, and length must be valid numbers.');
+      setFormError('Quantity, price, and length per quantity must be valid numbers.');
       return;
     }
 
@@ -174,25 +190,45 @@ export default function InventoryPage() {
       return;
     }
 
+    const parsedMaterialsUsed: Array<{ materialId: number; quantityUsed: number }> = [];
+    for (let index = 0; index < premadeMaterials.length; index += 1) {
+      const entry = premadeMaterials[index];
+      const materialId = Number(entry.materialId);
+      const quantityUsed = Number(entry.quantityUsed);
+
+      if (!materialId || Number.isNaN(quantityUsed) || quantityUsed <= 0) {
+        setFormError(`Please select a material and enter valid quantity for row ${index + 1}.`);
+        return;
+      }
+
+      parsedMaterialsUsed.push({ materialId, quantityUsed });
+    }
+
+    if (parsedMaterialsUsed.length === 0) {
+      setFormError('Please add at least one material used.');
+      return;
+    }
+
     setSaving(true);
     try {
       await api.inventory.createFinishedGood({
         name: newPremade.name.trim(),
         quantity,
-        unit: newPremade.unit,
+        unit: 'pcs',
         category: newPremade.category,
         price,
         cost: 0,
-        branchId: user?.branchId || 1
+        branchId: user?.branchId || 1,
+        materialsUsed: parsedMaterialsUsed
       });
 
       setNewPremade({
         name: '',
         quantity: '',
         price: '',
-        unit: 'pcs',
         category: 'General'
       });
+      setPremadeMaterials([{ materialId: '', quantityUsed: '' }]);
 
       await fetchInventory();
     } catch (error: any) {
@@ -202,12 +238,32 @@ export default function InventoryPage() {
     }
   };
 
+  const addPremadeMaterialRow = () => {
+    setPremadeMaterials((prev) => [...prev, { materialId: '', quantityUsed: '' }]);
+  };
+
+  const removePremadeMaterialRow = (index: number) => {
+    setPremadeMaterials((prev) => {
+      if (prev.length === 1) return prev;
+      return prev.filter((_, i) => i !== index);
+    });
+  };
+
+  const updatePremadeMaterialRow = (
+    index: number,
+    field: 'materialId' | 'quantityUsed',
+    value: string
+  ) => {
+    setPremadeMaterials((prev) =>
+      prev.map((entry, i) => (i === index ? { ...entry, [field]: value } : entry))
+    );
+  };
+
   const startEditPremade = (item: FinishedGood) => {
     setEditingPremadeId(item.id);
     setEditPremade({
       quantity: String(item.quantity),
-      price: String(item.price),
-      unit: item.unit || 'pcs'
+      price: String(item.price)
     });
   };
 
@@ -227,7 +283,7 @@ export default function InventoryPage() {
       await api.inventory.updateFinishedGood(itemId, {
         quantity,
         price,
-        unit: editPremade.unit
+        unit: 'pcs'
       });
 
       setEditingPremadeId(null);
@@ -256,11 +312,41 @@ export default function InventoryPage() {
     return { label: 'In Stock', class: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' };
   };
 
-  const filteredRawMaterials = rawMaterials.filter(item =>
-    item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    item.category.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    item.supplier?.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const groupedRawMaterials = useMemo(() => {
+    return rawMaterialGroups.filter((group) => {
+      const q = searchTerm.toLowerCase();
+      if (!q) return true;
+      return (
+        group.name.toLowerCase().includes(q) ||
+        group.category.toLowerCase().includes(q) ||
+        (group.supplier || '').toLowerCase().includes(q)
+      );
+    });
+  }, [rawMaterialGroups, searchTerm]);
+
+  const handleToggleMaterialDetails = async (group: RawMaterialSummaryGroup) => {
+    if (expandedMaterialKey === group.key) {
+      setExpandedMaterialKey(null);
+      return;
+    }
+
+    setExpandedMaterialKey(group.key);
+    if (expandedMaterialDetails[group.key]) {
+      return;
+    }
+
+    setLoadingDetailKey(group.key);
+    try {
+      const response = await api.inventory.getRawMaterialGroupDetail(group.key, { branchId: user?.branchId });
+      if (response.status === 'success' && response.data) {
+        setExpandedMaterialDetails((prev) => ({ ...prev, [group.key]: response.data }));
+      }
+    } catch (error: any) {
+      setFormError(error?.message || 'Failed to load material breakdown.');
+    } finally {
+      setLoadingDetailKey(null);
+    }
+  };
 
   const filteredFinishedGoods = finishedGoods.filter(item =>
     item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -276,6 +362,11 @@ export default function InventoryPage() {
     { id: 'finished-goods' as TabType, name: 'Finished Goods', icon: (
       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+      </svg>
+    )},
+    { id: 'material-usage' as TabType, name: 'Material Usage', icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
       </svg>
     )},
     { id: 'purchase-orders' as TabType, name: 'Purchase Orders', icon: (
@@ -332,7 +423,7 @@ export default function InventoryPage() {
                 step="0.01"
                 value={newMaterial.quantity}
                 onChange={(e) => setNewMaterial((prev) => ({ ...prev, quantity: e.target.value }))}
-                placeholder="Amount"
+                placeholder="Quantity"
                 className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
               />
               <input
@@ -351,7 +442,7 @@ export default function InventoryPage() {
                   step="0.01"
                   value={newMaterial.lengthValue}
                   onChange={(e) => setNewMaterial((prev) => ({ ...prev, lengthValue: e.target.value }))}
-                  placeholder="Length"
+                  placeholder="Length per quantity"
                   className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
                 />
                 <select
@@ -407,15 +498,6 @@ export default function InventoryPage() {
                 className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
               />
               <div className="flex gap-2">
-                <select
-                  value={newPremade.unit}
-                  onChange={(e) => setNewPremade((prev) => ({ ...prev, unit: e.target.value }))}
-                  className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
-                >
-                  {premadeUnits.map((unit) => (
-                    <option key={unit} value={unit}>{unit}</option>
-                  ))}
-                </select>
                 <input
                   type="text"
                   value={newPremade.category}
@@ -424,6 +506,56 @@ export default function InventoryPage() {
                   className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
                 />
               </div>
+            </div>
+
+            <div className="mt-4">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Materials Used (Required)</h3>
+                <button
+                  type="button"
+                  onClick={addPremadeMaterialRow}
+                  className="text-sm text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 font-medium"
+                >
+                  + Add Material
+                </button>
+              </div>
+              <div className="space-y-2">
+                {premadeMaterials.map((entry, index) => (
+                  <div key={index} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center">
+                    <select
+                      value={entry.materialId}
+                      onChange={(e) => updatePremadeMaterialRow(index, 'materialId', e.target.value)}
+                      className="md:col-span-7 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+                    >
+                      <option value="">Select material</option>
+                      {rawMaterials.map((material) => (
+                        <option key={material.id} value={material.id}>
+                          {material.name} ({material.quantity} {material.unit} available)
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={entry.quantityUsed}
+                      onChange={(e) => updatePremadeMaterialRow(index, 'quantityUsed', e.target.value)}
+                      placeholder="Qty used"
+                      className="md:col-span-3 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removePremadeMaterialRow(index)}
+                      className="md:col-span-2 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                Stock will be deducted automatically based on the material quantities you enter.
+              </p>
             </div>
             <div className="mt-4">
               <button
@@ -482,7 +614,7 @@ export default function InventoryPage() {
             </div>
           ) : activeTab === 'raw-materials' ? (
             <div className="overflow-x-auto">
-              {filteredRawMaterials.length === 0 ? (
+              {groupedRawMaterials.length === 0 ? (
                 <div className="p-8 text-center">
                   <svg className="w-16 h-16 mx-auto text-zinc-300 dark:text-zinc-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
@@ -497,127 +629,186 @@ export default function InventoryPage() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Material</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Category</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Quantity</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Length</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Total Length</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Unit Price</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Total Value</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Status</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Supplier</th>
                       <th className="px-6 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                    {filteredRawMaterials.map((material) => {
-                      const status = getStockStatus(material.quantity, material.reorderPoint);
-                      return (
-                        <tr key={material.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            <div className="flex items-center">
-                              <div className="w-10 h-10 rounded-lg bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center mr-3">
-                                <svg className="w-5 h-5 text-amber-600 dark:text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-                                </svg>
+                    {groupedRawMaterials.map((group) => {
+                      const status = getStockStatus(group.totalQuantity, group.reorderPoint);
+                      const uniqueLengths = [...new Set(group.lengths.map((v) => Number(v.toFixed(4))))];
+                      const lengthDisplay =
+                        uniqueLengths.length === 1
+                          ? `${uniqueLengths[0]} ${group.lengthUnit}`
+                          : `Mixed (${group.lengthUnit})`;
+                      return [
+                          <tr key={`${group.key}-main`} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <div className="flex items-center">
+                                <div className="w-10 h-10 rounded-lg bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center mr-3">
+                                  <svg className="w-5 h-5 text-amber-600 dark:text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+                                  </svg>
+                                </div>
+                                <div>
+                                  <p className="text-sm font-medium text-zinc-900 dark:text-white">{group.name}</p>
+                                  <p className="text-xs text-zinc-500 dark:text-zinc-400">{group.components.length} component{group.components.length > 1 ? 's' : ''}</p>
+                                </div>
                               </div>
-                              <div>
-                                <p className="text-sm font-medium text-zinc-900 dark:text-white">{material.name}</p>
-                                <p className="text-xs text-zinc-500 dark:text-zinc-400">{material.sku || 'No SKU'}</p>
-                              </div>
-                            </div>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
-                            {material.category}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            {editingMaterialId === material.id ? (
-                              <input
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                value={editMaterial.quantity}
-                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, quantity: e.target.value }))}
-                                className="w-28 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
-                              />
-                            ) : (
-                              <>
-                                <span className="text-sm font-medium text-zinc-900 dark:text-white">{material.quantity}</span>
-                                <span className="text-sm text-zinc-500 dark:text-zinc-400 ml-1">{material.unit}</span>
-                              </>
-                            )}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
-                            {editingMaterialId === material.id ? (
-                              <input
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                value={editMaterial.price}
-                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, price: e.target.value }))}
-                                className="w-28 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
-                              />
-                            ) : (
-                              formatCurrency(material.price)
-                            )}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-zinc-900 dark:text-white">
-                            {editingMaterialId === material.id ? (
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="0.01"
-                                  value={editMaterial.lengthValue}
-                                  onChange={(e) => setEditMaterial((prev) => ({ ...prev, lengthValue: e.target.value }))}
-                                  className="w-24 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
-                                />
-                                <select
-                                  value={editMaterial.lengthUnit}
-                                  onChange={(e) => setEditMaterial((prev) => ({ ...prev, lengthUnit: e.target.value }))}
-                                  className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
-                                >
-                                  {lengthUnits.map((unit) => (
-                                    <option key={unit} value={unit}>{unit}</option>
-                                  ))}
-                                </select>
-                              </div>
-                            ) : (
-                              <>
-                                {material.lengthValue ?? material.quantity} {material.lengthUnit || material.unit}
-                              </>
-                            )}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${status.class}`}>
-                              {status.label}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
-                            {material.supplier || '-'}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-right">
-                            {editingMaterialId === material.id ? (
-                              <div className="flex items-center justify-end gap-2">
-                                <button
-                                  onClick={() => handleSaveMaterial(material.id)}
-                                  className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium"
-                                >
-                                  Save
-                                </button>
-                                <button
-                                  onClick={() => setEditingMaterialId(null)}
-                                  className="text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 text-sm font-medium"
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                            ) : (
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
+                              {group.category}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-900 dark:text-white font-medium">
+                              {group.totalQuantity} {group.unit}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
+                              {lengthDisplay}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-900 dark:text-white font-medium">
+                              {group.totalLength.toFixed(2)} {group.lengthUnit}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
+                              {group.components.length === 1
+                                ? formatCurrency(group.components[0].price)
+                                : `${formatCurrency(group.totalValue / Math.max(group.totalQuantity, 1))} avg`}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <span className={`px-2 py-1 text-xs font-medium rounded-full ${status.class}`}>
+                                {status.label}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
+                              {group.supplier}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-right">
                               <button
-                                onClick={() => startEditMaterial(material)}
+                                onClick={() => handleToggleMaterialDetails(group)}
                                 className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium"
                               >
-                                Edit
+                                {expandedMaterialKey === group.key ? 'Hide Details' : 'View More'}
                               </button>
-                            )}
-                          </td>
-                        </tr>
-                      );
+                            </td>
+                          </tr>,
+                        expandedMaterialKey === group.key ? (
+                            <tr key={`${group.key}-details`}>
+                              <td colSpan={9} className="px-6 py-4 bg-zinc-50/70 dark:bg-zinc-900/40">
+                                {loadingDetailKey === group.key ? (
+                                  <div className="p-4 text-sm text-zinc-500 dark:text-zinc-400">Loading breakdown...</div>
+                                ) : (
+                                <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+                                  <table className="w-full">
+                                    <thead className="bg-white dark:bg-zinc-900">
+                                      <tr>
+                                        <th className="px-4 py-2 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Component</th>
+                                        <th className="px-4 py-2 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Quantity</th>
+                                        <th className="px-4 py-2 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Length</th>
+                                        <th className="px-4 py-2 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Total Length</th>
+                                        <th className="px-4 py-2 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Price</th>
+                                        <th className="px-4 py-2 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Actions</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800 bg-white dark:bg-zinc-900">
+                                      {(expandedMaterialDetails[group.key]?.components || group.components).map((material) => (
+                                        <tr key={material.id}>
+                                          <td className="px-4 py-2 text-sm text-zinc-600 dark:text-zinc-300">
+                                            {material.sku || `ID-${material.id}`}
+                                          </td>
+                                          <td className="px-4 py-2 text-sm text-zinc-900 dark:text-white">
+                                            {editingMaterialId === material.id ? (
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                step="0.01"
+                                                value={editMaterial.quantity}
+                                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, quantity: e.target.value }))}
+                                                className="w-24 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                                              />
+                                            ) : (
+                                              `${material.quantity} ${material.unit}`
+                                            )}
+                                          </td>
+                                          <td className="px-4 py-2 text-sm text-zinc-600 dark:text-zinc-300">
+                                            {editingMaterialId === material.id ? (
+                                              <div className="flex items-center gap-2">
+                                                <input
+                                                  type="number"
+                                                  min="0"
+                                                  step="0.01"
+                                                  value={editMaterial.lengthValue}
+                                                  onChange={(e) => setEditMaterial((prev) => ({ ...prev, lengthValue: e.target.value }))}
+                                                  className="w-24 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                                                />
+                                                <select
+                                                  value={editMaterial.lengthUnit}
+                                                  onChange={(e) => setEditMaterial((prev) => ({ ...prev, lengthUnit: e.target.value }))}
+                                                  className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                                                >
+                                                  {lengthUnits.map((unit) => (
+                                                    <option key={unit} value={unit}>{unit}</option>
+                                                  ))}
+                                                </select>
+                                              </div>
+                                            ) : (
+                                              `${material.lengthValue ?? 0} ${material.lengthUnit || material.unit}`
+                                            )}
+                                          </td>
+                                          <td className="px-4 py-2 text-sm text-zinc-900 dark:text-white">
+                                            {(Number(material.quantity) * Number(material.lengthValue || 0)).toFixed(2)} {material.lengthUnit || material.unit}
+                                          </td>
+                                          <td className="px-4 py-2 text-sm text-zinc-600 dark:text-zinc-300">
+                                            {editingMaterialId === material.id ? (
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                step="0.01"
+                                                value={editMaterial.price}
+                                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, price: e.target.value }))}
+                                                className="w-24 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                                              />
+                                            ) : (
+                                              formatCurrency(material.price)
+                                            )}
+                                          </td>
+                                          <td className="px-4 py-2 text-right">
+                                            {editingMaterialId === material.id ? (
+                                              <div className="flex items-center justify-end gap-2">
+                                                <button
+                                                  onClick={() => handleSaveMaterial(material.id)}
+                                                  className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium"
+                                                >
+                                                  Save
+                                                </button>
+                                                <button
+                                                  onClick={() => setEditingMaterialId(null)}
+                                                  className="text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 text-sm font-medium"
+                                                >
+                                                  Cancel
+                                                </button>
+                                              </div>
+                                            ) : (
+                                              <button
+                                                onClick={() => startEditMaterial(material)}
+                                                className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium"
+                                              >
+                                                Edit
+                                              </button>
+                                            )}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                                )}
+                              </td>
+                            </tr>
+                          ) : null
+                      ];
                     })}
                   </tbody>
                 </table>
@@ -668,30 +859,16 @@ export default function InventoryPage() {
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
                             {editingPremadeId === item.id ? (
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="0.01"
-                                  value={editPremade.quantity}
-                                  onChange={(e) => setEditPremade((prev) => ({ ...prev, quantity: e.target.value }))}
-                                  className="w-24 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
-                                />
-                                <select
-                                  value={editPremade.unit}
-                                  onChange={(e) => setEditPremade((prev) => ({ ...prev, unit: e.target.value }))}
-                                  className="px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
-                                >
-                                  {premadeUnits.map((unit) => (
-                                    <option key={unit} value={unit}>{unit}</option>
-                                  ))}
-                                </select>
-                              </div>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={editPremade.quantity}
+                                onChange={(e) => setEditPremade((prev) => ({ ...prev, quantity: e.target.value }))}
+                                className="w-24 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                              />
                             ) : (
-                              <>
-                                <span className="text-sm font-medium text-zinc-900 dark:text-white">{item.quantity}</span>
-                                <span className="text-sm text-zinc-500 dark:text-zinc-400 ml-1">{item.unit}</span>
-                              </>
+                              <span className="text-sm font-medium text-zinc-900 dark:text-white">{item.quantity}</span>
                             )}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
@@ -741,6 +918,67 @@ export default function InventoryPage() {
                         </tr>
                       );
                     })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          ) : activeTab === 'material-usage' ? (
+            <div className="overflow-x-auto">
+              {materialUsageLogs.length === 0 ? (
+                <div className="p-8 text-center">
+                  <svg className="w-16 h-16 mx-auto text-zinc-300 dark:text-zinc-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  <h3 className="text-lg font-medium text-zinc-900 dark:text-white mb-2">No material usage yet</h3>
+                  <p className="text-zinc-500 dark:text-zinc-400">Material usage entries appear here when premade products are added.</p>
+                </div>
+              ) : (
+                <table className="w-full">
+                  <thead className="bg-zinc-50 dark:bg-zinc-800/50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">When Used</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Material</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Where Used</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">How Much</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Used By</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                    {materialUsageLogs
+                      .filter((log) => {
+                        if (!searchTerm) return true;
+                        const q = searchTerm.toLowerCase();
+                        return (
+                          (log.materialName || '').toLowerCase().includes(q) ||
+                          (log.usedInReference || '').toLowerCase().includes(q) ||
+                          (log.usedByName || '').toLowerCase().includes(q)
+                        );
+                      })
+                      .map((log) => (
+                        <tr key={log.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
+                            {new Date(log.usedAt).toLocaleString('en-PH', {
+                              year: 'numeric',
+                              month: 'short',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit'
+                            })}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-zinc-900 dark:text-white">
+                            {log.materialName || 'N/A'}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
+                            {log.usedInReference}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-900 dark:text-white">
+                            {log.quantityUsed} {log.materialUnit || ''}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
+                            {log.usedByName || 'System'}
+                          </td>
+                        </tr>
+                      ))}
                   </tbody>
                 </table>
               )}

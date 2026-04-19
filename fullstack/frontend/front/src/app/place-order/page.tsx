@@ -313,12 +313,12 @@ export default function PlaceOrderPage() {
       await api.appointments.create(appointmentData);
       setSuccessMessage(
         appointmentContactMethod === 'branch_visit'
-          ? 'Appointment request submitted! We will confirm your appointment shortly.'
-          : 'Call request submitted! We will call you at your preferred date and time.'
+          ? 'Appointment request submitted! You can track confirmation status in My Orders.'
+          : 'Call request submitted! You can track confirmation status in My Orders.'
       );
       
       setTimeout(() => {
-        router.push('/my-orders');
+        router.push('/my-orders?tab=appointments');
       }, 2000);
     } catch (err: any) {
       setError(err.message || 'Failed to submit appointment. Please try again.');

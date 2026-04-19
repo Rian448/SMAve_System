@@ -1,20 +1,29 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, CustomerOrder, ProductOrder } from '@/lib/api';
+import { api, Appointment, CustomerOrder, ProductOrder } from '@/lib/api';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 
-type OrderTab = 'custom' | 'premade';
+type OrderTab = 'custom' | 'premade' | 'appointments';
 
 export default function MyOrdersPage() {
   const { user, isLoading: authLoading } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [customOrders, setCustomOrders] = useState<CustomerOrder[]>([]);
   const [productOrders, setProductOrders] = useState<ProductOrder[]>([]);
+  const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [activeTab, setActiveTab] = useState<OrderTab>('custom');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    const tabParam = searchParams.get('tab');
+    if (tabParam === 'appointments' || tabParam === 'custom' || tabParam === 'premade') {
+      setActiveTab(tabParam as OrderTab);
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     if (!authLoading) {
@@ -29,13 +38,15 @@ export default function MyOrdersPage() {
   const fetchOrders = async () => {
     try {
       setLoading(true);
-      const [customResponse, productResponse] = await Promise.all([
+      const [customResponse, productResponse, appointmentResponse] = await Promise.all([
         api.customerOrders.getMyOrders(),
-        api.productOrders.getMyOrders()
+        api.productOrders.getMyOrders(),
+        api.appointments.getMyAppointments()
       ]);
 
       setCustomOrders(customResponse.data || []);
       setProductOrders(productResponse.data || []);
+      setAppointments(appointmentResponse.data || []);
     } catch (err) {
       setError('Failed to load your orders');
       console.error(err);
@@ -48,6 +59,7 @@ export default function MyOrdersPage() {
     switch (status) {
       case 'pending':
         return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400';
+      case 'confirmed':
       case 'processing':
       case 'in_progress':
         return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400';
@@ -119,6 +131,36 @@ export default function MyOrdersPage() {
     return labels[type] || type;
   };
 
+  const getAppointmentTrackerMeta = (status: Appointment['status']) => {
+    switch (status) {
+      case 'pending':
+        return {
+          label: 'Waiting for confirmation from admin/supervisor',
+          progress: 33,
+          progressClass: 'bg-amber-500'
+        };
+      case 'confirmed':
+        return {
+          label: 'Confirmed by admin/supervisor',
+          progress: 66,
+          progressClass: 'bg-blue-500'
+        };
+      case 'completed':
+        return {
+          label: 'Appointment completed',
+          progress: 100,
+          progressClass: 'bg-green-500'
+        };
+      case 'cancelled':
+      default:
+        return {
+          label: 'Appointment cancelled',
+          progress: 100,
+          progressClass: 'bg-red-500'
+        };
+    }
+  };
+
   if (authLoading || loading) {
     return (
       <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 pt-8">
@@ -187,6 +229,16 @@ export default function MyOrdersPage() {
             }`}
           >
             Premade Purchases ({productOrders.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('appointments')}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              activeTab === 'appointments'
+                ? 'bg-zinc-900 text-white dark:bg-zinc-200 dark:text-zinc-900'
+                : 'bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-800'
+            }`}
+          >
+            Appointments ({appointments.length})
           </button>
         </div>
 
@@ -308,6 +360,89 @@ export default function MyOrdersPage() {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {activeTab === 'appointments' && (
+          <>
+            {appointments.length === 0 ? (
+              <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-12 text-center">
+                <p className="text-zinc-600 dark:text-zinc-400 mb-4">You have no appointment requests yet</p>
+                <Link
+                  href="/place-order"
+                  className="inline-flex items-center px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors font-medium"
+                >
+                  Book Appointment
+                </Link>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {appointments.map((appointment) => {
+                  const tracker = getAppointmentTrackerMeta(appointment.status);
+
+                  return (
+                    <div
+                      key={appointment.id}
+                      className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-6"
+                    >
+                      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-4">
+                        <div>
+                          <div className="flex items-center gap-3 flex-wrap">
+                            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">{appointment.appointmentNumber}</h3>
+                            <span className={`text-xs px-2 py-1 rounded-full font-medium ${getStatusColor(appointment.status)}`}>
+                              {appointment.status.toUpperCase()}
+                            </span>
+                          </div>
+                          <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+                            Preferred: {new Date(appointment.preferredDate).toLocaleDateString('en-PH', {
+                              year: 'numeric',
+                              month: 'short',
+                              day: 'numeric'
+                            })}
+                            {appointment.preferredTime ? ` • ${appointment.preferredTime}` : ''}
+                          </p>
+                          {appointment.branchName && (
+                            <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+                              Branch: {appointment.branchName}
+                            </p>
+                          )}
+                        </div>
+
+                        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                          Requested on {new Date(appointment.createdAt).toLocaleDateString('en-PH', {
+                            year: 'numeric',
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })}
+                        </p>
+                      </div>
+
+                      <div className="mb-2 flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
+                        <span>Request Sent</span>
+                        <span>Confirmed</span>
+                        <span>Completed</span>
+                      </div>
+                      <div className="h-2 w-full bg-zinc-200 dark:bg-zinc-700 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full ${tracker.progressClass} transition-all duration-500`}
+                          style={{ width: `${tracker.progress}%` }}
+                        />
+                      </div>
+                      <p className="mt-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">{tracker.label}</p>
+
+                      {appointment.adminNotes && (
+                        <div className="mt-4 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                          <p className="text-xs font-medium text-blue-600 dark:text-blue-400 uppercase">Admin Notes</p>
+                          <p className="text-sm text-blue-700 dark:text-blue-300 mt-1">{appointment.adminNotes}</p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </>

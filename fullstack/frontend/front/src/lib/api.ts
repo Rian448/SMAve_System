@@ -200,6 +200,21 @@ export interface RawMaterialInput {
   branchId: number;
 }
 
+export interface RawMaterialSummaryGroup {
+  key: string;
+  name: string;
+  category: string;
+  unit: string;
+  lengthUnit: string;
+  supplier: string;
+  totalQuantity: number;
+  totalLength: number;
+  totalValue: number;
+  reorderPoint: number;
+  lengths: number[];
+  components: RawMaterial[];
+}
+
 export interface FinishedGood {
   id: number;
   name: string;
@@ -217,12 +232,36 @@ export interface FinishedGood {
 export interface PremadeProductInput {
   name: string;
   quantity: number;
-  unit: string;
+  unit?: string;
   category: string;
   price: number;
   cost: number;
   branchId: number;
   sku?: string;
+  materialsUsed?: PremadeMaterialUsageInput[];
+}
+
+export interface PremadeMaterialUsageInput {
+  materialId: number;
+  quantityUsed: number;
+}
+
+export interface MaterialUsageLog {
+  id: number;
+  materialId: number;
+  materialName?: string;
+  materialUnit?: string;
+  premadeProductId?: number;
+  premadeProductName?: string;
+  quantityUsed: number;
+  usedInType: string;
+  usedInReference: string;
+  branchId: number;
+  branchName?: string;
+  usedBy?: number;
+  usedByName?: string;
+  notes?: string;
+  usedAt: string;
 }
 
 export interface JobOrderItem {
@@ -623,6 +662,23 @@ export const api = {
       if (params?.category) query.append('category', params.category);
       return fetchApi<RawMaterial[]>(`/api/inventory/raw-materials?${query}`);
     },
+
+    getRawMaterialsSummary: (params?: { includeArchived?: boolean; branchId?: number; category?: string; includeComponents?: boolean }) => {
+      const query = new URLSearchParams();
+      if (params?.includeArchived) query.append('includeArchived', 'true');
+      if (params?.branchId) query.append('branchId', params.branchId.toString());
+      if (params?.category) query.append('category', params.category);
+      if (params?.includeComponents) query.append('includeComponents', 'true');
+      return fetchApi<RawMaterialSummaryGroup[]>(`/api/inventory/raw-materials/summary?${query}`);
+    },
+
+    getRawMaterialGroupDetail: (key: string, params?: { includeArchived?: boolean; branchId?: number }) => {
+      const query = new URLSearchParams();
+      query.append('key', key);
+      if (params?.includeArchived) query.append('includeArchived', 'true');
+      if (params?.branchId) query.append('branchId', params.branchId.toString());
+      return fetchApi<RawMaterialSummaryGroup>(`/api/inventory/raw-materials/group-detail?${query}`);
+    },
     
     getRawMaterial: (id: number) => fetchApi<RawMaterial>(`/api/inventory/raw-materials/${id}`),
     
@@ -663,6 +719,13 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(item),
       }),
+
+    getMaterialUsage: (params?: { branchId?: number; materialId?: number }) => {
+      const query = new URLSearchParams();
+      if (params?.branchId) query.append('branchId', params.branchId.toString());
+      if (params?.materialId) query.append('materialId', params.materialId.toString());
+      return fetchApi<MaterialUsageLog[]>(`/api/inventory/material-usage?${query}`);
+    },
     
     // Public Products (for customer ordering)
     getPublicProducts: (params?: { branchId?: number; category?: string }) => {

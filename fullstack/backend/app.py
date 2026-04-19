@@ -235,6 +235,24 @@ class PremadeProduct(db.Model):
 
     branch = db.relationship('Branch')
 
+class MaterialUsageLog(db.Model):
+    __tablename__ = 'material_usage_logs'
+    id = db.Column(db.Integer, primary_key=True)
+    material_id = db.Column(db.Integer, db.ForeignKey('inventory_materials.id'), nullable=False)
+    premade_product_id = db.Column(db.Integer, db.ForeignKey('premade_products.id'), nullable=True)
+    quantity_used = db.Column(db.Float, nullable=False)
+    used_in_type = db.Column(db.String(100), default='premade_product')
+    used_in_reference = db.Column(db.String(255), nullable=False)
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
+    used_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    notes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    material = db.relationship('InventoryMaterial')
+    premade_product = db.relationship('PremadeProduct')
+    branch = db.relationship('Branch')
+    used_by_user = db.relationship('User', foreign_keys=[used_by])
+
 # ============================================
 # SEED DATA
 # ============================================
@@ -287,10 +305,10 @@ raw_materials = [
 
 # Finished Goods Inventory
 finished_goods = [
-    {'id': 1, 'name': 'Car Seat Cover - Standard', 'sku': 'FG-CSC-001', 'quantity': 25, 'unit': 'sets', 'category': 'Seat Covers', 'price': 150.00, 'cost': 75.00, 'branchId': 2, 'isArchived': False, 'lastUpdated': '2026-01-20'},
-    {'id': 2, 'name': 'Car Seat Cover - Premium', 'sku': 'FG-CSC-002', 'quantity': 15, 'unit': 'sets', 'category': 'Seat Covers', 'price': 250.00, 'cost': 120.00, 'branchId': 2, 'isArchived': False, 'lastUpdated': '2026-01-20'},
+    {'id': 1, 'name': 'Car Seat Cover - Standard', 'sku': 'FG-CSC-001', 'quantity': 25, 'unit': 'pcs', 'category': 'Seat Covers', 'price': 150.00, 'cost': 75.00, 'branchId': 2, 'isArchived': False, 'lastUpdated': '2026-01-20'},
+    {'id': 2, 'name': 'Car Seat Cover - Premium', 'sku': 'FG-CSC-002', 'quantity': 15, 'unit': 'pcs', 'category': 'Seat Covers', 'price': 250.00, 'cost': 120.00, 'branchId': 2, 'isArchived': False, 'lastUpdated': '2026-01-20'},
     {'id': 3, 'name': 'Motorcycle Seat - Custom', 'sku': 'FG-MCS-001', 'quantity': 10, 'unit': 'pcs', 'category': 'Motorcycle', 'price': 180.00, 'cost': 85.00, 'branchId': 3, 'isArchived': False, 'lastUpdated': '2026-01-19'},
-    {'id': 4, 'name': 'Sofa Cushion Set', 'sku': 'FG-SCS-001', 'quantity': 8, 'unit': 'sets', 'category': 'Furniture', 'price': 200.00, 'cost': 95.00, 'branchId': 2, 'isArchived': False, 'lastUpdated': '2026-01-18'},
+    {'id': 4, 'name': 'Sofa Cushion Set', 'sku': 'FG-SCS-001', 'quantity': 8, 'unit': 'pcs', 'category': 'Furniture', 'price': 200.00, 'cost': 95.00, 'branchId': 2, 'isArchived': False, 'lastUpdated': '2026-01-18'},
 ]
 
 # Job Orders
@@ -633,6 +651,17 @@ def seed_inventory_items():
 
     db.session.commit()
 
+def normalize_premade_units():
+    """Ensure premade product unit values stay consistent as plain piece counts."""
+    updated = False
+    for item in PremadeProduct.query.all():
+        if not item.unit or item.unit.strip().lower() != 'pcs':
+            item.unit = 'pcs'
+            updated = True
+
+    if updated:
+        db.session.commit()
+
 def init_db():
     db.create_all()
 
@@ -668,6 +697,7 @@ def init_db():
     # Seed users
     seed_default_users()
     seed_inventory_items()
+    normalize_premade_units()
 
 def get_user_from_token(token):
     """Get user from session token"""
@@ -976,6 +1006,35 @@ def material_to_dict(material):
         'lastUpdated': material.updated_at.strftime('%Y-%m-%d') if material.updated_at else None
     }
 
+def build_raw_material_group_key(material):
+    length_unit = material.length_unit or material.unit
+    return f"{material.name.lower()}|{material.category.lower()}|{length_unit.lower()}"
+
+def raw_material_group_to_dict(materials, include_components=True):
+    first = materials[0]
+    length_unit = first.length_unit or first.unit
+    group_key = build_raw_material_group_key(first)
+
+    total_quantity = sum(float(m.quantity or 0) for m in materials)
+    total_length = sum(float(m.quantity or 0) * float(m.length_value or 0) for m in materials)
+    total_value = sum(float(m.quantity or 0) * float(m.price or 0) for m in materials)
+    reorder_point = sum(float(m.reorder_point or 0) for m in materials)
+
+    return {
+        'key': group_key,
+        'name': first.name,
+        'category': first.category,
+        'unit': first.unit,
+        'lengthUnit': length_unit,
+        'supplier': first.supplier or '-',
+        'totalQuantity': total_quantity,
+        'totalLength': total_length,
+        'totalValue': total_value,
+        'reorderPoint': reorder_point,
+        'lengths': [float(m.length_value or 0) for m in materials],
+        'components': [material_to_dict(m) for m in materials] if include_components else []
+    }
+
 def premade_product_to_dict(product):
     return {
         'id': product.id,
@@ -989,6 +1048,25 @@ def premade_product_to_dict(product):
         'branchId': product.branch_id,
         'isArchived': product.is_archived,
         'lastUpdated': product.updated_at.strftime('%Y-%m-%d') if product.updated_at else None
+    }
+
+def material_usage_to_dict(log):
+    return {
+        'id': log.id,
+        'materialId': log.material_id,
+        'materialName': log.material.name if log.material else None,
+        'materialUnit': log.material.unit if log.material else None,
+        'premadeProductId': log.premade_product_id,
+        'premadeProductName': log.premade_product.name if log.premade_product else None,
+        'quantityUsed': float(log.quantity_used),
+        'usedInType': log.used_in_type,
+        'usedInReference': log.used_in_reference,
+        'branchId': log.branch_id,
+        'branchName': log.branch.name if log.branch else None,
+        'usedBy': log.used_by,
+        'usedByName': log.used_by_user.full_name if log.used_by_user else None,
+        'notes': log.notes,
+        'usedAt': log.created_at.isoformat() if log.created_at else None
     }
 
 @app.route('/api/inventory/raw-materials', methods=['GET'])
@@ -1008,6 +1086,57 @@ def get_raw_materials():
 
     items = query.order_by(InventoryMaterial.name.asc()).all()
     return jsonify({'status': 'success', 'data': [material_to_dict(m) for m in items]})
+
+@app.route('/api/inventory/raw-materials/summary', methods=['GET'])
+@require_auth
+def get_raw_materials_summary():
+    include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
+    include_components = request.args.get('includeComponents', 'false').lower() == 'true'
+    branch_id = request.args.get('branchId')
+    category = request.args.get('category')
+
+    query = InventoryMaterial.query
+    if not include_archived:
+        query = query.filter_by(is_archived=False)
+    if branch_id:
+        query = query.filter_by(branch_id=int(branch_id))
+    if category:
+        query = query.filter_by(category=category)
+
+    items = query.order_by(InventoryMaterial.name.asc(), InventoryMaterial.created_at.asc()).all()
+
+    grouped = {}
+    for material in items:
+        key = build_raw_material_group_key(material)
+        grouped.setdefault(key, []).append(material)
+
+    summaries = [raw_material_group_to_dict(group_items, include_components=include_components) for _, group_items in grouped.items()]
+    summaries.sort(key=lambda x: x['name'])
+    return jsonify({'status': 'success', 'data': summaries})
+
+@app.route('/api/inventory/raw-materials/group-detail', methods=['GET'])
+@require_auth
+def get_raw_material_group_detail():
+    include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
+    branch_id = request.args.get('branchId')
+    group_key = request.args.get('key')
+
+    if not group_key:
+        return jsonify({'status': 'error', 'message': 'Group key is required'}), 400
+
+    query = InventoryMaterial.query
+    if not include_archived:
+        query = query.filter_by(is_archived=False)
+    if branch_id:
+        query = query.filter_by(branch_id=int(branch_id))
+
+    items = query.order_by(InventoryMaterial.name.asc(), InventoryMaterial.created_at.asc()).all()
+    group_items = [m for m in items if build_raw_material_group_key(m) == group_key]
+
+    if not group_items:
+        return jsonify({'status': 'error', 'message': 'Material group not found'}), 404
+
+    return jsonify({'status': 'success', 'data': raw_material_group_to_dict(group_items, include_components=True)})
 
 @app.route('/api/inventory/raw-materials/<int:material_id>', methods=['GET'])
 @require_auth
@@ -1154,28 +1283,79 @@ def get_finished_goods():
 def create_finished_good():
     data = request.get_json()
 
-    required = ['name', 'quantity', 'unit', 'category', 'price', 'cost', 'branchId']
+    required = ['name', 'quantity', 'category', 'price', 'branchId', 'materialsUsed']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+
+    if not isinstance(data.get('materialsUsed'), list) or len(data.get('materialsUsed')) == 0:
+        return jsonify({'status': 'error', 'message': 'Please provide materials used for this premade product'}), 400
 
     branch = Branch.query.get(data['branchId'])
     if not branch or not branch.is_active:
         return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+
+    usage_entries = []
+    computed_cost = 0
+    for idx, used in enumerate(data.get('materialsUsed', [])):
+        material_id = used.get('materialId')
+        quantity_used = used.get('quantityUsed')
+
+        try:
+            quantity_used = float(quantity_used)
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': f'Invalid quantity used for material at row {idx + 1}'}), 400
+
+        if quantity_used <= 0:
+            return jsonify({'status': 'error', 'message': f'Quantity used must be greater than zero at row {idx + 1}'}), 400
+
+        material = InventoryMaterial.query.filter_by(
+            id=material_id,
+            branch_id=int(data['branchId']),
+            is_archived=False
+        ).first()
+        if not material:
+            return jsonify({'status': 'error', 'message': f'Material not found or unavailable at row {idx + 1}'}), 400
+
+        if float(material.quantity) < quantity_used:
+            return jsonify({'status': 'error', 'message': f'Insufficient stock for {material.name}. Available: {float(material.quantity)}'}), 400
+
+        usage_entries.append({'material': material, 'quantityUsed': quantity_used})
+        computed_cost += float(material.price) * quantity_used
 
     next_id = (db.session.query(db.func.max(PremadeProduct.id)).scalar() or 0) + 1
     product = PremadeProduct(
         name=data['name'].strip(),
         sku=data.get('sku') or f"FG-{next_id:03d}",
         quantity=float(data['quantity']),
-        unit=data['unit'],
+        unit='pcs',
         category=data['category'],
         price=float(data['price']),
-        cost=float(data['cost']),
+        cost=float(data.get('cost', computed_cost)),
         branch_id=int(data['branchId']),
         is_archived=False
     )
 
     db.session.add(product)
+
+    # Flush so product.id is available for usage logs before commit.
+    db.session.flush()
+
+    for entry in usage_entries:
+        material = entry['material']
+        quantity_used = entry['quantityUsed']
+        material.quantity = float(material.quantity) - quantity_used
+
+        db.session.add(MaterialUsageLog(
+            material_id=material.id,
+            premade_product_id=product.id,
+            quantity_used=quantity_used,
+            used_in_type='premade_product',
+            used_in_reference=f"{product.sku} - {product.name}",
+            branch_id=product.branch_id,
+            used_by=request.current_user['id'],
+            notes=f"Used to add premade product stock (qty: {product.quantity})"
+        ))
+
     db.session.commit()
 
     log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory', f"Created finished good: {product.name}", request.remote_addr or '0.0.0.0')
@@ -1198,8 +1378,7 @@ def update_finished_good(item_id):
         product.sku = data['sku']
     if 'quantity' in data:
         product.quantity = float(data['quantity'])
-    if 'unit' in data:
-        product.unit = data['unit']
+    product.unit = 'pcs'
     if 'category' in data:
         product.category = data['category']
     if 'price' in data:
@@ -1217,6 +1396,21 @@ def update_finished_good(item_id):
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated finished good: {product.name}", request.remote_addr or '0.0.0.0')
 
     return jsonify({'status': 'success', 'data': premade_product_to_dict(product)})
+
+@app.route('/api/inventory/material-usage', methods=['GET'])
+@require_auth
+def get_material_usage_logs():
+    branch_id = request.args.get('branchId')
+    material_id = request.args.get('materialId')
+
+    query = MaterialUsageLog.query
+    if branch_id:
+        query = query.filter_by(branch_id=int(branch_id))
+    if material_id:
+        query = query.filter_by(material_id=int(material_id))
+
+    logs = query.order_by(MaterialUsageLog.created_at.desc()).limit(300).all()
+    return jsonify({'status': 'success', 'data': [material_usage_to_dict(log) for log in logs]})
 
 @app.route('/api/inventory/finished-goods/public', methods=['GET'])
 def get_finished_goods_public():
