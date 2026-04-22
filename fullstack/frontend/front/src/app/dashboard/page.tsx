@@ -7,11 +7,16 @@ import Link from 'next/link';
 export default function Dashboard() {
   const { user, isLoading: authLoading } = useAuth();
   const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [activities, setActivities] = useState<Activity[]>([]);
+  const [alerts, setAlerts] = useState<Array<Alert & { id: string }>>([]);
+  const [activities, setActivities] = useState<Array<Activity & { id: string; user: string; action: string; details: string }>>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!authLoading && !user) {
+      setLoading(false);
+      return;
+    }
+
     if (!authLoading && user) {
       fetchDashboardData();
     }
@@ -22,11 +27,24 @@ export default function Dashboard() {
       const [statsData, alertsData, activitiesData] = await Promise.all([
         api.dashboard.getStats(),
         api.dashboard.getAlerts(),
-        api.dashboard.getActivities()
+        api.dashboard.getRecentActivity()
       ]);
-      setStats(statsData);
-      setAlerts(alertsData);
-      setActivities(activitiesData);
+      setStats(statsData.data || null);
+      setAlerts(
+        (alertsData.data || []).map((alert, index) => ({
+          ...alert,
+          id: `${alert.type}-${index}`
+        }))
+      );
+      setActivities(
+        (activitiesData.data || []).map((activity, index) => ({
+          ...activity,
+          id: `${activity.type}-${index}`,
+          user: activity.status ? activity.status.replace('_', ' ').toUpperCase() : 'SYSTEM',
+          action: activity.title,
+          details: activity.description
+        }))
+      );
     } catch (error) {
       console.error('Error fetching dashboard data:', error);
     } finally {
@@ -178,14 +196,14 @@ export default function Dashboard() {
 
         {/* Stats Cards - For staff only */}
         {user?.role !== 'customer' && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-          {/* Active Job Orders */}
-          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-6 mb-8">
+          {/* Pending Orders */}
+          <Link href="/sales" className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6 hover:border-amber-500 dark:hover:border-amber-500 hover:shadow-md transition-all block">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">Active Jobs</p>
+                <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">Pending Jobs</p>
                 <p className="text-3xl font-bold text-zinc-900 dark:text-white mt-1">
-                  {stats?.activeJobOrders || 0}
+                  {stats?.pendingOrders || 0}
                 </p>
               </div>
               <div className="w-12 h-12 rounded-xl bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
@@ -195,36 +213,53 @@ export default function Dashboard() {
               </div>
             </div>
             {hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager']) && (
-              <Link href="/sales" className="text-sm text-amber-600 dark:text-amber-400 hover:underline mt-4 inline-block">
-                View all jobs →
-              </Link>
+              <span className="text-sm text-amber-600 dark:text-amber-400 mt-4 inline-block">
+                Review jobs →
+              </span>
             )}
-          </div>
+          </Link>
 
-          {/* Today's Sales */}
-          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">
+          {/* In Progress Orders */}
+          <Link href="/sales" className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6 hover:border-blue-500 dark:hover:border-blue-500 hover:shadow-md transition-all block">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">Today&apos;s Sales</p>
+                <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">In Progress</p>
+                <p className="text-3xl font-bold text-blue-600 dark:text-blue-400 mt-1">
+                  {stats?.inProgressOrders || 0}
+                </p>
+              </div>
+              <div className="w-12 h-12 rounded-xl bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
+                <svg className="w-6 h-6 text-blue-600 dark:text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+            </div>
+          </Link>
+
+          {/* Completed Orders */}
+          <Link href="/reports" className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6 hover:border-green-500 dark:hover:border-green-500 hover:shadow-md transition-all block">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">Completed</p>
                 <p className="text-3xl font-bold text-green-600 dark:text-green-400 mt-1">
-                  {formatCurrency(stats?.todaySales || 0)}
+                  {stats?.completedOrders || 0}
                 </p>
               </div>
               <div className="w-12 h-12 rounded-xl bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
                 <svg className="w-6 h-6 text-green-600 dark:text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
               </div>
             </div>
             {hasAccess(user?.role, ['administrator', 'supervisor']) && (
-              <Link href="/reports" className="text-sm text-green-600 dark:text-green-400 hover:underline mt-4 inline-block">
+              <span className="text-sm text-green-600 dark:text-green-400 mt-4 inline-block">
                 View reports →
-              </Link>
+              </span>
             )}
-          </div>
+          </Link>
 
           {/* Low Stock Items */}
-          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">
+          <Link href="/inventory" className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6 hover:border-red-500 dark:hover:border-red-500 hover:shadow-md transition-all block">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">Low Stock</p>
@@ -239,14 +274,14 @@ export default function Dashboard() {
               </div>
             </div>
             {hasAccess(user?.role, ['administrator', 'supervisor']) && (
-              <Link href="/inventory" className="text-sm text-amber-600 dark:text-amber-400 hover:underline mt-4 inline-block">
+              <span className="text-sm text-amber-600 dark:text-amber-400 mt-4 inline-block">
                 Manage inventory →
-              </Link>
+              </span>
             )}
-          </div>
+          </Link>
 
           {/* Pending Deliveries */}
-          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">
+          <Link href="/delivery" className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6 hover:border-blue-500 dark:hover:border-blue-500 hover:shadow-md transition-all block">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">Pending Deliveries</p>
@@ -261,11 +296,33 @@ export default function Dashboard() {
               </div>
             </div>
             {hasAccess(user?.role, ['administrator', 'supervisor']) && (
-              <Link href="/delivery" className="text-sm text-blue-600 dark:text-blue-400 hover:underline mt-4 inline-block">
+              <span className="text-sm text-blue-600 dark:text-blue-400 mt-4 inline-block">
                 Track deliveries →
-              </Link>
+              </span>
             )}
-          </div>
+          </Link>
+
+          {/* Total Revenue */}
+          <Link href="/reports" className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6 hover:border-emerald-500 dark:hover:border-emerald-500 hover:shadow-md transition-all block">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">Total Revenue</p>
+                <p className="text-3xl font-bold text-emerald-600 dark:text-emerald-400 mt-1">
+                  {formatCurrency(stats?.totalRevenue || 0)}
+                </p>
+              </div>
+              <div className="w-12 h-12 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
+                <svg className="w-6 h-6 text-emerald-600 dark:text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+            </div>
+            {hasAccess(user?.role, ['administrator', 'supervisor']) && (
+              <span className="text-sm text-emerald-600 dark:text-emerald-400 mt-4 inline-block">
+                View reports →
+              </span>
+            )}
+          </Link>
         </div>
         )}
 
@@ -299,13 +356,13 @@ export default function Dashboard() {
                         {alert.title}
                       </p>
                       <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
-                        {alert.message}
+                        {alert.description}
                       </p>
                     </div>
                     <span className={`text-xs px-2 py-1 rounded-full ${
-                      alert.severity === 'high' 
+                      alert.severity === 'critical' 
                         ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
-                        : alert.severity === 'medium'
+                        : alert.severity === 'warning'
                         ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
                         : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
                     }`}>

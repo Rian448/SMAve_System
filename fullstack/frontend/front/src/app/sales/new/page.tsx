@@ -2,10 +2,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { api, type FinishedGood } from '@/lib/api';
+import { api, type FinishedGood, type RawMaterial } from '@/lib/api';
 
 interface MaterialItem {
   id: string;
+  materialSource: 'inventory' | 'custom';
+  materialId?: number | '';
   name: string;
   quantity: number;
   unitPrice: number;
@@ -36,6 +38,7 @@ export default function NewJobOrderPage() {
   ]);
   const [premadeItems, setPremadeItems] = useState<FinishedGood[]>([]);
   const [premadeLoading, setPremadeLoading] = useState(false);
+  const [inventoryMaterials, setInventoryMaterials] = useState<RawMaterial[]>([]);
   
   // Customer Information
   const [customerName, setCustomerName] = useState('');
@@ -48,6 +51,7 @@ export default function NewJobOrderPage() {
   const [vehicleModel, setVehicleModel] = useState('');
   const [vehicleYear, setVehicleYear] = useState('');
   const [vehiclePlate, setVehiclePlate] = useState('');
+  const [reupholsteryItemType, setReupholsteryItemType] = useState('');
   
   // Service Information
   const [estimatedCompletionDate, setEstimatedCompletionDate] = useState('');
@@ -99,6 +103,25 @@ export default function NewJobOrderPage() {
     loadPremadeItems();
   }, [orderType, user?.branchId]);
 
+  useEffect(() => {
+    const loadInventoryMaterials = async () => {
+      if (orderType !== 'normal') {
+        return;
+      }
+
+      try {
+        const response = await api.inventory.getRawMaterials(
+          user?.branchId ? { branchId: user.branchId } : undefined
+        );
+        setInventoryMaterials(response.data || []);
+      } catch (err) {
+        console.error('Failed to load inventory materials:', err);
+      }
+    };
+
+    loadInventoryMaterials();
+  }, [orderType, user?.branchId]);
+
   const addPremadeSelection = () => {
     premadeSelectionIdRef.current += 1;
     setPremadeSelections((prev) => [
@@ -142,7 +165,17 @@ export default function NewJobOrderPage() {
   }, 0);
 
   const addMaterial = () => {
-    setMaterials([...materials, { id: Date.now().toString(), name: '', quantity: 1, unitPrice: 0 }]);
+    setMaterials([
+      ...materials,
+      {
+        id: Date.now().toString(),
+        materialSource: 'inventory',
+        materialId: '',
+        name: '',
+        quantity: 1,
+        unitPrice: 0
+      }
+    ]);
   };
 
   const removeMaterial = (id: string) => {
@@ -151,6 +184,43 @@ export default function NewJobOrderPage() {
 
   const updateMaterial = (id: string, field: keyof MaterialItem, value: string | number) => {
     setMaterials(materials.map(m => m.id === id ? { ...m, [field]: value } : m));
+  };
+
+  const updateMaterialSource = (id: string, value: string) => {
+    setMaterials(materials.map((material) => {
+      if (material.id !== id) {
+        return material;
+      }
+
+      if (value === 'custom') {
+        return {
+          ...material,
+          materialSource: 'custom',
+          materialId: '',
+          name: '',
+        };
+      }
+
+      const selectedId = Number(value);
+      const selectedMaterial = inventoryMaterials.find((item) => item.id === selectedId);
+      if (!selectedMaterial) {
+        return {
+          ...material,
+          materialSource: 'inventory',
+          materialId: '',
+          name: '',
+          unitPrice: 0
+        };
+      }
+
+      return {
+        ...material,
+        materialSource: 'inventory',
+        materialId: selectedMaterial.id,
+        name: selectedMaterial.name,
+        unitPrice: Number(selectedMaterial.price) || 0
+      };
+    }));
   };
 
   const addLabor = () => {
@@ -286,7 +356,11 @@ export default function NewJobOrderPage() {
     // Build services array
     const selectedServices = [];
     if (flooring.selected) selectedServices.push({ type: 'flooring', material: flooring.material });
-    if (reupholstery.selected) selectedServices.push({ type: 'reupholstery', material: reupholstery.material });
+    if (reupholstery.selected) selectedServices.push({
+      type: 'reupholstery',
+      material: reupholstery.material,
+      itemType: reupholsteryItemType.trim() || undefined
+    });
     if (ceiling.selected) selectedServices.push({ type: 'ceiling', material: ceiling.material });
     if (sidings.selected) selectedServices.push({ type: 'sidings', material: sidings.material });
     if (seatCovers.selected) selectedServices.push({
@@ -307,33 +381,134 @@ export default function NewJobOrderPage() {
       return;
     }
 
+    for (const material of materials) {
+      if (material.materialSource === 'inventory' && !material.materialId) {
+        setError('Please select an inventory material or choose Type new material.');
+        setLoading(false);
+        return;
+      }
+
+      if (!material.name.trim()) {
+        setError('Please provide a material name for all material rows.');
+        setLoading(false);
+        return;
+      }
+    }
+
+    if (reupholstery.selected && !reupholsteryItemType.trim()) {
+      setError('Please specify what furniture or item will be reupholstered.');
+      setLoading(false);
+      return;
+    }
+
+    const branchId = user?.branchId || 1;
+    if (!branchId) {
+      setError('Unable to determine branch for this job order.');
+      setLoading(false);
+      return;
+    }
+
+    const normalizedItems = materials.map((material) => ({
+      name: material.name.trim(),
+      quantity: Number(material.quantity) || 0,
+      unitPrice: Number(material.unitPrice) || 0,
+      materialCost: Number(material.unitPrice) || 0,
+      laborCost: 0
+    }));
+
+    if (normalizedItems.length === 0) {
+      normalizedItems.push({
+        name: 'Service Package',
+        quantity: 1,
+        unitPrice: 0,
+        materialCost: 0,
+        laborCost: 0
+      });
+    }
+
+    if (labor.length > 0) {
+      const totalLaborCost = labor.reduce(
+        (sum, item) => sum + ((Number(item.hours) || 0) * (Number(item.rate) || 0)),
+        0
+      );
+      normalizedItems[0].laborCost = totalLaborCost;
+    }
+
+    const serviceDescription = selectedServices
+      .map((service: any) => {
+        if (service.type === 'reupholstery' && service.itemType) {
+          return `reupholstery (${service.itemType})`;
+        }
+        return service.type;
+      })
+      .join(', ');
+
+    const computedVehicleInfo = reupholstery.selected
+      ? {
+          make: 'Reupholstery',
+          model: reupholsteryItemType.trim(),
+          year: new Date().getFullYear(),
+          plateNumber: ''
+        }
+      : {
+          make: vehicleMake || 'N/A',
+          model: vehicleModel || 'N/A',
+          year: Number(vehicleYear) || new Date().getFullYear(),
+          plateNumber: vehiclePlate || ''
+        };
+
+    const estimatedCompletion = estimatedCompletionDate || new Date().toISOString().slice(0, 10);
+
     try {
       const jobOrderData = {
         customerName,
         customerPhone,
         customerEmail,
-        customerAddress,
-        vehicleInfo: `${vehicleYear} ${vehicleMake} ${vehicleModel}`,
-        vehiclePlate,
-        services: selectedServices,
-        estimatedCompletionDate,
-        priority,
-        materials,
-        labor,
-        materialsTotal,
-        laborTotal,
-        totalAmount,
+        branchId,
+        description: serviceDescription || 'Custom service order',
+        vehicleInfo: computedVehicleInfo,
+        items: normalizedItems,
+        estimatedCompletion,
         downPayment,
-        balanceDue,
-        paymentMethod,
-        notes,
-        branch: user?.branch || 'Main Branch'
+        notes
       };
 
-      await api.sales.createJobOrder(jobOrderData);
+      const createResponse = await api.sales.createJobOrder(jobOrderData as any);
+
+      const createdJobOrderId = (createResponse.data as any)?.jobOrderId || 'PENDING-JO';
+      const customNeededMaterials = materials.filter(
+        (material) => material.materialSource === 'custom' && material.name.trim()
+      );
+
+      if (customNeededMaterials.length > 0) {
+        try {
+          await Promise.all(
+            customNeededMaterials.map((material) =>
+              api.inventory.createRawMaterial({
+                name: `${material.name.trim()} (Needed for ${createdJobOrderId})`,
+                quantity: 0,
+                price: Number(material.unitPrice) || 0,
+                lengthValue: 1,
+                lengthUnit: 'pcs',
+                unit: 'pcs',
+                branchId: user?.branchId || 1,
+                category: 'Needed Materials',
+                reorderPoint: Number(material.quantity) || 1,
+                supplier: `Needed for ${createdJobOrderId}`
+              })
+            )
+          );
+        } catch (customMaterialErr) {
+          console.error('Failed to save some needed materials:', customMaterialErr);
+        }
+      }
+
       router.push('/sales');
     } catch (err) {
-      setError('Failed to create job order. Please try again.');
+      const errorMessage = err instanceof Error && err.message
+        ? err.message
+        : 'Failed to create job order. Please try again.';
+      setError(errorMessage);
       console.error(err);
     } finally {
       setLoading(false);
@@ -837,60 +1012,78 @@ export default function NewJobOrderPage() {
       case 4:
         return (
           <div className="space-y-6">
-            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Vehicle Information</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">
+              {reupholstery.selected ? 'Reupholstery Item Details' : 'Vehicle Information'}
+            </h3>
+            {reupholstery.selected ? (
               <div>
                 <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Vehicle Make *
+                  What furniture or item do you want to reupholster? *
                 </label>
                 <input
                   type="text"
-                  value={vehicleMake}
-                  onChange={(e) => setVehicleMake(e.target.value)}
+                  value={reupholsteryItemType}
+                  onChange={(e) => setReupholsteryItemType(e.target.value)}
                   required
                   className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="Toyota"
+                  placeholder="Example: Sofa set, dining chair, office chair, motorcycle seat"
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Vehicle Model *
-                </label>
-                <input
-                  type="text"
-                  value={vehicleModel}
-                  onChange={(e) => setVehicleModel(e.target.value)}
-                  required
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="Fortuner"
-                />
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Vehicle Make *
+                  </label>
+                  <input
+                    type="text"
+                    value={vehicleMake}
+                    onChange={(e) => setVehicleMake(e.target.value)}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="Toyota"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Vehicle Model *
+                  </label>
+                  <input
+                    type="text"
+                    value={vehicleModel}
+                    onChange={(e) => setVehicleModel(e.target.value)}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="Fortuner"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Year *
+                  </label>
+                  <input
+                    type="text"
+                    value={vehicleYear}
+                    onChange={(e) => setVehicleYear(e.target.value)}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="2023"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                    Plate Number
+                  </label>
+                  <input
+                    type="text"
+                    value={vehiclePlate}
+                    onChange={(e) => setVehiclePlate(e.target.value)}
+                    className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="ABC 1234"
+                  />
+                </div>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Year *
-                </label>
-                <input
-                  type="text"
-                  value={vehicleYear}
-                  onChange={(e) => setVehicleYear(e.target.value)}
-                  required
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="2023"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Plate Number
-                </label>
-                <input
-                  type="text"
-                  value={vehiclePlate}
-                  onChange={(e) => setVehiclePlate(e.target.value)}
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="ABC 1234"
-                />
-              </div>
-            </div>
+            )}
           </div>
         );
       
@@ -919,13 +1112,34 @@ export default function NewJobOrderPage() {
                 <div className="space-y-3">
                   {materials.map((material) => (
                     <div key={material.id} className="flex items-center gap-3 p-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
-                      <input
-                        type="text"
-                        value={material.name}
-                        onChange={(e) => updateMaterial(material.id, 'name', e.target.value)}
-                        placeholder="Material name"
-                        className="flex-1 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
-                      />
+                      <div className="flex-1 min-w-0 space-y-2">
+                        <select
+                          value={material.materialSource === 'custom' ? 'custom' : (material.materialId || '')}
+                          onChange={(e) => updateMaterialSource(material.id, e.target.value)}
+                          className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
+                        >
+                          <option value="">Select inventory material</option>
+                          {inventoryMaterials.map((inv) => (
+                            <option key={inv.id} value={inv.id}>
+                              {inv.name} - Stock: {inv.quantity} {inv.unit}
+                            </option>
+                          ))}
+                          <option value="custom">Type new material (not in inventory)</option>
+                        </select>
+                        {material.materialSource === 'custom' ? (
+                          <input
+                            type="text"
+                            value={material.name}
+                            onChange={(e) => updateMaterial(material.id, 'name', e.target.value)}
+                            placeholder="Type material name needed"
+                            className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
+                          />
+                        ) : material.name ? (
+                          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                            Selected: {material.name}
+                          </p>
+                        ) : null}
+                      </div>
                       <input
                         type="number"
                         value={material.quantity}
@@ -1162,7 +1376,7 @@ export default function NewJobOrderPage() {
                 { num: 1, label: 'Name' },
                 { num: 2, label: 'Service' },
                 { num: 3, label: 'Customer Info' },
-                { num: 4, label: 'Vehicle' },
+                { num: 4, label: reupholstery.selected ? 'Item' : 'Vehicle' },
                 { num: 5, label: 'Costing' },
                 { num: 6, label: 'Payment' }
               ].map((s, index) => (

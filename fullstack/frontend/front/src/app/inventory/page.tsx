@@ -9,6 +9,7 @@ type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'purchase
 export default function InventoryPage() {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<TabType>('raw-materials');
+  const [rawMaterialFilter, setRawMaterialFilter] = useState<'all' | 'needed'>('all');
   const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([]);
   const [rawMaterialGroups, setRawMaterialGroups] = useState<RawMaterialSummaryGroup[]>([]);
   const [finishedGoods, setFinishedGoods] = useState<FinishedGood[]>([]);
@@ -65,6 +66,8 @@ export default function InventoryPage() {
         ]);
         setRawMaterialGroups(summaryResponse.data || []);
         setRawMaterials(materialsResponse.data || []);
+        setExpandedMaterialKey(null);
+        setExpandedMaterialDetails({});
       } else if (activeTab === 'finished-goods') {
         const [finishedGoodsResponse, rawMaterialsResponse] = await Promise.all([
           api.inventory.getFinishedGoods(),
@@ -314,6 +317,10 @@ export default function InventoryPage() {
 
   const groupedRawMaterials = useMemo(() => {
     return rawMaterialGroups.filter((group) => {
+      if (rawMaterialFilter === 'needed' && group.category !== 'Needed Materials') {
+        return false;
+      }
+
       const q = searchTerm.toLowerCase();
       if (!q) return true;
       return (
@@ -322,37 +329,11 @@ export default function InventoryPage() {
         (group.supplier || '').toLowerCase().includes(q)
       );
     });
-  }, [rawMaterialGroups, searchTerm]);
+  }, [rawMaterialGroups, searchTerm, rawMaterialFilter]);
 
-  const handleToggleMaterialDetails = async (group: RawMaterialSummaryGroup) => {
-    if (expandedMaterialKey === group.key) {
-      setExpandedMaterialKey(null);
-      return;
-    }
-
-    setExpandedMaterialKey(group.key);
-    if (expandedMaterialDetails[group.key]) {
-      return;
-    }
-
-    setLoadingDetailKey(group.key);
-    try {
-      const response = await api.inventory.getRawMaterialGroupDetail(group.key, { branchId: user?.branchId });
-      if (response.status === 'success' && response.data) {
-        setExpandedMaterialDetails((prev) => ({ ...prev, [group.key]: response.data }));
-      }
-    } catch (error: any) {
-      setFormError(error?.message || 'Failed to load material breakdown.');
-    } finally {
-      setLoadingDetailKey(null);
-    }
-  };
-
-  const filteredFinishedGoods = finishedGoods.filter(item =>
-    item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    item.category.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-
+  const neededRawMaterialCount = rawMaterialGroups.filter(
+    (group) => group.category === 'Needed Materials'
+  ).length;
   const tabs = [
     { id: 'raw-materials' as TabType, name: 'Raw Materials', icon: (
       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -592,17 +573,45 @@ export default function InventoryPage() {
 
           {/* Search */}
           <div className="p-4 border-b border-zinc-200 dark:border-zinc-800">
-            <div className="relative max-w-md">
-              <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
-              <input
-                type="text"
-                placeholder="Search inventory..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-              />
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div className="relative max-w-md w-full">
+                <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                <input
+                  type="text"
+                  placeholder="Search inventory..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                />
+              </div>
+              {activeTab === 'raw-materials' && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRawMaterialFilter('all')}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                      rawMaterialFilter === 'all'
+                        ? 'bg-amber-600 text-white'
+                        : 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                    }`}
+                  >
+                    All Materials
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRawMaterialFilter('needed')}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                      rawMaterialFilter === 'needed'
+                        ? 'bg-amber-600 text-white'
+                        : 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                    }`}
+                  >
+                    Needed Materials
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
