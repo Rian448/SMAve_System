@@ -270,6 +270,11 @@ export interface JobOrderItem {
   unitPrice: number;
   materialCost?: number;
   laborCost?: number;
+  partType?: 'material' | 'labor' | 'service' | 'other';
+  materialName?: string;
+  workerName?: string;
+  workerRate?: number;
+  notes?: string;
 }
 
 export interface VehicleInfo {
@@ -772,6 +777,8 @@ export const api = {
       items: JobOrderItem[];
       estimatedCompletion: string;
       downPayment?: number;
+      totalPrice?: number;
+      notes?: string;
     }) =>
       fetchApi<JobOrder>('/api/sales/job-orders', {
         method: 'POST',

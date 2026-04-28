@@ -176,6 +176,38 @@ export default function InventoryPage() {
     }
   };
 
+  const handleToggleMaterialDetails = async (group: RawMaterialSummaryGroup) => {
+    if (expandedMaterialKey === group.key) {
+      setExpandedMaterialKey(null);
+      return;
+    }
+
+    setExpandedMaterialKey(group.key);
+
+    if (expandedMaterialDetails[group.key]) {
+      return;
+    }
+
+    setLoadingDetailKey(group.key);
+    try {
+      const response = await api.inventory.getRawMaterialGroupDetail(group.key, {
+        branchId: user?.branchId
+      });
+
+      if (response.data) {
+        setExpandedMaterialDetails((prev) => ({
+          ...prev,
+          [group.key]: response.data as RawMaterialSummaryGroup
+        }));
+      }
+    } catch (error) {
+      console.error('Error loading raw material group details:', error);
+      setFormError('Failed to load material details. Please try again.');
+    } finally {
+      setLoadingDetailKey(null);
+    }
+  };
+
   const handleCreatePremade = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
@@ -330,6 +362,18 @@ export default function InventoryPage() {
       );
     });
   }, [rawMaterialGroups, searchTerm, rawMaterialFilter]);
+
+  const filteredFinishedGoods = useMemo(() => {
+    const q = searchTerm.toLowerCase();
+    return finishedGoods.filter((item) => {
+      if (!q) return true;
+      return (
+        item.name.toLowerCase().includes(q) ||
+        item.category.toLowerCase().includes(q) ||
+        (item.sku || '').toLowerCase().includes(q)
+      );
+    });
+  }, [finishedGoods, searchTerm]);
 
   const neededRawMaterialCount = rawMaterialGroups.filter(
     (group) => group.category === 'Needed Materials'

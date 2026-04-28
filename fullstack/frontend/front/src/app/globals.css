@@ -24,3 +24,49 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  .job-order-print,
+  .job-order-print * {
+    background: transparent !important;
+    color: #000000 !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+    border-color: #000000 !important;
+    -webkit-print-color-adjust: economy;
+    print-color-adjust: economy;
+  }
+
+  .job-order-print .no-print,
+  .job-order-print button,
+  .job-order-print input,
+  .job-order-print select,
+  .job-order-print textarea,
+  .job-order-print svg {
+    display: none !important;
+  }
+
+  .job-order-print main {
+    max-width: none !important;
+    padding: 0 !important;
+  }
+
+  .job-order-print .rounded-xl,
+  .job-order-print .rounded-lg,
+  .job-order-print .rounded-full {
+    border-radius: 0 !important;
+  }
+
+  .job-order-print .border,
+  .job-order-print .border-t,
+  .job-order-print .border-b,
+  .job-order-print .border-l,
+  .job-order-print .border-r {
+    border-color: #000000 !important;
+  }
+}

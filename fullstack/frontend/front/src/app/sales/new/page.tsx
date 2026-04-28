@@ -1090,212 +1090,47 @@ export default function NewJobOrderPage() {
       case 5:
         return (
           <div className="space-y-6">
-            <div>
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Materials</h3>
-                <button
-                  type="button"
-                  onClick={addMaterial}
-                  className="inline-flex items-center px-3 py-1.5 bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 rounded-lg text-sm font-medium hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors"
-                >
-                  <svg className="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                  </svg>
-                  Add Material
-                </button>
-              </div>
-              {materials.length === 0 ? (
-                <div className="text-center py-8 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg border-2 border-dashed border-zinc-200 dark:border-zinc-700">
-                  <p className="text-zinc-500 dark:text-zinc-400">No materials added yet</p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {materials.map((material) => (
-                    <div key={material.id} className="flex items-center gap-3 p-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
-                      <div className="flex-1 min-w-0 space-y-2">
-                        <select
-                          value={material.materialSource === 'custom' ? 'custom' : (material.materialId || '')}
-                          onChange={(e) => updateMaterialSource(material.id, e.target.value)}
-                          className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
-                        >
-                          <option value="">Select inventory material</option>
-                          {inventoryMaterials.map((inv) => (
-                            <option key={inv.id} value={inv.id}>
-                              {inv.name} - Stock: {inv.quantity} {inv.unit}
-                            </option>
-                          ))}
-                          <option value="custom">Type new material (not in inventory)</option>
-                        </select>
-                        {material.materialSource === 'custom' ? (
-                          <input
-                            type="text"
-                            value={material.name}
-                            onChange={(e) => updateMaterial(material.id, 'name', e.target.value)}
-                            placeholder="Type material name needed"
-                            className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
-                          />
-                        ) : material.name ? (
-                          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                            Selected: {material.name}
-                          </p>
-                        ) : null}
-                      </div>
-                      <input
-                        type="number"
-                        value={material.quantity}
-                        onChange={(e) => updateMaterial(material.id, 'quantity', parseInt(e.target.value) || 0)}
-                        placeholder="Qty"
-                        className="w-20 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
-                      />
-                      <input
-                        type="number"
-                        value={material.unitPrice}
-                        onChange={(e) => updateMaterial(material.id, 'unitPrice', parseFloat(e.target.value) || 0)}
-                        placeholder="Price"
-                        className="w-28 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
-                      />
-                      <span className="w-24 text-right text-sm font-medium text-zinc-900 dark:text-white">
-                        ₱{(material.quantity * material.unitPrice).toLocaleString()}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => removeMaterial(material.id)}
-                        className="p-2 text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-lg transition-colors"
-                      >
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Labor</h3>
-                <button
-                  type="button"
-                  onClick={addLabor}
-                  className="inline-flex items-center px-3 py-1.5 bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 rounded-lg text-sm font-medium hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors"
-                >
-                  <svg className="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                  </svg>
-                  Add Labor
-                </button>
-              </div>
-              {labor.length === 0 ? (
-                <div className="text-center py-8 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg border-2 border-dashed border-zinc-200 dark:border-zinc-700">
-                  <p className="text-zinc-500 dark:text-zinc-400">No labor items added yet</p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {labor.map((item, index) => (
-                    <div key={index} className="flex items-center gap-3 p-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
-                      <input
-                        type="text"
-                        value={item.description}
-                        onChange={(e) => updateLabor(index, 'description', e.target.value)}
-                        placeholder="Labor description"
-                        className="flex-1 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
-                      />
-                      <input
-                        type="number"
-                        value={item.hours}
-                        onChange={(e) => updateLabor(index, 'hours', parseFloat(e.target.value) || 0)}
-                        placeholder="Hours"
-                        className="w-20 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
-                      />
-                      <input
-                        type="number"
-                        value={item.rate}
-                        onChange={(e) => updateLabor(index, 'rate', parseFloat(e.target.value) || 0)}
-                        placeholder="Rate"
-                        className="w-28 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
-                      />
-                      <span className="w-24 text-right text-sm font-medium text-zinc-900 dark:text-white">
-                        ₱{(item.hours * item.rate).toLocaleString()}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => removeLabor(index)}
-                        className="p-2 text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-lg transition-colors"
-                      >
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        );
-      
-      case 6:
-        return (
-          <div className="space-y-6">
-            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Payment & Summary</h3>
-            
-            {/* Summary */}
-            <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-6">
-              <div className="space-y-3">
-                <div className="flex justify-between text-sm">
-                  <span className="text-zinc-600 dark:text-zinc-400">Materials Subtotal</span>
-                  <span className="font-medium text-zinc-900 dark:text-white">₱{materialsTotal.toLocaleString()}</span>
-                </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-zinc-600 dark:text-zinc-400">Labor Subtotal</span>
-                  <span className="font-medium text-zinc-900 dark:text-white">₱{laborTotal.toLocaleString()}</span>
-                </div>
-                <div className="border-t border-zinc-200 dark:border-zinc-700 pt-3">
-                  <div className="flex justify-between text-lg font-semibold">
-                    <span className="text-zinc-900 dark:text-white">Total Amount</span>
-                    <span className="text-amber-600 dark:text-amber-400">₱{totalAmount.toLocaleString()}</span>
-                  </div>
-                </div>
+            <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
+              <h3 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">Review Job Order</h3>
+              <div className="space-y-3 text-sm text-zinc-600 dark:text-zinc-300">
+                <p>
+                  Services selected: {[flooring.selected && 'Flooring', reupholstery.selected && `Reupholstery${reupholsteryItemType.trim() ? ` (${reupholsteryItemType.trim()})` : ''}`, ceiling.selected && 'Ceiling', sidings.selected && 'Sidings', seatCovers.selected && 'Seat Covers', otherServices.selected && 'Other Services'].filter(Boolean).join(', ') || 'None'}
+                </p>
+                <p>Estimated completion: {estimatedCompletionDate || 'Not set'}</p>
+                <p>Materials and pricing will be added later by the admin or supervisor when the job order is edited.</p>
               </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Payment Method
-                </label>
-                <select
-                  value={paymentMethod}
-                  onChange={(e) => setPaymentMethod(e.target.value)}
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                >
-                  <option value="cash">Cash</option>
-                  <option value="gcash">GCash</option>
-                  <option value="bank_transfer">Bank Transfer</option>
-                  <option value="credit_card">Credit Card</option>
-                  <option value="installment">Installment</option>
-                </select>
+              <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4">
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">Customer</p>
+                <p className="font-medium text-zinc-900 dark:text-white">{customerName || 'N/A'}</p>
+                <p className="text-sm text-zinc-600 dark:text-zinc-300">{customerPhone || 'N/A'}</p>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Down Payment
-                </label>
-                <input
-                  type="number"
-                  value={downPayment}
-                  onChange={(e) => setDownPayment(parseFloat(e.target.value) || 0)}
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="0"
-                />
+              <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4">
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">Vehicle / Item</p>
+                <p className="font-medium text-zinc-900 dark:text-white">
+                  {reupholstery.selected ? (reupholsteryItemType.trim() || 'Reupholstery item') : `${vehicleMake || 'N/A'} ${vehicleModel || ''}`.trim() || 'N/A'}
+                </p>
+                <p className="text-sm text-zinc-600 dark:text-zinc-300">
+                  {reupholstery.selected ? 'Reupholstery request' : `${vehicleYear || 'N/A'} ${vehiclePlate || ''}`.trim() || 'N/A'}
+                </p>
               </div>
             </div>
 
-            <div className="bg-amber-50 dark:bg-amber-900/20 rounded-lg p-4">
-              <div className="flex justify-between text-lg font-semibold">
-                <span className="text-amber-800 dark:text-amber-300">Balance Due</span>
-                <span className="text-amber-800 dark:text-amber-300">₱{balanceDue.toLocaleString()}</span>
-              </div>
+            <div>
+              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                Deposit / Down Payment
+              </label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={downPayment}
+                onChange={(e) => setDownPayment(parseFloat(e.target.value) || 0)}
+                className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                placeholder="Enter deposit amount"
+              />
             </div>
 
             <div>
@@ -1377,8 +1212,7 @@ export default function NewJobOrderPage() {
                 { num: 2, label: 'Service' },
                 { num: 3, label: 'Customer Info' },
                 { num: 4, label: reupholstery.selected ? 'Item' : 'Vehicle' },
-                { num: 5, label: 'Costing' },
-                { num: 6, label: 'Payment' }
+                { num: 5, label: 'Review' }
               ].map((s, index) => (
                 <div key={s.num} className="flex items-center">
                   <button
@@ -1396,7 +1230,7 @@ export default function NewJobOrderPage() {
                   }`}>
                     {s.label}
                   </span>
-                  {index < 5 && (
+                  {index < 4 && (
                     <div className={`w-8 sm:w-16 h-1 mx-2 rounded ${
                       step > s.num ? 'bg-amber-600' : 'bg-zinc-200 dark:bg-zinc-700'
                     }`} />
@@ -1433,7 +1267,7 @@ export default function NewJobOrderPage() {
               >
                 Previous
               </button>
-              {step < 6 ? (
+              {step < 5 ? (
                 <button
                   type="button"
                   onClick={() => setStep(step + 1)}

@@ -11,15 +11,22 @@ import secrets
 import uuid
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:3000"], supports_credentials=True)
+CORS(
+    app,
+    resources={r"/*": {"origins": "*"}},
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    supports_credentials=False
+)
 
 # ============================================
 # DATABASE CONFIGURATION (PostgreSQL)
 # ============================================
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
     'DATABASE_URL',
-    'postgresql+pg8000://postgres:poiuytrewq@localhost:5432/SmDatabase'
+    f"sqlite:///{os.path.join(BASE_DIR, 'smaeve_system.db')}"
 )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -761,8 +768,30 @@ def ensure_db_initialized():
 def generate_job_order_id(branch_code):
     """Generate unique job order ID"""
     year = datetime.now().year
-    count = sum(1 for jo in job_orders if jo['jobOrderId'].startswith(f'JO-{branch_code}-{year}')) + 1
-    return f'JO-{branch_code}-{year}-{count:04d}'
+    prefix = f'JO-{branch_code}-{year}-'
+
+    existing_ids = [
+        row[0]
+        for row in db.session.query(JobOrder.job_order_id)
+        .filter(JobOrder.job_order_id.like(f'{prefix}%'))
+        .all()
+        if row[0]
+    ]
+    existing_ids.extend(
+        jo['jobOrderId']
+        for jo in job_orders
+        if jo.get('jobOrderId', '').startswith(prefix)
+    )
+
+    next_sequence = 1
+    for job_order_id in existing_ids:
+        try:
+            sequence = int(job_order_id.rsplit('-', 1)[-1])
+        except (TypeError, ValueError):
+            continue
+        next_sequence = max(next_sequence, sequence + 1)
+
+    return f'{prefix}{next_sequence:04d}'
 
 def generate_lineup_slip_number(branch_code):
     """Generate unique lineup slip number"""
@@ -1626,14 +1655,18 @@ def create_job_order():
     
     job_order_id = generate_job_order_id(branch_db.code)
     
+    items = data.get('items') or []
+
     # Calculate costs
-    total_price = sum(item['quantity'] * item['unitPrice'] for item in data['items'])
-    estimated_cost = sum(item['quantity'] * (item.get('materialCost', 0) + item.get('laborCost', 0)) for item in data['items'])
+    total_price = data.get('totalPrice')
+    if total_price is None:
+        total_price = sum(item.get('quantity', 0) * item.get('unitPrice', 0) for item in items)
+    estimated_cost = sum(item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0)) for item in items)
     down_payment = data.get('downPayment', 0)
-    balance = total_price - down_payment
+    balance = max(total_price - down_payment, 0) if total_price > 0 else 0
     
     # Determine payment status
-    if down_payment >= total_price:
+    if total_price > 0 and down_payment >= total_price:
         payment_status = 'paid'
     elif down_payment > 0:
         payment_status = 'partial'
@@ -1654,7 +1687,7 @@ def create_job_order():
         branch_id=data['branchId'],
         description=data['description'],
         vehicle_info=data.get('vehicleInfo'),
-        items=data['items'],
+        items=items,
         estimated_cost=estimated_cost,
         actual_cost=0,
         total_price=total_price,
@@ -1691,6 +1724,10 @@ def update_job_order(order_id):
     order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
+
+    user = request.current_user
+    if user.get('role') == 'sales_manager' and (order.down_payment or 0) <= 0:
+        return jsonify({'status': 'error', 'message': 'Down payment is required before sales managers can edit this job order'}), 403
     
     data = request.get_json()
     
@@ -1703,14 +1740,26 @@ def update_job_order(order_id):
         order.down_payment = data['downPayment']
     if 'actualCost' in data:
         order.actual_cost = data['actualCost']
+    if 'totalPrice' in data:
+        order.total_price = data['totalPrice']
+    if 'items' in data:
+        order.items = data['items']
+        order.estimated_cost = sum(
+            item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0))
+            for item in data['items']
+        )
     
     # Recalculate balance
-    if 'downPayment' in data:
-        order.balance = order.total_price - order.down_payment
-        if order.down_payment >= order.total_price:
+    if 'downPayment' in data or 'totalPrice' in data:
+        order.balance = max(order.total_price - order.down_payment, 0)
+        if order.total_price > 0 and order.down_payment >= order.total_price:
             order.payment_status = 'paid'
         elif order.down_payment > 0:
             order.payment_status = 'partial'
+        elif order.total_price <= 0 and order.down_payment > 0:
+            order.payment_status = 'partial'
+        elif order.total_price <= 0:
+            order.payment_status = 'unpaid'
     
     if data.get('status') == 'completed':
         order.completed_at = datetime.now()
@@ -1730,6 +1779,8 @@ def update_job_order(order_id):
             'downPayment': order.down_payment,
             'balance': order.balance,
             'actualCost': order.actual_cost,
+            'totalPrice': order.total_price,
+            'items': order.items,
             'completedAt': order.completed_at.strftime('%Y-%m-%d') if order.completed_at else None,
             'updatedAt': order.updated_at.strftime('%Y-%m-%d')
         }
