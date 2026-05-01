@@ -170,50 +170,151 @@ export default function ProductOrderDetailPage() {
           </div>
 
           <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-6">
-            <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">Order Controls</h2>
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">Order Workflow</h2>
+            
+            {/* Step-by-step workflow */}
             <div className="space-y-3">
-              <div>
-                <label className="block text-xs text-zinc-500 dark:text-zinc-400 mb-1">Status</label>
-                <select
-                  value={order.status}
-                  onChange={(e) => updateOrder({ status: e.target.value as ProductOrder['status'] })}
-                  disabled={saveState === 'saving'}
-                  className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
-                >
-                  <option value="pending">Pending</option>
-                  <option value="processing">Confirmed / Processing</option>
-                  <option value="ready">Ready</option>
-                  <option value="completed">Completed</option>
-                  <option value="cancelled">Cancelled</option>
-                </select>
+              {/* Step 1: Invoice */}
+              <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg p-4">
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex items-start gap-3">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center font-semibold text-sm ${
+                      order.status !== 'pending'
+                        ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                        : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
+                    }`}>
+                      {order.status !== 'pending' ? '✓' : '1'}
+                    </div>
+                    <div>
+                      <p className="font-medium text-zinc-900 dark:text-white text-sm">Step 1: Generate Invoice</p>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">Create and prepare invoice for the customer</p>
+                    </div>
+                  </div>
+                </div>
+                {order.status === 'pending' && (
+                  <button
+                    onClick={() => updateOrder({ status: 'processing' })}
+                    disabled={saveState === 'saving'}
+                    className="w-full px-4 py-2 rounded-lg bg-amber-600 text-white font-medium hover:bg-amber-700 disabled:opacity-50 text-sm"
+                  >
+                    {saveState === 'saving' ? 'Processing...' : 'Generate Invoice'}
+                  </button>
+                )}
+                {order.status !== 'pending' && (
+                  <p className="text-xs text-green-600 dark:text-green-400 font-medium">Completed</p>
+                )}
               </div>
-              <div>
-                <label className="block text-xs text-zinc-500 dark:text-zinc-400 mb-1">Payment</label>
-                <select
-                  value={order.paymentStatus}
-                  onChange={(e) => updateOrder({ paymentStatus: e.target.value as ProductOrder['paymentStatus'] })}
-                  disabled={saveState === 'saving'}
-                  className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
-                >
-                  <option value="unpaid">Unpaid</option>
-                  <option value="partial">Partially Paid</option>
-                  <option value="paid">Fully Paid</option>
-                </select>
+
+              {/* Step 2: Payment Confirmation */}
+              <div className={`border rounded-lg p-4 ${
+                order.status === 'pending'
+                  ? 'border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/30 opacity-50'
+                  : 'border-zinc-200 dark:border-zinc-700'
+              }`}>
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex items-start gap-3">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center font-semibold text-sm ${
+                      order.paymentStatus === 'paid'
+                        ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                        : order.status === 'pending'
+                        ? 'bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-500'
+                        : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
+                    }`}>
+                      {order.paymentStatus === 'paid' ? '✓' : '2'}
+                    </div>
+                    <div>
+                      <p className="font-medium text-zinc-900 dark:text-white text-sm">Step 2: Confirm Payment</p>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">Verify and confirm payment received</p>
+                    </div>
+                  </div>
+                </div>
+                {order.status !== 'pending' && order.paymentStatus !== 'paid' && (
+                  <div className="space-y-2">
+                    <button
+                      onClick={() => updateOrder({ paymentStatus: 'partial' })}
+                      disabled={saveState === 'saving'}
+                      className="w-full px-3 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50 text-sm"
+                    >
+                      {saveState === 'saving' ? 'Processing...' : 'Partial Payment'}
+                    </button>
+                    <button
+                      onClick={() => updateOrder({ paymentStatus: 'paid' })}
+                      disabled={saveState === 'saving'}
+                      className="w-full px-3 py-2 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 disabled:opacity-50 text-sm"
+                    >
+                      {saveState === 'saving' ? 'Processing...' : 'Fully Paid'}
+                    </button>
+                  </div>
+                )}
+                {order.paymentStatus === 'paid' && (
+                  <p className="text-xs text-green-600 dark:text-green-400 font-medium">Completed - {order.paymentStatus.toUpperCase()}</p>
+                )}
+                {order.status === 'pending' && (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">Complete Step 1 first</p>
+                )}
               </div>
-              <button
-                onClick={() => updateOrder({ status: 'processing' })}
-                disabled={saveState === 'saving' || order.status === 'completed' || order.status === 'cancelled'}
-                className="w-full px-4 py-2 rounded-lg bg-amber-600 text-white font-medium hover:bg-amber-700 disabled:opacity-50"
-              >
-                Confirm Order
-              </button>
-              <button
-                onClick={printReceipt}
-                className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-200 font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800"
-              >
-                Print Receipt
-              </button>
+
+              {/* Step 3: Complete Transaction */}
+              <div className={`border rounded-lg p-4 ${
+                order.paymentStatus !== 'paid'
+                  ? 'border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/30 opacity-50'
+                  : order.status === 'completed'
+                  ? 'border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20'
+                  : 'border-zinc-200 dark:border-zinc-700'
+              }`}>
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex items-start gap-3">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center font-semibold text-sm ${
+                      order.status === 'completed'
+                        ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                        : order.paymentStatus !== 'paid'
+                        ? 'bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-500'
+                        : 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
+                    }`}>
+                      {order.status === 'completed' ? '✓' : '3'}
+                    </div>
+                    <div>
+                      <p className="font-medium text-zinc-900 dark:text-white text-sm">Step 3: Complete Transaction</p>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">Finalize order and mark as completed</p>
+                    </div>
+                  </div>
+                </div>
+                {order.paymentStatus === 'paid' && order.status !== 'completed' && (
+                  <button
+                    onClick={() => updateOrder({ status: 'completed' })}
+                    disabled={saveState === 'saving'}
+                    className="w-full px-4 py-2 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 disabled:opacity-50 text-sm"
+                  >
+                    {saveState === 'saving' ? 'Processing...' : 'Complete Transaction'}
+                  </button>
+                )}
+                {order.status === 'completed' && (
+                  <p className="text-xs text-green-600 dark:text-green-400 font-medium">✓ Transaction Complete</p>
+                )}
+                {order.paymentStatus !== 'paid' && (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">Complete Step 2 first</p>
+                )}
+              </div>
             </div>
+
+            {/* Cancel button - always available */}
+            {order.status !== 'completed' && order.status !== 'cancelled' && (
+              <button
+                onClick={() => updateOrder({ status: 'cancelled' })}
+                disabled={saveState === 'saving'}
+                className="w-full mt-4 px-4 py-2 rounded-lg border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 font-medium hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50 text-sm"
+              >
+                Cancel Order
+              </button>
+            )}
+
+            {/* Print Receipt button */}
+            <button
+              onClick={printReceipt}
+              className="w-full mt-3 px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-200 font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800 text-sm"
+            >
+              Print Receipt
+            </button>
 
             <div className="mt-5 text-sm space-y-2">
               <p className="text-zinc-600 dark:text-zinc-400"><span className="font-medium text-zinc-800 dark:text-zinc-200">Customer:</span> {order.customerName}</p>

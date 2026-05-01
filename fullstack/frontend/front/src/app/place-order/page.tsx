@@ -74,6 +74,15 @@ export default function PlaceOrderPage() {
     plateNumber: ''
   });
 
+  const availableServices = [
+    'Flooring',
+    'Reupholstery',
+    'Ceiling',
+    'Sidings',
+    'Seat Covers',
+    'Other Services'
+  ];
+
   const [notes, setNotes] = useState('');
   const [agreeTerms, setAgreeTerms] = useState(false);
 
@@ -209,13 +218,10 @@ export default function PlaceOrderPage() {
     ? products.filter((product) => product.branchId === selectedBranch)
     : products;
 
-  useEffect(() => {
-    if (!selectedBranch) {
-      return;
-    }
-
-    setCart((prev) => prev.filter((item) => item.product.branchId === selectedBranch));
-  }, [selectedBranch]);
+  // Get cart items filtered by selected branch for order submission
+  const cartItemsForSubmission = selectedBranch
+    ? cart.filter((item) => item.product.branchId === selectedBranch)
+    : cart;
 
   // Submit product order
   const handleProductOrderSubmit = async (e: React.FormEvent) => {
@@ -231,8 +237,8 @@ export default function PlaceOrderPage() {
       return;
     }
 
-    if (cart.length === 0) {
-      setError('Please add at least one product to your cart');
+    if (cartItemsForSubmission.length === 0) {
+      setError('Please add at least one product from the selected branch to your cart');
       return;
     }
 
@@ -245,7 +251,7 @@ export default function PlaceOrderPage() {
         customerPhone,
         customerEmail,
         customerAddress,
-        items: cart.map(item => ({
+        items: cartItemsForSubmission.map(item => ({
           productId: item.product.id,
           quantity: item.quantity
         })),
@@ -757,24 +763,56 @@ export default function PlaceOrderPage() {
                   <p className="text-zinc-500 dark:text-zinc-400 text-sm py-4">Your cart is empty</p>
                 ) : (
                   <div className="space-y-4">
-                    {cart.map((item) => (
-                      <div key={item.product.id} className="flex justify-between items-start border-b border-zinc-100 dark:border-zinc-800 pb-3">
-                        <div className="flex-1">
-                          <p className="font-medium text-zinc-900 dark:text-white text-sm">{item.product.name}</p>
-                          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                            ₱{item.product.price.toLocaleString()} × {item.quantity}
-                          </p>
-                        </div>
-                        <span className="font-semibold text-zinc-900 dark:text-white">
-                          ₱{(item.product.price * item.quantity).toLocaleString()}
-                        </span>
+                    {/* Info about other branch items */}
+                    {selectedBranch && cart.some(item => item.product.branchId !== selectedBranch) && (
+                      <div className="p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg text-blue-700 dark:text-blue-400 text-xs mb-4">
+                        <p className="font-semibold mb-1">Items from other branches in your cart:</p>
+                        <p>Only items from the selected branch will be included in this order. Other items remain in your cart for future orders.</p>
                       </div>
-                    ))}
+                    )}
+
+                    {cart.map((item) => {
+                      const isFromSelectedBranch = selectedBranch === item.product.branchId;
+                      const isOtherBranch = selectedBranch && !isFromSelectedBranch;
+                      
+                      return (
+                        <div 
+                          key={item.product.id} 
+                          className={`flex justify-between items-start border-b border-zinc-100 dark:border-zinc-800 pb-3 ${
+                            isOtherBranch ? 'opacity-50' : ''
+                          }`}
+                        >
+                          <div className="flex-1">
+                            <p className="font-medium text-zinc-900 dark:text-white text-sm">{item.product.name}</p>
+                            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                              ₱{item.product.price.toLocaleString()} × {item.quantity}
+                            </p>
+                            {isOtherBranch && (
+                              <p className="text-xs text-orange-600 dark:text-orange-400 font-semibold mt-1">
+                                Different branch
+                              </p>
+                            )}
+                          </div>
+                          <span className={`font-semibold ${isOtherBranch ? 'text-zinc-400 dark:text-zinc-600' : 'text-zinc-900 dark:text-white'}`}>
+                            ₱{(item.product.price * item.quantity).toLocaleString()}
+                          </span>
+                        </div>
+                      );
+                    })}
                     
                     <div className="flex justify-between items-center pt-2 border-t border-zinc-200 dark:border-zinc-700">
-                      <span className="font-semibold text-zinc-900 dark:text-white">Total:</span>
+                      <span className="font-semibold text-zinc-900 dark:text-white">
+                        {selectedBranch && cart.some(item => item.product.branchId !== selectedBranch) 
+                          ? 'Branch Total:' 
+                          : 'Total:'}
+                      </span>
                       <span className="text-xl font-bold text-amber-600 dark:text-amber-400">
-                        ₱{cartTotal.toLocaleString()}
+                        ₱{(selectedBranch 
+                          ? cart
+                              .filter(item => item.product.branchId === selectedBranch)
+                              .reduce((sum, item) => sum + item.product.price * item.quantity, 0)
+                          : cartTotal
+                        ).toLocaleString()}
                       </span>
                     </div>
                   </div>
@@ -812,7 +850,7 @@ export default function PlaceOrderPage() {
                 <button
                   type="button"
                   onClick={handleProductOrderSubmit}
-                  disabled={loading || cart.length === 0}
+                  disabled={loading || cartItemsForSubmission.length === 0}
                   className="w-full mt-4 py-3 rounded-lg bg-amber-600 text-white font-semibold hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {loading ? 'Placing Order...' : 'Place Order'}
@@ -1024,6 +1062,20 @@ export default function PlaceOrderPage() {
                   </select>
                 </div>
               </div>
+            </div>
+
+            {/* Vehicle Info (Optional) */}
+            <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6">
+              <h2 className="text-xl font-semibold text-zinc-900 dark:text-white mb-2">Available Services</h2>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">We offer the following services:</p>
+              <ul className="space-y-2">
+                {availableServices.map((service, index) => (
+                  <li key={index} className="flex items-start gap-3">
+                    <span className="text-amber-600 dark:text-amber-400 font-bold mt-0.5">•</span>
+                    <span className="text-sm text-zinc-700 dark:text-zinc-300">{service}</span>
+                  </li>
+                ))}
+              </ul>
             </div>
 
             {/* Vehicle Info (Optional) */}
