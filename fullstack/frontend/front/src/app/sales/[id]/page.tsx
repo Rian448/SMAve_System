@@ -188,9 +188,9 @@ export default function JobOrderDetailPage() {
         ...item,
         materialSource: 'inventory',
         materialId: selectedMaterial.id,
-        name: selectedMaterial.name,
-        materialCost: Number(selectedMaterial.price) || 0,
-        unitPrice: Number(selectedMaterial.price) || 0
+        name: selectedMaterial.materialType,
+        materialCost: Number(selectedMaterial.unitPrice) || 0,
+        unitPrice: Number(selectedMaterial.unitPrice) || 0
       };
     }));
   };
@@ -221,20 +221,16 @@ export default function JobOrderDetailPage() {
 
         const normalizedMaterialName = materialName.toLowerCase();
         const existingMaterial = inventoryMaterials.find(
-          (material) => material.name.trim().toLowerCase() === normalizedMaterialName
+          (material) => material.materialType.trim().toLowerCase() === normalizedMaterialName
         );
 
         if (!existingMaterial) {
           const createdMaterialResponse = await api.inventory.createRawMaterial({
-            name: materialName,
-            quantity: 0,
-            price: Number(item.materialCost) || Number(item.unitPrice) || 0,
-            lengthValue: 0,
-            lengthUnit: 'yards',
-            unit: 'pcs',
-            category: 'Needed Materials',
-            reorderPoint: 0,
-            supplier: '',
+            materialType: materialName,
+            color: '',
+            pattern: '',
+            unitPrice: Number(item.materialCost) || Number(item.unitPrice) || 0,
+            stockQuantity: 0,
             branchId: jobOrder.branchId
           });
 
@@ -622,7 +618,7 @@ export default function JobOrderDetailPage() {
                               <option value="">Select inventory material</option>
                               {inventoryMaterials.map((material) => (
                                 <option key={material.id} value={material.id}>
-                                  {material.name} - Stock: {material.quantity} {material.unit}
+                                  {material.materialType}{material.color ? ` - ${material.color}` : ''}{material.pattern ? ` (${material.pattern})` : ''} - Stock: {material.stockQuantity}
                                 </option>
                               ))}
                               {canCreateNewMaterial && <option value="custom">Add new material</option>}

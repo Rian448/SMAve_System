@@ -119,6 +119,7 @@ export interface Appointment {
   description?: string;
   vehicleInfo?: VehicleInfo;
   status: 'pending' | 'confirmed' | 'completed' | 'cancelled';
+  confirmedTime?: string;
   adminNotes?: string;
   createdAt: string;
   updatedAt?: string;
@@ -131,6 +132,23 @@ export interface ProductOrderItem {
   quantity: number;
   unitPrice: number;
   total: number;
+  sourceBranchId?: number;
+  sourceBranchName?: string;
+}
+
+export interface ProductOrderTransfer {
+  id: number;
+  productOrderId: number;
+  orderNumber?: string;
+  customerName?: string;
+  customerPhone?: string;
+  pickupBranchId?: number;
+  pickupBranchName?: string;
+  sourceBranchId: number;
+  sourceBranchName?: string;
+  items: ProductOrderItem[];
+  status: 'pending' | 'transferred' | 'received';
+  createdAt: string;
 }
 
 export interface ProductOrder {
@@ -144,11 +162,28 @@ export interface ProductOrder {
   totalAmount: number;
   branchId: number;
   branchName?: string;
+  groupId?: string;
+  pickupBranchId?: number;
+  pickupBranchName?: string;
+  shipmentStatus?: 'not_needed' | 'pending' | 'shipped' | 'received';
+  transfers?: ProductOrderTransfer[];
   status: 'pending' | 'processing' | 'ready' | 'completed' | 'cancelled';
   paymentStatus: 'unpaid' | 'partial' | 'paid';
   notes?: string;
   createdAt: string;
   updatedAt?: string;
+}
+
+export interface MultiProductOrderResult {
+  groupId: string;
+  pickupBranchName: string;
+  totalAmount: number;
+  orders: ProductOrder[];
+}
+
+export interface IncomingShipmentGroup {
+  groupId: string;
+  orders: ProductOrder[];
 }
 
 export interface ProductOrderTimelineEvent {
@@ -172,46 +207,34 @@ export interface PublicProduct {
 
 export interface RawMaterial {
   id: number;
-  name: string;
-  sku: string;
-  quantity: number;
-  unit: string;
-  category: string;
-  price: number;
-  reorderPoint: number;
-  supplier: string;
-  lengthValue?: number;
-  lengthUnit?: string;
+  itemId: string;
+  materialType: string;
+  color: string;
+  pattern: string;
+  unitPrice: number;
+  stockQuantity: number;
   branchId: number;
   isArchived: boolean;
   lastUpdated: string;
 }
 
 export interface RawMaterialInput {
-  name: string;
-  quantity: number;
-  price: number;
-  lengthValue: number;
-  lengthUnit: string;
-  unit?: string;
-  category?: string;
-  reorderPoint?: number;
-  supplier?: string;
+  itemId?: string;
+  materialType: string;
+  color?: string;
+  pattern?: string;
+  unitPrice: number;
+  stockQuantity: number;
   branchId: number;
 }
 
 export interface RawMaterialSummaryGroup {
   key: string;
   name: string;
-  category: string;
-  unit: string;
-  lengthUnit: string;
-  supplier: string;
-  totalQuantity: number;
-  totalLength: number;
-  totalValue: number;
-  reorderPoint: number;
-  lengths: number[];
+  color: string;
+  pattern: string;
+  unitPrice: number;
+  totalStockQuantity: number;
   components: RawMaterial[];
 }
 
@@ -1018,7 +1041,7 @@ export const api = {
       return fetchApi<Appointment[]>(`/api/appointments${query}`);
     },
 
-    update: (id: number, data: { status?: string; adminNotes?: string }) =>
+    update: (id: number, data: { status?: string; adminNotes?: string; confirmedTime?: string }) =>
       fetchApi<Appointment>(`/api/appointments/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -1060,7 +1083,36 @@ export const api = {
         body: JSON.stringify(data),
       }),
 
+    multiCreate: (data: {
+      customerName: string;
+      customerPhone: string;
+      customerEmail?: string;
+      customerAddress?: string;
+      items: Array<{ productId: number; quantity: number }>;
+      pickupBranchId: number;
+      notes?: string;
+    }) =>
+      fetchApi<ProductOrder>('/api/product-orders/multi', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    getGroup: (groupId: string) => fetchApi<ProductOrder[]>(`/api/product-orders/group/${groupId}`),
+
     getMyOrders: () => fetchApi<ProductOrder[]>('/api/product-orders/my-orders'),
+  },
+
+  // ==================
+  // PRODUCT ORDER TRANSFERS
+  // ==================
+  productOrderTransfers: {
+    getMyRequests: () => fetchApi<ProductOrderTransfer[]>('/api/product-orders/my-transfer-requests'),
+
+    markTransferred: (id: number) =>
+      fetchApi<ProductOrderTransfer>(`/api/product-order-transfers/${id}/mark-transferred`, { method: 'POST' }),
+
+    confirmReceipt: (id: number) =>
+      fetchApi<ProductOrderTransfer>(`/api/product-order-transfers/${id}/confirm-receipt`, { method: 'POST' }),
   },
 
   // ==================

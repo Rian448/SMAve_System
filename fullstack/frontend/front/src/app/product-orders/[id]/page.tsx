@@ -2,13 +2,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { api, ProductOrder, ProductOrderTimelineEvent } from '@/lib/api';
+import { api, ProductOrder, ProductOrderTransfer, ProductOrderTimelineEvent } from '@/lib/api';
+import { useAuth, hasAccess } from '@/context/AuthContext';
 
 type SaveState = 'idle' | 'saving';
 
 export default function ProductOrderDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const { user } = useAuth();
+  const isAdmin = user ? hasAccess(user.role, ['administrator']) : false;
   const [order, setOrder] = useState<ProductOrder | null>(null);
   const [timeline, setTimeline] = useState<ProductOrderTimelineEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -45,10 +48,7 @@ export default function ProductOrderDetailPage() {
   }, [orderId, loadData]);
 
   const updateOrder = async (data: { status?: ProductOrder['status']; paymentStatus?: ProductOrder['paymentStatus']; notes?: string }) => {
-    if (!order) {
-      return;
-    }
-
+    if (!order) return;
     try {
       setSaveState('saving');
       await api.productOrders.update(order.id, data);
@@ -58,6 +58,32 @@ export default function ProductOrderDetailPage() {
       console.error(err);
     } finally {
       setSaveState('idle');
+    }
+  };
+
+  const [transferSavingId, setTransferSavingId] = useState<number | null>(null);
+
+  const markTransferred = async (transferId: number) => {
+    try {
+      setTransferSavingId(transferId);
+      await api.productOrderTransfers.markTransferred(transferId);
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to mark as transferred');
+    } finally {
+      setTransferSavingId(null);
+    }
+  };
+
+  const confirmTransferReceipt = async (transferId: number) => {
+    try {
+      setTransferSavingId(transferId);
+      await api.productOrderTransfers.confirmReceipt(transferId);
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to confirm receipt');
+    } finally {
+      setTransferSavingId(null);
     }
   };
 
@@ -105,7 +131,80 @@ export default function ProductOrderDetailPage() {
   };
 
   const printReceipt = () => {
-    window.print();
+    if (!order) return;
+
+    const dateTime = new Date(order.createdAt).toLocaleString('en-PH', {
+      year: 'numeric', month: 'long', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: true,
+    });
+
+    const itemRows = order.items.map((item) => `
+      <tr>
+        <td class="item-name">${item.name}</td>
+        <td class="center">${item.quantity}</td>
+        <td class="right">&#8369;${item.unitPrice.toLocaleString()}</td>
+        <td class="right">&#8369;${item.total.toLocaleString()}</td>
+      </tr>`).join('');
+
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Receipt – ${order.orderNumber}</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:'Courier New',monospace;font-size:12px;width:300px;margin:0 auto;padding:20px}
+    h1{text-align:center;font-size:16px;letter-spacing:1px;margin-bottom:2px}
+    .sub{text-align:center;font-size:10px;color:#555;margin-bottom:14px}
+    .dash{border:none;border-top:1px dashed #000;margin:10px 0}
+    .row{display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px}
+    table{width:100%;border-collapse:collapse;margin:8px 0}
+    th{border-bottom:1px solid #000;padding:4px 3px;font-size:10px;text-align:left}
+    td{padding:4px 3px;font-size:11px;vertical-align:top}
+    .item-name{max-width:120px;word-break:break-word}
+    .center{text-align:center}
+    .right{text-align:right}
+    .total td{border-top:1px solid #000;font-weight:bold;padding-top:6px}
+    .thanks{text-align:center;margin-top:14px;font-size:10px;color:#555}
+    @media print{@page{margin:8mm}body{width:auto}}
+  </style>
+</head>
+<body>
+  <h1>SEATMAKERS AVENUE</h1>
+  <p class="sub">Official Receipt</p>
+  <hr class="dash"/>
+  <div class="row"><span>Order No:</span><span>${order.orderNumber}</span></div>
+  <div class="row"><span>Customer:</span><span>${order.customerName}</span></div>
+  <div class="row"><span>Date &amp; Time:</span><span>${dateTime}</span></div>
+  <hr class="dash"/>
+  <table>
+    <thead>
+      <tr>
+        <th>Item</th>
+        <th class="center">Qty</th>
+        <th class="right">Unit</th>
+        <th class="right">Total</th>
+      </tr>
+    </thead>
+    <tbody>${itemRows}</tbody>
+    <tfoot>
+      <tr class="total">
+        <td colspan="3" class="right">TOTAL</td>
+        <td class="right">&#8369;${order.totalAmount.toLocaleString()}</td>
+      </tr>
+    </tfoot>
+  </table>
+  <hr class="dash"/>
+  <p class="thanks">Thank you for your purchase!</p>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const w = window.open(url, '_blank', 'width=380,height=600');
+    if (!w) { URL.revokeObjectURL(url); return; }
+    w.focus();
+    setTimeout(() => { w.print(); w.close(); URL.revokeObjectURL(url); }, 300);
   };
 
   if (loading) {
@@ -140,11 +239,33 @@ export default function ProductOrderDetailPage() {
             <h1 className="text-2xl font-bold text-zinc-900 dark:text-white mt-2">{order.orderNumber}</h1>
             <p className="text-zinc-600 dark:text-zinc-400">Detailed purchase tracking and timeline</p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className={`text-xs px-2 py-1 rounded-full font-medium ${getStatusClass(order.status)}`}>{order.status.toUpperCase()}</span>
             <span className={`text-xs px-2 py-1 rounded-full font-medium ${getPaymentClass(order.paymentStatus)}`}>{order.paymentStatus.toUpperCase()}</span>
+            {order.groupId && (
+              <span className="text-xs px-2 py-1 rounded-full font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">
+                Group Order
+              </span>
+            )}
           </div>
         </div>
+
+        {order.pickupBranchId && order.pickupBranchId !== order.branchId && (
+          <div className="p-4 bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-xl flex items-start gap-3">
+            <svg className="w-5 h-5 text-orange-600 dark:text-orange-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+            </svg>
+            <div>
+              <p className="font-semibold text-orange-700 dark:text-orange-300 text-sm">Shipping Required</p>
+              <p className="text-sm text-orange-600 dark:text-orange-400 mt-0.5">
+                Customer wants to pick up at <strong>{order.pickupBranchName}</strong>. Ship this order to that branch before marking as ready.
+                {isAdmin && order.groupId && (
+                  <span className="ml-1">Group ID: <code className="font-mono text-xs">{order.groupId.slice(0, 8)}…</code></span>
+                )}
+              </p>
+            </div>
+          </div>
+        )}
 
         {error && (
           <div className="p-4 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-xl text-red-700 dark:text-red-400">
@@ -316,11 +437,75 @@ export default function ProductOrderDetailPage() {
               Print Receipt
             </button>
 
+            {/* Transfer requests for multi-branch orders */}
+            {order.transfers && order.transfers.length > 0 && (
+              <div className="mt-4 space-y-3">
+                <p className="text-xs font-semibold text-purple-700 dark:text-purple-300 uppercase tracking-wide">Branch Transfers</p>
+                {(order.transfers as ProductOrderTransfer[]).map((transfer) => (
+                  <div key={transfer.id} className="p-3 rounded-lg border border-purple-200 dark:border-purple-800 bg-purple-50 dark:bg-purple-900/20 space-y-2">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-xs font-medium text-zinc-800 dark:text-zinc-200">
+                        {transfer.sourceBranchName} → {order.branchName}
+                      </span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                        transfer.status === 'pending'
+                          ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                          : transfer.status === 'transferred'
+                          ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
+                          : 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                      }`}>
+                        {transfer.status === 'pending' ? 'Awaiting Transfer'
+                          : transfer.status === 'transferred' ? 'In Transit'
+                          : '✓ Received'}
+                      </span>
+                    </div>
+                    <div className="space-y-0.5">
+                      {transfer.items.map((item, idx) => (
+                        <p key={idx} className="text-xs text-zinc-600 dark:text-zinc-400">
+                          {item.quantity}x {item.name}
+                        </p>
+                      ))}
+                    </div>
+                    {transfer.status === 'pending' && (user?.role === 'administrator' || user?.branchId === transfer.sourceBranchId) && (
+                      <button
+                        onClick={() => markTransferred(transfer.id)}
+                        disabled={transferSavingId === transfer.id}
+                        className="w-full px-3 py-1.5 rounded-lg bg-orange-600 text-white font-medium hover:bg-orange-700 disabled:opacity-50 text-xs"
+                      >
+                        {transferSavingId === transfer.id ? 'Saving…' : 'Mark as Transferred'}
+                      </button>
+                    )}
+                    {transfer.status === 'transferred' && (user?.role === 'administrator' || user?.branchId === transfer.pickupBranchId) && (
+                      <button
+                        onClick={() => confirmTransferReceipt(transfer.id)}
+                        disabled={transferSavingId === transfer.id}
+                        className="w-full px-3 py-1.5 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 disabled:opacity-50 text-xs"
+                      >
+                        {transferSavingId === transfer.id ? 'Processing…' : 'Confirm Receipt & Add to Inventory'}
+                      </button>
+                    )}
+                    {transfer.status === 'received' && (
+                      <p className="text-xs text-green-600 dark:text-green-400 font-medium">✓ Added to {order.branchName} inventory</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div className="mt-5 text-sm space-y-2">
               <p className="text-zinc-600 dark:text-zinc-400"><span className="font-medium text-zinc-800 dark:text-zinc-200">Customer:</span> {order.customerName}</p>
               <p className="text-zinc-600 dark:text-zinc-400"><span className="font-medium text-zinc-800 dark:text-zinc-200">Phone:</span> {order.customerPhone}</p>
-              <p className="text-zinc-600 dark:text-zinc-400"><span className="font-medium text-zinc-800 dark:text-zinc-200">Branch:</span> {order.branchName || 'N/A'}</p>
+              <p className="text-zinc-600 dark:text-zinc-400"><span className="font-medium text-zinc-800 dark:text-zinc-200">Source Branch:</span> {order.branchName || 'N/A'}</p>
+              {order.pickupBranchName && (
+                <p className={`font-medium ${order.pickupBranchId !== order.branchId ? 'text-orange-600 dark:text-orange-400' : 'text-zinc-600 dark:text-zinc-400'}`}>
+                  <span className="font-medium text-zinc-800 dark:text-zinc-200">Pickup Branch:</span> {order.pickupBranchName}
+                  {order.pickupBranchId !== order.branchId && ' ⚠ Ship required'}
+                </p>
+              )}
               <p className="text-zinc-600 dark:text-zinc-400"><span className="font-medium text-zinc-800 dark:text-zinc-200">Created:</span> {new Date(order.createdAt).toLocaleString('en-PH')}</p>
+              {isAdmin && order.groupId && (
+                <p className="text-zinc-600 dark:text-zinc-400"><span className="font-medium text-zinc-800 dark:text-zinc-200">Group ID:</span> <code className="font-mono text-xs bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded">{order.groupId}</code></p>
+              )}
             </div>
           </div>
         </div>

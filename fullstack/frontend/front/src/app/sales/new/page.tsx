@@ -217,8 +217,8 @@ export default function NewJobOrderPage() {
         ...material,
         materialSource: 'inventory',
         materialId: selectedMaterial.id,
-        name: selectedMaterial.name,
-        unitPrice: Number(selectedMaterial.price) || 0
+        name: selectedMaterial.materialType,
+        unitPrice: Number(selectedMaterial.unitPrice) || 0
       };
     }));
   };
@@ -485,16 +485,12 @@ export default function NewJobOrderPage() {
           await Promise.all(
             customNeededMaterials.map((material) =>
               api.inventory.createRawMaterial({
-                name: `${material.name.trim()} (Needed for ${createdJobOrderId})`,
-                quantity: 0,
-                price: Number(material.unitPrice) || 0,
-                lengthValue: 1,
-                lengthUnit: 'pcs',
-                unit: 'pcs',
-                branchId: user?.branchId || 1,
-                category: 'Needed Materials',
-                reorderPoint: Number(material.quantity) || 1,
-                supplier: `Needed for ${createdJobOrderId}`
+                materialType: `${material.name.trim()} (Needed for ${createdJobOrderId})`,
+                color: '',
+                pattern: '',
+                unitPrice: Number(material.unitPrice) || 0,
+                stockQuantity: 0,
+                branchId: user?.branchId || 1
               })
             )
           );

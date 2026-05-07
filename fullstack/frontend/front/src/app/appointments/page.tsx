@@ -4,25 +4,43 @@ import { api, Appointment } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 
+const TIME_RANGES: Record<string, [number, number]> = {
+  morning:   [8,  12],
+  afternoon: [12, 17],
+  evening:   [17, 20],
+};
+
+function getTimeSlots(preferredTime?: string): string[] {
+  const [startH, endH] = TIME_RANGES[preferredTime ?? ''] ?? [8, 20];
+  const slots: string[] = [];
+  for (let mins = startH * 60; mins <= endH * 60; mins += 30) {
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+    const period = h < 12 ? 'AM' : 'PM';
+    slots.push(`${h12}:${m.toString().padStart(2, '0')} ${period}`);
+  }
+  return slots;
+}
+
 export default function AppointmentsPage() {
   const router = useRouter();
-  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [selectedAppointment, setSelectedAppointment] = useState<Appointment | null>(null);
   const [adminNotes, setAdminNotes] = useState('');
+  const [confirmedTime, setConfirmedTime] = useState('');
   const [updating, setUpdating] = useState(false);
 
-  // Check authorization
   useEffect(() => {
     if (!authLoading && !isAuthenticated) {
       router.push('/login');
     }
   }, [authLoading, isAuthenticated, router]);
 
-  // Fetch appointments
   useEffect(() => {
     const fetchAppointments = async () => {
       try {
@@ -36,27 +54,28 @@ export default function AppointmentsPage() {
         setLoading(false);
       }
     };
-    
+
     if (isAuthenticated) {
       fetchAppointments();
     }
   }, [isAuthenticated, statusFilter]);
 
-  const handleStatusUpdate = async (appointmentId: number, newStatus: string) => {
+  const handleStatusUpdate = async (appointmentId: number, newStatus: string, time?: string) => {
     setUpdating(true);
     try {
-      await api.appointments.update(appointmentId, { 
+      await api.appointments.update(appointmentId, {
         status: newStatus,
-        adminNotes: adminNotes || undefined
+        adminNotes: adminNotes || undefined,
+        ...(time ? { confirmedTime: time } : {}),
       });
-      
-      // Refresh the list
+
       const response = await api.appointments.getAll(statusFilter !== 'all' ? statusFilter : undefined);
       if (response.status === 'success' && response.data) {
         setAppointments(response.data);
       }
       setSelectedAppointment(null);
       setAdminNotes('');
+      setConfirmedTime('');
     } catch (err: any) {
       setError(err.message || 'Failed to update appointment');
     } finally {
@@ -64,18 +83,19 @@ export default function AppointmentsPage() {
     }
   };
 
+  const openConfirmModal = (appointment: Appointment) => {
+    setSelectedAppointment(appointment);
+    setAdminNotes('');
+    setConfirmedTime('');
+  };
+
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'pending':
-        return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400';
-      case 'confirmed':
-        return 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400';
-      case 'completed':
-        return 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
-      case 'cancelled':
-        return 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400';
-      default:
-        return 'bg-zinc-100 text-zinc-800 dark:bg-zinc-700 dark:text-zinc-300';
+      case 'pending':   return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400';
+      case 'confirmed': return 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400';
+      case 'completed': return 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
+      case 'cancelled': return 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400';
+      default:          return 'bg-zinc-100 text-zinc-800 dark:bg-zinc-700 dark:text-zinc-300';
     }
   };
 
@@ -94,22 +114,18 @@ export default function AppointmentsPage() {
     );
   };
 
-  const formatDate = (dateStr: string) => {
-    return new Date(dateStr).toLocaleDateString('en-US', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
+  const formatDate = (dateStr: string) =>
+    new Date(dateStr).toLocaleDateString('en-US', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
     });
-  };
 
   const formatTime = (timeStr?: string) => {
     if (!timeStr) return 'Any time';
     switch (timeStr) {
-      case 'morning': return 'Morning (8AM - 12PM)';
-      case 'afternoon': return 'Afternoon (12PM - 5PM)';
-      case 'evening': return 'Evening (5PM - 8PM)';
-      default: return timeStr;
+      case 'morning':   return 'Morning (8:00 AM – 12:00 PM)';
+      case 'afternoon': return 'Afternoon (12:00 PM – 5:00 PM)';
+      case 'evening':   return 'Evening (5:00 PM – 8:00 PM)';
+      default:          return timeStr;
     }
   };
 
@@ -125,7 +141,6 @@ export default function AppointmentsPage() {
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="mb-8">
@@ -158,30 +173,20 @@ export default function AppointmentsPage() {
           ))}
         </div>
 
-        {/* Stats Summary */}
+        {/* Stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-4">
-            <div className="text-2xl font-bold text-zinc-900 dark:text-white">
-              {appointments.filter(a => a.status === 'pending').length}
+          {(['pending', 'confirmed', 'completed'] as const).map((s) => (
+            <div key={s} className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-4">
+              <div className="text-2xl font-bold text-zinc-900 dark:text-white">
+                {appointments.filter(a => a.status === s).length}
+              </div>
+              <div className={`text-sm ${s === 'pending' ? 'text-yellow-600 dark:text-yellow-400' : s === 'confirmed' ? 'text-blue-600 dark:text-blue-400' : 'text-green-600 dark:text-green-400'}`}>
+                {s.charAt(0).toUpperCase() + s.slice(1)}
+              </div>
             </div>
-            <div className="text-sm text-yellow-600 dark:text-yellow-400">Pending</div>
-          </div>
+          ))}
           <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-4">
-            <div className="text-2xl font-bold text-zinc-900 dark:text-white">
-              {appointments.filter(a => a.status === 'confirmed').length}
-            </div>
-            <div className="text-sm text-blue-600 dark:text-blue-400">Confirmed</div>
-          </div>
-          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-4">
-            <div className="text-2xl font-bold text-zinc-900 dark:text-white">
-              {appointments.filter(a => a.status === 'completed').length}
-            </div>
-            <div className="text-sm text-green-600 dark:text-green-400">Completed</div>
-          </div>
-          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-4">
-            <div className="text-2xl font-bold text-zinc-900 dark:text-white">
-              {appointments.length}
-            </div>
+            <div className="text-2xl font-bold text-zinc-900 dark:text-white">{appointments.length}</div>
             <div className="text-sm text-zinc-600 dark:text-zinc-400">Total</div>
           </div>
         </div>
@@ -205,17 +210,13 @@ export default function AppointmentsPage() {
                 className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6"
               >
                 <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
-                  {/* Left side - Main Info */}
+                  {/* Left side */}
                   <div className="flex-1">
                     <div className="flex items-center gap-3 mb-3">
                       {getContactMethodIcon(appointment.contactMethod)}
                       <div>
-                        <h3 className="font-semibold text-zinc-900 dark:text-white">
-                          {appointment.customerName}
-                        </h3>
-                        <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                          {appointment.appointmentNumber}
-                        </p>
+                        <h3 className="font-semibold text-zinc-900 dark:text-white">{appointment.customerName}</h3>
+                        <p className="text-sm text-zinc-500 dark:text-zinc-400">{appointment.appointmentNumber}</p>
                       </div>
                       <span className={`ml-auto lg:ml-0 px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(appointment.status)}`}>
                         {appointment.status.charAt(0).toUpperCase() + appointment.status.slice(1)}
@@ -240,13 +241,17 @@ export default function AppointmentsPage() {
                         )}
                       </div>
                       <div>
-                        <span className="text-zinc-500 dark:text-zinc-400">Preferred Date:</span>
-                        <p className="text-zinc-900 dark:text-white font-medium">
-                          {formatDate(appointment.preferredDate)}
-                        </p>
-                        <p className="text-zinc-600 dark:text-zinc-300">
-                          {formatTime(appointment.preferredTime)}
-                        </p>
+                        <span className="text-zinc-500 dark:text-zinc-400">Preferred Date & Time:</span>
+                        <p className="text-zinc-900 dark:text-white font-medium">{formatDate(appointment.preferredDate)}</p>
+                        <p className="text-zinc-600 dark:text-zinc-300">{formatTime(appointment.preferredTime)}</p>
+                        {appointment.confirmedTime && (
+                          <p className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 text-xs font-semibold">
+                            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            Confirmed at {appointment.confirmedTime}
+                          </p>
+                        )}
                       </div>
                       {appointment.vehicleInfo && (
                         <div>
@@ -285,7 +290,7 @@ export default function AppointmentsPage() {
                     {appointment.status === 'pending' && (
                       <>
                         <button
-                          onClick={() => setSelectedAppointment(appointment)}
+                          onClick={() => openConfirmModal(appointment)}
                           className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 transition-colors"
                         >
                           Confirm
@@ -309,9 +314,7 @@ export default function AppointmentsPage() {
                       </button>
                     )}
                     {(appointment.status === 'completed' || appointment.status === 'cancelled') && (
-                      <span className="text-center text-sm text-zinc-500 dark:text-zinc-400">
-                        No actions available
-                      </span>
+                      <span className="text-center text-sm text-zinc-500 dark:text-zinc-400">No actions available</span>
                     )}
                   </div>
                 </div>
@@ -324,17 +327,41 @@ export default function AppointmentsPage() {
         {selectedAppointment && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
             <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-xl max-w-md w-full p-6">
-              <h3 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">
+              <h3 className="text-lg font-semibold text-zinc-900 dark:text-white mb-1">
                 Confirm Appointment
               </h3>
               <p className="text-sm text-zinc-600 dark:text-zinc-400 mb-4">
-                Confirm appointment for <strong>{selectedAppointment.customerName}</strong> on{' '}
-                <strong>{formatDate(selectedAppointment.preferredDate)}</strong>?
+                <strong>{selectedAppointment.customerName}</strong> —{' '}
+                {formatDate(selectedAppointment.preferredDate)}
               </p>
-              
+
+              {/* Preferred window reminder */}
+              <div className="mb-4 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 text-sm text-amber-700 dark:text-amber-300">
+                Customer&apos;s preferred window:{' '}
+                <span className="font-semibold">{formatTime(selectedAppointment.preferredTime)}</span>
+              </div>
+
+              {/* Time picker — required */}
               <div className="mb-4">
                 <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                  Add Notes (Optional)
+                  Set Appointment Time <span className="text-red-500">*</span>
+                </label>
+                <select
+                  value={confirmedTime}
+                  onChange={(e) => setConfirmedTime(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                >
+                  <option value="">-- Select a time --</option>
+                  {getTimeSlots(selectedAppointment.preferredTime).map((slot) => (
+                    <option key={slot} value={slot}>{slot}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Optional notes */}
+              <div className="mb-5">
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  Notes (Optional)
                 </label>
                 <textarea
                   value={adminNotes}
@@ -350,15 +377,16 @@ export default function AppointmentsPage() {
                   onClick={() => {
                     setSelectedAppointment(null);
                     setAdminNotes('');
+                    setConfirmedTime('');
                   }}
                   className="flex-1 px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 text-sm font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors"
                 >
                   Cancel
                 </button>
                 <button
-                  onClick={() => handleStatusUpdate(selectedAppointment.id, 'confirmed')}
-                  disabled={updating}
-                  className="flex-1 px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                  onClick={() => handleStatusUpdate(selectedAppointment.id, 'confirmed', confirmedTime)}
+                  disabled={updating || !confirmedTime}
+                  className="flex-1 px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {updating ? 'Confirming...' : 'Confirm Appointment'}
                 </button>

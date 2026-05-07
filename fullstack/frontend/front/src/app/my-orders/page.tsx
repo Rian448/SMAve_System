@@ -330,6 +330,11 @@ export default function MyOrdersPage() {
                           <span className={`text-xs px-2 py-1 rounded-full font-medium ${getPaymentStatusColor(order.paymentStatus)}`}>
                             PAYMENT: {order.paymentStatus.toUpperCase()}
                           </span>
+                          {order.groupId && (
+                            <span className="text-xs px-2 py-1 rounded-full font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">
+                              Multi-branch
+                            </span>
+                          )}
                         </div>
                         <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
                           {new Date(order.createdAt).toLocaleDateString('en-PH', {
@@ -341,8 +346,18 @@ export default function MyOrdersPage() {
                           })}
                         </p>
                         <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
-                          Branch: {order.branchName || 'N/A'}
+                          Source Branch: {order.branchName || 'N/A'}
                         </p>
+                        {order.pickupBranchName && (
+                          <p className={`text-sm font-medium mt-1 ${
+                            order.pickupBranchId !== order.branchId
+                              ? 'text-orange-600 dark:text-orange-400'
+                              : 'text-zinc-500 dark:text-zinc-400'
+                          }`}>
+                            {order.pickupBranchId !== order.branchId ? 'Pickup at: ' : 'Pickup Branch: '}
+                            {order.pickupBranchName}
+                          </p>
+                        )}
                       </div>
 
                       <p className="text-lg font-semibold text-amber-600">₱{order.totalAmount.toLocaleString()}</p>
@@ -403,6 +418,16 @@ export default function MyOrdersPage() {
                             })}
                             {appointment.preferredTime ? ` • ${appointment.preferredTime}` : ''}
                           </p>
+                          {appointment.confirmedTime && (
+                            <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800">
+                              <svg className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                              </svg>
+                              <span className="text-sm font-semibold text-blue-700 dark:text-blue-300">
+                                Your appointment is set at {appointment.confirmedTime}
+                              </span>
+                            </div>
+                          )}
                           {appointment.branchName && (
                             <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
                               Branch: {appointment.branchName}

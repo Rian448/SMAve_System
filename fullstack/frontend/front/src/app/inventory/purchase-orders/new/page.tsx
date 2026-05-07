@@ -54,12 +54,13 @@ export default function NewPurchaseOrderPage() {
     if (field === 'material_id') {
       const material = materials.find(m => m.id === value);
       if (material) {
+        const label = [material.materialType, material.color, material.pattern].filter(Boolean).join(' - ');
         newItems[index] = {
           ...newItems[index],
           material_id: material.id.toString(),
-          material_name: material.name,
-          unit_cost: material.price,
-          unit: material.unit
+          material_name: label,
+          unit_cost: material.unitPrice,
+          unit: 'unit'
         };
       }
     } else {
@@ -247,7 +248,7 @@ export default function NewPurchaseOrderPage() {
                           <option value="">Select material</option>
                           {materials.map(m => (
                             <option key={m.id} value={m.id.toString()}>
-                              {m.name} ({m.quantity} {m.unit} in stock)
+                              {m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} in stock)
                             </option>
                           ))}
                         </select>

@@ -176,6 +176,7 @@ class Appointment(db.Model):
     description = db.Column(db.Text)  # What the customer needs
     vehicle_info = db.Column(db.JSON)  # Optional vehicle info
     status = db.Column(db.String(50), default='pending')  # pending, confirmed, completed, cancelled
+    confirmed_time = db.Column(db.String(20), nullable=True)  # e.g. "2:30 PM"
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     admin_notes = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -199,25 +200,40 @@ class ProductOrder(db.Model):
     payment_status = db.Column(db.String(50), default='unpaid')  # unpaid, partial, paid
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     notes = db.Column(db.Text)
+    group_id = db.Column(db.String(50), nullable=True, index=True)
+    pickup_branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
+    shipment_status = db.Column(db.String(20), default='not_needed')  # not_needed, pending, shipped, received
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    branch = db.relationship('Branch')
+
+    branch = db.relationship('Branch', foreign_keys=[branch_id])
+    pickup_branch = db.relationship('Branch', foreign_keys=[pickup_branch_id])
     customer_user = db.relationship('User', foreign_keys=[user_id])
+
+class ProductOrderTransfer(db.Model):
+    """Tracks items that need to be physically transferred from a source branch
+    to the pickup branch for a multi-branch premade order."""
+    __tablename__ = 'product_order_transfers'
+    id = db.Column(db.Integer, primary_key=True)
+    product_order_id = db.Column(db.Integer, db.ForeignKey('product_orders.id'), nullable=False)
+    source_branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
+    items = db.Column(db.JSON, nullable=False)  # [{productId, name, sku, quantity, unitPrice, total, sourceBranchId}]
+    status = db.Column(db.String(20), default='pending')  # pending, transferred, received
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    order = db.relationship('ProductOrder', backref=db.backref('transfers', lazy=True))
+    source_branch = db.relationship('Branch')
 
 class InventoryMaterial(db.Model):
     __tablename__ = 'inventory_materials'
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(255), nullable=False)
-    sku = db.Column(db.String(100), unique=True, nullable=False)
-    quantity = db.Column(db.Float, default=0)
-    unit = db.Column(db.String(50), default='yards')
-    category = db.Column(db.String(100), default='General')
-    price = db.Column(db.Float, default=0)
-    reorder_point = db.Column(db.Float, default=0)
-    supplier = db.Column(db.String(255), default='')
-    length_value = db.Column(db.Float, default=0)
-    length_unit = db.Column(db.String(50), default='yards')
+    item_id = db.Column(db.String(50), unique=True, nullable=True)
+    material_type = db.Column(db.String(255), nullable=False)
+    color = db.Column(db.String(100), default='')
+    pattern = db.Column(db.String(100), default='')
+    unit_price = db.Column(db.Float, default=0)
+    stock_quantity = db.Column(db.Float, default=0)
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
     is_archived = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -297,18 +313,7 @@ branches = [
 ]
 
 # Raw Materials Inventory
-raw_materials = [
-    {'id': 1, 'name': 'Leather - Black', 'sku': 'RM-LTH-001', 'quantity': 500, 'unit': 'sqft', 'category': 'Leather', 'price': 15.00, 'reorderPoint': 100, 'supplier': 'LeatherCo', 'branchId': 1, 'isArchived': False, 'lastUpdated': '2026-01-20'},
-    {'id': 2, 'name': 'Leather - Brown', 'sku': 'RM-LTH-002', 'quantity': 350, 'unit': 'sqft', 'category': 'Leather', 'price': 15.00, 'reorderPoint': 100, 'supplier': 'LeatherCo', 'branchId': 1, 'isArchived': False, 'lastUpdated': '2026-01-20'},
-    {'id': 3, 'name': 'Foam Padding - High Density', 'sku': 'RM-FOM-001', 'quantity': 200, 'unit': 'sheets', 'category': 'Foam', 'price': 25.00, 'reorderPoint': 50, 'supplier': 'FoamWorld', 'branchId': 1, 'isArchived': False, 'lastUpdated': '2026-01-19'},
-    {'id': 4, 'name': 'Foam Padding - Low Density', 'sku': 'RM-FOM-002', 'quantity': 150, 'unit': 'sheets', 'category': 'Foam', 'price': 18.00, 'reorderPoint': 40, 'supplier': 'FoamWorld', 'branchId': 1, 'isArchived': False, 'lastUpdated': '2026-01-18'},
-    {'id': 5, 'name': 'Thread - Black', 'sku': 'RM-THR-001', 'quantity': 1000, 'unit': 'spools', 'category': 'Thread', 'price': 3.50, 'reorderPoint': 200, 'supplier': 'ThreadMaster', 'branchId': 1, 'isArchived': False, 'lastUpdated': '2026-01-17'},
-    {'id': 6, 'name': 'Thread - White', 'sku': 'RM-THR-002', 'quantity': 800, 'unit': 'spools', 'category': 'Thread', 'price': 3.50, 'reorderPoint': 200, 'supplier': 'ThreadMaster', 'branchId': 1, 'isArchived': False, 'lastUpdated': '2026-01-17'},
-    {'id': 7, 'name': 'Vinyl - Gray', 'sku': 'RM-VNL-001', 'quantity': 80, 'unit': 'sqft', 'category': 'Vinyl', 'price': 12.00, 'reorderPoint': 100, 'supplier': 'VinylPro', 'branchId': 1, 'isArchived': False, 'lastUpdated': '2026-01-16'},
-    {'id': 8, 'name': 'Adhesive Spray', 'sku': 'RM-ADH-001', 'quantity': 45, 'unit': 'cans', 'category': 'Adhesive', 'price': 8.50, 'reorderPoint': 50, 'supplier': 'GlueMaster', 'branchId': 1, 'isArchived': False, 'lastUpdated': '2026-01-15'},
-    {'id': 9, 'name': 'Staples - Heavy Duty', 'sku': 'RM-STP-001', 'quantity': 5000, 'unit': 'pcs', 'category': 'Fasteners', 'price': 0.05, 'reorderPoint': 1000, 'supplier': 'FastenerCo', 'branchId': 1, 'isArchived': False, 'lastUpdated': '2026-01-14'},
-    {'id': 10, 'name': 'Zipper - 12 inch', 'sku': 'RM-ZIP-001', 'quantity': 300, 'unit': 'pcs', 'category': 'Fasteners', 'price': 2.00, 'reorderPoint': 100, 'supplier': 'ZipperKing', 'branchId': 1, 'isArchived': False, 'lastUpdated': '2026-01-13'},
-]
+raw_materials = []
 
 # Finished Goods Inventory
 finished_goods = [
@@ -626,21 +631,7 @@ def seed_default_users():
 
 def seed_inventory_items():
     if InventoryMaterial.query.count() == 0:
-        for material in raw_materials:
-            db.session.add(InventoryMaterial(
-                name=material['name'],
-                sku=material.get('sku') or f"RM-{material['id']:03d}",
-                quantity=float(material.get('quantity', 0)),
-                unit=material.get('unit', 'yards'),
-                category=material.get('category', 'General'),
-                price=float(material.get('price', 0)),
-                reorder_point=float(material.get('reorderPoint', 0)),
-                supplier=material.get('supplier', ''),
-                length_value=float(material.get('quantity', 0)),
-                length_unit=material.get('unit', 'yards'),
-                branch_id=material.get('branchId', 1),
-                is_archived=material.get('isArchived', False)
-            ))
+        pass  # No default seed data for the new inventory schema
 
     if PremadeProduct.query.count() == 0:
         for product in finished_goods:
@@ -1020,47 +1011,32 @@ def get_alerts():
 def material_to_dict(material):
     return {
         'id': material.id,
-        'name': material.name,
-        'sku': material.sku,
-        'quantity': float(material.quantity),
-        'unit': material.unit,
-        'category': material.category,
-        'price': float(material.price),
-        'reorderPoint': float(material.reorder_point),
-        'supplier': material.supplier,
-        'lengthValue': float(material.length_value),
-        'lengthUnit': material.length_unit,
+        'itemId': material.item_id or str(material.id),
+        'materialType': material.material_type,
+        'color': material.color or '',
+        'pattern': material.pattern or '',
+        'unitPrice': float(material.unit_price),
+        'stockQuantity': float(material.stock_quantity),
         'branchId': material.branch_id,
         'isArchived': material.is_archived,
         'lastUpdated': material.updated_at.strftime('%Y-%m-%d') if material.updated_at else None
     }
 
 def build_raw_material_group_key(material):
-    length_unit = material.length_unit or material.unit
-    return f"{material.name.lower()}|{material.category.lower()}|{length_unit.lower()}"
+    return f"{material.material_type.lower()}|{material.color.lower()}|{material.pattern.lower()}"
 
 def raw_material_group_to_dict(materials, include_components=True):
     first = materials[0]
-    length_unit = first.length_unit or first.unit
     group_key = build_raw_material_group_key(first)
-
-    total_quantity = sum(float(m.quantity or 0) for m in materials)
-    total_length = sum(float(m.quantity or 0) * float(m.length_value or 0) for m in materials)
-    total_value = sum(float(m.quantity or 0) * float(m.price or 0) for m in materials)
-    reorder_point = sum(float(m.reorder_point or 0) for m in materials)
+    total_stock_quantity = sum(float(m.stock_quantity or 0) for m in materials)
 
     return {
         'key': group_key,
-        'name': first.name,
-        'category': first.category,
-        'unit': first.unit,
-        'lengthUnit': length_unit,
-        'supplier': first.supplier or '-',
-        'totalQuantity': total_quantity,
-        'totalLength': total_length,
-        'totalValue': total_value,
-        'reorderPoint': reorder_point,
-        'lengths': [float(m.length_value or 0) for m in materials],
+        'name': first.material_type,
+        'color': first.color or '',
+        'pattern': first.pattern or '',
+        'unitPrice': float(first.unit_price),
+        'totalStockQuantity': total_stock_quantity,
         'components': [material_to_dict(m) for m in materials] if include_components else []
     }
 
@@ -1083,8 +1059,8 @@ def material_usage_to_dict(log):
     return {
         'id': log.id,
         'materialId': log.material_id,
-        'materialName': log.material.name if log.material else None,
-        'materialUnit': log.material.unit if log.material else None,
+        'materialName': log.material.material_type if log.material else None,
+        'materialUnit': '',
         'premadeProductId': log.premade_product_id,
         'premadeProductName': log.premade_product.name if log.premade_product else None,
         'quantityUsed': float(log.quantity_used),
@@ -1113,7 +1089,7 @@ def get_raw_materials():
     if category:
         query = query.filter_by(category=category)
 
-    items = query.order_by(InventoryMaterial.name.asc()).all()
+    items = query.order_by(InventoryMaterial.material_type.asc()).all()
     return jsonify({'status': 'success', 'data': [material_to_dict(m) for m in items]})
 
 @app.route('/api/inventory/raw-materials/summary', methods=['GET'])
@@ -1132,7 +1108,7 @@ def get_raw_materials_summary():
     if category:
         query = query.filter_by(category=category)
 
-    items = query.order_by(InventoryMaterial.name.asc(), InventoryMaterial.created_at.asc()).all()
+    items = query.order_by(InventoryMaterial.material_type.asc(), InventoryMaterial.created_at.asc()).all()
 
     grouped = {}
     for material in items:
@@ -1159,7 +1135,7 @@ def get_raw_material_group_detail():
     if branch_id:
         query = query.filter_by(branch_id=int(branch_id))
 
-    items = query.order_by(InventoryMaterial.name.asc(), InventoryMaterial.created_at.asc()).all()
+    items = query.order_by(InventoryMaterial.material_type.asc(), InventoryMaterial.created_at.asc()).all()
     group_items = [m for m in items if build_raw_material_group_key(m) == group_key]
 
     if not group_items:
@@ -1181,7 +1157,7 @@ def get_raw_material(material_id):
 def create_raw_material():
     data = request.get_json()
 
-    required = ['name', 'quantity', 'price', 'lengthValue', 'lengthUnit', 'branchId']
+    required = ['materialType', 'stockQuantity', 'unitPrice', 'branchId']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
 
@@ -1189,18 +1165,19 @@ def create_raw_material():
     if not branch or not branch.is_active:
         return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
 
-    next_id = (db.session.query(db.func.max(InventoryMaterial.id)).scalar() or 0) + 1
+    custom_item_id = data.get('itemId', '').strip() if data.get('itemId') else None
+    if custom_item_id:
+        existing = InventoryMaterial.query.filter_by(item_id=custom_item_id).first()
+        if existing:
+            return jsonify({'status': 'error', 'message': f'Item ID "{custom_item_id}" already exists'}), 400
+
     material = InventoryMaterial(
-        name=data['name'].strip(),
-        sku=data.get('sku') or f"RM-{next_id:03d}",
-        quantity=float(data['quantity']),
-        unit=data.get('unit', data['lengthUnit']),
-        category=data.get('category', 'General'),
-        price=float(data['price']),
-        reorder_point=float(data.get('reorderPoint', 0)),
-        supplier=data.get('supplier', ''),
-        length_value=float(data['lengthValue']),
-        length_unit=data['lengthUnit'],
+        item_id=custom_item_id,
+        material_type=data['materialType'].strip(),
+        color=data.get('color', '').strip(),
+        pattern=data.get('pattern', '').strip(),
+        unit_price=float(data['unitPrice']),
+        stock_quantity=float(data['stockQuantity']),
         branch_id=int(data['branchId']),
         is_archived=False
     )
@@ -1208,7 +1185,7 @@ def create_raw_material():
     db.session.add(material)
     db.session.commit()
 
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory', f"Created raw material: {material.name}", request.remote_addr or '0.0.0.0')
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory', f"Created inventory item: {material.material_type}", request.remote_addr or '0.0.0.0')
 
     return jsonify({'status': 'success', 'data': material_to_dict(material)}), 201
 
@@ -1222,28 +1199,16 @@ def update_raw_material(material_id):
 
     data = request.get_json()
 
-    if 'name' in data:
-        material.name = data['name'].strip()
-    if 'sku' in data:
-        material.sku = data['sku']
-    if 'quantity' in data:
-        material.quantity = float(data['quantity'])
-    if 'unit' in data:
-        material.unit = data['unit']
-    if 'category' in data:
-        material.category = data['category']
-    if 'price' in data:
-        material.price = float(data['price'])
-    if 'reorderPoint' in data:
-        material.reorder_point = float(data['reorderPoint'])
-    if 'supplier' in data:
-        material.supplier = data['supplier']
-    if 'lengthValue' in data:
-        material.length_value = float(data['lengthValue'])
-    if 'lengthUnit' in data:
-        material.length_unit = data['lengthUnit']
-        if 'unit' not in data:
-            material.unit = data['lengthUnit']
+    if 'materialType' in data:
+        material.material_type = data['materialType'].strip()
+    if 'color' in data:
+        material.color = data['color'].strip()
+    if 'pattern' in data:
+        material.pattern = data['pattern'].strip()
+    if 'unitPrice' in data:
+        material.unit_price = float(data['unitPrice'])
+    if 'stockQuantity' in data:
+        material.stock_quantity = float(data['stockQuantity'])
     if 'branchId' in data:
         branch = Branch.query.get(data['branchId'])
         if not branch or not branch.is_active:
@@ -1252,7 +1217,7 @@ def update_raw_material(material_id):
 
     db.session.commit()
 
-    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated raw material: {material.name}", request.remote_addr or '0.0.0.0')
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated inventory item: {material.material_type}", request.remote_addr or '0.0.0.0')
 
     return jsonify({'status': 'success', 'data': material_to_dict(material)})
 
@@ -1267,7 +1232,7 @@ def archive_raw_material(material_id):
     material.is_archived = True
     db.session.commit()
 
-    log_action(request.current_user['id'], request.current_user['fullName'], 'ARCHIVE', 'Inventory', f"Archived raw material: {material.name}", request.remote_addr or '0.0.0.0')
+    log_action(request.current_user['id'], request.current_user['fullName'], 'ARCHIVE', 'Inventory', f"Archived inventory item: {material.material_type}", request.remote_addr or '0.0.0.0')
 
     return jsonify({'status': 'success', 'message': 'Material archived'})
 
@@ -1282,7 +1247,7 @@ def restore_raw_material(material_id):
     material.is_archived = False
     db.session.commit()
 
-    log_action(request.current_user['id'], request.current_user['fullName'], 'RESTORE', 'Inventory', f"Restored raw material: {material.name}", request.remote_addr or '0.0.0.0')
+    log_action(request.current_user['id'], request.current_user['fullName'], 'RESTORE', 'Inventory', f"Restored inventory item: {material.material_type}", request.remote_addr or '0.0.0.0')
 
     return jsonify({'status': 'success', 'message': 'Material restored'})
 
@@ -1345,11 +1310,11 @@ def create_finished_good():
         if not material:
             return jsonify({'status': 'error', 'message': f'Material not found or unavailable at row {idx + 1}'}), 400
 
-        if float(material.quantity) < quantity_used:
-            return jsonify({'status': 'error', 'message': f'Insufficient stock for {material.name}. Available: {float(material.quantity)}'}), 400
+        if float(material.stock_quantity) < quantity_used:
+            return jsonify({'status': 'error', 'message': f'Insufficient stock for {material.material_type}. Available: {float(material.stock_quantity)}'}), 400
 
         usage_entries.append({'material': material, 'quantityUsed': quantity_used})
-        computed_cost += float(material.price) * quantity_used
+        computed_cost += float(material.unit_price) * quantity_used
 
     next_id = (db.session.query(db.func.max(PremadeProduct.id)).scalar() or 0) + 1
     product = PremadeProduct(
@@ -1372,7 +1337,7 @@ def create_finished_good():
     for entry in usage_entries:
         material = entry['material']
         quantity_used = entry['quantityUsed']
-        material.quantity = float(material.quantity) - quantity_used
+        material.stock_quantity = float(material.stock_quantity) - quantity_used
 
         db.session.add(MaterialUsageLog(
             material_id=material.id,
@@ -1477,7 +1442,7 @@ def get_finished_goods_public():
 @app.route('/api/inventory/categories', methods=['GET'])
 @require_auth
 def get_categories():
-    rm_categories = sorted({m.category for m in InventoryMaterial.query.filter_by(is_archived=False).all() if m.category})
+    rm_categories = sorted({m.material_type for m in InventoryMaterial.query.filter_by(is_archived=False).all() if m.material_type})
     fg_categories = sorted({p.category for p in PremadeProduct.query.filter_by(is_archived=False).all() if p.category})
     
     return jsonify({
@@ -1493,8 +1458,8 @@ def get_categories():
 def get_low_stock_items():
     low_stock = InventoryMaterial.query.filter(
         InventoryMaterial.is_archived.is_(False),
-        InventoryMaterial.quantity <= InventoryMaterial.reorder_point
-    ).order_by(InventoryMaterial.quantity.asc()).all()
+        InventoryMaterial.stock_quantity <= 0
+    ).order_by(InventoryMaterial.stock_quantity.asc()).all()
     return jsonify({'status': 'success', 'data': [material_to_dict(m) for m in low_stock]})
 
 # ============================================
@@ -2174,7 +2139,7 @@ def receive_purchase_order(po_id):
     for item in po['items']:
         material = InventoryMaterial.query.get(item.get('materialId'))
         if material:
-            material.quantity = float(material.quantity) + float(item['quantity'])
+            material.stock_quantity = float(material.stock_quantity) + float(item['quantity'])
     
     po['status'] = 'received'
     po['receivedAt'] = datetime.now().strftime('%Y-%m-%d')
@@ -2359,6 +2324,7 @@ def appointment_to_dict(appointment):
         'description': appointment.description,
         'vehicleInfo': appointment.vehicle_info,
         'status': appointment.status,
+        'confirmedTime': appointment.confirmed_time,
         'adminNotes': appointment.admin_notes,
         'createdAt': appointment.created_at.isoformat() if appointment.created_at else None,
         'updatedAt': appointment.updated_at.isoformat() if appointment.updated_at else None
@@ -2468,10 +2434,15 @@ def update_appointment(appointment_id):
     data = request.get_json()
     
     if 'status' in data:
-        appointment.status = data['status']
+        new_status = data['status']
+        if new_status == 'confirmed':
+            if not data.get('confirmedTime'):
+                return jsonify({'status': 'error', 'message': 'A confirmed time must be selected when confirming an appointment'}), 400
+            appointment.confirmed_time = data['confirmedTime']
+        appointment.status = new_status
     if 'adminNotes' in data:
         appointment.admin_notes = data['adminNotes']
-    
+
     db.session.commit()
     
     return jsonify({'status': 'success', 'data': appointment_to_dict(appointment)})
@@ -2488,12 +2459,32 @@ def get_my_appointments():
 # PRODUCT ORDERS MODULE (Premade Products)
 # ============================================
 
+def transfer_to_dict(transfer):
+    order = transfer.order
+    return {
+        'id': transfer.id,
+        'productOrderId': transfer.product_order_id,
+        'orderNumber': order.order_number if order else None,
+        'customerName': order.customer_name if order else None,
+        'customerPhone': order.customer_phone if order else None,
+        'pickupBranchId': order.branch_id if order else None,
+        'pickupBranchName': order.branch.name if (order and order.branch) else None,
+        'sourceBranchId': transfer.source_branch_id,
+        'sourceBranchName': transfer.source_branch.name if transfer.source_branch else None,
+        'items': transfer.items,
+        'status': transfer.status,
+        'createdAt': transfer.created_at.isoformat() if transfer.created_at else None,
+    }
+
 def product_order_to_dict(order):
     """Helper to convert ProductOrder model to dictionary"""
-    branch_name = None
-    if order.branch:
-        branch_name = order.branch.name
-    
+    branch_name = order.branch.name if order.branch else None
+    transfers = []
+    try:
+        transfers = [transfer_to_dict(t) for t in (order.transfers or [])]
+    except Exception:
+        pass
+
     return {
         'id': order.id,
         'orderNumber': order.order_number,
@@ -2505,6 +2496,11 @@ def product_order_to_dict(order):
         'totalAmount': order.total_amount,
         'branchId': order.branch_id,
         'branchName': branch_name,
+        'groupId': order.group_id,
+        'pickupBranchId': order.pickup_branch_id,
+        'pickupBranchName': order.pickup_branch.name if order.pickup_branch else None,
+        'shipmentStatus': order.shipment_status or 'not_needed',
+        'transfers': transfers,
         'status': order.status,
         'paymentStatus': order.payment_status,
         'notes': order.notes,
@@ -2519,7 +2515,10 @@ def can_manage_product_order(user, order):
 
     if user['role'] == 'supervisor':
         user_branch_id = user.get('branchId')
-        return bool(user_branch_id and order.branch_id == user_branch_id)
+        if not user_branch_id:
+            return False
+        # Source branch supervisor OR pickup branch supervisor can manage
+        return order.branch_id == user_branch_id or order.pickup_branch_id == user_branch_id
 
     return False
 
@@ -2570,6 +2569,207 @@ def build_product_order_timeline(order):
 
     events.sort(key=lambda e: e.get('timestamp') or '', reverse=True)
     return events
+
+@app.route('/api/product-orders/multi', methods=['POST'])
+def create_multi_branch_product_order():
+    """Create a single order at the pickup branch. Items from other branches
+    generate transfer requests notifying those branches to send the items over."""
+    data = request.get_json()
+
+    required = ['customerName', 'customerPhone', 'items', 'pickupBranchId']
+    if not all(f in data for f in required):
+        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    if not data['items']:
+        return jsonify({'status': 'error', 'message': 'At least one item is required'}), 400
+
+    pickup_branch_id = int(data['pickupBranchId'])
+    pickup_branch = Branch.query.get(pickup_branch_id)
+    if not pickup_branch or not pickup_branch.is_active:
+        return jsonify({'status': 'error', 'message': 'Invalid or inactive pickup branch'}), 400
+
+    user_id = None
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if token:
+        u = get_user_from_token(token)
+        if u:
+            user_id = u['id']
+
+    # Validate all items and enrich with source branch info
+    all_items = []
+    items_by_source = {}
+    for item_data in data['items']:
+        product_id = item_data.get('productId')
+        quantity = int(item_data.get('quantity', 1))
+        product = PremadeProduct.query.filter_by(id=product_id, is_archived=False).first()
+        if not product:
+            return jsonify({'status': 'error', 'message': f'Product {product_id} not found'}), 400
+        if float(product.quantity) < quantity:
+            return jsonify({'status': 'error', 'message': f'Insufficient stock for {product.name}'}), 400
+
+        item_dict = {
+            'productId': product.id,
+            'name': product.name,
+            'sku': product.sku,
+            'quantity': quantity,
+            'unitPrice': float(product.price),
+            'total': float(product.price) * quantity,
+            'sourceBranchId': int(product.branch_id),
+            'sourceBranchName': product.branch.name if product.branch else None,
+        }
+        all_items.append(item_dict)
+
+        src = int(product.branch_id)
+        if src != pickup_branch_id:
+            items_by_source.setdefault(src, []).append(item_dict)
+
+    # Create ONE order at the pickup branch with all items
+    order_count = ProductOrder.query.count() + 1
+    order = ProductOrder(
+        order_number=f"PO-{order_count:04d}",
+        customer_name=data['customerName'],
+        customer_phone=data['customerPhone'],
+        customer_email=data.get('customerEmail', ''),
+        customer_address=data.get('customerAddress', ''),
+        items=all_items,
+        total_amount=sum(i['total'] for i in all_items),
+        branch_id=pickup_branch_id,
+        pickup_branch_id=pickup_branch_id,
+        shipment_status='not_needed',
+        status='pending',
+        payment_status='unpaid',
+        user_id=user_id,
+        notes=data.get('notes', '')
+    )
+    db.session.add(order)
+    db.session.flush()  # get order.id
+
+    # Create a transfer request for each source branch ≠ pickup branch
+    for src_branch_id, branch_items in items_by_source.items():
+        db.session.add(ProductOrderTransfer(
+            product_order_id=order.id,
+            source_branch_id=src_branch_id,
+            items=branch_items,
+            status='pending'
+        ))
+
+    db.session.commit()
+
+    log_action(
+        user_id or 0, data.get('customerName', 'Customer'), 'CREATE', 'Product Orders',
+        f"Order {order.order_number} at {pickup_branch.name} — {len(items_by_source)} transfer request(s) created",
+        request.remote_addr or '0.0.0.0'
+    )
+
+    return jsonify({'status': 'success', 'data': product_order_to_dict(order)}), 201
+
+
+@app.route('/api/product-orders/group/<group_id>', methods=['GET'])
+@require_auth
+@require_roles('administrator')
+def get_product_order_group(group_id):
+    """Get all orders belonging to the same multi-branch group (admin only)."""
+    orders = ProductOrder.query.filter_by(group_id=group_id).order_by(ProductOrder.created_at.asc()).all()
+    if not orders:
+        return jsonify({'status': 'error', 'message': 'Group not found'}), 404
+    return jsonify({'status': 'success', 'data': [product_order_to_dict(o) for o in orders]})
+
+
+@app.route('/api/product-orders/my-transfer-requests', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def get_my_transfer_requests():
+    """Source branch supervisors see transfer requests assigned to their branch."""
+    user = request.current_user
+    if user['role'] == 'supervisor':
+        branch_id = user.get('branchId')
+        if not branch_id:
+            return jsonify({'status': 'success', 'data': []})
+        transfers = ProductOrderTransfer.query.filter_by(
+            source_branch_id=branch_id
+        ).order_by(ProductOrderTransfer.created_at.desc()).all()
+    else:
+        transfers = ProductOrderTransfer.query.order_by(
+            ProductOrderTransfer.created_at.desc()
+        ).all()
+    return jsonify({'status': 'success', 'data': [transfer_to_dict(t) for t in transfers]})
+
+
+@app.route('/api/product-order-transfers/<int:transfer_id>/mark-transferred', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def mark_transfer_sent(transfer_id):
+    """Source branch marks their items as sent to the pickup branch."""
+    transfer = ProductOrderTransfer.query.get(transfer_id)
+    if not transfer:
+        return jsonify({'status': 'error', 'message': 'Transfer request not found'}), 404
+
+    user = request.current_user
+    if user['role'] == 'supervisor' and user.get('branchId') != transfer.source_branch_id:
+        return jsonify({'status': 'error', 'message': 'Only the source branch can mark this transfer as sent'}), 403
+
+    if transfer.status != 'pending':
+        return jsonify({'status': 'error', 'message': 'Transfer is not in pending status'}), 400
+
+    transfer.status = 'transferred'
+    db.session.commit()
+
+    log_action(user['id'], user['fullName'], 'TRANSFER', 'Product Orders',
+        f"Transfer {transfer_id} for order {transfer.order.order_number if transfer.order else '?'} marked as sent to {transfer.order.branch.name if (transfer.order and transfer.order.branch) else 'N/A'}",
+        request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': transfer_to_dict(transfer)})
+
+
+@app.route('/api/product-order-transfers/<int:transfer_id>/confirm-receipt', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def confirm_transfer_receipt(transfer_id):
+    """Pickup branch confirms they received the transferred items; adds to their inventory."""
+    transfer = ProductOrderTransfer.query.get(transfer_id)
+    if not transfer:
+        return jsonify({'status': 'error', 'message': 'Transfer request not found'}), 404
+
+    user = request.current_user
+    order = transfer.order
+    if user['role'] == 'supervisor' and user.get('branchId') != (order.branch_id if order else None):
+        return jsonify({'status': 'error', 'message': 'Only the pickup branch can confirm receipt'}), 403
+
+    if transfer.status != 'transferred':
+        return jsonify({'status': 'error', 'message': 'Items have not been marked as transferred yet'}), 400
+
+    pickup_branch = order.branch if order else None
+    for item in transfer.items:
+        orig_product = PremadeProduct.query.get(item.get('productId')) if item.get('productId') else None
+        derived_sku = f"{item['sku']}-{pickup_branch.code}" if pickup_branch else item['sku']
+
+        existing = (
+            PremadeProduct.query.filter_by(sku=item['sku'], branch_id=order.branch_id).first()
+            or PremadeProduct.query.filter_by(sku=derived_sku, branch_id=order.branch_id).first()
+        )
+        if existing:
+            existing.quantity = float(existing.quantity) + float(item['quantity'])
+        else:
+            db.session.add(PremadeProduct(
+                name=item['name'],
+                sku=derived_sku,
+                quantity=float(item['quantity']),
+                unit=orig_product.unit if orig_product else 'pcs',
+                category=orig_product.category if orig_product else 'General',
+                price=float(item.get('unitPrice', 0)),
+                cost=float(orig_product.cost) if orig_product else 0,
+                branch_id=order.branch_id,
+                is_archived=False
+            ))
+
+    transfer.status = 'received'
+    db.session.commit()
+
+    log_action(user['id'], user['fullName'], 'RECEIVE', 'Product Orders',
+        f"Transfer {transfer_id} received at {pickup_branch.name if pickup_branch else 'N/A'}. Items added to inventory.",
+        request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': transfer_to_dict(transfer)})
+
 
 @app.route('/api/product-orders', methods=['POST'])
 def create_product_order():
