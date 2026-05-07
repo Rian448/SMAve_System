@@ -250,18 +250,16 @@ export default function ProductOrderDetailPage() {
           </div>
         </div>
 
-        {order.pickupBranchId && order.pickupBranchId !== order.branchId && (
-          <div className="p-4 bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-xl flex items-start gap-3">
-            <svg className="w-5 h-5 text-orange-600 dark:text-orange-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        {order.transfers && order.transfers.length > 0 && (
+          <div className="p-4 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-xl flex items-start gap-3">
+            <svg className="w-5 h-5 text-purple-600 dark:text-purple-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
             </svg>
             <div>
-              <p className="font-semibold text-orange-700 dark:text-orange-300 text-sm">Shipping Required</p>
-              <p className="text-sm text-orange-600 dark:text-orange-400 mt-0.5">
-                Customer wants to pick up at <strong>{order.pickupBranchName}</strong>. Ship this order to that branch before marking as ready.
-                {isAdmin && order.groupId && (
-                  <span className="ml-1">Group ID: <code className="font-mono text-xs">{order.groupId.slice(0, 8)}…</code></span>
-                )}
+              <p className="font-semibold text-purple-700 dark:text-purple-300 text-sm">Multi-Branch Order</p>
+              <p className="text-sm text-purple-600 dark:text-purple-400 mt-0.5">
+                This order includes items from {order.transfers.length} other branch{order.transfers.length !== 1 ? 'es' : ''}.
+                Those branches will transfer their items to <strong>{order.branchName}</strong> for customer pickup.
               </p>
             </div>
           </div>
@@ -279,7 +277,12 @@ export default function ProductOrderDetailPage() {
             <div className="space-y-2">
               {order.items.map((item, index) => (
                 <div key={index} className="flex justify-between text-sm border-b border-zinc-100 dark:border-zinc-800 pb-2">
-                  <span className="text-zinc-900 dark:text-zinc-100">{item.quantity}x {item.name} ({item.sku})</span>
+                  <span className="text-zinc-900 dark:text-zinc-100">
+                    {item.quantity}x {item.name} ({item.sku})
+                    {item.sourceBranchName && item.sourceBranchName !== order.branchName && (
+                      <span className="ml-2 text-xs text-orange-500 dark:text-orange-400">from {item.sourceBranchName}</span>
+                    )}
+                  </span>
                   <span className="text-zinc-600 dark:text-zinc-400">₱{item.total.toLocaleString()}</span>
                 </div>
               ))}
@@ -495,13 +498,7 @@ export default function ProductOrderDetailPage() {
             <div className="mt-5 text-sm space-y-2">
               <p className="text-zinc-600 dark:text-zinc-400"><span className="font-medium text-zinc-800 dark:text-zinc-200">Customer:</span> {order.customerName}</p>
               <p className="text-zinc-600 dark:text-zinc-400"><span className="font-medium text-zinc-800 dark:text-zinc-200">Phone:</span> {order.customerPhone}</p>
-              <p className="text-zinc-600 dark:text-zinc-400"><span className="font-medium text-zinc-800 dark:text-zinc-200">Source Branch:</span> {order.branchName || 'N/A'}</p>
-              {order.pickupBranchName && (
-                <p className={`font-medium ${order.pickupBranchId !== order.branchId ? 'text-orange-600 dark:text-orange-400' : 'text-zinc-600 dark:text-zinc-400'}`}>
-                  <span className="font-medium text-zinc-800 dark:text-zinc-200">Pickup Branch:</span> {order.pickupBranchName}
-                  {order.pickupBranchId !== order.branchId && ' ⚠ Ship required'}
-                </p>
-              )}
+              <p className="text-zinc-600 dark:text-zinc-400"><span className="font-medium text-zinc-800 dark:text-zinc-200">Pickup Branch:</span> {order.branchName || 'N/A'}</p>
               <p className="text-zinc-600 dark:text-zinc-400"><span className="font-medium text-zinc-800 dark:text-zinc-200">Created:</span> {new Date(order.createdAt).toLocaleString('en-PH')}</p>
               {isAdmin && order.groupId && (
                 <p className="text-zinc-600 dark:text-zinc-400"><span className="font-medium text-zinc-800 dark:text-zinc-200">Group ID:</span> <code className="font-mono text-xs bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded">{order.groupId}</code></p>

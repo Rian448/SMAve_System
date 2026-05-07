@@ -2459,6 +2459,17 @@ def get_my_appointments():
 # PRODUCT ORDERS MODULE (Premade Products)
 # ============================================
 
+def generate_product_order_number():
+    """Generate a unique PO-XXXX order number that won't collide."""
+    max_id = db.session.query(db.func.max(ProductOrder.id)).scalar() or 0
+    candidate = f"PO-{max_id + 1:04d}"
+    # If somehow it already exists, keep incrementing
+    offset = 1
+    while ProductOrder.query.filter_by(order_number=candidate).first():
+        offset += 1
+        candidate = f"PO-{max_id + offset:04d}"
+    return candidate
+
 def transfer_to_dict(transfer):
     order = transfer.order
     return {
@@ -2623,9 +2634,8 @@ def create_multi_branch_product_order():
             items_by_source.setdefault(src, []).append(item_dict)
 
     # Create ONE order at the pickup branch with all items
-    order_count = ProductOrder.query.count() + 1
     order = ProductOrder(
-        order_number=f"PO-{order_count:04d}",
+        order_number=generate_product_order_number(),
         customer_name=data['customerName'],
         customer_phone=data['customerPhone'],
         customer_email=data.get('customerEmail', ''),
@@ -2710,11 +2720,30 @@ def mark_transfer_sent(transfer_id):
     if transfer.status != 'pending':
         return jsonify({'status': 'error', 'message': 'Transfer is not in pending status'}), 400
 
+    # Validate stock before deducting
+    deductions = []
+    for item in transfer.items:
+        product = PremadeProduct.query.get(item.get('productId')) if item.get('productId') else None
+        if not product or product.branch_id != transfer.source_branch_id:
+            # Fallback: find by SKU at source branch
+            product = PremadeProduct.query.filter_by(
+                sku=item.get('sku', ''), branch_id=transfer.source_branch_id
+            ).first()
+        if not product:
+            return jsonify({'status': 'error', 'message': f"Product '{item.get('name')}' not found in source branch inventory"}), 400
+        requested_qty = float(item.get('quantity', 0))
+        if float(product.quantity) < requested_qty:
+            return jsonify({'status': 'error', 'message': f"Insufficient stock for '{product.name}' at source branch. Available: {product.quantity:g}, required: {requested_qty:g}"}), 400
+        deductions.append((product, requested_qty))
+
+    for product, qty in deductions:
+        product.quantity = float(product.quantity) - qty
+
     transfer.status = 'transferred'
     db.session.commit()
 
     log_action(user['id'], user['fullName'], 'TRANSFER', 'Product Orders',
-        f"Transfer {transfer_id} for order {transfer.order.order_number if transfer.order else '?'} marked as sent to {transfer.order.branch.name if (transfer.order and transfer.order.branch) else 'N/A'}",
+        f"Transfer {transfer_id} for order {transfer.order.order_number if transfer.order else '?'} marked as sent to {transfer.order.branch.name if (transfer.order and transfer.order.branch) else 'N/A'}. Inventory deducted from source branch.",
         request.remote_addr or '0.0.0.0')
 
     return jsonify({'status': 'success', 'data': transfer_to_dict(transfer)})
@@ -2829,12 +2858,8 @@ def create_product_order():
             'total': item_total
         })
     
-    # Generate order number
-    order_count = ProductOrder.query.count() + 1
-    order_number = f"PO-{order_count:04d}"
-    
     new_order = ProductOrder(
-        order_number=order_number,
+        order_number=generate_product_order_number(),
         customer_name=data['customerName'],
         customer_phone=data['customerPhone'],
         customer_email=data.get('customerEmail', ''),
@@ -2919,18 +2944,36 @@ def update_product_order(order_id):
 
         # Deduct inventory only once when transitioning into completed.
         if previous_status != 'completed' and incoming_status == 'completed':
+            pickup_branch = order.branch
             stock_deductions = []
             for item in order.items:
-                product = PremadeProduct.query.get(item['productId'])
+                source_branch_id = item.get('sourceBranchId', order.branch_id)
+                item_sku = item.get('sku', '')
+
+                if source_branch_id == order.branch_id:
+                    # Local item — deduct from the original product at the pickup branch
+                    product = PremadeProduct.query.get(item.get('productId'))
+                    if not product or product.branch_id != order.branch_id:
+                        product = PremadeProduct.query.filter_by(
+                            sku=item_sku, branch_id=order.branch_id
+                        ).first()
+                else:
+                    # Transferred item — find the copy added to the pickup branch on receipt
+                    derived_sku = f"{item_sku}-{pickup_branch.code}" if pickup_branch else item_sku
+                    product = (
+                        PremadeProduct.query.filter_by(sku=item_sku, branch_id=order.branch_id).first()
+                        or PremadeProduct.query.filter_by(sku=derived_sku, branch_id=order.branch_id).first()
+                    )
+
                 if not product:
-                    return jsonify({'status': 'error', 'message': f"Product with ID {item['productId']} not found"}), 400
+                    return jsonify({'status': 'error', 'message': f"Cannot complete order. Product '{item.get('name')}' not found in pickup branch inventory. Ensure all transfers have been received first."}), 400
 
                 requested_qty = float(item.get('quantity', 0))
                 current_qty = float(product.quantity)
                 if current_qty < requested_qty:
                     return jsonify({
                         'status': 'error',
-                        'message': f"Cannot complete order. Insufficient stock for {product.name}. Current stock: {current_qty:g}, required: {requested_qty:g}"
+                        'message': f"Cannot complete order. Insufficient stock for '{product.name}' at pickup branch. Current stock: {current_qty:g}, required: {requested_qty:g}"
                     }), 400
 
                 stock_deductions.append((product, requested_qty))
