@@ -1,9 +1,10 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from datetime import datetime, timedelta
 from functools import wraps
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
+from werkzeug.utils import secure_filename
 import os
 import random
 import hashlib
@@ -29,6 +30,10 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
     f"sqlite:///{os.path.join(BASE_DIR, 'smaeve_system.db')}"
 )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+CATALOG_UPLOAD_FOLDER = os.path.join(BASE_DIR, 'static', 'catalog')
+os.makedirs(CATALOG_UPLOAD_FOLDER, exist_ok=True)
+ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
@@ -236,6 +241,10 @@ class InventoryMaterial(db.Model):
     stock_quantity = db.Column(db.Float, default=0)
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
     is_archived = db.Column(db.Boolean, default=False)
+    # Tracks which job order this material was added for when not yet in stock
+    source_job_order_id = db.Column(db.String(50), nullable=True)
+    # 'available' = normal stock item; 'needed' = ordered/reserved for a specific job order
+    status = db.Column(db.String(20), default='available')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -275,6 +284,18 @@ class MaterialUsageLog(db.Model):
     premade_product = db.relationship('PremadeProduct')
     branch = db.relationship('Branch')
     used_by_user = db.relationship('User', foreign_keys=[used_by])
+
+class CatalogItem(db.Model):
+    __tablename__ = 'catalog_items'
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(255), nullable=False)
+    description = db.Column(db.Text, default='')
+    tag = db.Column(db.String(100), default='')
+    image_url = db.Column(db.String(500), default='')
+    sort_order = db.Column(db.Integer, default=0)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 # ============================================
 # SEED DATA
@@ -660,8 +681,25 @@ def normalize_premade_units():
     if updated:
         db.session.commit()
 
+def run_migrations():
+    """Add new columns to existing tables without dropping data."""
+    from sqlalchemy import text
+    migrations = [
+        "ALTER TABLE inventory_materials ADD COLUMN source_job_order_id VARCHAR(50)",
+        "ALTER TABLE inventory_materials ADD COLUMN status VARCHAR(20) DEFAULT 'available'",
+        "ALTER TABLE material_usage_logs ADD COLUMN job_order_db_id INTEGER",
+    ]
+    with db.engine.connect() as conn:
+        for sql in migrations:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+            except Exception:
+                pass  # Column already exists
+
 def init_db():
     db.create_all()
+    run_migrations()
 
     # Seed roles
     for role in default_roles:
@@ -696,6 +734,18 @@ def init_db():
     seed_default_users()
     seed_inventory_items()
     normalize_premade_units()
+
+    # Seed default catalog items
+    if CatalogItem.query.count() == 0:
+        default_catalog = [
+            CatalogItem(title='Toyota Vios 2025', description='Latest model with modern features and exceptional fuel efficiency.', tag='New Arrival', image_url='/pictures/Toyota Vios 2025.jpg', sort_order=1),
+            CatalogItem(title='Mitsubishi TRITON 2025', description='Powerful pickup truck built for adventure and heavy-duty performance.', tag='Best Seller', image_url='/pictures/Mitsubishi TRITON 2025.jpg', sort_order=2),
+            CatalogItem(title='Toyota Grandia GL 2024', description='Spacious family van with premium comfort and reliability.', tag='Premium', image_url='/pictures/Toyota_Grandia_GL_2024.jpg', sort_order=3),
+            CatalogItem(title='Toyota Vios 2020', description='Trusted sedan with proven performance and value.', tag='Classic', image_url='/pictures/Toyota Vios 2020.jpg', sort_order=4),
+        ]
+        for item in default_catalog:
+            db.session.add(item)
+        db.session.commit()
 
 def get_user_from_token(token):
     """Get user from session token"""
@@ -1019,6 +1069,8 @@ def material_to_dict(material):
         'stockQuantity': float(material.stock_quantity),
         'branchId': material.branch_id,
         'isArchived': material.is_archived,
+        'sourceJobOrderId': material.source_job_order_id,
+        'status': material.status or 'available',
         'lastUpdated': material.updated_at.strftime('%Y-%m-%d') if material.updated_at else None
     }
 
@@ -1079,13 +1131,23 @@ def material_usage_to_dict(log):
 def get_raw_materials():
     include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
     branch_id = request.args.get('branchId')
+    include_warehouse = request.args.get('includeWarehouse', 'false').lower() == 'true'
     category = request.args.get('category')
 
     query = InventoryMaterial.query
     if not include_archived:
         query = query.filter_by(is_archived=False)
     if branch_id:
-        query = query.filter_by(branch_id=int(branch_id))
+        branch_id_int = int(branch_id)
+        if include_warehouse:
+            warehouse = Branch.query.filter_by(is_warehouse=True).first()
+            warehouse_id = warehouse.id if warehouse else 1
+            if branch_id_int != warehouse_id:
+                query = query.filter(InventoryMaterial.branch_id.in_([branch_id_int, warehouse_id]))
+            else:
+                query = query.filter_by(branch_id=branch_id_int)
+        else:
+            query = query.filter_by(branch_id=branch_id_int)
     if category:
         query = query.filter_by(category=category)
 
@@ -1171,6 +1233,11 @@ def create_raw_material():
         if existing:
             return jsonify({'status': 'error', 'message': f'Item ID "{custom_item_id}" already exists'}), 400
 
+    source_job_order_id = data.get('sourceJobOrderId', '').strip() or None
+    material_status = data.get('status', 'available').strip()
+    if material_status not in ('available', 'needed'):
+        material_status = 'available'
+
     material = InventoryMaterial(
         item_id=custom_item_id,
         material_type=data['materialType'].strip(),
@@ -1179,13 +1246,17 @@ def create_raw_material():
         unit_price=float(data['unitPrice']),
         stock_quantity=float(data['stockQuantity']),
         branch_id=int(data['branchId']),
-        is_archived=False
+        is_archived=False,
+        source_job_order_id=source_job_order_id,
+        status=material_status
     )
 
     db.session.add(material)
     db.session.commit()
 
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory', f"Created inventory item: {material.material_type}", request.remote_addr or '0.0.0.0')
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory',
+               f"Created inventory item: {material.material_type}" + (f" (needed for {source_job_order_id})" if source_job_order_id else ""),
+               request.remote_addr or '0.0.0.0')
 
     return jsonify({'status': 'success', 'data': material_to_dict(material)}), 201
 
@@ -1695,7 +1766,10 @@ def update_job_order(order_id):
         return jsonify({'status': 'error', 'message': 'Down payment is required before sales managers can edit this job order'}), 403
     
     data = request.get_json()
-    
+
+    # Capture previous status BEFORE any updates
+    prev_status = order.status
+
     # Update allowed fields
     if 'status' in data:
         order.status = data['status']
@@ -1713,7 +1787,7 @@ def update_job_order(order_id):
             item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0))
             for item in data['items']
         )
-    
+
     # Recalculate balance
     if 'downPayment' in data or 'totalPrice' in data:
         order.balance = max(order.total_price - order.down_payment, 0)
@@ -1725,13 +1799,66 @@ def update_job_order(order_id):
             order.payment_status = 'partial'
         elif order.total_price <= 0:
             order.payment_status = 'unpaid'
-    
+
     if data.get('status') == 'completed':
         order.completed_at = datetime.now()
-    
+
     order.updated_at = datetime.now()
+
+    # ── Deduct inventory when a job order is completed ──────────────────────
+    if data.get('status') == 'completed' and prev_status != 'completed':
+        for item in (order.items or []):
+            qty = float(item.get('quantity', 0))
+            if qty <= 0:
+                continue
+
+            # Skip pure-labor items (have laborCost > 0 and no materialCost)
+            labor_cost = float(item.get('laborCost', 0))
+            material_cost = float(item.get('materialCost', 0))
+            if labor_cost > 0 and material_cost == 0:
+                continue
+
+            # Resolve the inventory material – prefer stored ID, fall back to name match.
+            # Do NOT restrict by branch_id on ID lookup — the material may belong to the
+            # warehouse even when the order is from a different branch.
+            inv_material = None
+            stored_material_id = item.get('materialId')
+            if stored_material_id:
+                inv_material = InventoryMaterial.query.filter_by(
+                    id=int(stored_material_id)
+                ).first()
+            if not inv_material:
+                material_name = item.get('name', '').strip().lower()
+                if material_name:
+                    warehouse = Branch.query.filter_by(is_warehouse=True).first()
+                    warehouse_id = warehouse.id if warehouse else 1
+                    # Search the order's branch first, then the warehouse
+                    inv_material = InventoryMaterial.query.filter(
+                        db.func.lower(InventoryMaterial.material_type) == material_name,
+                        InventoryMaterial.branch_id.in_([order.branch_id, warehouse_id]),
+                        InventoryMaterial.is_archived.is_(False)
+                    ).order_by(
+                        db.case((InventoryMaterial.branch_id == order.branch_id, 0), else_=1)
+                    ).first()
+
+            if inv_material:
+                inv_material.stock_quantity = float(inv_material.stock_quantity) - qty
+                inv_material.status = 'available'   # clear 'needed' flag
+                inv_material.updated_at = datetime.now()
+
+                usage_log = MaterialUsageLog(
+                    material_id=inv_material.id,
+                    quantity_used=qty,
+                    used_in_type='job_order',
+                    used_in_reference=order.job_order_id,
+                    branch_id=order.branch_id,
+                    used_by=request.current_user['id'],
+                    notes=f"Used in job order {order.job_order_id} — {order.customer_name}"
+                )
+                db.session.add(usage_log)
+
     db.session.commit()
-    
+
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Sales', f"Updated job order: {order.job_order_id}", request.remote_addr or '0.0.0.0')
     
     return jsonify({
@@ -4400,6 +4527,102 @@ def debug_branches_and_orders():
             'totalOrders': len(job_orders)
         }
     })
+
+# ============================================================
+# CATALOG ROUTES
+# ============================================================
+
+@app.route('/api/catalog', methods=['GET'])
+def get_catalog():
+    items = CatalogItem.query.filter_by(is_active=True).order_by(CatalogItem.sort_order, CatalogItem.id).all()
+    return jsonify({'status': 'success', 'data': [
+        {'id': i.id, 'title': i.title, 'description': i.description, 'tag': i.tag,
+         'imageUrl': i.image_url, 'sortOrder': i.sort_order}
+        for i in items
+    ]})
+
+@app.route('/api/catalog', methods=['POST'])
+@require_auth
+@require_roles('administrator')
+def create_catalog_item():
+    data = request.get_json()
+    if not data or not data.get('title', '').strip():
+        return jsonify({'status': 'error', 'message': 'Title is required'}), 400
+    max_order = db.session.query(db.func.max(CatalogItem.sort_order)).scalar() or 0
+    item = CatalogItem(
+        title=data['title'].strip(),
+        description=data.get('description', '').strip(),
+        tag=data.get('tag', '').strip(),
+        image_url=data.get('imageUrl', ''),
+        sort_order=max_order + 1,
+    )
+    db.session.add(item)
+    db.session.commit()
+    return jsonify({'status': 'success', 'data': {
+        'id': item.id, 'title': item.title, 'description': item.description,
+        'tag': item.tag, 'imageUrl': item.image_url, 'sortOrder': item.sort_order
+    }}), 201
+
+@app.route('/api/catalog/<int:item_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator')
+def update_catalog_item(item_id):
+    item = CatalogItem.query.get(item_id)
+    if not item:
+        return jsonify({'status': 'error', 'message': 'Item not found'}), 404
+    data = request.get_json()
+    if 'title' in data:
+        item.title = data['title'].strip()
+    if 'description' in data:
+        item.description = data['description'].strip()
+    if 'tag' in data:
+        item.tag = data['tag'].strip()
+    if 'sortOrder' in data:
+        item.sort_order = int(data['sortOrder'])
+    item.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'status': 'success', 'data': {
+        'id': item.id, 'title': item.title, 'description': item.description,
+        'tag': item.tag, 'imageUrl': item.image_url, 'sortOrder': item.sort_order
+    }})
+
+@app.route('/api/catalog/<int:item_id>', methods=['DELETE'])
+@require_auth
+@require_roles('administrator')
+def delete_catalog_item(item_id):
+    item = CatalogItem.query.get(item_id)
+    if not item:
+        return jsonify({'status': 'error', 'message': 'Item not found'}), 404
+    item.is_active = False
+    item.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'status': 'success', 'message': 'Item removed from catalog'})
+
+@app.route('/api/catalog/<int:item_id>/image', methods=['POST'])
+@require_auth
+@require_roles('administrator')
+def upload_catalog_image(item_id):
+    item = CatalogItem.query.get(item_id)
+    if not item:
+        return jsonify({'status': 'error', 'message': 'Item not found'}), 404
+    if 'image' not in request.files:
+        return jsonify({'status': 'error', 'message': 'No image file provided'}), 400
+    file = request.files['image']
+    if not file.filename:
+        return jsonify({'status': 'error', 'message': 'No file selected'}), 400
+    ext = file.filename.rsplit('.', 1)[-1].lower() if '.' in file.filename else ''
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        return jsonify({'status': 'error', 'message': 'File type not allowed'}), 400
+    filename = secure_filename(f"catalog_{item_id}_{uuid.uuid4().hex[:8]}.{ext}")
+    file.save(os.path.join(CATALOG_UPLOAD_FOLDER, filename))
+    item.image_url = f"/api/catalog/images/{filename}"
+    item.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'status': 'success', 'imageUrl': item.image_url})
+
+@app.route('/api/catalog/images/<filename>', methods=['GET'])
+def serve_catalog_image(filename):
+    return send_from_directory(CATALOG_UPLOAD_FOLDER, filename)
 
 if __name__ == '__main__':
     with app.app_context():

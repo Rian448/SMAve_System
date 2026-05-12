@@ -215,6 +215,10 @@ export interface RawMaterial {
   stockQuantity: number;
   branchId: number;
   isArchived: boolean;
+  /** 'available' = normal stock | 'needed' = reserved/ordered for a job order */
+  status?: string;
+  /** Job order ID this material was added for (when status is 'needed') */
+  sourceJobOrderId?: string;
   lastUpdated: string;
 }
 
@@ -226,6 +230,10 @@ export interface RawMaterialInput {
   unitPrice: number;
   stockQuantity: number;
   branchId: number;
+  /** Set to 'needed' when material is being ordered specifically for a job order */
+  status?: string;
+  /** The job order ID this material is being ordered for */
+  sourceJobOrderId?: string;
 }
 
 export interface RawMaterialSummaryGroup {
@@ -298,6 +306,8 @@ export interface JobOrderItem {
   workerName?: string;
   workerRate?: number;
   notes?: string;
+  /** FK to inventory_materials.id — used to deduct stock on job order completion */
+  materialId?: number;
 }
 
 export interface VehicleInfo {
@@ -683,11 +693,12 @@ export const api = {
   // ==================
   inventory: {
     // Raw Materials
-    getRawMaterials: (params?: { includeArchived?: boolean; branchId?: number; category?: string }) => {
+    getRawMaterials: (params?: { includeArchived?: boolean; branchId?: number; category?: string; includeWarehouse?: boolean }) => {
       const query = new URLSearchParams();
       if (params?.includeArchived) query.append('includeArchived', 'true');
       if (params?.branchId) query.append('branchId', params.branchId.toString());
       if (params?.category) query.append('category', params.category);
+      if (params?.includeWarehouse) query.append('includeWarehouse', 'true');
       return fetchApi<RawMaterial[]>(`/api/inventory/raw-materials?${query}`);
     },
 

@@ -138,13 +138,29 @@ export default function ProductOrderDetailPage() {
       hour: '2-digit', minute: '2-digit', hour12: true,
     });
 
-    const itemRows = order.items.map((item) => `
+    const printedAt = new Date().toLocaleString('en-PH', {
+      year: 'numeric', month: 'long', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: true,
+    });
+
+    const paymentLabel = order.paymentStatus === 'paid' ? 'PAID' : order.paymentStatus === 'partial' ? 'PARTIAL PAYMENT' : 'UNPAID';
+    const statusLabel = order.status.toUpperCase();
+
+    const itemRows = order.items.map((item) => {
+      const fromBranch = item.sourceBranchName && item.sourceBranchName !== order.branchName
+        ? `<div class="item-branch">from ${item.sourceBranchName}</div>` : '';
+      return `
       <tr>
-        <td class="item-name">${item.name}</td>
+        <td class="item-name">
+          <div>${item.name}</div>
+          <div class="item-sku">${item.sku}</div>
+          ${fromBranch}
+        </td>
         <td class="center">${item.quantity}</td>
         <td class="right">&#8369;${item.unitPrice.toLocaleString()}</td>
         <td class="right">&#8369;${item.total.toLocaleString()}</td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
 
     const html = `<!DOCTYPE html>
 <html>
@@ -152,59 +168,175 @@ export default function ProductOrderDetailPage() {
   <meta charset="utf-8"/>
   <title>Receipt – ${order.orderNumber}</title>
   <style>
-    *{margin:0;padding:0;box-sizing:border-box}
-    body{font-family:'Courier New',monospace;font-size:12px;width:300px;margin:0 auto;padding:20px}
-    h1{text-align:center;font-size:16px;letter-spacing:1px;margin-bottom:2px}
-    .sub{text-align:center;font-size:10px;color:#555;margin-bottom:14px}
-    .dash{border:none;border-top:1px dashed #000;margin:10px 0}
-    .row{display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px}
-    table{width:100%;border-collapse:collapse;margin:8px 0}
-    th{border-bottom:1px solid #000;padding:4px 3px;font-size:10px;text-align:left}
-    td{padding:4px 3px;font-size:11px;vertical-align:top}
-    .item-name{max-width:120px;word-break:break-word}
-    .center{text-align:center}
-    .right{text-align:right}
-    .total td{border-top:1px solid #000;font-weight:bold;padding-top:6px}
-    .thanks{text-align:center;margin-top:14px;font-size:10px;color:#555}
-    @media print{@page{margin:8mm}body{width:auto}}
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 12px;
+      width: 320px;
+      margin: 0 auto;
+      padding: 24px 20px 32px;
+      background: #fff;
+      color: #111;
+    }
+
+    /* ── Header ── */
+    .header { text-align: center; margin-bottom: 4px; }
+    .store-name {
+      font-size: 20px;
+      font-weight: bold;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      line-height: 1.2;
+    }
+    .store-tagline { font-size: 9px; color: #555; letter-spacing: 1px; margin-top: 2px; }
+    .receipt-title {
+      font-size: 10px;
+      font-weight: bold;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      margin-top: 8px;
+      border: 1px solid #111;
+      display: inline-block;
+      padding: 2px 10px;
+    }
+
+    /* ── Dividers ── */
+    .dash { border: none; border-top: 1px dashed #999; margin: 10px 0; }
+    .solid { border: none; border-top: 2px solid #111; margin: 10px 0; }
+
+    /* ── Key-value rows ── */
+    .row { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 3px; gap: 8px; }
+    .row .label { color: #555; flex-shrink: 0; }
+    .row .val { font-weight: bold; text-align: right; word-break: break-all; }
+
+    /* ── Badge ── */
+    .badge {
+      display: inline-block;
+      font-size: 9px;
+      font-weight: bold;
+      letter-spacing: 1px;
+      border: 1px solid #111;
+      padding: 1px 6px;
+      margin-left: 4px;
+      vertical-align: middle;
+    }
+    .badge-paid { border-color: #16a34a; color: #16a34a; }
+    .badge-partial { border-color: #d97706; color: #d97706; }
+    .badge-unpaid { border-color: #dc2626; color: #dc2626; }
+
+    /* ── Items table ── */
+    table { width: 100%; border-collapse: collapse; margin: 6px 0; }
+    thead tr th {
+      font-size: 9px;
+      font-weight: bold;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      padding: 4px 3px;
+      border-bottom: 1px solid #111;
+      border-top: 1px solid #111;
+    }
+    td { padding: 5px 3px; font-size: 11px; vertical-align: top; }
+    .item-name { max-width: 130px; }
+    .item-sku { font-size: 9px; color: #777; margin-top: 1px; }
+    .item-branch { font-size: 9px; color: #b45309; margin-top: 1px; }
+    .center { text-align: center; }
+    .right { text-align: right; }
+    tr + tr td { border-top: 1px dotted #ddd; }
+
+    /* ── Totals ── */
+    .subtotal-row td { font-size: 11px; padding-top: 6px; border-top: 1px solid #111; }
+    .total-row td { font-size: 13px; font-weight: bold; padding-top: 4px; }
+
+    /* ── Footer ── */
+    .footer { text-align: center; margin-top: 14px; }
+    .footer .thanks { font-size: 12px; font-weight: bold; letter-spacing: 1px; margin-bottom: 4px; }
+    .footer .sub { font-size: 9px; color: #666; margin-top: 2px; }
+    .order-barcode {
+      font-size: 9px;
+      letter-spacing: 3px;
+      color: #999;
+      margin-top: 10px;
+      font-family: monospace;
+    }
+
+    @media print {
+      @page { margin: 6mm; size: 80mm auto; }
+      body { width: auto; padding: 0; }
+    }
   </style>
 </head>
 <body>
-  <h1>SEATMAKERS AVENUE</h1>
-  <p class="sub">Official Receipt</p>
+
+  <div class="header">
+    <div class="store-name">Seatmakers<br/>Avenue</div>
+    <div class="store-tagline">Premium Upholstery &amp; Car Accessories</div>
+    <div class="receipt-title">Official Receipt</div>
+  </div>
+
   <hr class="dash"/>
-  <div class="row"><span>Order No:</span><span>${order.orderNumber}</span></div>
-  <div class="row"><span>Customer:</span><span>${order.customerName}</span></div>
-  <div class="row"><span>Date &amp; Time:</span><span>${dateTime}</span></div>
+
+  <div class="row"><span class="label">Branch:</span><span class="val">${order.branchName || 'N/A'}</span></div>
+  <div class="row"><span class="label">Order No:</span><span class="val">${order.orderNumber}</span></div>
+  <div class="row"><span class="label">Order Date:</span><span class="val">${dateTime}</span></div>
+  <div class="row"><span class="label">Printed:</span><span class="val">${printedAt}</span></div>
+
   <hr class="dash"/>
+
+  <div class="row"><span class="label">Customer:</span><span class="val">${order.customerName}</span></div>
+  <div class="row"><span class="label">Phone:</span><span class="val">${order.customerPhone || '—'}</span></div>
+
+  <hr class="dash"/>
+
   <table>
     <thead>
       <tr>
-        <th>Item</th>
+        <th style="text-align:left">Item</th>
         <th class="center">Qty</th>
         <th class="right">Unit</th>
-        <th class="right">Total</th>
+        <th class="right">Subtotal</th>
       </tr>
     </thead>
     <tbody>${itemRows}</tbody>
     <tfoot>
-      <tr class="total">
+      <tr class="subtotal-row">
+        <td colspan="3" class="right" style="font-size:11px">Total Amount</td>
+        <td class="right" style="font-size:11px">&#8369;${order.totalAmount.toLocaleString()}</td>
+      </tr>
+      <tr class="total-row">
         <td colspan="3" class="right">TOTAL</td>
         <td class="right">&#8369;${order.totalAmount.toLocaleString()}</td>
       </tr>
     </tfoot>
   </table>
+
   <hr class="dash"/>
-  <p class="thanks">Thank you for your purchase!</p>
+
+  <div class="row">
+    <span class="label">Payment Status:</span>
+    <span class="val">
+      <span class="badge badge-${order.paymentStatus === 'paid' ? 'paid' : order.paymentStatus === 'partial' ? 'partial' : 'unpaid'}">${paymentLabel}</span>
+    </span>
+  </div>
+  <div class="row"><span class="label">Order Status:</span><span class="val">${statusLabel}</span></div>
+
+  <hr class="solid"/>
+
+  <div class="footer">
+    <div class="thanks">Thank you for your purchase!</div>
+    <div class="sub">Please keep this receipt for your records.</div>
+    <div class="sub">For concerns, present this receipt at any branch.</div>
+    <div class="order-barcode">${order.orderNumber}</div>
+  </div>
+
 </body>
 </html>`;
 
     const blob = new Blob([html], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
-    const w = window.open(url, '_blank', 'width=380,height=600');
+    const w = window.open(url, '_blank', 'width=420,height=700');
     if (!w) { URL.revokeObjectURL(url); return; }
     w.focus();
-    setTimeout(() => { w.print(); w.close(); URL.revokeObjectURL(url); }, 300);
+    setTimeout(() => { w.print(); w.close(); URL.revokeObjectURL(url); }, 400);
   };
 
   if (loading) {
