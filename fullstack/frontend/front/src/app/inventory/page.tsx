@@ -94,6 +94,14 @@ export default function InventoryPage() {
     }).catch(() => {});
   }, [user?.branchId]);
 
+  useEffect(() => {
+    if (activeTab === 'finished-goods' && newPremade.branchId) {
+      api.inventory.getRawMaterials({ branchId: Number(newPremade.branchId), includeWarehouse: true })
+        .then(res => setRawMaterials(res.data || []))
+        .catch(() => {});
+    }
+  }, [newPremade.branchId, activeTab]);
+
   const fetchInventory = async () => {
     setLoading(true);
     try {
@@ -105,9 +113,10 @@ export default function InventoryPage() {
         setRawMaterials(matRes.data || []);
         setSuppliers(supRes.data || []);
       } else if (activeTab === 'finished-goods') {
+        const targetBranchId = Number(newPremade.branchId) || user?.branchId;
         const [finishedGoodsResponse, rawMaterialsResponse] = await Promise.all([
           api.inventory.getFinishedGoods(),
-          api.inventory.getRawMaterials({ branchId: user?.branchId })
+          api.inventory.getRawMaterials({ branchId: targetBranchId, includeWarehouse: true })
         ]);
         setFinishedGoods(finishedGoodsResponse.data || []);
         setRawMaterials(rawMaterialsResponse.data || []);
@@ -728,7 +737,10 @@ export default function InventoryPage() {
               />
               <select
                 value={newPremade.branchId}
-                onChange={(e) => setNewPremade((prev) => ({ ...prev, branchId: e.target.value }))}
+                onChange={(e) => {
+                  setNewPremade((prev) => ({ ...prev, branchId: e.target.value }));
+                  setPremadeMaterials([{ materialId: '', quantityUsed: '' }]);
+                }}
                 required
                 className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
               >

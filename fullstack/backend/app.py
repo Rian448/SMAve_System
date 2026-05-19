@@ -208,6 +208,7 @@ class ProductOrder(db.Model):
     group_id = db.Column(db.String(50), nullable=True, index=True)
     pickup_branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
     shipment_status = db.Column(db.String(20), default='not_needed')  # not_needed, pending, shipped, received
+    amount_paid = db.Column(db.Float, default=0.0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -743,6 +744,7 @@ def run_migrations():
         "ALTER TABLE material_usage_logs ADD COLUMN job_order_db_id INTEGER",
         "ALTER TABLE inventory_materials ADD COLUMN low_stock_threshold REAL DEFAULT 0",
         "ALTER TABLE inventory_materials ADD COLUMN supplier_id INTEGER REFERENCES suppliers(id)",
+        "ALTER TABLE product_orders ADD COLUMN amount_paid REAL DEFAULT 0.0",
     ]
     with db.engine.connect() as conn:
         for sql in migrations:
@@ -1447,10 +1449,15 @@ def create_finished_good():
         if quantity_used <= 0:
             return jsonify({'status': 'error', 'message': f'Quantity used must be greater than zero at row {idx + 1}'}), 400
 
-        material = InventoryMaterial.query.filter_by(
-            id=material_id,
-            branch_id=int(data['branchId']),
-            is_archived=False
+        warehouse = Branch.query.filter_by(is_warehouse=True).first()
+        warehouse_id = warehouse.id if warehouse else None
+        allowed_branch_ids = [int(data['branchId'])]
+        if warehouse_id and warehouse_id != int(data['branchId']):
+            allowed_branch_ids.append(warehouse_id)
+        material = InventoryMaterial.query.filter(
+            InventoryMaterial.id == material_id,
+            InventoryMaterial.branch_id.in_(allowed_branch_ids),
+            InventoryMaterial.is_archived.is_(False)
         ).first()
         if not material:
             return jsonify({'status': 'error', 'message': f'Material not found or unavailable at row {idx + 1}'}), 400
@@ -2972,6 +2979,8 @@ def product_order_to_dict(order):
         'transfers': transfers,
         'status': order.status,
         'paymentStatus': order.payment_status,
+        'amountPaid': order.amount_paid or 0.0,
+        'remainingBalance': max(0.0, (order.total_amount or 0.0) - (order.amount_paid or 0.0)),
         'notes': order.notes,
         'createdAt': order.created_at.isoformat() if order.created_at else None,
         'updatedAt': order.updated_at.isoformat() if order.updated_at else None
@@ -3342,6 +3351,14 @@ def create_product_order():
             'total': item_total
         })
     
+    payment_amount = float(data.get('paymentAmount') or 0)
+    if payment_amount >= total_amount and total_amount > 0:
+        initial_payment_status = 'paid'
+    elif payment_amount > 0:
+        initial_payment_status = 'partial'
+    else:
+        initial_payment_status = 'unpaid'
+
     new_order = ProductOrder(
         order_number=generate_product_order_number(),
         customer_name=data['customerName'],
@@ -3352,7 +3369,8 @@ def create_product_order():
         total_amount=total_amount,
         branch_id=branch_id,
         status='pending',
-        payment_status='unpaid',
+        payment_status=initial_payment_status,
+        amount_paid=payment_amount,
         user_id=user_id,
         notes=data.get('notes', '')
     )
@@ -3472,11 +3490,26 @@ def update_product_order(order_id):
             updated_fields.append(f"payment: {order.payment_status} -> {data['paymentStatus']}")
         order.payment_status = data['paymentStatus']
     
+    if 'addPayment' in data:
+        add_amount = float(data.get('addPayment') or 0)
+        if add_amount > 0:
+            current_paid = order.amount_paid or 0.0
+            order.amount_paid = current_paid + add_amount
+            if order.amount_paid >= order.total_amount:
+                order.amount_paid = order.total_amount
+                prev = order.payment_status
+                order.payment_status = 'paid'
+                updated_fields.append(f"payment: {prev} -> paid (added ₱{add_amount:,.2f})")
+            else:
+                order.payment_status = 'partial'
+                remaining = order.total_amount - order.amount_paid
+                updated_fields.append(f"payment: added ₱{add_amount:,.2f}, remaining ₱{remaining:,.2f}")
+
     if 'notes' in data:
         if order.notes != data['notes']:
             updated_fields.append('notes updated')
         order.notes = data['notes']
-    
+
     db.session.commit()
 
     if updated_fields:

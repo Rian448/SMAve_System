@@ -62,6 +62,9 @@ export default function ProductOrderDetailPage() {
   };
 
   const [transferSavingId, setTransferSavingId] = useState<number | null>(null);
+  const [paymentInput, setPaymentInput] = useState<number | ''>('');
+  const [addingPayment, setAddingPayment] = useState(false);
+  const [showInvoice, setShowInvoice] = useState(false);
 
   const markTransferred = async (transferId: number) => {
     try {
@@ -84,6 +87,20 @@ export default function ProductOrderDetailPage() {
       setError(err.message || 'Failed to confirm receipt');
     } finally {
       setTransferSavingId(null);
+    }
+  };
+
+  const handleAddPayment = async () => {
+    if (!order || !paymentInput || paymentInput <= 0) return;
+    try {
+      setAddingPayment(true);
+      await api.productOrders.update(order.id, { addPayment: paymentInput as number });
+      setPaymentInput('');
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to record payment');
+    } finally {
+      setAddingPayment(false);
     }
   };
 
@@ -146,9 +163,9 @@ export default function ProductOrderDetailPage() {
     const paymentLabel = order.paymentStatus === 'paid' ? 'PAID' : order.paymentStatus === 'partial' ? 'PARTIAL PAYMENT' : 'UNPAID';
     const statusLabel = order.status.toUpperCase();
 
-    const subtotal = order.totalAmount;
-    const vat = subtotal * 0.12;
-    const totalWithVat = subtotal + vat;
+    const totalWithVat = order.totalAmount;
+    const vat = totalWithVat * (12 / 112);
+    const subtotal = totalWithVat - vat;
 
     const itemRows = order.items.map((item) => {
       const fromBranch = item.sourceBranchName && item.sourceBranchName !== order.branchName
@@ -303,7 +320,7 @@ export default function ProductOrderDetailPage() {
     <tbody>${itemRows}</tbody>
     <tfoot>
       <tr class="subtotal-row">
-        <td colspan="3" class="right" style="font-size:11px">Subtotal</td>
+        <td colspan="3" class="right" style="font-size:11px">Net of VAT</td>
         <td class="right" style="font-size:11px">&#8369;${subtotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
       </tr>
       <tr>
@@ -345,6 +362,138 @@ export default function ProductOrderDetailPage() {
     if (!w) { URL.revokeObjectURL(url); return; }
     w.focus();
     setTimeout(() => { w.print(); w.close(); URL.revokeObjectURL(url); }, 400);
+  };
+
+  const printInvoice = () => {
+    if (!order) return;
+
+    const invoiceDate = new Date(order.createdAt).toLocaleDateString('en-PH', {
+      year: 'numeric', month: 'long', day: 'numeric',
+    });
+    const printedAt = new Date().toLocaleString('en-PH', {
+      year: 'numeric', month: 'long', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: true,
+    });
+    const totalWithVat = order.totalAmount;
+    const vat = totalWithVat * (12 / 112);
+    const subtotal = totalWithVat - vat;
+
+    const itemRows = order.items.map((item) => {
+      const fromBranch = item.sourceBranchName && item.sourceBranchName !== order.branchName
+        ? `<div class="item-sub">from ${item.sourceBranchName}</div>` : '';
+      return `
+      <tr>
+        <td><div>${item.name}</div><div class="item-sub">${item.sku}</div>${fromBranch}</td>
+        <td class="center">${item.quantity}</td>
+        <td class="right">&#8369;${item.unitPrice.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
+        <td class="right">&#8369;${item.total.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
+      </tr>`;
+    }).join('');
+
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Invoice – ${order.orderNumber}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; font-size: 13px; color: #111; background: #fff; padding: 40px; max-width: 700px; margin: 0 auto; }
+    .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 32px; }
+    .company-name { font-size: 24px; font-weight: 800; text-transform: uppercase; letter-spacing: 2px; color: #b45309; }
+    .company-sub { font-size: 11px; color: #666; margin-top: 4px; }
+    .invoice-title { text-align: right; }
+    .invoice-title h1 { font-size: 36px; font-weight: 800; letter-spacing: 4px; color: #111; }
+    .invoice-title .inv-num { font-size: 12px; color: #555; margin-top: 4px; }
+    .divider { border: none; border-top: 2px solid #111; margin: 20px 0; }
+    .divider-light { border: none; border-top: 1px solid #ddd; margin: 16px 0; }
+    .meta-row { display: flex; gap: 40px; margin-bottom: 24px; }
+    .meta-block label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #888; }
+    .meta-block p { font-size: 13px; font-weight: 600; margin-top: 3px; }
+    .meta-block .small { font-size: 12px; color: #555; font-weight: 400; margin-top: 1px; }
+    table { width: 100%; border-collapse: collapse; margin: 8px 0 16px; }
+    thead th { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; padding: 10px 8px; background: #f4f4f4; border-top: 2px solid #111; border-bottom: 2px solid #111; }
+    td { padding: 10px 8px; font-size: 12px; border-bottom: 1px solid #eee; vertical-align: top; }
+    .item-sub { font-size: 10px; color: #888; margin-top: 2px; }
+    .center { text-align: center; }
+    .right { text-align: right; }
+    .totals { width: 280px; margin-left: auto; margin-top: 8px; }
+    .totals-row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 12px; color: #555; }
+    .totals-row.total { font-size: 16px; font-weight: 800; color: #111; border-top: 2px solid #111; padding-top: 10px; margin-top: 4px; }
+    .amount-due { background: #b45309; color: #fff; border-radius: 8px; padding: 16px 20px; text-align: right; margin-top: 24px; }
+    .amount-due .label { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; opacity: 0.85; }
+    .amount-due .amount { font-size: 28px; font-weight: 800; margin-top: 4px; }
+    .footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #ddd; display: flex; justify-content: space-between; font-size: 11px; color: #888; }
+    .status-badge { display: inline-block; font-size: 10px; font-weight: 700; border: 1.5px solid #b45309; color: #b45309; padding: 2px 10px; border-radius: 4px; letter-spacing: 1px; text-transform: uppercase; margin-top: 6px; }
+    @media print { @page { margin: 12mm; size: A4; } body { padding: 0; max-width: none; } }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <div class="company-name">Seatmakers Avenue</div>
+      <div class="company-sub">Premium Upholstery &amp; Car Accessories</div>
+      <div class="company-sub">${order.branchName || 'N/A'}</div>
+    </div>
+    <div class="invoice-title">
+      <h1>INVOICE</h1>
+      <div class="inv-num">${order.orderNumber}</div>
+      <div class="status-badge">Amount Due</div>
+    </div>
+  </div>
+  <hr class="divider"/>
+  <div class="meta-row">
+    <div class="meta-block" style="flex:1">
+      <label>Bill To</label>
+      <p>${order.customerName}</p>
+      <div class="small">${order.customerPhone || ''}</div>
+      ${order.customerEmail ? `<div class="small">${order.customerEmail}</div>` : ''}
+    </div>
+    <div class="meta-block">
+      <label>Invoice Date</label>
+      <p>${invoiceDate}</p>
+    </div>
+    <div class="meta-block">
+      <label>Due Date</label>
+      <p>Upon Receipt</p>
+    </div>
+    <div class="meta-block">
+      <label>Printed</label>
+      <p style="font-size:11px">${printedAt}</p>
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th style="text-align:left">Description</th>
+        <th class="center">Qty</th>
+        <th class="right">Unit Price</th>
+        <th class="right">Amount</th>
+      </tr>
+    </thead>
+    <tbody>${itemRows}</tbody>
+  </table>
+  <div class="totals">
+    <div class="totals-row"><span>Net of VAT</span><span>&#8369;${subtotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+    <div class="totals-row"><span>VAT (12%)</span><span>&#8369;${vat.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+    <div class="totals-row total"><span>Total</span><span>&#8369;${totalWithVat.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+  </div>
+  <div class="amount-due">
+    <div class="label">Total Amount Due</div>
+    <div class="amount">&#8369;${totalWithVat.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+  </div>
+  <div class="footer">
+    <div>Thank you for choosing Seatmakers Avenue!</div>
+    <div>For concerns, contact us at your pickup branch.</div>
+  </div>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const w = window.open(url, '_blank', 'width=750,height=900');
+    if (!w) { URL.revokeObjectURL(url); return; }
+    w.focus();
+    setTimeout(() => { w.print(); URL.revokeObjectURL(url); }, 400);
   };
 
   if (loading) {
@@ -457,11 +606,11 @@ export default function ProductOrderDetailPage() {
                 </div>
                 {order.status === 'pending' && (
                   <button
-                    onClick={() => updateOrder({ status: 'processing' })}
+                    onClick={() => setShowInvoice(true)}
                     disabled={saveState === 'saving'}
                     className="w-full px-4 py-2 rounded-lg bg-amber-600 text-white font-medium hover:bg-amber-700 disabled:opacity-50 text-sm"
                   >
-                    {saveState === 'saving' ? 'Processing...' : 'Generate Invoice'}
+                    Generate Invoice
                   </button>
                 )}
                 {order.status !== 'pending' && (
@@ -475,9 +624,9 @@ export default function ProductOrderDetailPage() {
                   ? 'border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/30 opacity-50'
                   : 'border-zinc-200 dark:border-zinc-700'
               }`}>
-                <div className="flex items-start justify-between mb-3">
+                <div className="flex items-start justify-between gap-2 mb-3">
                   <div className="flex items-start gap-3">
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center font-semibold text-sm ${
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center font-semibold text-sm flex-shrink-0 ${
                       order.paymentStatus === 'paid'
                         ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
                         : order.status === 'pending'
@@ -488,31 +637,86 @@ export default function ProductOrderDetailPage() {
                     </div>
                     <div>
                       <p className="font-medium text-zinc-900 dark:text-white text-sm">Step 2: Confirm Payment</p>
-                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">Verify and confirm payment received</p>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">Record payment amount received</p>
                     </div>
                   </div>
+                  {order.status !== 'pending' && order.status !== 'completed' && !(order.amountPaid && order.amountPaid > 0) && (
+                    <button
+                      onClick={() => updateOrder({ status: 'pending' })}
+                      disabled={saveState === 'saving'}
+                      className="inline-flex items-center gap-1 text-xs text-zinc-500 dark:text-zinc-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors disabled:opacity-50 flex-shrink-0"
+                      title="Go back to Step 1"
+                    >
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                      </svg>
+                      Back
+                    </button>
+                  )}
                 </div>
-                {order.status !== 'pending' && order.paymentStatus !== 'paid' && (
-                  <div className="space-y-2">
-                    <button
-                      onClick={() => updateOrder({ paymentStatus: 'partial' })}
-                      disabled={saveState === 'saving'}
-                      className="w-full px-3 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50 text-sm"
-                    >
-                      {saveState === 'saving' ? 'Processing...' : 'Partial Payment'}
-                    </button>
-                    <button
-                      onClick={() => updateOrder({ paymentStatus: 'paid' })}
-                      disabled={saveState === 'saving'}
-                      className="w-full px-3 py-2 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 disabled:opacity-50 text-sm"
-                    >
-                      {saveState === 'saving' ? 'Processing...' : 'Fully Paid'}
-                    </button>
+
+                {order.status !== 'pending' && (
+                  <div className="space-y-3">
+                    {/* Payment progress */}
+                    <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-3 space-y-1.5 text-xs">
+                      <div className="flex justify-between text-zinc-600 dark:text-zinc-400">
+                        <span>Total Amount</span>
+                        <span className="font-semibold text-zinc-900 dark:text-white">₱{order.totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
+                      </div>
+                      <div className="flex justify-between text-zinc-600 dark:text-zinc-400">
+                        <span>Amount Paid</span>
+                        <span className="font-semibold text-green-700 dark:text-green-400">₱{((order.amountPaid ?? 0)).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
+                      </div>
+                      {order.paymentStatus !== 'paid' && (
+                        <div className="flex justify-between text-zinc-600 dark:text-zinc-400 pt-1 border-t border-zinc-200 dark:border-zinc-700">
+                          <span>Remaining</span>
+                          <span className="font-bold text-red-600 dark:text-red-400">₱{((order.remainingBalance ?? order.totalAmount)).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {order.paymentStatus !== 'paid' && (
+                      <div className="space-y-2">
+                        <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400">Record Payment</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 dark:text-zinc-400 text-sm font-medium">₱</span>
+                          <input
+                            type="number"
+                            min="0.01"
+                            step="0.01"
+                            max={order.remainingBalance ?? order.totalAmount}
+                            value={paymentInput}
+                            onChange={(e) => setPaymentInput(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                            placeholder="0.00"
+                            className="w-full pl-7 pr-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                          />
+                        </div>
+                        {typeof paymentInput === 'number' && paymentInput > 0 && (
+                          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                            {paymentInput >= (order.remainingBalance ?? order.totalAmount)
+                              ? 'This will fully settle the order.'
+                              : `₱${Math.max(0, (order.remainingBalance ?? order.totalAmount) - paymentInput).toLocaleString('en-PH', { minimumFractionDigits: 2 })} will remain after this payment.`}
+                          </p>
+                        )}
+                        <button
+                          onClick={handleAddPayment}
+                          disabled={addingPayment || !paymentInput || (paymentInput as number) <= 0}
+                          className="w-full px-3 py-2 rounded-lg bg-amber-600 text-white font-medium hover:bg-amber-700 disabled:opacity-50 text-sm"
+                        >
+                          {addingPayment ? 'Recording...' : 'Record Payment'}
+                        </button>
+                      </div>
+                    )}
+
+                    {order.paymentStatus === 'paid' && (
+                      <p className="text-xs text-green-600 dark:text-green-400 font-medium">Fully paid — ₱{order.totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p>
+                    )}
+                    {order.paymentStatus === 'partial' && (
+                      <p className="text-xs text-amber-600 dark:text-amber-400 font-medium">Partial — continue recording payments above until fully settled.</p>
+                    )}
                   </div>
                 )}
-                {order.paymentStatus === 'paid' && (
-                  <p className="text-xs text-green-600 dark:text-green-400 font-medium">Completed - {order.paymentStatus.toUpperCase()}</p>
-                )}
+
                 {order.status === 'pending' && (
                   <p className="text-xs text-zinc-500 dark:text-zinc-400">Complete Step 1 first</p>
                 )}
@@ -646,6 +850,159 @@ export default function ProductOrderDetailPage() {
             </div>
           </div>
         </div>
+
+        {showInvoice && order && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+            <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+              {/* Modal Header */}
+              <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-700">
+                <div>
+                  <h2 className="text-lg font-bold text-zinc-900 dark:text-white">Invoice Preview</h2>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">{order.orderNumber}</p>
+                </div>
+                <button
+                  onClick={() => setShowInvoice(false)}
+                  className="p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 dark:text-zinc-400 transition-colors"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Invoice Content */}
+              <div className="overflow-y-auto flex-1 p-6">
+                {/* Company + Invoice Title */}
+                <div className="flex items-start justify-between mb-6">
+                  <div>
+                    <p className="text-xl font-extrabold text-amber-600 tracking-widest uppercase">Seatmakers Avenue</p>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">Premium Upholstery &amp; Car Accessories</p>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">{order.branchName || 'N/A'}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-4xl font-black tracking-widest text-zinc-900 dark:text-white">INVOICE</p>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{order.orderNumber}</p>
+                    <span className="inline-block mt-1 text-[10px] font-bold tracking-widest uppercase border border-amber-500 text-amber-600 dark:text-amber-400 px-2 py-0.5 rounded">Amount Due</span>
+                  </div>
+                </div>
+
+                <hr className="border-zinc-200 dark:border-zinc-700 mb-6" />
+
+                {/* Meta: Bill To + Dates */}
+                <div className="grid grid-cols-3 gap-4 mb-6">
+                  <div className="col-span-2">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 mb-1">Bill To</p>
+                    <p className="font-semibold text-zinc-900 dark:text-white">{order.customerName}</p>
+                    {order.customerPhone && <p className="text-sm text-zinc-500 dark:text-zinc-400">{order.customerPhone}</p>}
+                  </div>
+                  <div className="space-y-3">
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Invoice Date</p>
+                      <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200 mt-0.5">
+                        {new Date(order.createdAt).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' })}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Due Date</p>
+                      <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200 mt-0.5">Upon Receipt</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Items Table */}
+                <div className="rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-700 mb-6">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-zinc-100 dark:bg-zinc-800">
+                        <th className="text-left px-4 py-2.5 text-xs font-bold uppercase tracking-widest text-zinc-500 dark:text-zinc-400">Description</th>
+                        <th className="text-center px-3 py-2.5 text-xs font-bold uppercase tracking-widest text-zinc-500 dark:text-zinc-400">Qty</th>
+                        <th className="text-right px-3 py-2.5 text-xs font-bold uppercase tracking-widest text-zinc-500 dark:text-zinc-400">Unit Price</th>
+                        <th className="text-right px-4 py-2.5 text-xs font-bold uppercase tracking-widest text-zinc-500 dark:text-zinc-400">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {order.items.map((item, i) => (
+                        <tr key={i} className="border-t border-zinc-100 dark:border-zinc-800">
+                          <td className="px-4 py-3">
+                            <p className="font-medium text-zinc-900 dark:text-white">{item.name}</p>
+                            <p className="text-xs text-zinc-400">{item.sku}</p>
+                            {item.sourceBranchName && item.sourceBranchName !== order.branchName && (
+                              <p className="text-xs text-amber-600 dark:text-amber-400">from {item.sourceBranchName}</p>
+                            )}
+                          </td>
+                          <td className="px-3 py-3 text-center text-zinc-700 dark:text-zinc-300">{item.quantity}</td>
+                          <td className="px-3 py-3 text-right text-zinc-700 dark:text-zinc-300">₱{item.unitPrice.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-3 text-right font-medium text-zinc-900 dark:text-white">₱{item.total.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Totals */}
+                <div className="flex justify-end mb-6">
+                  <div className="w-64 space-y-2">
+                    <div className="flex justify-between text-sm text-zinc-500 dark:text-zinc-400">
+                      <span>Net of VAT</span>
+                      <span>₱{(order.totalAmount * (100 / 112)).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                    <div className="flex justify-between text-sm text-zinc-500 dark:text-zinc-400">
+                      <span>VAT (12%)</span>
+                      <span>₱{(order.totalAmount * (12 / 112)).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                    <div className="flex justify-between text-base font-bold text-zinc-900 dark:text-white border-t border-zinc-200 dark:border-zinc-700 pt-2">
+                      <span>Total</span>
+                      <span>₱{order.totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Amount Due Banner */}
+                <div className="bg-amber-600 text-white rounded-xl px-6 py-4 flex items-center justify-between">
+                  <p className="text-sm font-semibold uppercase tracking-widest opacity-90">Total Amount Due</p>
+                  <p className="text-2xl font-black">₱{order.totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                </div>
+
+                <p className="text-xs text-zinc-400 text-center mt-4">Thank you for choosing Seatmakers Avenue!</p>
+              </div>
+
+              {/* Modal Footer / Actions */}
+              <div className="flex items-center justify-between gap-3 px-6 py-4 border-t border-zinc-200 dark:border-zinc-700">
+                <button
+                  onClick={printInvoice}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 text-sm font-medium transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
+                  </svg>
+                  Print Invoice
+                </button>
+                <button
+                  onClick={async () => {
+                    await updateOrder({ status: 'processing' });
+                    setShowInvoice(false);
+                  }}
+                  disabled={saveState === 'saving'}
+                  className="inline-flex items-center gap-2 px-5 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-sm transition-colors disabled:opacity-50"
+                >
+                  {saveState === 'saving' ? (
+                    <>
+                      <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full" />
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      Confirm &amp; Proceed to Payment
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-6">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">

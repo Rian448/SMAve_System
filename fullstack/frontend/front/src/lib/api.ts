@@ -169,6 +169,8 @@ export interface ProductOrder {
   transfers?: ProductOrderTransfer[];
   status: 'pending' | 'processing' | 'ready' | 'completed' | 'cancelled';
   paymentStatus: 'unpaid' | 'partial' | 'paid';
+  amountPaid?: number;
+  remainingBalance?: number;
   notes?: string;
   createdAt: string;
   updatedAt?: string;
@@ -1163,6 +1165,7 @@ export const api = {
       items: Array<{ productId: number; quantity: number }>;
       branchId: number;
       notes?: string;
+      paymentAmount?: number;
     }) =>
       fetchApi<ProductOrder>('/api/product-orders', {
         method: 'POST',
@@ -1178,7 +1181,7 @@ export const api = {
 
     getTimeline: (id: number) => fetchApi<ProductOrderTimelineEvent[]>(`/api/product-orders/${id}/timeline`),
 
-    update: (id: number, data: { status?: ProductOrder['status']; paymentStatus?: ProductOrder['paymentStatus']; notes?: string }) =>
+    update: (id: number, data: { status?: ProductOrder['status']; paymentStatus?: ProductOrder['paymentStatus']; notes?: string; addPayment?: number }) =>
       fetchApi<ProductOrder>(`/api/product-orders/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),

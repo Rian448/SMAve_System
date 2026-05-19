@@ -65,6 +65,8 @@ export default function NewJobOrderPage() {
   const [error, setError] = useState('');
   const [orderType, setOrderType] = useState<'normal' | 'premade'>('normal');
   const [step, setStep] = useState(1);
+  const [premadeStep, setPremadeStep] = useState(1);
+  const [paymentAmount, setPaymentAmount] = useState<number | ''>('');
   const premadeSelectionIdRef = useRef(1);
   const [premadeSelections, setPremadeSelections] = useState<PremadeSelection[]>([
     { id: 'premade-1', productId: '', quantity: 1 }
@@ -185,6 +187,20 @@ export default function NewJobOrderPage() {
       setStep(step + 1);
       return;
     }
+    if (orderType === 'premade' && premadeStep === 1) {
+      if (!customerName.trim() || !customerPhone.trim()) {
+        setError('Customer name and phone are required.');
+        return;
+      }
+      const hasItems = premadeSelections.some(s => s.productId);
+      if (!hasItems) {
+        setError('Please select at least one premade inventory item.');
+        return;
+      }
+      setError('');
+      setPremadeStep(2);
+      return;
+    }
     setLoading(true);
     setError('');
 
@@ -261,6 +277,7 @@ export default function NewJobOrderPage() {
           customerAddress,
           branchId,
           notes: premadeNotes,
+          paymentAmount: typeof paymentAmount === 'number' ? paymentAmount : 0,
           items: selectedPremadeItems.map((selection) => ({
             productId: selection.productId as number,
             quantity: selection.quantity
@@ -407,141 +424,234 @@ export default function NewJobOrderPage() {
     }
   };
 
-  const renderPremadeForm = () => (
-    <div className="space-y-6">
-      <div>
-        <h3 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">Walk-in Premade Order</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div>
-            <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Customer Name *</label>
-            <input
-              type="text"
-              value={customerName}
-              onChange={(e) => setCustomerName(e.target.value)}
-              required
-              className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-              placeholder="Walk-in customer name"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Phone Number *</label>
-            <input
-              type="tel"
-              value={customerPhone}
-              onChange={(e) => setCustomerPhone(e.target.value)}
-              required
-              className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-              placeholder="09XX XXX XXXX"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Email Address</label>
-            <input
-              type="email"
-              value={customerEmail}
-              onChange={(e) => setCustomerEmail(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-              placeholder="customer@email.com"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Address</label>
-            <input
-              type="text"
-              value={customerAddress}
-              onChange={(e) => setCustomerAddress(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-              placeholder="Customer address"
-            />
-          </div>
-        </div>
-      </div>
+  const premadePaymentAmount = typeof paymentAmount === 'number' ? paymentAmount : 0;
+  const isPremadeFullPayment = premadePaymentAmount >= premadeTotal && premadeTotal > 0;
+  const isPremadePartialPayment = premadePaymentAmount > 0 && premadePaymentAmount < premadeTotal;
+  const premadeRemaining = Math.max(0, premadeTotal - premadePaymentAmount);
 
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Finished Goods</h3>
-          <button
-            type="button"
-            onClick={addPremadeSelection}
-            className="inline-flex items-center px-3 py-1.5 bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 rounded-lg text-sm font-medium hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors"
-          >
-            + Add Item
-          </button>
-        </div>
-
-        {premadeLoading ? (
-          <div className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400 py-4">
-            <div className="animate-spin w-4 h-4 border-2 border-amber-600 border-t-transparent rounded-full"></div>
-            Loading premade inventory...
-          </div>
-        ) : (
-          <>
-            {premadeItems.length === 0 && (
-              <div className="text-sm text-zinc-500 dark:text-zinc-400 mb-3">No finished goods found in inventory.</div>
-            )}
-            <div className="space-y-3">
-              {premadeSelections.map((selection) => {
-                const selectedItem = premadeItems.find((item) => item.id === selection.productId);
-                return (
-                  <div key={selection.id} className="grid grid-cols-1 md:grid-cols-12 gap-3 p-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg border border-zinc-200 dark:border-zinc-700">
-                    <div className="md:col-span-7">
-                      <select
-                        value={selection.productId}
-                        onChange={(e) => updatePremadeSelection(selection.id, 'productId', e.target.value ? Number(e.target.value) : '')}
-                        className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
-                        disabled={premadeItems.length === 0}
-                      >
-                        <option value="">Select finished good item</option>
-                        {premadeItems.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.name} ({item.sku}) - Stock: {item.quantity} - ₱{item.price.toLocaleString()}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="md:col-span-2">
-                      <input
-                        type="number"
-                        min={1}
-                        max={selectedItem ? Number(selectedItem.quantity) : undefined}
-                        value={selection.quantity}
-                        onChange={(e) => {
-                          const nextValue = Math.max(1, parseInt(e.target.value) || 1);
-                          const boundedValue = selectedItem ? Math.min(nextValue, Number(selectedItem.quantity)) : nextValue;
-                          updatePremadeSelection(selection.id, 'quantity', boundedValue);
-                        }}
-                        className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
-                      />
-                    </div>
-                    <div className="md:col-span-2 flex items-center text-sm font-semibold text-zinc-900 dark:text-white">
-                      {selectedItem ? `₱${(selectedItem.price * selection.quantity).toLocaleString()}` : '—'}
-                    </div>
-                    <div className="md:col-span-1 flex items-center justify-end">
-                      <button
-                        type="button"
-                        onClick={() => removePremadeSelection(selection.id)}
-                        disabled={premadeSelections.length === 1}
-                        className="p-2 text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
+  const renderPremadeForm = () => {
+    if (premadeStep === 1) {
+      return (
+        <div className="space-y-6">
+          <div>
+            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white mb-1">Walk-in Premade Order</h3>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Step 1 of 2 — Customer & Items</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Customer Name *</label>
+                <input
+                  type="text"
+                  value={customerName}
+                  onChange={(e) => setCustomerName(e.target.value)}
+                  required
+                  className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="Walk-in customer name"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Phone Number *</label>
+                <input
+                  type="tel"
+                  value={customerPhone}
+                  onChange={(e) => setCustomerPhone(e.target.value)}
+                  required
+                  className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="09XX XXX XXXX"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Email Address</label>
+                <input
+                  type="email"
+                  value={customerEmail}
+                  onChange={(e) => setCustomerEmail(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="customer@email.com"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Address</label>
+                <input
+                  type="text"
+                  value={customerAddress}
+                  onChange={(e) => setCustomerAddress(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  placeholder="Customer address"
+                />
+              </div>
             </div>
-          </>
-        )}
-      </div>
+          </div>
 
-      <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-4 flex justify-between items-center">
-        <span className="text-sm font-medium text-amber-800 dark:text-amber-300">Premade Order Total</span>
-        <span className="text-xl font-bold text-amber-700 dark:text-amber-400">₱{premadeTotal.toLocaleString()}</span>
-      </div>
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Finished Goods</h3>
+              <button
+                type="button"
+                onClick={addPremadeSelection}
+                className="inline-flex items-center px-3 py-1.5 bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 rounded-lg text-sm font-medium hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors"
+              >
+                + Add Item
+              </button>
+            </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {premadeLoading ? (
+              <div className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400 py-4">
+                <div className="animate-spin w-4 h-4 border-2 border-amber-600 border-t-transparent rounded-full"></div>
+                Loading premade inventory...
+              </div>
+            ) : (
+              <>
+                {premadeItems.length === 0 && (
+                  <div className="text-sm text-zinc-500 dark:text-zinc-400 mb-3">No finished goods found in inventory.</div>
+                )}
+                <div className="space-y-3">
+                  {premadeSelections.map((selection) => {
+                    const selectedItem = premadeItems.find((item) => item.id === selection.productId);
+                    return (
+                      <div key={selection.id} className="grid grid-cols-1 md:grid-cols-12 gap-3 p-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg border border-zinc-200 dark:border-zinc-700">
+                        <div className="md:col-span-7">
+                          <select
+                            value={selection.productId}
+                            onChange={(e) => updatePremadeSelection(selection.id, 'productId', e.target.value ? Number(e.target.value) : '')}
+                            className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
+                            disabled={premadeItems.length === 0}
+                          >
+                            <option value="">Select finished good item</option>
+                            {premadeItems.map((item) => (
+                              <option key={item.id} value={item.id}>
+                                {item.name} ({item.sku}) - Stock: {item.quantity} - ₱{item.price.toLocaleString()}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="md:col-span-2">
+                          <input
+                            type="number"
+                            min={1}
+                            max={selectedItem ? Number(selectedItem.quantity) : undefined}
+                            value={selection.quantity}
+                            onChange={(e) => {
+                              const nextValue = Math.max(1, parseInt(e.target.value) || 1);
+                              const boundedValue = selectedItem ? Math.min(nextValue, Number(selectedItem.quantity)) : nextValue;
+                              updatePremadeSelection(selection.id, 'quantity', boundedValue);
+                            }}
+                            className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
+                          />
+                        </div>
+                        <div className="md:col-span-2 flex items-center text-sm font-semibold text-zinc-900 dark:text-white">
+                          {selectedItem ? `₱${(selectedItem.price * selection.quantity).toLocaleString()}` : '—'}
+                        </div>
+                        <div className="md:col-span-1 flex items-center justify-end">
+                          <button
+                            type="button"
+                            onClick={() => removePremadeSelection(selection.id)}
+                            disabled={premadeSelections.length === 1}
+                            className="p-2 text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-4 flex justify-between items-center">
+            <span className="text-sm font-medium text-amber-800 dark:text-amber-300">Order Total</span>
+            <span className="text-xl font-bold text-amber-700 dark:text-amber-400">₱{premadeTotal.toLocaleString()}</span>
+          </div>
+        </div>
+      );
+    }
+
+    // Step 2: Payment
+    return (
+      <div className="space-y-6">
+        <div>
+          <h3 className="text-lg font-semibold text-zinc-900 dark:text-white mb-1">Payment</h3>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Step 2 of 2 — Review & Payment</p>
+        </div>
+
+        {/* Order Summary */}
+        <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-xl border border-zinc-200 dark:border-zinc-700 p-4 space-y-2">
+          <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-3">Order Summary</p>
+          <div className="flex justify-between text-sm text-zinc-700 dark:text-zinc-300">
+            <span>Customer</span>
+            <span className="font-medium text-zinc-900 dark:text-white">{customerName}</span>
+          </div>
+          <div className="flex justify-between text-sm text-zinc-700 dark:text-zinc-300">
+            <span>Items</span>
+            <span className="font-medium text-zinc-900 dark:text-white">
+              {premadeSelections.filter(s => s.productId).length} item(s)
+            </span>
+          </div>
+          <div className="flex justify-between items-center pt-2 border-t border-zinc-200 dark:border-zinc-700">
+            <span className="font-semibold text-zinc-900 dark:text-white">Total Due</span>
+            <span className="text-lg font-bold text-amber-600 dark:text-amber-400">₱{premadeTotal.toLocaleString()}</span>
+          </div>
+        </div>
+
+        {/* Amount to Pay */}
+        <div>
+          <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+            Amount to Pay
+          </label>
+          <div className="relative">
+            <span className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500 dark:text-zinc-400 font-medium">₱</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              max={premadeTotal}
+              value={paymentAmount}
+              onChange={(e) => {
+                const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                setPaymentAmount(val === '' ? '' : (isNaN(val as number) ? '' : val as number));
+              }}
+              className="w-full pl-8 pr-4 py-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent text-lg"
+              placeholder="0.00"
+            />
+          </div>
+
+          {/* Payment type indicator */}
+          {premadePaymentAmount > 0 && (
+            <div className="mt-3 space-y-2">
+              {isPremadeFullPayment ? (
+                <div className="flex items-center gap-2 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg">
+                  <svg className="w-5 h-5 text-green-600 dark:text-green-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  <span className="text-sm font-semibold text-green-700 dark:text-green-400">Full Payment — Order will be marked as Paid</span>
+                </div>
+              ) : isPremadePartialPayment ? (
+                <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg space-y-1">
+                  <div className="flex items-center gap-2">
+                    <svg className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span className="text-sm font-semibold text-amber-700 dark:text-amber-400">Partial Payment</span>
+                  </div>
+                  <div className="flex justify-between text-sm text-amber-700 dark:text-amber-300 pl-7">
+                    <span>Remaining balance:</span>
+                    <span className="font-bold">₱{premadeRemaining.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                  <p className="text-xs text-amber-600 dark:text-amber-400 pl-7">The remaining balance can be settled from the order detail page.</p>
+                </div>
+              ) : null}
+            </div>
+          )}
+
+          {paymentAmount === '' || premadePaymentAmount === 0 ? (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-2">Leave at ₱0 to record as unpaid.</p>
+          ) : null}
+        </div>
+
+        {/* Payment Method */}
         <div>
           <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Payment Method</label>
           <select
@@ -555,6 +665,8 @@ export default function NewJobOrderPage() {
             <option value="credit_card">Credit Card</option>
           </select>
         </div>
+
+        {/* Notes */}
         <div>
           <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Additional Notes</label>
           <input
@@ -566,8 +678,8 @@ export default function NewJobOrderPage() {
           />
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const STEPS = [
     { num: 1, label: 'Name', icon: (
@@ -1264,14 +1376,6 @@ export default function NewJobOrderPage() {
         {/* Form Card */}
         <form onSubmit={handleSubmit}>
           <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6 mb-5">
-            {error && (
-              <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl text-red-600 dark:text-red-400 text-sm flex items-start gap-2">
-                <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                {error}
-              </div>
-            )}
             {orderType === 'normal' ? renderStep() : renderPremadeForm()}
           </div>
 
@@ -1329,26 +1433,73 @@ export default function NewJobOrderPage() {
               )}
             </div>
           ) : (
-            <div className="flex justify-end">
-              <button
-                type="submit"
-                disabled={loading}
-                className="inline-flex items-center gap-2 px-6 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {loading ? (
-                  <>
-                    <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full"></div>
-                    Creating...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
-                    Create Premade Order
-                  </>
+            <div className="flex justify-between gap-3">
+              {premadeStep === 1 ? (
+                <button
+                  type="button"
+                  onClick={() => router.back()}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors"
+                >
+                  Cancel
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => { setError(''); setPremadeStep(1); }}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                  </svg>
+                  Back
+                </button>
+              )}
+              <div className="flex gap-3">
+                {premadeStep === 2 && (
+                  <button
+                    type="button"
+                    onClick={() => router.back()}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white dark:bg-zinc-800 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                  >
+                    Cancel
+                  </button>
                 )}
-              </button>
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="inline-flex items-center gap-2 px-6 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {loading ? (
+                    <>
+                      <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full"></div>
+                      Creating...
+                    </>
+                  ) : premadeStep === 1 ? (
+                    <>
+                      Next
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                      Create Premade Order
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {error && (
+            <div className="mt-4 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl text-red-600 dark:text-red-400 text-sm flex items-start gap-2">
+              <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              {error}
             </div>
           )}
         </form>

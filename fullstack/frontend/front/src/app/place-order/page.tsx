@@ -592,8 +592,6 @@ export default function PlaceOrderPage() {
                 </button>
               </div>
 
-              {error && <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400 text-sm">{error}</div>}
-
               {/* Order summary grouped by branch */}
               <div className="mb-5 space-y-3">
                 <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wide">Order Summary</h3>
@@ -670,6 +668,15 @@ export default function PlaceOrderPage() {
                   {loading ? 'Placing Order...' : 'Confirm Order'}
                 </button>
               </div>
+
+              {error && (
+                <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400 text-sm flex items-start gap-2">
+                  <svg className="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  {error}
+                </div>
+              )}
             </div>
           </div>
         </div>
