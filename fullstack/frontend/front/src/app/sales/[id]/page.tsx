@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { api, JobOrder, JobOrderItem, RawMaterial } from '@/lib/api';
+import { api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 
 type EditableJobOrderItem = JobOrderItem & {
@@ -24,7 +24,13 @@ export default function JobOrderDetailPage() {
   const [error, setError] = useState('');
 
   // Payment states
-  const [partialPaymentAmount, setPartialPaymentAmount] = useState<string>('0');
+  const [paymentRecords, setPaymentRecords] = useState<PaymentRecord[]>([]);
+  const [loadingPayments, setLoadingPayments] = useState(false);
+  const [showPaymentForm, setShowPaymentForm] = useState(false);
+  const [newPaymentAmount, setNewPaymentAmount] = useState('');
+  const [newPaymentMethod, setNewPaymentMethod] = useState('cash');
+  const [newPaymentRef, setNewPaymentRef] = useState('');
+  const [newPaymentNotes, setNewPaymentNotes] = useState('');
   const [savingPayment, setSavingPayment] = useState(false);
 
   useEffect(() => {
@@ -72,7 +78,6 @@ export default function JobOrderDetailPage() {
 
     setEditingParts(items);
     setEditedTotalPrice(String(jobOrder.totalPrice || 0));
-    setPartialPaymentAmount(String(jobOrder.downPayment || 0));
   }, [jobOrder]);
 
   const canEditParts = ['administrator', 'supervisor'].includes(user?.role || '');
@@ -80,7 +85,8 @@ export default function JobOrderDetailPage() {
   const canCreateNewMaterial = ['administrator', 'supervisor'].includes(user?.role || '');
 
   useEffect(() => {
-    if (!jobOrder || !canEditParts) return;
+    const isFinished = jobOrder?.status === 'completed' || jobOrder?.status === 'delivered';
+    if (!jobOrder || (!canEditParts && !isFinished)) return;
 
     const loadMaterials = async () => {
       try {
@@ -280,21 +286,40 @@ export default function JobOrderDetailPage() {
     }
   };
 
-  const savePayment = async () => {
-    if (!jobOrder) return;
-    const amountPaid = parseFloat(partialPaymentAmount) || 0;
-    const remaining = Math.max(0, (jobOrder.totalPrice || 0) - amountPaid);
-    const computedStatus: 'paid' | 'partial' | 'unpaid' =
-      remaining <= 0 ? 'paid' : amountPaid > 0 ? 'partial' : 'unpaid';
+  useEffect(() => {
+    if (!jobOrder?.id) return;
+    setLoadingPayments(true);
+    api.payments.getAll({ jobOrderId: jobOrder.id })
+      .then(res => setPaymentRecords(res.data || []))
+      .catch(err => console.error(err))
+      .finally(() => setLoadingPayments(false));
+  }, [jobOrder?.id]);
 
+  const recordPayment = async () => {
+    if (!jobOrder) return;
+    const amount = parseFloat(newPaymentAmount);
+    if (!amount || amount <= 0) return;
     setSavingPayment(true);
     try {
-      await api.sales.updateJobOrder(jobOrder.id, {
-        downPayment: amountPaid,
-        balance: remaining,
-        paymentStatus: computedStatus
+      await api.payments.create({
+        jobOrderId: jobOrder.id,
+        amount,
+        paymentMethod: newPaymentMethod,
+        referenceNumber: newPaymentRef || undefined,
+        notes: newPaymentNotes || undefined,
       });
-      setJobOrder({ ...jobOrder, downPayment: amountPaid, balance: remaining, paymentStatus: computedStatus });
+      const res = await api.payments.getAll({ jobOrderId: jobOrder.id });
+      const records = res.data || [];
+      setPaymentRecords(records);
+      const newTotalPaid = records.reduce((s: number, r: PaymentRecord) => s + r.amount, 0);
+      const newBalance = Math.max(0, (jobOrder.totalPrice || 0) - newTotalPaid);
+      const newStatus: 'paid' | 'partial' | 'unpaid' =
+        newBalance <= 0 ? 'paid' : newTotalPaid > 0 ? 'partial' : 'unpaid';
+      setJobOrder({ ...jobOrder, downPayment: newTotalPaid, balance: newBalance, paymentStatus: newStatus });
+      setNewPaymentAmount('');
+      setNewPaymentRef('');
+      setNewPaymentNotes('');
+      setShowPaymentForm(false);
     } catch (err) {
       console.error(err);
     } finally {
@@ -381,11 +406,21 @@ export default function JobOrderDetailPage() {
 
   const computedPartsTotal = materialPartsTotal + laborPartsTotal;
 
-  // Payment calculation
-  const totalPaid = parseFloat(partialPaymentAmount) || 0;
+  // Financial summary (shown when completed/delivered)
+  const actualExpenses = materialSubtotal + laborSubtotal;
+  const finalPrice = jobOrder.totalPrice || 0;
+  const grossProfit = finalPrice - actualExpenses;
+  const profitMarginPct = finalPrice > 0 ? (grossProfit / finalPrice) * 100 : 0;
+  const isProfit = grossProfit >= 0;
+  const estimatedCostQuoted = jobOrder.estimatedCost || 0;
+  const priceDiff = finalPrice - estimatedCostQuoted;
+  const priceDiffPct = estimatedCostQuoted > 0 ? (priceDiff / estimatedCostQuoted) * 100 : 0;
+
+  // Payment calculation — fall back to job order's stored downPayment for legacy orders with no records
+  const totalPaid = paymentRecords.length > 0
+    ? paymentRecords.reduce((sum, r) => sum + (r.amount || 0), 0)
+    : (jobOrder.downPayment || 0);
   const remainingBalance = Math.max(0, (jobOrder.totalPrice || 0) - totalPaid);
-  const autoPaymentStatus: 'paid' | 'partial' | 'unpaid' =
-    remainingBalance <= 0 ? 'paid' : totalPaid > 0 ? 'partial' : 'unpaid';
   const isFullySettled = remainingBalance <= 0;
 
   const inputClass = "w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent";
@@ -941,20 +976,20 @@ export default function JobOrderDetailPage() {
             </div>
             <div className="bg-green-50 dark:bg-green-900/20 rounded-xl p-4 border border-green-100 dark:border-green-900/40 text-center">
               <p className="text-xs font-medium text-green-600 dark:text-green-400 uppercase tracking-wide mb-1">Amount Paid</p>
-              <p className="text-2xl font-bold text-green-700 dark:text-green-400">{formatCurrency(jobOrder.downPayment || 0)}</p>
+              <p className="text-2xl font-bold text-green-700 dark:text-green-400">{formatCurrency(totalPaid)}</p>
             </div>
             <div className={`rounded-xl p-4 border text-center ${
-              (jobOrder.balance || 0) <= 0
+              remainingBalance <= 0
                 ? 'bg-green-50 dark:bg-green-900/20 border-green-100 dark:border-green-900/40'
                 : 'bg-red-50 dark:bg-red-900/20 border-red-100 dark:border-red-900/40'
             }`}>
               <p className={`text-xs font-medium uppercase tracking-wide mb-1 ${
-                (jobOrder.balance || 0) <= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
+                remainingBalance <= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
               }`}>Balance Due</p>
               <p className={`text-2xl font-bold ${
-                (jobOrder.balance || 0) <= 0 ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'
+                remainingBalance <= 0 ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'
               }`}>
-                {formatCurrency(jobOrder.balance || 0)}
+                {formatCurrency(remainingBalance)}
               </p>
             </div>
           </div>
@@ -980,123 +1015,334 @@ export default function JobOrderDetailPage() {
             )}
           </div>
 
-          {/* Record Payment Form */}
-          {canUpdatePaymentStatus && (
-            <div className="border border-zinc-200 dark:border-zinc-700 rounded-xl p-4 bg-zinc-50 dark:bg-zinc-800/50">
-              <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-4 flex items-center gap-2">
-                <svg className="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                Record Payment
-              </h3>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
-                {/* Amount Paid Input */}
-                <div>
-                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
-                    Total Amount Paid (₱)
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 text-sm font-medium">₱</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      max={jobOrder.totalPrice || undefined}
-                      value={partialPaymentAmount}
-                      onChange={(e) => setPartialPaymentAmount(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2.5 rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent text-sm font-medium"
-                      placeholder="0.00"
-                    />
-                  </div>
-                </div>
-
-                {/* Remaining Balance (computed) */}
-                <div>
-                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
-                    Remaining Balance
-                  </label>
-                  <div className={`flex items-center px-3 py-2.5 rounded-lg border font-semibold text-sm h-[42px] ${
-                    isFullySettled
-                      ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-900/40 text-green-700 dark:text-green-400'
-                      : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-900/40 text-red-700 dark:text-red-400'
-                  }`}>
-                    {isFullySettled ? (
-                      <span className="flex items-center gap-1.5">
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                        </svg>
-                        Fully Paid
-                      </span>
-                    ) : formatCurrency(remainingBalance)}
-                  </div>
-                </div>
-
-                {/* Auto Status */}
-                <div>
-                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
-                    Payment Status
-                  </label>
-                  <div className="flex items-center px-3 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 h-[42px]">
-                    <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
-                      autoPaymentStatus === 'paid'
-                        ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                        : autoPaymentStatus === 'partial'
-                        ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
-                        : 'bg-zinc-100 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400'
-                    }`}>
-                      {autoPaymentStatus.toUpperCase()}
-                    </span>
-                  </div>
-                </div>
+          {/* Payment History */}
+          <div className="mb-5">
+            <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-3">Payment History</h3>
+            {loadingPayments ? (
+              <div className="flex items-center justify-center py-6">
+                <div className="animate-spin w-5 h-5 border-2 border-amber-600 border-t-transparent rounded-full"></div>
               </div>
+            ) : paymentRecords.length === 0 ? (
+              <p className="text-sm text-zinc-400 dark:text-zinc-500 italic py-4 text-center">No payments recorded yet.</p>
+            ) : (
+              <div className="overflow-x-auto border border-zinc-200 dark:border-zinc-800 rounded-lg">
+                <table className="w-full min-w-[500px]">
+                  <thead className="bg-zinc-50 dark:bg-zinc-800/50">
+                    <tr>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Date</th>
+                      <th className="px-4 py-2.5 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Amount</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Method</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Reference</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Recorded By</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                    {paymentRecords.map(record => (
+                      <tr key={record.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40">
+                        <td className="px-4 py-3 text-sm text-zinc-600 dark:text-zinc-400">
+                          {new Date(record.createdAt).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' })}
+                        </td>
+                        <td className="px-4 py-3 text-sm font-semibold text-green-700 dark:text-green-400 text-right">
+                          {formatCurrency(record.amount)}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-zinc-700 dark:text-zinc-300 capitalize">
+                          {record.paymentMethod.replace(/_/g, ' ')}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-zinc-500 dark:text-zinc-400">
+                          {record.referenceNumber || '—'}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-zinc-500 dark:text-zinc-400">
+                          {record.recordedByName || '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
 
-              {/* Hint */}
-              {!isFullySettled && totalPaid > 0 && (
-                <div className="flex items-start gap-2 mb-4 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
-                  <svg className="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  <span>
-                    {formatCurrency(remainingBalance)} still needs to be settled before this job order can be marked as paid or completed.
-                  </span>
-                </div>
-              )}
-
-              {!isFullySettled && totalPaid === 0 && (
-                <div className="flex items-start gap-2 mb-4 text-xs text-zinc-500 dark:text-zinc-400 bg-zinc-100 dark:bg-zinc-800 rounded-lg px-3 py-2">
-                  <svg className="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  <span>Enter the amount paid by the customer. Full payment is required to mark as Paid.</span>
-                </div>
-              )}
-
-              <div className="flex justify-end">
+          {/* Record Payment Button + Form */}
+          {canUpdatePaymentStatus && !isFullySettled && (
+            <div>
+              {!showPaymentForm ? (
                 <button
                   type="button"
-                  onClick={savePayment}
-                  disabled={savingPayment}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  onClick={() => setShowPaymentForm(true)}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium text-sm transition-colors"
                 >
-                  {savingPayment ? (
-                    <>
-                      <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full"></div>
-                      Saving...
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                      Record Payment
-                    </>
-                  )}
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  </svg>
+                  Record Payment
                 </button>
-              </div>
+              ) : (
+                <div className="border border-zinc-200 dark:border-zinc-700 rounded-xl p-4 bg-zinc-50 dark:bg-zinc-800/50">
+                  <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-4 flex items-center gap-2">
+                    <svg className="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    New Payment Entry
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">Amount (₱) *</label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 text-sm font-medium">₱</span>
+                        <input
+                          type="number"
+                          min="0.01"
+                          step="0.01"
+                          max={remainingBalance}
+                          value={newPaymentAmount}
+                          onChange={(e) => setNewPaymentAmount(e.target.value)}
+                          className="w-full pl-8 pr-3 py-2.5 rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent text-sm"
+                          placeholder={`Max: ${formatCurrency(remainingBalance)}`}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">Payment Method *</label>
+                      <select
+                        value={newPaymentMethod}
+                        onChange={(e) => setNewPaymentMethod(e.target.value)}
+                        className="w-full px-3 py-2.5 rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent text-sm"
+                      >
+                        <option value="cash">Cash</option>
+                        <option value="gcash">GCash</option>
+                        <option value="bank_transfer">Bank Transfer</option>
+                        <option value="check">Check</option>
+                        <option value="credit_card">Credit Card</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">Reference Number</label>
+                      <input
+                        type="text"
+                        value={newPaymentRef}
+                        onChange={(e) => setNewPaymentRef(e.target.value)}
+                        placeholder="GCash ref, check no., etc."
+                        className="w-full px-3 py-2.5 rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">Notes</label>
+                      <input
+                        type="text"
+                        value={newPaymentNotes}
+                        onChange={(e) => setNewPaymentNotes(e.target.value)}
+                        placeholder="Optional note"
+                        className="w-full px-3 py-2.5 rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent text-sm"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={() => { setShowPaymentForm(false); setNewPaymentAmount(''); setNewPaymentRef(''); setNewPaymentNotes(''); }}
+                      className="px-4 py-2 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-lg text-sm font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={recordPayment}
+                      disabled={savingPayment || !newPaymentAmount || parseFloat(newPaymentAmount) <= 0}
+                      className="inline-flex items-center gap-2 px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {savingPayment ? (
+                        <>
+                          <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full"></div>
+                          Saving...
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                          Save Payment
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {canUpdatePaymentStatus && isFullySettled && (
+            <div className="flex items-center gap-2 px-4 py-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg text-sm text-green-700 dark:text-green-400 font-medium">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              This order has been fully paid.
             </div>
           )}
         </div>
+
+        {/* ── Job Financial Summary (completed / delivered only) ── */}
+        {(jobOrder.status === 'completed' || jobOrder.status === 'delivered') && (
+          <div className="mb-5 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-base font-semibold text-zinc-900 dark:text-white flex items-center gap-2">
+                <svg className="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
+                Job Financial Summary
+              </h2>
+              <span className={`px-3 py-1 text-sm font-bold rounded-full ${
+                isProfit
+                  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                  : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+              }`}>
+                {isProfit ? 'PROFITABLE' : 'AT A LOSS'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              {/* Left: Expense Breakdown */}
+              <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-xl p-5 border border-zinc-200 dark:border-zinc-700">
+                <h3 className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-4">
+                  Actual Expense Breakdown
+                </h3>
+
+                {/* Materials */}
+                {itemBreakdown.some(i => i.lineMaterialCost > 0) && (
+                  <div className="mb-4">
+                    <p className="flex items-center gap-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400 mb-2">
+                      <span className="w-2 h-2 rounded-full bg-blue-500 inline-block"></span>
+                      Materials
+                    </p>
+                    <div className="space-y-1">
+                      {itemBreakdown.filter(i => i.lineMaterialCost > 0).map((item, idx) => {
+                        const inv = item.materialId
+                          ? inventoryMaterials.find(m => m.id === item.materialId)
+                          : null;
+                        const color = inv?.color || '';
+                        const pattern = inv?.pattern || '';
+                        const detail = [color, pattern].filter(Boolean).join(' · ');
+                        return (
+                          <div key={idx} className="flex justify-between items-start text-sm py-1.5 border-b border-zinc-200 dark:border-zinc-700 last:border-0">
+                            <div className="truncate pr-2">
+                              <span className="text-zinc-800 dark:text-zinc-200 font-medium">{item.name || `Item ${idx + 1}`}</span>
+                              {detail && (
+                                <span className="block text-xs text-zinc-400 dark:text-zinc-500">{detail}</span>
+                              )}
+                              <span className="block text-xs text-zinc-400 dark:text-zinc-500">Qty: {item.quantity}</span>
+                            </div>
+                            <span className="text-zinc-700 dark:text-zinc-300 shrink-0 font-medium">{formatCurrency(item.lineMaterialCost)}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="flex justify-between items-center mt-2 pt-1">
+                      <span className="text-xs font-semibold text-blue-600 dark:text-blue-400">Materials Subtotal</span>
+                      <span className="text-sm font-bold text-blue-700 dark:text-blue-400">{formatCurrency(materialSubtotal)}</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Labor */}
+                {itemBreakdown.some(i => i.lineLaborCost > 0) && (
+                  <div className="mb-4">
+                    <p className="flex items-center gap-1.5 text-xs font-semibold text-amber-600 dark:text-amber-400 mb-2">
+                      <span className="w-2 h-2 rounded-full bg-amber-500 inline-block"></span>
+                      Labor
+                    </p>
+                    <div className="space-y-1">
+                      {itemBreakdown.filter(i => i.lineLaborCost > 0).map((item, idx) => (
+                        <div key={idx} className="flex justify-between items-center text-sm py-1 border-b border-zinc-200 dark:border-zinc-700 last:border-0">
+                          <span className="text-zinc-700 dark:text-zinc-300 truncate pr-2">
+                            {item.name || `Task ${idx + 1}`}
+                            {item.workerName && (
+                              <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-1">({item.workerName})</span>
+                            )}
+                            <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-1">× {item.quantity}</span>
+                          </span>
+                          <span className="text-zinc-700 dark:text-zinc-300 shrink-0">{formatCurrency(item.lineLaborCost)}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex justify-between items-center mt-2 pt-1">
+                      <span className="text-xs font-semibold text-amber-600 dark:text-amber-400">Labor Subtotal</span>
+                      <span className="text-sm font-bold text-amber-700 dark:text-amber-400">{formatCurrency(laborSubtotal)}</span>
+                    </div>
+                  </div>
+                )}
+
+                {itemBreakdown.length === 0 && (
+                  <p className="text-sm text-zinc-400 dark:text-zinc-500 italic mb-4">No items recorded.</p>
+                )}
+
+                <div className="flex justify-between items-center pt-2 border-t-2 border-zinc-300 dark:border-zinc-600">
+                  <span className="text-sm font-bold text-zinc-900 dark:text-white">Total Expenses</span>
+                  <span className="text-xl font-bold text-zinc-900 dark:text-white">{formatCurrency(actualExpenses)}</span>
+                </div>
+              </div>
+
+              {/* Right: Price Comparison & Profit/Loss */}
+              <div className="space-y-3">
+                {/* Estimated vs Final comparison */}
+                <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-xl p-5 border border-zinc-200 dark:border-zinc-700">
+                  <h3 className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-4">
+                    Estimated vs. Final Price
+                  </h3>
+                  <div className="space-y-3">
+                    <div className="flex justify-between items-center py-2 border-b border-zinc-200 dark:border-zinc-700">
+                      <span className="text-sm text-zinc-600 dark:text-zinc-400">Estimated Cost</span>
+                      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatCurrency(estimatedCostQuoted)}</span>
+                    </div>
+                    <div className="flex justify-between items-center py-2 border-b border-zinc-200 dark:border-zinc-700">
+                      <span className="text-sm text-zinc-600 dark:text-zinc-400">Final Price Charged</span>
+                      <span className="text-sm font-semibold text-zinc-900 dark:text-white">{formatCurrency(finalPrice)}</span>
+                    </div>
+                    <div className="flex justify-between items-center pt-1">
+                      <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Variance</span>
+                      <span className={`text-sm font-bold ${priceDiff >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                        {priceDiff >= 0 ? '+' : ''}{formatCurrency(priceDiff)}
+                        <span className="text-xs ml-1 font-medium opacity-80">
+                          ({priceDiff >= 0 ? '+' : ''}{priceDiffPct.toFixed(1)}%)
+                        </span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Profit/Loss card */}
+                <div className={`rounded-xl p-5 border-2 ${
+                  isProfit
+                    ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'
+                    : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'
+                }`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className={`text-xs font-semibold uppercase tracking-wider ${isProfit ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                      {isProfit ? 'Gross Profit' : 'Net Loss'}
+                    </span>
+                    <svg className={`w-5 h-5 ${isProfit ? 'text-green-500' : 'text-red-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      {isProfit
+                        ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                        : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 17h8m0 0V9m0 8l-8-8-4 4-6-6" />
+                      }
+                    </svg>
+                  </div>
+                  <div className="flex items-end gap-3">
+                    <span className={`text-3xl font-bold ${isProfit ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}`}>
+                      {isProfit ? '' : '-'}{formatCurrency(Math.abs(grossProfit))}
+                    </span>
+                    <span className={`text-base font-semibold mb-0.5 ${isProfit ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                      ({isProfit ? '+' : '-'}{Math.abs(profitMarginPct).toFixed(1)}%)
+                    </span>
+                  </div>
+                  <p className={`text-xs mt-2 ${isProfit ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                    {isProfit
+                      ? `Revenue of ${formatCurrency(finalPrice)} minus ${formatCurrency(actualExpenses)} in expenses`
+                      : `Expenses of ${formatCurrency(actualExpenses)} exceeded revenue of ${formatCurrency(finalPrice)}`
+                    }
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── Bottom Actions ── */}
         <div className="no-print flex flex-wrap gap-3">

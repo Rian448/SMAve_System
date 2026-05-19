@@ -245,10 +245,13 @@ class InventoryMaterial(db.Model):
     source_job_order_id = db.Column(db.String(50), nullable=True)
     # 'available' = normal stock item; 'needed' = ordered/reserved for a specific job order
     status = db.Column(db.String(20), default='available')
+    low_stock_threshold = db.Column(db.Float, default=0)
+    supplier_id = db.Column(db.Integer, db.ForeignKey('suppliers.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     branch = db.relationship('Branch')
+    supplier = db.relationship('Supplier', foreign_keys=[supplier_id])
 
 class PremadeProduct(db.Model):
     __tablename__ = 'premade_products'
@@ -296,6 +299,56 @@ class CatalogItem(db.Model):
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class SystemSetting(db.Model):
+    __tablename__ = 'system_settings'
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(100), unique=True, nullable=False)
+    value = db.Column(db.Text, default='')
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Supplier(db.Model):
+    __tablename__ = 'suppliers'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    contact_person = db.Column(db.String(255), nullable=True)
+    phone = db.Column(db.String(50), nullable=True)
+    email = db.Column(db.String(255), nullable=True)
+    address = db.Column(db.String(500), nullable=True)
+    materials_supplied = db.Column(db.Text, nullable=True)
+    notes = db.Column(db.Text, nullable=True)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class MaterialWasteLog(db.Model):
+    __tablename__ = 'material_waste_logs'
+    id = db.Column(db.Integer, primary_key=True)
+    material_id = db.Column(db.Integer, db.ForeignKey('inventory_materials.id'), nullable=False)
+    quantity = db.Column(db.Float, nullable=False)
+    reason = db.Column(db.String(255), nullable=False)
+    notes = db.Column(db.Text, nullable=True)
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
+    logged_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    material = db.relationship('InventoryMaterial')
+    branch = db.relationship('Branch')
+    logged_by_user = db.relationship('User', foreign_keys=[logged_by])
+
+class PaymentRecord(db.Model):
+    __tablename__ = 'payment_records'
+    id = db.Column(db.Integer, primary_key=True)
+    job_order_id = db.Column(db.Integer, db.ForeignKey('job_orders.id'), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    payment_method = db.Column(db.String(50), default='cash')  # cash, gcash, card, bank_transfer
+    reference_number = db.Column(db.String(100), nullable=True)
+    notes = db.Column(db.Text, nullable=True)
+    recorded_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    job_order = db.relationship('JobOrder', backref='payment_records')
+    recorder = db.relationship('User', foreign_keys=[recorded_by])
 
 # ============================================
 # SEED DATA
@@ -688,6 +741,8 @@ def run_migrations():
         "ALTER TABLE inventory_materials ADD COLUMN source_job_order_id VARCHAR(50)",
         "ALTER TABLE inventory_materials ADD COLUMN status VARCHAR(20) DEFAULT 'available'",
         "ALTER TABLE material_usage_logs ADD COLUMN job_order_db_id INTEGER",
+        "ALTER TABLE inventory_materials ADD COLUMN low_stock_threshold REAL DEFAULT 0",
+        "ALTER TABLE inventory_materials ADD COLUMN supplier_id INTEGER REFERENCES suppliers(id)",
     ]
     with db.engine.connect() as conn:
         for sql in migrations:
@@ -706,6 +761,14 @@ def init_db():
         existing = Role.query.filter_by(key=role['key']).first()
         if not existing:
             db.session.add(Role(key=role['key'], name=role['name']))
+
+    # Seed default system settings
+    default_settings = [
+        ('inventory_low_stock_threshold', '0'),
+    ]
+    for key, value in default_settings:
+        if not SystemSetting.query.filter_by(key=key).first():
+            db.session.add(SystemSetting(key=key, value=value))
 
     db.session.commit()
 
@@ -1067,6 +1130,9 @@ def material_to_dict(material):
         'pattern': material.pattern or '',
         'unitPrice': float(material.unit_price),
         'stockQuantity': float(material.stock_quantity),
+        'lowStockThreshold': float(material.low_stock_threshold or 0),
+        'supplierId': material.supplier_id,
+        'supplierName': material.supplier.name if material.supplier else None,
         'branchId': material.branch_id,
         'isArchived': material.is_archived,
         'sourceJobOrderId': material.source_job_order_id,
@@ -1103,6 +1169,7 @@ def premade_product_to_dict(product):
         'price': float(product.price),
         'cost': float(product.cost),
         'branchId': product.branch_id,
+        'branchName': product.branch.name if product.branch else None,
         'isArchived': product.is_archived,
         'lastUpdated': product.updated_at.strftime('%Y-%m-%d') if product.updated_at else None
     }
@@ -1238,6 +1305,7 @@ def create_raw_material():
     if material_status not in ('available', 'needed'):
         material_status = 'available'
 
+    supplier_id = int(data['supplierId']) if data.get('supplierId') else None
     material = InventoryMaterial(
         item_id=custom_item_id,
         material_type=data['materialType'].strip(),
@@ -1245,6 +1313,8 @@ def create_raw_material():
         pattern=data.get('pattern', '').strip(),
         unit_price=float(data['unitPrice']),
         stock_quantity=float(data['stockQuantity']),
+        low_stock_threshold=float(data.get('lowStockThreshold', 0) or 0),
+        supplier_id=supplier_id,
         branch_id=int(data['branchId']),
         is_archived=False,
         source_job_order_id=source_job_order_id,
@@ -1280,6 +1350,10 @@ def update_raw_material(material_id):
         material.unit_price = float(data['unitPrice'])
     if 'stockQuantity' in data:
         material.stock_quantity = float(data['stockQuantity'])
+    if 'lowStockThreshold' in data:
+        material.low_stock_threshold = float(data['lowStockThreshold'] or 0)
+    if 'supplierId' in data:
+        material.supplier_id = int(data['supplierId']) if data['supplierId'] else None
     if 'branchId' in data:
         branch = Branch.query.get(data['branchId'])
         if not branch or not branch.is_active:
@@ -1479,24 +1553,28 @@ def get_material_usage_logs():
 
 @app.route('/api/inventory/finished-goods/public', methods=['GET'])
 def get_finished_goods_public():
-    """Public API to get available finished goods (products) for customers"""
+    """Public API to get available finished goods (products) for customers.
+    Only returns products from active, non-warehouse retail branches."""
     branch_id = request.args.get('branchId')
     category = request.args.get('category')
 
-    query = PremadeProduct.query.filter(
+    query = PremadeProduct.query.join(
+        Branch, PremadeProduct.branch_id == Branch.id
+    ).filter(
         PremadeProduct.is_archived.is_(False),
-        PremadeProduct.quantity > 0
+        PremadeProduct.quantity > 0,
+        Branch.is_warehouse.is_(False),
+        Branch.is_active.is_(True)
     )
 
     if branch_id:
-        query = query.filter_by(branch_id=int(branch_id))
+        query = query.filter(PremadeProduct.branch_id == int(branch_id))
 
     if category:
         query = query.filter(db.func.lower(PremadeProduct.category) == category.lower())
 
     items = query.order_by(PremadeProduct.name.asc()).all()
 
-    # Return only public-facing info (hide cost)
     public_items = [{
         'id': item.id,
         'name': item.name,
@@ -1505,9 +1583,10 @@ def get_finished_goods_public():
         'unit': item.unit,
         'category': item.category,
         'price': float(item.price),
-        'branchId': item.branch_id
+        'branchId': item.branch_id,
+        'branchName': item.branch.name if item.branch else None
     } for item in items]
-    
+
     return jsonify({'status': 'success', 'data': public_items})
 
 @app.route('/api/inventory/categories', methods=['GET'])
@@ -1527,11 +1606,250 @@ def get_categories():
 @app.route('/api/inventory/low-stock', methods=['GET'])
 @require_auth
 def get_low_stock_items():
-    low_stock = InventoryMaterial.query.filter(
-        InventoryMaterial.is_archived.is_(False),
-        InventoryMaterial.stock_quantity <= 0
-    ).order_by(InventoryMaterial.stock_quantity.asc()).all()
+    threshold_setting = SystemSetting.query.filter_by(key='inventory_low_stock_threshold').first()
+    threshold = float(threshold_setting.value) if threshold_setting and threshold_setting.value else 0
+
+    if threshold > 0:
+        from sqlalchemy import or_
+        low_stock = InventoryMaterial.query.filter(
+            InventoryMaterial.is_archived.is_(False),
+            or_(
+                InventoryMaterial.stock_quantity <= 0,
+                InventoryMaterial.stock_quantity <= threshold
+            )
+        ).order_by(InventoryMaterial.stock_quantity.asc()).all()
+    else:
+        low_stock = InventoryMaterial.query.filter(
+            InventoryMaterial.is_archived.is_(False),
+            InventoryMaterial.stock_quantity <= 0
+        ).order_by(InventoryMaterial.stock_quantity.asc()).all()
+
     return jsonify({'status': 'success', 'data': [material_to_dict(m) for m in low_stock]})
+
+# ============================================
+# INVENTORY - SUPPLIERS
+# ============================================
+
+def supplier_to_dict(s):
+    return {
+        'id': s.id,
+        'name': s.name,
+        'contactPerson': s.contact_person,
+        'phone': s.phone,
+        'email': s.email,
+        'address': s.address,
+        'materialsSupplied': s.materials_supplied,
+        'notes': s.notes,
+        'isActive': s.is_active,
+        'createdAt': s.created_at.strftime('%Y-%m-%d') if s.created_at else None,
+    }
+
+@app.route('/api/inventory/suppliers', methods=['GET'])
+@require_auth
+def get_suppliers():
+    include_inactive = request.args.get('includeInactive', 'false').lower() == 'true'
+    query = Supplier.query
+    if not include_inactive:
+        query = query.filter_by(is_active=True)
+    suppliers = query.order_by(Supplier.name.asc()).all()
+    return jsonify({'status': 'success', 'data': [supplier_to_dict(s) for s in suppliers]})
+
+@app.route('/api/inventory/suppliers', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def create_supplier():
+    data = request.get_json()
+    if not data.get('name', '').strip():
+        return jsonify({'status': 'error', 'message': 'Supplier name is required'}), 400
+    supplier = Supplier(
+        name=data['name'].strip(),
+        contact_person=data.get('contactPerson', '').strip() or None,
+        phone=data.get('phone', '').strip() or None,
+        email=data.get('email', '').strip() or None,
+        address=data.get('address', '').strip() or None,
+        materials_supplied=data.get('materialsSupplied', '').strip() or None,
+        notes=data.get('notes', '').strip() or None,
+    )
+    db.session.add(supplier)
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory', f"Created supplier: {supplier.name}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': supplier_to_dict(supplier)}), 201
+
+@app.route('/api/inventory/suppliers/<int:supplier_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def update_supplier(supplier_id):
+    supplier = Supplier.query.get(supplier_id)
+    if not supplier:
+        return jsonify({'status': 'error', 'message': 'Supplier not found'}), 404
+    data = request.get_json()
+    if 'name' in data: supplier.name = data['name'].strip()
+    if 'contactPerson' in data: supplier.contact_person = data['contactPerson'].strip() or None
+    if 'phone' in data: supplier.phone = data['phone'].strip() or None
+    if 'email' in data: supplier.email = data['email'].strip() or None
+    if 'address' in data: supplier.address = data['address'].strip() or None
+    if 'materialsSupplied' in data: supplier.materials_supplied = data['materialsSupplied'].strip() or None
+    if 'notes' in data: supplier.notes = data['notes'].strip() or None
+    if 'isActive' in data: supplier.is_active = bool(data['isActive'])
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated supplier: {supplier.name}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': supplier_to_dict(supplier)})
+
+# ============================================
+# INVENTORY - WASTE LOGS
+# ============================================
+
+def waste_log_to_dict(log):
+    return {
+        'id': log.id,
+        'materialId': log.material_id,
+        'materialName': log.material.material_type if log.material else None,
+        'materialColor': log.material.color if log.material else None,
+        'materialPattern': log.material.pattern if log.material else None,
+        'quantity': float(log.quantity),
+        'reason': log.reason,
+        'notes': log.notes,
+        'branchId': log.branch_id,
+        'branchName': log.branch.name if log.branch else None,
+        'loggedBy': log.logged_by,
+        'loggedByName': log.logged_by_user.full_name if log.logged_by_user else None,
+        'createdAt': log.created_at.isoformat() if log.created_at else None,
+    }
+
+@app.route('/api/inventory/waste-logs', methods=['GET'])
+@require_auth
+def get_waste_logs():
+    branch_id = request.args.get('branchId')
+    query = MaterialWasteLog.query
+    if branch_id:
+        query = query.filter_by(branch_id=int(branch_id))
+    logs = query.order_by(MaterialWasteLog.created_at.desc()).all()
+    return jsonify({'status': 'success', 'data': [waste_log_to_dict(l) for l in logs]})
+
+@app.route('/api/inventory/waste-logs', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def create_waste_log():
+    data = request.get_json()
+    if not data.get('materialId') or not data.get('quantity') or not data.get('reason', '').strip():
+        return jsonify({'status': 'error', 'message': 'materialId, quantity, and reason are required'}), 400
+    material = InventoryMaterial.query.get(int(data['materialId']))
+    if not material:
+        return jsonify({'status': 'error', 'message': 'Material not found'}), 404
+    qty = float(data['quantity'])
+    if qty <= 0:
+        return jsonify({'status': 'error', 'message': 'Quantity must be positive'}), 400
+    # Deduct from stock
+    material.stock_quantity = max(0, float(material.stock_quantity) - qty)
+    log = MaterialWasteLog(
+        material_id=material.id,
+        quantity=qty,
+        reason=data['reason'].strip(),
+        notes=data.get('notes', '').strip() or None,
+        branch_id=int(data.get('branchId', material.branch_id)),
+        logged_by=request.current_user['id'],
+    )
+    db.session.add(log)
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory', f"Logged waste: {qty} of {material.material_type}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': waste_log_to_dict(log)}), 201
+
+# ============================================
+# PAYMENTS
+# ============================================
+
+def payment_record_to_dict(p):
+    return {
+        'id': p.id,
+        'jobOrderId': p.job_order_id,
+        'jobOrderRef': p.job_order.job_order_id if p.job_order else None,
+        'customerName': p.job_order.customer_name if p.job_order else None,
+        'amount': float(p.amount),
+        'paymentMethod': p.payment_method,
+        'referenceNumber': p.reference_number,
+        'notes': p.notes,
+        'recordedBy': p.recorded_by,
+        'recordedByName': p.recorder.full_name if p.recorder else None,
+        'createdAt': p.created_at.isoformat() if p.created_at else None,
+    }
+
+@app.route('/api/payments', methods=['GET'])
+@require_auth
+def get_payments():
+    user = request.current_user
+    job_order_id = request.args.get('jobOrderId')
+    query = PaymentRecord.query
+    if job_order_id:
+        query = query.filter_by(job_order_id=int(job_order_id))
+    elif user['role'] != 'administrator':
+        # Non-admins: only show payments for their branch's job orders
+        branch_id = user.get('branchId')
+        if branch_id:
+            branch_order_ids = [jo.id for jo in JobOrder.query.filter_by(branch_id=branch_id).all()]
+            query = query.filter(PaymentRecord.job_order_id.in_(branch_order_ids))
+    payments = query.order_by(PaymentRecord.created_at.desc()).all()
+    return jsonify({'status': 'success', 'data': [payment_record_to_dict(p) for p in payments]})
+
+@app.route('/api/payments', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def create_payment():
+    data = request.get_json()
+    if not data.get('jobOrderId') or not data.get('amount'):
+        return jsonify({'status': 'error', 'message': 'jobOrderId and amount are required'}), 400
+    job_order = JobOrder.query.get(int(data['jobOrderId']))
+    if not job_order:
+        return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
+    amount = float(data['amount'])
+    if amount <= 0:
+        return jsonify({'status': 'error', 'message': 'Amount must be positive'}), 400
+    payment = PaymentRecord(
+        job_order_id=job_order.id,
+        amount=amount,
+        payment_method=data.get('paymentMethod', 'cash'),
+        reference_number=data.get('referenceNumber', '').strip() or None,
+        notes=data.get('notes', '').strip() or None,
+        recorded_by=request.current_user['id'],
+    )
+    db.session.add(payment)
+    # Recompute job order totals
+    total_paid = sum(float(p.amount) for p in job_order.payment_records) + amount
+    balance = max(0, float(job_order.total_price or 0) - total_paid)
+    if balance <= 0:
+        job_order.payment_status = 'paid'
+    elif total_paid > 0:
+        job_order.payment_status = 'partial'
+    else:
+        job_order.payment_status = 'unpaid'
+    job_order.down_payment = total_paid
+    job_order.balance = balance
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Payment', f"Recorded payment of {amount} for {job_order.job_order_id}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': payment_record_to_dict(payment)}), 201
+
+@app.route('/api/payments/summary', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def get_payment_summary():
+    user = request.current_user
+    jo_query = JobOrder.query
+    if user['role'] != 'administrator' and user.get('branchId'):
+        jo_query = jo_query.filter_by(branch_id=user['branchId'])
+    orders = jo_query.all()
+    total_revenue = sum(float(o.total_price or 0) for o in orders if o.status not in ('voided', 'cancelled'))
+    total_collected = sum(float(o.down_payment or 0) for o in orders if o.status not in ('voided', 'cancelled'))
+    total_balance = sum(float(o.balance or 0) for o in orders if o.status not in ('voided', 'cancelled'))
+    unpaid_count = sum(1 for o in orders if o.payment_status == 'unpaid' and o.status not in ('voided', 'cancelled'))
+    partial_count = sum(1 for o in orders if o.payment_status == 'partial' and o.status not in ('voided', 'cancelled'))
+    paid_count = sum(1 for o in orders if o.payment_status == 'paid')
+    return jsonify({'status': 'success', 'data': {
+        'totalRevenue': round(total_revenue, 2),
+        'totalCollected': round(total_collected, 2),
+        'totalBalance': round(total_balance, 2),
+        'unpaidCount': unpaid_count,
+        'partialCount': partial_count,
+        'paidCount': paid_count,
+    }})
 
 # ============================================
 # SALES MODULE - JOB ORDERS
@@ -1736,10 +2054,23 @@ def create_job_order():
     )
     
     db.session.add(new_order)
+    db.session.flush()  # get new_order.id before commit
+
+    # Auto-create a PaymentRecord for the initial down payment
+    if down_payment > 0:
+        initial_payment = PaymentRecord(
+            job_order_id=new_order.id,
+            amount=down_payment,
+            payment_method=data.get('paymentMethod', 'cash'),
+            notes='Initial payment on order creation',
+            recorded_by=request.current_user['id']
+        )
+        db.session.add(initial_payment)
+
     db.session.commit()
-    
+
     log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Sales', f"Created job order: {job_order_id}", request.remote_addr or '0.0.0.0')
-    
+
     # Return the created order
     return jsonify({
         'status': 'success',
@@ -2829,6 +3160,32 @@ def get_my_transfer_requests():
             ProductOrderTransfer.created_at.desc()
         ).all()
     return jsonify({'status': 'success', 'data': [transfer_to_dict(t) for t in transfers]})
+
+
+@app.route('/api/product-orders/pickup-queue', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def get_pickup_queue():
+    """Orders where this branch is the pickup location and items come from other branches."""
+    user = request.current_user
+    if user['role'] == 'supervisor':
+        branch_id = user.get('branchId')
+        if not branch_id:
+            return jsonify({'status': 'success', 'data': []})
+        orders = (ProductOrder.query
+            .filter(ProductOrder.pickup_branch_id == branch_id)
+            .join(ProductOrderTransfer, ProductOrderTransfer.product_order_id == ProductOrder.id)
+            .filter(ProductOrderTransfer.source_branch_id != branch_id)
+            .distinct()
+            .order_by(ProductOrder.created_at.desc())
+            .all())
+    else:
+        orders = (ProductOrder.query
+            .join(ProductOrderTransfer, ProductOrderTransfer.product_order_id == ProductOrder.id)
+            .distinct()
+            .order_by(ProductOrder.created_at.desc())
+            .all())
+    return jsonify({'status': 'success', 'data': [product_order_to_dict(o) for o in orders]})
 
 
 @app.route('/api/product-order-transfers/<int:transfer_id>/mark-transferred', methods=['POST'])
@@ -3980,6 +4337,28 @@ def update_branch(branch_id):
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Settings', f"Updated branch: {branch.name}", request.remote_addr or '0.0.0.0')
     
     return jsonify({'status': 'success', 'data': branch_to_dict(branch)})
+
+@app.route('/api/settings/system', methods=['GET'])
+@require_auth
+def get_system_settings():
+    settings = SystemSetting.query.all()
+    return jsonify({'status': 'success', 'data': {s.key: s.value for s in settings}})
+
+@app.route('/api/settings/system/<key>', methods=['PUT'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def update_system_setting(key):
+    data = request.get_json()
+    value = str(data.get('value', ''))
+    setting = SystemSetting.query.filter_by(key=key).first()
+    if not setting:
+        setting = SystemSetting(key=key, value=value)
+        db.session.add(setting)
+    else:
+        setting.value = value
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Settings', f"Updated system setting: {key} = {value}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': {setting.key: setting.value}})
 
 # ============================================
 # ============================================

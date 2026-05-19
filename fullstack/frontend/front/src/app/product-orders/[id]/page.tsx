@@ -146,6 +146,10 @@ export default function ProductOrderDetailPage() {
     const paymentLabel = order.paymentStatus === 'paid' ? 'PAID' : order.paymentStatus === 'partial' ? 'PARTIAL PAYMENT' : 'UNPAID';
     const statusLabel = order.status.toUpperCase();
 
+    const subtotal = order.totalAmount;
+    const vat = subtotal * 0.12;
+    const totalWithVat = subtotal + vat;
+
     const itemRows = order.items.map((item) => {
       const fromBranch = item.sourceBranchName && item.sourceBranchName !== order.branchName
         ? `<div class="item-branch">from ${item.sourceBranchName}</div>` : '';
@@ -299,12 +303,16 @@ export default function ProductOrderDetailPage() {
     <tbody>${itemRows}</tbody>
     <tfoot>
       <tr class="subtotal-row">
-        <td colspan="3" class="right" style="font-size:11px">Total Amount</td>
-        <td class="right" style="font-size:11px">&#8369;${order.totalAmount.toLocaleString()}</td>
+        <td colspan="3" class="right" style="font-size:11px">Subtotal</td>
+        <td class="right" style="font-size:11px">&#8369;${subtotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+      </tr>
+      <tr>
+        <td colspan="3" class="right" style="font-size:11px; color:#555;">VAT (12%)</td>
+        <td class="right" style="font-size:11px; color:#555;">&#8369;${vat.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
       </tr>
       <tr class="total-row">
         <td colspan="3" class="right">TOTAL</td>
-        <td class="right">&#8369;${order.totalAmount.toLocaleString()}</td>
+        <td class="right">&#8369;${totalWithVat.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
       </tr>
     </tfoot>
   </table>

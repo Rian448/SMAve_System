@@ -1,10 +1,10 @@
 'use client';
 import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, RawMaterial, FinishedGood, MaterialUsageLog } from '@/lib/api';
+import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog } from '@/lib/api';
 import Link from 'next/link';
 
-type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'purchase-orders';
+type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'purchase-orders' | 'suppliers' | 'waste-log';
 
 export default function InventoryPage() {
   const { user } = useAuth();
@@ -35,11 +35,31 @@ export default function InventoryPage() {
     stockQuantity: ''
   });
 
+  const [globalThreshold, setGlobalThreshold] = useState(0);
+  const [thresholdInput, setThresholdInput] = useState('');
+  const [editingThreshold, setEditingThreshold] = useState(false);
+  const [thresholdSaving, setThresholdSaving] = useState(false);
+  const [notificationDismissed, setNotificationDismissed] = useState(false);
+
+  // Suppliers
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [newSupplier, setNewSupplier] = useState({ name: '', contactPerson: '', phone: '', email: '', address: '', materialsSupplied: '', notes: '' });
+  const [editingSupplierId, setEditingSupplierId] = useState<number | null>(null);
+  const [editSupplier, setEditSupplier] = useState({ name: '', contactPerson: '', phone: '', email: '', address: '', materialsSupplied: '', notes: '' });
+  const [supplierSearch, setSupplierSearch] = useState('');
+
+  // Waste Log
+  const [wasteLogs, setWasteLogs] = useState<MaterialWasteLog[]>([]);
+  const [newWaste, setNewWaste] = useState({ materialId: '', quantity: '', reason: '', notes: '' });
+  const [wasteSearch, setWasteSearch] = useState('');
+
+  const [branches, setBranches] = useState<{ id: number; name: string; isWarehouse: boolean; isActive: boolean }[]>([]);
   const [newPremade, setNewPremade] = useState({
     name: '',
     quantity: '',
     price: '',
-    category: 'General'
+    category: 'General',
+    branchId: ''
   });
   const [premadeMaterials, setPremadeMaterials] = useState<Array<{ materialId: string; quantityUsed: string }>>([
     { materialId: '', quantityUsed: '' }
@@ -51,12 +71,39 @@ export default function InventoryPage() {
     fetchInventory();
   }, [activeTab]);
 
+  useEffect(() => {
+    api.settings.getSystemSettings().then(r => {
+      if (r.data) {
+        const t = parseFloat(r.data['inventory_low_stock_threshold'] || '0') || 0;
+        setGlobalThreshold(t);
+        setThresholdInput(String(t));
+      }
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    api.settings.getBranches().then(r => {
+      if (r.data) {
+        const retail = r.data.filter((b: any) => !b.isWarehouse && b.isActive);
+        setBranches(retail);
+        if (retail.length > 0 && !newPremade.branchId) {
+          const def = retail.find((b: any) => b.id === user?.branchId) || retail[0];
+          setNewPremade(prev => ({ ...prev, branchId: String(def.id) }));
+        }
+      }
+    }).catch(() => {});
+  }, [user?.branchId]);
+
   const fetchInventory = async () => {
     setLoading(true);
     try {
       if (activeTab === 'raw-materials') {
-        const response = await api.inventory.getRawMaterials({ branchId: user?.branchId });
-        setRawMaterials(response.data || []);
+        const [matRes, supRes] = await Promise.all([
+          api.inventory.getRawMaterials({ branchId: user?.branchId }),
+          api.inventory.getSuppliers(),
+        ]);
+        setRawMaterials(matRes.data || []);
+        setSuppliers(supRes.data || []);
       } else if (activeTab === 'finished-goods') {
         const [finishedGoodsResponse, rawMaterialsResponse] = await Promise.all([
           api.inventory.getFinishedGoods(),
@@ -67,6 +114,16 @@ export default function InventoryPage() {
       } else if (activeTab === 'material-usage') {
         const response = await api.inventory.getMaterialUsage({ branchId: user?.branchId });
         setMaterialUsageLogs(response.data || []);
+      } else if (activeTab === 'suppliers') {
+        const res = await api.inventory.getSuppliers(true);
+        setSuppliers(res.data || []);
+      } else if (activeTab === 'waste-log') {
+        const [wasteRes, matRes] = await Promise.all([
+          api.inventory.getWasteLogs({ branchId: user?.branchId }),
+          api.inventory.getRawMaterials({ branchId: user?.branchId }),
+        ]);
+        setWasteLogs(wasteRes.data || []);
+        setRawMaterials(matRes.data || []);
       }
     } catch (error) {
       console.error('Error fetching inventory:', error);
@@ -192,6 +249,12 @@ export default function InventoryPage() {
       return;
     }
 
+    const branchId = Number(newPremade.branchId) || user?.branchId;
+    if (!branchId) {
+      setFormError('Please select a branch for this product.');
+      return;
+    }
+
     setSaving(true);
     try {
       await api.inventory.createFinishedGood({
@@ -201,11 +264,12 @@ export default function InventoryPage() {
         category: newPremade.category,
         price,
         cost: 0,
-        branchId: user?.branchId || 1,
+        branchId,
         materialsUsed: parsedMaterialsUsed
       });
 
-      setNewPremade({ name: '', quantity: '', price: '', category: 'General' });
+      const def = branches.find(b => b.id === user?.branchId) || branches[0];
+      setNewPremade({ name: '', quantity: '', price: '', category: 'General', branchId: def ? String(def.id) : '' });
       setPremadeMaterials([{ materialId: '', quantityUsed: '' }]);
       await fetchInventory();
     } catch (error: any) {
@@ -263,12 +327,91 @@ export default function InventoryPage() {
     }
   };
 
+  const handleCreateSupplier = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newSupplier.name.trim()) { setFormError('Supplier name is required.'); return; }
+    setFormError('');
+    setSaving(true);
+    try {
+      await api.inventory.createSupplier(newSupplier);
+      setNewSupplier({ name: '', contactPerson: '', phone: '', email: '', address: '', materialsSupplied: '', notes: '' });
+      await fetchInventory();
+    } catch (err: any) { setFormError(err?.message || 'Failed to add supplier.'); }
+    finally { setSaving(false); }
+  };
+
+  const startEditSupplier = (s: Supplier) => {
+    setEditingSupplierId(s.id);
+    setEditSupplier({ name: s.name, contactPerson: s.contactPerson || '', phone: s.phone || '', email: s.email || '', address: s.address || '', materialsSupplied: s.materialsSupplied || '', notes: s.notes || '' });
+  };
+
+  const handleSaveSupplier = async (id: number) => {
+    setFormError('');
+    setSaving(true);
+    try {
+      await api.inventory.updateSupplier(id, editSupplier);
+      setEditingSupplierId(null);
+      await fetchInventory();
+    } catch (err: any) { setFormError(err?.message || 'Failed to update supplier.'); }
+    finally { setSaving(false); }
+  };
+
+  const handleDeactivateSupplier = async (id: number) => {
+    setSaving(true);
+    try {
+      await api.inventory.updateSupplier(id, { isActive: false });
+      await fetchInventory();
+    } catch { }
+    finally { setSaving(false); }
+  };
+
+  const handleCreateWasteLog = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newWaste.materialId || !newWaste.quantity || !newWaste.reason.trim()) {
+      setFormError('Material, quantity, and reason are required.');
+      return;
+    }
+    setFormError('');
+    setSaving(true);
+    try {
+      await api.inventory.createWasteLog({
+        materialId: Number(newWaste.materialId),
+        quantity: Number(newWaste.quantity),
+        reason: newWaste.reason.trim(),
+        notes: newWaste.notes.trim() || undefined,
+        branchId: user?.branchId,
+      });
+      setNewWaste({ materialId: '', quantity: '', reason: '', notes: '' });
+      await fetchInventory();
+    } catch (err: any) { setFormError(err?.message || 'Failed to log waste.'); }
+    finally { setSaving(false); }
+  };
+
+  const handleSaveThreshold = async () => {
+    const value = Number(thresholdInput);
+    if (Number.isNaN(value) || value < 0) return;
+    setThresholdSaving(true);
+    try {
+      await api.settings.updateSystemSetting('inventory_low_stock_threshold', value);
+      setGlobalThreshold(value);
+      setEditingThreshold(false);
+      setNotificationDismissed(false);
+    } catch {
+      // ignore
+    } finally {
+      setThresholdSaving(false);
+    }
+  };
+
   const formatCurrency = (amount: number) =>
     new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(amount);
 
   const getStockStatus = (quantity: number) => {
     if (quantity <= 0) {
       return { label: 'Out of Stock', class: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' };
+    }
+    if (globalThreshold > 0 && quantity <= globalThreshold) {
+      return { label: 'Low Stock', class: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400' };
     }
     return { label: 'In Stock', class: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' };
   };
@@ -295,6 +438,18 @@ export default function InventoryPage() {
     });
   }, [finishedGoods, searchTerm]);
 
+  const lowStockItems = useMemo(() =>
+    globalThreshold > 0
+      ? rawMaterials.filter(m => m.stockQuantity > 0 && m.stockQuantity <= globalThreshold)
+      : [],
+    [rawMaterials, globalThreshold]
+  );
+
+  const outOfStockItems = useMemo(() =>
+    rawMaterials.filter(m => m.stockQuantity <= 0),
+    [rawMaterials]
+  );
+
   const tabs = [
     { id: 'raw-materials' as TabType, name: 'Raw Materials', icon: (
       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -316,6 +471,16 @@ export default function InventoryPage() {
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
       </svg>
     )},
+    { id: 'suppliers' as TabType, name: 'Suppliers', icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+      </svg>
+    )},
+    { id: 'waste-log' as TabType, name: 'Waste / Scrap', icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+      </svg>
+    )},
   ];
 
   return (
@@ -327,7 +492,54 @@ export default function InventoryPage() {
             <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">Inventory Management</h1>
             <p className="text-zinc-500 dark:text-zinc-400 mt-1">Manage raw materials and finished goods</p>
           </div>
-          <div className="mt-4 sm:mt-0 flex gap-3">
+          <div className="mt-4 sm:mt-0 flex flex-wrap items-center gap-3">
+            {/* Global Low Stock Threshold Setting — admin/supervisor only */}
+            {(user?.role === 'administrator' || user?.role === 'supervisor') && (
+              <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800">
+                <svg className="w-4 h-4 text-orange-600 dark:text-orange-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+                </svg>
+                {editingThreshold ? (
+                  <>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={thresholdInput}
+                      onChange={(e) => setThresholdInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleSaveThreshold(); if (e.key === 'Escape') setEditingThreshold(false); }}
+                      className="w-20 px-2 py-0.5 text-sm rounded border border-orange-300 dark:border-orange-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+                      autoFocus
+                    />
+                    <button
+                      onClick={handleSaveThreshold}
+                      disabled={thresholdSaving}
+                      className="text-xs font-medium text-orange-700 dark:text-orange-300 hover:text-orange-900 dark:hover:text-orange-100 disabled:opacity-50"
+                    >
+                      {thresholdSaving ? 'Saving…' : 'Save'}
+                    </button>
+                    <button
+                      onClick={() => { setEditingThreshold(false); setThresholdInput(String(globalThreshold)); }}
+                      className="text-xs text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-xs text-orange-700 dark:text-orange-300">
+                      Low stock alert: <strong>{globalThreshold > 0 ? `≤ ${globalThreshold} units` : 'Off'}</strong>
+                    </span>
+                    <button
+                      onClick={() => { setEditingThreshold(true); setThresholdInput(String(globalThreshold)); }}
+                      className="text-xs text-orange-600 dark:text-orange-400 hover:text-orange-800 dark:hover:text-orange-200 underline"
+                    >
+                      {globalThreshold > 0 ? 'Change' : 'Set'}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
             <Link
               href="/inventory/purchase-orders/new"
               className="inline-flex items-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors"
@@ -343,6 +555,73 @@ export default function InventoryPage() {
         {formError && (
           <div className="mb-4 p-3 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-sm text-red-700 dark:text-red-300">
             {formError}
+          </div>
+        )}
+
+        {/* Low Stock Notifications */}
+        {!notificationDismissed && (lowStockItems.length > 0 || outOfStockItems.length > 0) && (
+          <div className="mb-6 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Stock Alerts</p>
+              <button
+                onClick={() => setNotificationDismissed(true)}
+                className="text-xs text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 flex items-center gap-1"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                Dismiss
+              </button>
+            </div>
+            {outOfStockItems.length > 0 && (
+              <div className="p-4 rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+                <div className="flex items-start gap-3">
+                  <svg className="w-5 h-5 text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                  </svg>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-red-700 dark:text-red-300">
+                      {outOfStockItems.length} item{outOfStockItems.length > 1 ? 's' : ''} out of stock
+                    </p>
+                    <p className="text-xs text-red-600 dark:text-red-400 mt-1">
+                      {outOfStockItems.map(m => `${m.materialType}${m.color ? ` (${m.color})` : ''}`).join(', ')}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+            {lowStockItems.length > 0 && (
+              <div className="p-4 rounded-xl bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800">
+                <div className="flex items-start gap-3">
+                  <svg className="w-5 h-5 text-orange-600 dark:text-orange-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+                  </svg>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-semibold text-orange-700 dark:text-orange-300">
+                        {lowStockItems.length} item{lowStockItems.length > 1 ? 's' : ''} running low on stock
+                      </p>
+                      <Link
+                        href="/inventory/purchase-orders/new"
+                        className="flex-shrink-0 inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-medium transition-colors"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                        </svg>
+                        Create Purchase Order
+                      </Link>
+                    </div>
+                    <ul className="mt-1 space-y-0.5">
+                      {lowStockItems.map(m => (
+                        <li key={m.id} className="text-xs text-orange-600 dark:text-orange-400">
+                          {m.materialType}{m.color ? ` (${m.color})` : ''}{m.pattern ? ` / ${m.pattern}` : ''} — {m.stockQuantity} remaining
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -414,7 +693,7 @@ export default function InventoryPage() {
         {activeTab === 'finished-goods' && (
           <form onSubmit={handleCreatePremade} className="mb-6 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
             <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">Add Premade Product</h2>
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
               <input
                 type="text"
                 value={newPremade.name}
@@ -447,6 +726,17 @@ export default function InventoryPage() {
                 placeholder="Category"
                 className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
               />
+              <select
+                value={newPremade.branchId}
+                onChange={(e) => setNewPremade((prev) => ({ ...prev, branchId: e.target.value }))}
+                required
+                className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white"
+              >
+                <option value="">Select branch *</option>
+                {branches.map(b => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
             </div>
 
             <div className="mt-4">
@@ -506,6 +796,51 @@ export default function InventoryPage() {
               >
                 {saving ? 'Saving...' : 'Add Premade Product'}
               </button>
+            </div>
+          </form>
+        )}
+
+        {/* Add Supplier Form */}
+        {activeTab === 'suppliers' && (user?.role === 'administrator' || user?.role === 'supervisor') && (
+          <form onSubmit={handleCreateSupplier} className="mb-6 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">Add Supplier</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <input type="text" value={newSupplier.name} onChange={e => setNewSupplier(p => ({ ...p, name: e.target.value }))} placeholder="Supplier Name *" className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white" />
+              <input type="text" value={newSupplier.contactPerson} onChange={e => setNewSupplier(p => ({ ...p, contactPerson: e.target.value }))} placeholder="Contact Person" className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white" />
+              <input type="text" value={newSupplier.phone} onChange={e => setNewSupplier(p => ({ ...p, phone: e.target.value }))} placeholder="Phone" className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white" />
+              <input type="email" value={newSupplier.email} onChange={e => setNewSupplier(p => ({ ...p, email: e.target.value }))} placeholder="Email" className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white" />
+              <input type="text" value={newSupplier.address} onChange={e => setNewSupplier(p => ({ ...p, address: e.target.value }))} placeholder="Address" className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white" />
+              <input type="text" value={newSupplier.materialsSupplied} onChange={e => setNewSupplier(p => ({ ...p, materialsSupplied: e.target.value }))} placeholder="Materials Supplied" className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white" />
+              <input type="text" value={newSupplier.notes} onChange={e => setNewSupplier(p => ({ ...p, notes: e.target.value }))} placeholder="Notes" className="md:col-span-3 px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white" />
+            </div>
+            <div className="mt-4">
+              <button type="submit" disabled={saving} className="inline-flex items-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors disabled:opacity-60">
+                {saving ? 'Saving...' : 'Add Supplier'}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* Add Waste Log Form */}
+        {activeTab === 'waste-log' && (user?.role === 'administrator' || user?.role === 'supervisor') && (
+          <form onSubmit={handleCreateWasteLog} className="mb-6 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">Log Waste / Scrap</h2>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <select value={newWaste.materialId} onChange={e => setNewWaste(p => ({ ...p, materialId: e.target.value }))} className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white">
+                <option value="">Select Material *</option>
+                {rawMaterials.map(m => (
+                  <option key={m.id} value={m.id}>{m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} available)</option>
+                ))}
+              </select>
+              <input type="number" min="0.01" step="0.01" value={newWaste.quantity} onChange={e => setNewWaste(p => ({ ...p, quantity: e.target.value }))} placeholder="Quantity Wasted *" className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white" />
+              <input type="text" value={newWaste.reason} onChange={e => setNewWaste(p => ({ ...p, reason: e.target.value }))} placeholder="Reason (e.g. cutting error) *" className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white" />
+              <input type="text" value={newWaste.notes} onChange={e => setNewWaste(p => ({ ...p, notes: e.target.value }))} placeholder="Notes (optional)" className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white" />
+            </div>
+            <div className="mt-4">
+              <button type="submit" disabled={saving} className="inline-flex items-center px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors disabled:opacity-60">
+                {saving ? 'Saving...' : 'Log Waste'}
+              </button>
+              <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">This will deduct the quantity from the material&apos;s stock.</p>
             </div>
           </form>
         )}
@@ -701,6 +1036,7 @@ export default function InventoryPage() {
                   <thead className="bg-zinc-50 dark:bg-zinc-800/50">
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Product</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Branch</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Category</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Quantity</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Price</th>
@@ -725,6 +1061,11 @@ export default function InventoryPage() {
                                 <p className="text-xs text-zinc-500 dark:text-zinc-400">{item.sku || 'No SKU'}</p>
                               </div>
                             </div>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <span className="text-xs px-2 py-1 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300">
+                              {item.branchName || `Branch ${item.branchId}`}
+                            </span>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
                             {item.category}
@@ -851,21 +1192,156 @@ export default function InventoryPage() {
                 </table>
               )}
             </div>
-          ) : (
+          ) : activeTab === 'purchase-orders' ? (
             <div className="p-8 text-center">
               <svg className="w-16 h-16 mx-auto text-zinc-300 dark:text-zinc-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
               </svg>
               <h3 className="text-lg font-medium text-zinc-900 dark:text-white mb-2">Purchase Orders</h3>
               <p className="text-zinc-500 dark:text-zinc-400 mb-4">View and manage purchase orders for restocking inventory.</p>
-              <Link
-                href="/inventory/purchase-orders"
-                className="inline-flex items-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors"
-              >
+              <Link href="/inventory/purchase-orders" className="inline-flex items-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors">
                 View Purchase Orders
               </Link>
             </div>
-          )}
+          ) : activeTab === 'suppliers' ? (
+            <div className="overflow-x-auto">
+              {/* Search */}
+              <div className="p-4 border-b border-zinc-200 dark:border-zinc-800">
+                <input type="text" placeholder="Search suppliers..." value={supplierSearch} onChange={e => setSupplierSearch(e.target.value)} className="w-full max-w-md pl-4 pr-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-white" />
+              </div>
+              {suppliers.filter(s => !supplierSearch || s.name.toLowerCase().includes(supplierSearch.toLowerCase()) || (s.contactPerson || '').toLowerCase().includes(supplierSearch.toLowerCase())).length === 0 ? (
+                <div className="p-8 text-center">
+                  <p className="text-zinc-500 dark:text-zinc-400">No suppliers found. Add your first supplier above.</p>
+                </div>
+              ) : (
+                <table className="w-full">
+                  <thead className="bg-zinc-50 dark:bg-zinc-800/50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Supplier</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Contact</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Phone / Email</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Materials</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Status</th>
+                      <th className="px-6 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                    {suppliers.filter(s => !supplierSearch || s.name.toLowerCase().includes(supplierSearch.toLowerCase()) || (s.contactPerson || '').toLowerCase().includes(supplierSearch.toLowerCase())).map(s => (
+                      <tr key={s.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {editingSupplierId === s.id ? (
+                            <input type="text" value={editSupplier.name} onChange={e => setEditSupplier(p => ({ ...p, name: e.target.value }))} className="w-36 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white" />
+                          ) : (
+                            <div>
+                              <p className="text-sm font-medium text-zinc-900 dark:text-white">{s.name}</p>
+                              {s.address && <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate max-w-[160px]">{s.address}</p>}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {editingSupplierId === s.id ? (
+                            <input type="text" value={editSupplier.contactPerson} onChange={e => setEditSupplier(p => ({ ...p, contactPerson: e.target.value }))} placeholder="Contact Person" className="w-32 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white" />
+                          ) : (
+                            <span className="text-sm text-zinc-600 dark:text-zinc-300">{s.contactPerson || '—'}</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {editingSupplierId === s.id ? (
+                            <div className="space-y-1">
+                              <input type="text" value={editSupplier.phone} onChange={e => setEditSupplier(p => ({ ...p, phone: e.target.value }))} placeholder="Phone" className="w-32 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white" />
+                              <input type="email" value={editSupplier.email} onChange={e => setEditSupplier(p => ({ ...p, email: e.target.value }))} placeholder="Email" className="w-40 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white" />
+                            </div>
+                          ) : (
+                            <div>
+                              <p className="text-sm text-zinc-600 dark:text-zinc-300">{s.phone || '—'}</p>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400">{s.email || ''}</p>
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {editingSupplierId === s.id ? (
+                            <input type="text" value={editSupplier.materialsSupplied} onChange={e => setEditSupplier(p => ({ ...p, materialsSupplied: e.target.value }))} placeholder="Materials" className="w-36 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white" />
+                          ) : (
+                            <span className="text-sm text-zinc-600 dark:text-zinc-300 truncate max-w-[140px] block">{s.materialsSupplied || '—'}</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${s.isActive ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400'}`}>
+                            {s.isActive ? 'Active' : 'Inactive'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right">
+                          {editingSupplierId === s.id ? (
+                            <div className="flex items-center justify-end gap-2">
+                              <button onClick={() => handleSaveSupplier(s.id)} className="text-amber-600 dark:text-amber-400 text-sm font-medium">Save</button>
+                              <button onClick={() => setEditingSupplierId(null)} className="text-zinc-500 dark:text-zinc-400 text-sm font-medium">Cancel</button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center justify-end gap-3">
+                              <button onClick={() => startEditSupplier(s)} className="text-amber-600 dark:text-amber-400 text-sm font-medium">Edit</button>
+                              {s.isActive && (user?.role === 'administrator' || user?.role === 'supervisor') && (
+                                <button onClick={() => handleDeactivateSupplier(s.id)} className="text-red-500 dark:text-red-400 text-sm font-medium">Deactivate</button>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          ) : activeTab === 'waste-log' ? (
+            <div className="overflow-x-auto">
+              <div className="p-4 border-b border-zinc-200 dark:border-zinc-800">
+                <input type="text" placeholder="Search waste logs..." value={wasteSearch} onChange={e => setWasteSearch(e.target.value)} className="w-full max-w-md pl-4 pr-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-white" />
+              </div>
+              {wasteLogs.length === 0 ? (
+                <div className="p-8 text-center">
+                  <p className="text-zinc-500 dark:text-zinc-400">No waste logs yet. Use the form above to log wasted or scrapped materials.</p>
+                </div>
+              ) : (
+                <table className="w-full">
+                  <thead className="bg-zinc-50 dark:bg-zinc-800/50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Date</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Material</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Qty Wasted</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Reason</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Branch</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Logged By</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                    {wasteLogs.filter(l => {
+                      if (!wasteSearch) return true;
+                      const q = wasteSearch.toLowerCase();
+                      return (l.materialName || '').toLowerCase().includes(q) || l.reason.toLowerCase().includes(q) || (l.loggedByName || '').toLowerCase().includes(q);
+                    }).map(l => (
+                      <tr key={l.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
+                          {new Date(l.createdAt).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' })}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className="text-sm font-medium text-zinc-900 dark:text-white">{l.materialName || 'N/A'}</span>
+                          {l.materialColor && <span className="text-xs text-zinc-500 dark:text-zinc-400 ml-1">({l.materialColor})</span>}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className="text-sm font-medium text-red-600 dark:text-red-400">{l.quantity}</span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className="text-sm text-zinc-600 dark:text-zinc-300">{l.reason}</span>
+                          {l.notes && <p className="text-xs text-zinc-400 dark:text-zinc-500">{l.notes}</p>}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">{l.branchName || '—'}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">{l.loggedByName || 'System'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          ) : null}
         </div>
 
         {/* Summary Cards */}
@@ -891,8 +1367,13 @@ export default function InventoryPage() {
               <div>
                 <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">Out of Stock</p>
                 <p className="text-2xl font-bold text-red-600 dark:text-red-400 mt-1">
-                  {rawMaterials.filter(m => m.stockQuantity <= 0).length}
+                  {outOfStockItems.length}
                 </p>
+                {lowStockItems.length > 0 && (
+                  <p className="text-xs text-orange-600 dark:text-orange-400 mt-1">
+                    +{lowStockItems.length} low stock
+                  </p>
+                )}
               </div>
               <div className="w-10 h-10 rounded-lg bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
                 <svg className="w-5 h-5 text-red-600 dark:text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">

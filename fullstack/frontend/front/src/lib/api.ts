@@ -203,6 +203,7 @@ export interface PublicProduct {
   category: string;
   price: number;
   branchId: number;
+  branchName?: string;
 }
 
 export interface RawMaterial {
@@ -213,6 +214,9 @@ export interface RawMaterial {
   pattern: string;
   unitPrice: number;
   stockQuantity: number;
+  lowStockThreshold: number;
+  supplierId?: number;
+  supplierName?: string;
   branchId: number;
   isArchived: boolean;
   /** 'available' = normal stock | 'needed' = reserved/ordered for a job order */
@@ -222,6 +226,58 @@ export interface RawMaterial {
   lastUpdated: string;
 }
 
+export interface Supplier {
+  id: number;
+  name: string;
+  contactPerson?: string;
+  phone?: string;
+  email?: string;
+  address?: string;
+  materialsSupplied?: string;
+  notes?: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export interface MaterialWasteLog {
+  id: number;
+  materialId: number;
+  materialName?: string;
+  materialColor?: string;
+  materialPattern?: string;
+  quantity: number;
+  reason: string;
+  notes?: string;
+  branchId: number;
+  branchName?: string;
+  loggedBy: number;
+  loggedByName?: string;
+  createdAt: string;
+}
+
+export interface PaymentRecord {
+  id: number;
+  jobOrderId: number;
+  jobOrderRef?: string;
+  customerName?: string;
+  amount: number;
+  paymentMethod: 'cash' | 'gcash' | 'card' | 'bank_transfer';
+  referenceNumber?: string;
+  notes?: string;
+  recordedBy: number;
+  recordedByName?: string;
+  createdAt: string;
+}
+
+export interface PaymentSummary {
+  totalRevenue: number;
+  totalCollected: number;
+  totalBalance: number;
+  unpaidCount: number;
+  partialCount: number;
+  paidCount: number;
+}
+
 export interface RawMaterialInput {
   itemId?: string;
   materialType: string;
@@ -229,6 +285,8 @@ export interface RawMaterialInput {
   pattern?: string;
   unitPrice: number;
   stockQuantity: number;
+  lowStockThreshold?: number;
+  supplierId?: number | null;
   branchId: number;
   /** Set to 'needed' when material is being ordered specifically for a job order */
   status?: string;
@@ -256,6 +314,7 @@ export interface FinishedGood {
   price: number;
   cost: number;
   branchId: number;
+  branchName?: string;
   isArchived: boolean;
   lastUpdated: string;
 }
@@ -779,6 +838,37 @@ export const api = {
     
     // Low Stock
     getLowStock: () => fetchApi<RawMaterial[]>('/api/inventory/low-stock'),
+
+    // Suppliers
+    getSuppliers: (includeInactive?: boolean) => {
+      const q = includeInactive ? '?includeInactive=true' : '';
+      return fetchApi<Supplier[]>(`/api/inventory/suppliers${q}`);
+    },
+    createSupplier: (data: Omit<Supplier, 'id' | 'isActive' | 'createdAt'>) =>
+      fetchApi<Supplier>('/api/inventory/suppliers', { method: 'POST', body: JSON.stringify(data) }),
+    updateSupplier: (id: number, data: Partial<Supplier>) =>
+      fetchApi<Supplier>(`/api/inventory/suppliers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+
+    // Waste Logs
+    getWasteLogs: (params?: { branchId?: number }) => {
+      const q = params?.branchId ? `?branchId=${params.branchId}` : '';
+      return fetchApi<MaterialWasteLog[]>(`/api/inventory/waste-logs${q}`);
+    },
+    createWasteLog: (data: { materialId: number; quantity: number; reason: string; notes?: string; branchId?: number }) =>
+      fetchApi<MaterialWasteLog>('/api/inventory/waste-logs', { method: 'POST', body: JSON.stringify(data) }),
+  },
+
+  // ==================
+  // PAYMENTS
+  // ==================
+  payments: {
+    getAll: (params?: { jobOrderId?: number }) => {
+      const q = params?.jobOrderId ? `?jobOrderId=${params.jobOrderId}` : '';
+      return fetchApi<PaymentRecord[]>(`/api/payments${q}`);
+    },
+    create: (data: { jobOrderId: number; amount: number; paymentMethod: string; referenceNumber?: string; notes?: string }) =>
+      fetchApi<PaymentRecord>('/api/payments', { method: 'POST', body: JSON.stringify(data) }),
+    getSummary: () => fetchApi<PaymentSummary>('/api/payments/summary'),
   },
 
   // ==================
@@ -1111,6 +1201,8 @@ export const api = {
     getGroup: (groupId: string) => fetchApi<ProductOrder[]>(`/api/product-orders/group/${groupId}`),
 
     getMyOrders: () => fetchApi<ProductOrder[]>('/api/product-orders/my-orders'),
+
+    getPickupQueue: () => fetchApi<ProductOrder[]>('/api/product-orders/pickup-queue'),
   },
 
   // ==================
@@ -1219,6 +1311,15 @@ export const api = {
       fetchApi<Branch>(`/api/settings/branches/${id}`, {
         method: 'PUT',
         body: JSON.stringify(updates),
+      }),
+
+    // System settings
+    getSystemSettings: () => fetchApi<Record<string, string>>('/api/settings/system'),
+
+    updateSystemSetting: (key: string, value: string | number) =>
+      fetchApi<Record<string, string>>(`/api/settings/system/${key}`, {
+        method: 'PUT',
+        body: JSON.stringify({ value }),
       }),
   },
 

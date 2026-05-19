@@ -110,6 +110,7 @@ export default function NewJobOrderPage() {
 
   // Payment
   const [paymentMethod, setPaymentMethod] = useState('cash');
+  const [estimatedTotal, setEstimatedTotal] = useState(0);
   const [downPayment, setDownPayment] = useState(0);
   const [notes, setNotes] = useState('');
 
@@ -180,6 +181,10 @@ export default function NewJobOrderPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (orderType === 'normal' && step < 5) {
+      setStep(step + 1);
+      return;
+    }
     setLoading(true);
     setError('');
 
@@ -359,6 +364,7 @@ export default function NewJobOrderPage() {
         items: normalizedItems,
         estimatedCompletion,
         downPayment,
+        paymentMethod,
         notes
       };
 
@@ -1105,21 +1111,36 @@ export default function NewJobOrderPage() {
               </p>
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                Initial Deposit / Down Payment
-              </label>
-              <div className="relative">
-                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500 dark:text-zinc-400 font-medium">₱</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={downPayment}
-                  onChange={(e) => setDownPayment(parseFloat(e.target.value) || 0)}
-                  className="w-full pl-8 pr-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  placeholder="0.00"
-                />
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  Estimated Total Amount for the Work
+                </label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500 dark:text-zinc-400 font-medium">₱</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={estimatedTotal || ''}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value) || 0;
+                      setEstimatedTotal(val);
+                      setDownPayment(val / 2);
+                    }}
+                    className="w-full pl-8 pr-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    placeholder="0.00"
+                  />
+                </div>
+              </div>
+              <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-4 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-amber-800 dark:text-amber-300">Down Payment (50%)</p>
+                  <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5">Half of estimated total</p>
+                </div>
+                <span className="text-xl font-bold text-amber-700 dark:text-amber-400">
+                  ₱{downPayment.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
               </div>
             </div>
 
@@ -1274,8 +1295,9 @@ export default function NewJobOrderPage() {
               </button>
               {step < 5 ? (
                 <button
+                  key="next-btn"
                   type="button"
-                  onClick={() => setStep(step + 1)}
+                  onClick={(e) => { e.preventDefault(); setStep(step + 1); }}
                   className="inline-flex items-center gap-2 px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-medium transition-colors shadow-sm"
                 >
                   Next
@@ -1285,6 +1307,7 @@ export default function NewJobOrderPage() {
                 </button>
               ) : (
                 <button
+                  key="submit-btn"
                   type="submit"
                   disabled={loading}
                   className="inline-flex items-center gap-2 px-6 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"

@@ -373,7 +373,7 @@ export default function PlaceOrderPage() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {visible.map((product) => {
                         const cartItem = cart.find(i => i.product.id === product.id);
-                        const branchName = branches.find(b => b.id === product.branchId)?.name ?? `Branch ${product.branchId}`;
+                        const branchName = product.branchName || branches.find(b => b.id === product.branchId)?.name || `Branch ${product.branchId}`;
                         return (
                           <div key={product.id} className="border border-zinc-200 dark:border-zinc-700 rounded-lg p-4 hover:border-amber-300 dark:hover:border-amber-700 transition-colors">
                             <div className="flex justify-between items-start mb-1">
