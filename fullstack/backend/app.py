@@ -2022,7 +2022,8 @@ def create_job_order():
     total_price = data.get('totalPrice')
     if total_price is None:
         total_price = sum(item.get('quantity', 0) * item.get('unitPrice', 0) for item in items)
-    estimated_cost = sum(item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0)) for item in items)
+    computed_cost = sum(item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0)) for item in items)
+    estimated_cost = data.get('estimatedCost') if data.get('estimatedCost') is not None else computed_cost
     down_payment = data.get('downPayment', 0)
     balance = max(total_price - down_payment, 0) if total_price > 0 else 0
     
@@ -3938,47 +3939,57 @@ def get_sales_report():
     start_date = request.args.get('startDate', (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
     end_date = request.args.get('endDate', datetime.now().strftime('%Y-%m-%d'))
     branch_id = request.args.get('branchId')
-    
-    filtered_orders = [jo for jo in job_orders if start_date <= jo['createdAt'] <= end_date]
-    
+
+    try:
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Invalid date format'}), 400
+
+    query = JobOrder.query.filter(
+        JobOrder.created_at >= start_dt,
+        JobOrder.created_at <= end_dt
+    )
+
     # Branch-level access control
     if user['role'] != 'administrator':
         user_branch = Branch.query.filter_by(name=user['branch']).first()
         if user_branch:
-            filtered_orders = [jo for jo in filtered_orders if jo['branchId'] == user_branch.id]
-            branch_id = user_branch.id  # Override any branch_id parameter
+            query = query.filter(JobOrder.branch_id == user_branch.id)
         else:
-            filtered_orders = []
+            query = query.filter(False)
     elif branch_id:
-        filtered_orders = [jo for jo in filtered_orders if jo['branchId'] == int(branch_id)]
-    
-    total_orders = len(filtered_orders)
-    total_revenue = sum(jo['totalPrice'] for jo in filtered_orders if jo['status'] == 'completed')
-    total_pending_revenue = sum(jo['balance'] for jo in filtered_orders if jo['paymentStatus'] != 'paid')
-    
+        query = query.filter(JobOrder.branch_id == int(branch_id))
+
+    orders = query.all()
+
+    total_orders = len(orders)
+    total_revenue = sum(float(o.total_price) for o in orders if o.status == 'completed')
+    total_pending_revenue = sum(float(o.balance) for o in orders if o.payment_status != 'paid')
+
     status_breakdown = {}
-    for jo in filtered_orders:
-        status = jo['status']
+    daily_sales = {}
+
+    for o in orders:
+        status = o.status
         if status not in status_breakdown:
             status_breakdown[status] = {'count': 0, 'value': 0}
         status_breakdown[status]['count'] += 1
-        status_breakdown[status]['value'] += jo['totalPrice']
-    
-    # Daily sales for chart
-    daily_sales = {}
-    for jo in filtered_orders:
-        date = jo['createdAt']
-        if date not in daily_sales:
-            daily_sales[date] = {'orders': 0, 'revenue': 0}
-        daily_sales[date]['orders'] += 1
-        if jo['status'] == 'completed':
-            daily_sales[date]['revenue'] += jo['totalPrice']
-    
+        status_breakdown[status]['value'] += float(o.total_price)
+
+        date = o.created_at.strftime('%Y-%m-%d') if o.created_at else ''
+        if date:
+            if date not in daily_sales:
+                daily_sales[date] = {'orders': 0, 'revenue': 0}
+            daily_sales[date]['orders'] += 1
+            if o.status == 'completed':
+                daily_sales[date]['revenue'] += float(o.total_price)
+
     report = {
         'period': {'startDate': start_date, 'endDate': end_date},
         'summary': {
             'totalOrders': total_orders,
-            'completedOrders': len([jo for jo in filtered_orders if jo['status'] == 'completed']),
+            'completedOrders': sum(1 for o in orders if o.status == 'completed'),
             'totalRevenue': total_revenue,
             'pendingRevenue': total_pending_revenue,
             'averageOrderValue': round(total_revenue / total_orders, 2) if total_orders > 0 else 0
@@ -3992,7 +4003,7 @@ def get_sales_report():
             for k, v in sorted(daily_sales.items())
         ]
     }
-    
+
     return jsonify({'status': 'success', 'data': report})
 
 @app.route('/api/reports/inventory', methods=['GET'])
@@ -4001,36 +4012,43 @@ def get_sales_report():
 def get_inventory_report():
     user = request.current_user
     branch_id = request.args.get('branchId')
-    
+
     # Branch-level access control
     if user['role'] != 'administrator':
         user_branch = Branch.query.filter_by(name=user['branch']).first()
         if user_branch:
-            branch_id = user_branch.id  # Override any branch_id parameter
+            branch_id = user_branch.id
         else:
             return jsonify({'status': 'error', 'message': 'Branch not found'}), 404
-    
-    rm_items = raw_materials if not branch_id else [m for m in raw_materials if m['branchId'] == int(branch_id)]
-    fg_items = finished_goods if not branch_id else [fg for fg in finished_goods if fg['branchId'] == int(branch_id)]
-    
-    rm_items = [m for m in rm_items if not m['isArchived']]
-    fg_items = [fg for fg in fg_items if not fg['isArchived']]
-    
-    total_rm_value = sum(m['quantity'] * m['price'] for m in rm_items)
-    total_fg_value = sum(fg['quantity'] * fg['price'] for fg in fg_items)
-    total_fg_cost = sum(fg['quantity'] * fg['cost'] for fg in fg_items)
-    
-    low_stock = [m for m in rm_items if m['quantity'] <= m['reorderPoint']]
-    
-    # Category breakdown
+
+    rm_query = InventoryMaterial.query.filter_by(is_archived=False)
+    if branch_id:
+        rm_query = rm_query.filter_by(branch_id=int(branch_id))
+    rm_items = rm_query.all()
+
+    fg_query = PremadeProduct.query.filter_by(is_archived=False)
+    if branch_id:
+        fg_query = fg_query.filter_by(branch_id=int(branch_id))
+    fg_items = fg_query.all()
+
+    total_rm_value = sum(float(m.stock_quantity) * float(m.unit_price) for m in rm_items)
+    total_fg_value = sum(float(fg.quantity) * float(fg.price) for fg in fg_items)
+    total_fg_cost = sum(float(fg.quantity) * float(fg.cost) for fg in fg_items)
+
+    low_stock = [
+        m for m in rm_items
+        if float(m.low_stock_threshold or 0) > 0 and float(m.stock_quantity) <= float(m.low_stock_threshold)
+    ]
+
+    # Category breakdown grouped by material_type
     rm_by_category = {}
     for m in rm_items:
-        cat = m['category']
+        cat = m.material_type or 'Unknown'
         if cat not in rm_by_category:
             rm_by_category[cat] = {'count': 0, 'value': 0}
         rm_by_category[cat]['count'] += 1
-        rm_by_category[cat]['value'] += m['quantity'] * m['price']
-    
+        rm_by_category[cat]['value'] += float(m.stock_quantity) * float(m.unit_price)
+
     report = {
         'summary': {
             'totalRawMaterials': len(rm_items),
@@ -4043,11 +4061,11 @@ def get_inventory_report():
         },
         'lowStockItems': [
             {
-                'id': m['id'],
-                'name': m['name'],
-                'currentStock': m['quantity'],
-                'reorderPoint': m['reorderPoint'],
-                'unit': m['unit']
+                'id': m.id,
+                'name': m.material_type,
+                'currentStock': float(m.stock_quantity),
+                'reorderPoint': float(m.low_stock_threshold or 0),
+                'unit': ''
             }
             for m in low_stock
         ],
@@ -4056,7 +4074,7 @@ def get_inventory_report():
             for k, v in rm_by_category.items()
         ]
     }
-    
+
     return jsonify({'status': 'success', 'data': report})
 
 @app.route('/api/reports/audit-trail', methods=['GET'])
@@ -4077,7 +4095,7 @@ def get_audit_trail():
     if user_id:
         logs = [l for l in logs if l['userId'] == int(user_id)]
     if module:
-        logs = [l for l in logs if l['module'] == module]
+        logs = [l for l in logs if l['module'].lower() == module.lower()]
     
     logs = sorted(logs, key=lambda x: x['timestamp'], reverse=True)
     

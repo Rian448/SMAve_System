@@ -32,6 +32,7 @@ export default function JobOrderDetailPage() {
   const [newPaymentRef, setNewPaymentRef] = useState('');
   const [newPaymentNotes, setNewPaymentNotes] = useState('');
   const [savingPayment, setSavingPayment] = useState(false);
+  const [showRevertConfirm, setShowRevertConfirm] = useState(false);
 
   useEffect(() => {
     if (params.id) {
@@ -452,6 +453,30 @@ export default function JobOrderDetailPage() {
             <span className={`px-3 py-1.5 text-sm font-semibold rounded-full ${getStatusColor(jobOrder.status)}`}>
               {jobOrder.status.replace(/_/g, ' ').toUpperCase()}
             </span>
+            {canEditParts && jobOrder.status === 'in_progress' && (
+              <button
+                onClick={() => updateStatus('pending')}
+                disabled={updating}
+                className="px-4 py-2 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 border border-zinc-300 dark:border-zinc-600 rounded-lg font-medium transition-colors disabled:opacity-50 text-sm flex items-center gap-1.5"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                </svg>
+                Back to Pending
+              </button>
+            )}
+            {canEditParts && jobOrder.status === 'completed' && (
+              <button
+                onClick={() => setShowRevertConfirm(true)}
+                disabled={updating}
+                className="px-4 py-2 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 border border-zinc-300 dark:border-zinc-600 rounded-lg font-medium transition-colors disabled:opacity-50 text-sm flex items-center gap-1.5"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                </svg>
+                Back to In Progress
+              </button>
+            )}
             {canEditParts && jobOrder.status === 'pending' && (
               <button onClick={() => updateStatus('in_progress')} disabled={updating} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 text-sm">
                 Start Work
@@ -476,6 +501,43 @@ export default function JobOrderDetailPage() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
             {error}
+          </div>
+        )}
+
+        {/* Revert-to-in_progress confirmation modal */}
+        {showRevertConfirm && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm px-4">
+            <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-700 w-full max-w-md p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 rounded-full bg-yellow-100 dark:bg-yellow-900/30 flex items-center justify-center shrink-0">
+                  <svg className="w-5 h-5 text-yellow-600 dark:text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-zinc-900 dark:text-white">Revert to In Progress?</h3>
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">This order is currently marked as completed.</p>
+                </div>
+              </div>
+              <p className="text-sm text-zinc-600 dark:text-zinc-400 mb-6">
+                Are you sure you want to move this job order back to <span className="font-semibold text-blue-600 dark:text-blue-400">In Progress</span>? This will undo the completed status.
+              </p>
+              <div className="flex gap-3 justify-end">
+                <button
+                  onClick={() => setShowRevertConfirm(false)}
+                  className="px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 text-sm font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={async () => { setShowRevertConfirm(false); await updateStatus('in_progress'); }}
+                  disabled={updating}
+                  className="px-4 py-2 rounded-lg bg-yellow-600 hover:bg-yellow-700 text-white text-sm font-medium transition-colors disabled:opacity-50"
+                >
+                  Yes, Revert to In Progress
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

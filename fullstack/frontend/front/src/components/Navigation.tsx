@@ -135,7 +135,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
     { name: 'Product Orders', path: '/product-orders', icon: ShoppingIcon, roles: ['administrator', 'supervisor'] },
     { name: 'Costing', path: '/costing', icon: CostingIcon, roles: ['administrator', 'supervisor'] },
     { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, roles: ['administrator', 'supervisor'] },
-    { name: 'Delivery', path: '/delivery', icon: DeliveryIcon, roles: ['administrator', 'supervisor'] },
+    { name: 'Item Trail', path: '/delivery', icon: DeliveryIcon, roles: ['administrator', 'supervisor'] },
     { name: 'Reports', path: '/reports', icon: ReportsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
     { name: 'Task Management', path: '/task-management', icon: WorkerIcon, roles: ['administrator', 'supervisor'] },
     { name: 'Settings', path: '/settings', icon: SettingsIcon, roles: ['administrator', 'supervisor'] },

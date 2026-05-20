@@ -382,7 +382,8 @@ export default function NewJobOrderPage() {
         estimatedCompletion,
         downPayment,
         paymentMethod,
-        notes
+        notes,
+        ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, totalPrice: estimatedTotal } : {})
       };
 
       const createResponse = await api.sales.createJobOrder(jobOrderData as any);

@@ -23,6 +23,9 @@ export default function DeliveryPage() {
   const [actionError, setActionError] = useState('');
   const [savingId, setSavingId] = useState<number | null>(null);
 
+  const [deliveryDateFilter, setDeliveryDateFilter] = useState<'all' | 'day' | 'week' | 'month' | 'year'>('all');
+  const [transferDateFilter, setTransferDateFilter] = useState<'all' | 'day' | 'week' | 'month' | 'year'>('all');
+
   const canSeeTransfers = user && ['administrator', 'supervisor'].includes(user.role);
 
   useEffect(() => { fetchDeliveries(); }, [filter]);
@@ -125,13 +128,35 @@ export default function DeliveryPage() {
   const inTransitIncoming = incomingTransfers.filter(t => t.status === 'transferred').length;
   const transferBadgeCount = pendingOutgoing + inTransitIncoming;
 
+  const applyDateFilter = <T extends { createdAt: string }>(items: T[], f: 'all' | 'day' | 'week' | 'month' | 'year'): T[] => {
+    if (f === 'all') return items;
+    const now = new Date();
+    return items.filter(item => {
+      const d = new Date(item.createdAt);
+      if (f === 'day') return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+      if (f === 'week') {
+        const startOfWeek = new Date(now);
+        startOfWeek.setDate(now.getDate() - now.getDay());
+        startOfWeek.setHours(0, 0, 0, 0);
+        return d >= startOfWeek;
+      }
+      if (f === 'month') return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+      if (f === 'year') return d.getFullYear() === now.getFullYear();
+      return true;
+    });
+  };
+
+  const dateFilteredDeliveries = applyDateFilter(filteredDeliveries, deliveryDateFilter);
+  const dateFilteredOutgoing = applyDateFilter(outgoingTransfers, transferDateFilter);
+  const dateFilteredPickupOrders = applyDateFilter(pickupOrders, transferDateFilter);
+
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-8">
           <div>
-            <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">Delivery Management</h1>
+            <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">Item Trail</h1>
             <p className="text-zinc-500 dark:text-zinc-400 mt-1">Schedule deliveries and track product transfers</p>
           </div>
           <Link href="/delivery/new"
@@ -207,7 +232,7 @@ export default function DeliveryPage() {
             </div>
 
             {/* Filters */}
-            <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-4 mb-6">
+            <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-4 mb-4">
               <div className="flex flex-col sm:flex-row gap-4">
                 <div className="flex-1 relative">
                   <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -228,23 +253,41 @@ export default function DeliveryPage() {
               </div>
             </div>
 
+            {/* Date filter */}
+            <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-3 mb-6 flex items-center gap-2 flex-wrap">
+              <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mr-1">Sort by date:</span>
+              {(['all', 'day', 'week', 'month', 'year'] as const).map(f => (
+                <button key={f} onClick={() => setDeliveryDateFilter(f)}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${deliveryDateFilter === f ? 'bg-amber-600 text-white' : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700'}`}>
+                  {f === 'all' ? 'All Time' : f === 'day' ? 'Today' : f === 'week' ? 'This Week' : f === 'month' ? 'This Month' : 'This Year'}
+                </button>
+              ))}
+              {deliveryDateFilter !== 'all' && (
+                <span className="ml-auto text-xs text-zinc-400">
+                  {dateFilteredDeliveries.length} of {filteredDeliveries.length} records
+                </span>
+              )}
+            </div>
+
             <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 overflow-hidden">
               {loading ? (
                 <div className="p-8 text-center">
                   <div className="animate-spin w-8 h-8 border-4 border-amber-600 border-t-transparent rounded-full mx-auto"></div>
                   <p className="mt-4 text-zinc-500 dark:text-zinc-400">Loading deliveries...</p>
                 </div>
-              ) : filteredDeliveries.length === 0 ? (
+              ) : dateFilteredDeliveries.length === 0 ? (
                 <div className="p-8 text-center">
                   <svg className="w-16 h-16 mx-auto text-zinc-300 dark:text-zinc-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
                   </svg>
                   <h3 className="text-lg font-medium text-zinc-900 dark:text-white mb-2">No deliveries found</h3>
-                  <p className="text-zinc-500 dark:text-zinc-400">Schedule a delivery to get started.</p>
+                  <p className="text-zinc-500 dark:text-zinc-400">
+                    {deliveryDateFilter === 'all' ? 'Schedule a delivery to get started.' : 'No deliveries found for the selected period.'}
+                  </p>
                 </div>
               ) : (
                 <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                  {filteredDeliveries.map(delivery => (
+                  {dateFilteredDeliveries.map(delivery => (
                     <div key={delivery.id} className="p-6 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
                       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
                         <div className="flex items-start space-x-4">
@@ -301,6 +344,22 @@ export default function DeliveryPage() {
         {/* ── PRODUCT TRANSFERS TAB ── */}
         {activeTab === 'product-transfers' && (
           <div className="space-y-8">
+            {/* Date filter */}
+            <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-3 flex items-center gap-2 flex-wrap">
+              <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mr-1">Sort by date:</span>
+              {(['all', 'day', 'week', 'month', 'year'] as const).map(f => (
+                <button key={f} onClick={() => setTransferDateFilter(f)}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${transferDateFilter === f ? 'bg-amber-600 text-white' : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700'}`}>
+                  {f === 'all' ? 'All Time' : f === 'day' ? 'Today' : f === 'week' ? 'This Week' : f === 'month' ? 'This Month' : 'This Year'}
+                </button>
+              ))}
+              {transferDateFilter !== 'all' && (
+                <span className="ml-auto text-xs text-zinc-400">
+                  {dateFilteredOutgoing.length + dateFilteredPickupOrders.length} of {outgoingTransfers.length + pickupOrders.length} records
+                </span>
+              )}
+            </div>
+
             {transfersLoading ? (
               <div className="p-10 text-center bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800">
                 <div className="animate-spin w-8 h-8 border-4 border-amber-600 border-t-transparent rounded-full mx-auto"></div>
@@ -320,13 +379,13 @@ export default function DeliveryPage() {
                     </span>
                   </div>
 
-                  {outgoingTransfers.length === 0 ? (
+                  {dateFilteredOutgoing.length === 0 ? (
                     <div className="p-6 text-center bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 text-sm">
-                      No outgoing transfers for this branch.
+                      {transferDateFilter === 'all' ? 'No outgoing transfers for this branch.' : 'No outgoing transfers for the selected period.'}
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {outgoingTransfers.map(transfer => {
+                      {dateFilteredOutgoing.map(transfer => {
                         const total = transfer.items.reduce((s, i) => s + (i.total || i.unitPrice * i.quantity), 0);
                         return (
                           <div key={transfer.id} className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden shadow-sm">
@@ -406,13 +465,13 @@ export default function DeliveryPage() {
                     </span>
                   </div>
 
-                  {pickupOrders.length === 0 ? (
+                  {dateFilteredPickupOrders.length === 0 ? (
                     <div className="p-6 text-center bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 text-sm">
-                      No incoming transfers for this branch.
+                      {transferDateFilter === 'all' ? 'No incoming transfers for this branch.' : 'No incoming transfers for the selected period.'}
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {pickupOrders.map(order => (
+                      {dateFilteredPickupOrders.map(order => (
                         <div key={order.id} className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden shadow-sm">
                           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-5 py-3 bg-zinc-50 dark:bg-zinc-800/50 border-b border-zinc-100 dark:border-zinc-800">
                             <div className="flex items-center gap-3">

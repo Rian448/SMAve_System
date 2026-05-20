@@ -15,6 +15,8 @@ export default function InventoryPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'in-stock' | 'low-stock' | 'out-of-stock'>('all');
+  const [materialTypeFilter, setMaterialTypeFilter] = useState('');
   const [formError, setFormError] = useState('');
 
   const [newMaterial, setNewMaterial] = useState({
@@ -40,6 +42,7 @@ export default function InventoryPage() {
   const [editingThreshold, setEditingThreshold] = useState(false);
   const [thresholdSaving, setThresholdSaving] = useState(false);
   const [notificationDismissed, setNotificationDismissed] = useState(false);
+  const [alertsCollapsed, setAlertsCollapsed] = useState(false);
 
   // Suppliers
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -425,15 +428,29 @@ export default function InventoryPage() {
     return { label: 'In Stock', class: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' };
   };
 
+  const uniqueMaterialTypes = useMemo(() =>
+    Array.from(new Set(rawMaterials.map(m => m.materialType).filter(Boolean))).sort(),
+    [rawMaterials]
+  );
+
   const filteredRawMaterials = useMemo(() => {
     const q = searchTerm.toLowerCase();
-    if (!q) return rawMaterials;
-    return rawMaterials.filter((m) =>
-      m.materialType.toLowerCase().includes(q) ||
-      m.color.toLowerCase().includes(q) ||
-      m.pattern.toLowerCase().includes(q)
-    );
-  }, [rawMaterials, searchTerm]);
+    return rawMaterials.filter((m) => {
+      const matchesSearch = !q ||
+        m.materialType.toLowerCase().includes(q) ||
+        m.color.toLowerCase().includes(q) ||
+        m.pattern.toLowerCase().includes(q) ||
+        (m.itemId || '').toLowerCase().includes(q);
+      const matchesType = !materialTypeFilter || m.materialType === materialTypeFilter;
+      const qty = m.stockQuantity;
+      const matchesStatus =
+        statusFilter === 'all' ||
+        (statusFilter === 'out-of-stock' && qty <= 0) ||
+        (statusFilter === 'low-stock' && globalThreshold > 0 && qty > 0 && qty <= globalThreshold) ||
+        (statusFilter === 'in-stock' && qty > (globalThreshold > 0 ? globalThreshold : 0));
+      return matchesSearch && matchesType && matchesStatus;
+    });
+  }, [rawMaterials, searchTerm, statusFilter, materialTypeFilter, globalThreshold]);
 
   const filteredFinishedGoods = useMemo(() => {
     const q = searchTerm.toLowerCase();
@@ -569,66 +586,102 @@ export default function InventoryPage() {
 
         {/* Low Stock Notifications */}
         {!notificationDismissed && (lowStockItems.length > 0 || outOfStockItems.length > 0) && (
-          <div className="mb-6 space-y-3">
-            <div className="flex items-center justify-between">
-              <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Stock Alerts</p>
-              <button
-                onClick={() => setNotificationDismissed(true)}
-                className="text-xs text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 flex items-center gap-1"
-              >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          <div className="mb-6 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 overflow-hidden shadow-sm">
+            {/* Header — always visible, click to collapse */}
+            <button
+              type="button"
+              onClick={() => setAlertsCollapsed(prev => !prev)}
+              className="w-full flex items-center justify-between px-4 py-3 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <svg className="w-4 h-4 text-orange-500 dark:text-orange-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
                 </svg>
-                Dismiss
-              </button>
-            </div>
-            {outOfStockItems.length > 0 && (
-              <div className="p-4 rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
-                <div className="flex items-start gap-3">
-                  <svg className="w-5 h-5 text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                  </svg>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-red-700 dark:text-red-300">
-                      {outOfStockItems.length} item{outOfStockItems.length > 1 ? 's' : ''} out of stock
-                    </p>
-                    <p className="text-xs text-red-600 dark:text-red-400 mt-1">
-                      {outOfStockItems.map(m => `${m.materialType}${m.color ? ` (${m.color})` : ''}`).join(', ')}
-                    </p>
-                  </div>
+                <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300 uppercase tracking-wide">Stock Alerts</span>
+                <div className="flex items-center gap-1.5">
+                  {outOfStockItems.length > 0 && (
+                    <span className="px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300 text-xs font-medium">
+                      {outOfStockItems.length} out of stock
+                    </span>
+                  )}
+                  {lowStockItems.length > 0 && (
+                    <span className="px-2 py-0.5 rounded-full bg-orange-100 dark:bg-orange-900/40 text-orange-700 dark:text-orange-300 text-xs font-medium">
+                      {lowStockItems.length} low stock
+                    </span>
+                  )}
                 </div>
               </div>
-            )}
-            {lowStockItems.length > 0 && (
-              <div className="p-4 rounded-xl bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800">
-                <div className="flex items-start gap-3">
-                  <svg className="w-5 h-5 text-orange-600 dark:text-orange-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
-                  </svg>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm font-semibold text-orange-700 dark:text-orange-300">
-                        {lowStockItems.length} item{lowStockItems.length > 1 ? 's' : ''} running low on stock
-                      </p>
-                      <Link
-                        href="/inventory/purchase-orders/new"
-                        className="flex-shrink-0 inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-medium transition-colors"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                        </svg>
-                        Create Purchase Order
-                      </Link>
+              <div className="flex items-center gap-3">
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => { e.stopPropagation(); setNotificationDismissed(true); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); setNotificationDismissed(true); } }}
+                  className="text-xs text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300"
+                >
+                  Dismiss
+                </span>
+                <svg
+                  className={`w-4 h-4 text-zinc-400 transition-transform duration-200 ${alertsCollapsed ? '' : 'rotate-180'}`}
+                  fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
+            </button>
+
+            {/* Collapsible body */}
+            {!alertsCollapsed && (
+              <div className="px-4 pb-4 space-y-3 border-t border-zinc-100 dark:border-zinc-800 pt-3">
+                {outOfStockItems.length > 0 && (
+                  <div className="p-4 rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+                    <div className="flex items-start gap-3">
+                      <svg className="w-5 h-5 text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                      </svg>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-semibold text-red-700 dark:text-red-300">
+                          {outOfStockItems.length} item{outOfStockItems.length > 1 ? 's' : ''} out of stock
+                        </p>
+                        <p className="text-xs text-red-600 dark:text-red-400 mt-1">
+                          {outOfStockItems.map(m => `${m.materialType}${m.color ? ` (${m.color})` : ''}`).join(', ')}
+                        </p>
+                      </div>
                     </div>
-                    <ul className="mt-1 space-y-0.5">
-                      {lowStockItems.map(m => (
-                        <li key={m.id} className="text-xs text-orange-600 dark:text-orange-400">
-                          {m.materialType}{m.color ? ` (${m.color})` : ''}{m.pattern ? ` / ${m.pattern}` : ''} — {m.stockQuantity} remaining
-                        </li>
-                      ))}
-                    </ul>
                   </div>
-                </div>
+                )}
+                {lowStockItems.length > 0 && (
+                  <div className="p-4 rounded-xl bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800">
+                    <div className="flex items-start gap-3">
+                      <svg className="w-5 h-5 text-orange-600 dark:text-orange-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+                      </svg>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-sm font-semibold text-orange-700 dark:text-orange-300">
+                            {lowStockItems.length} item{lowStockItems.length > 1 ? 's' : ''} running low on stock
+                          </p>
+                          <Link
+                            href="/inventory/purchase-orders/new"
+                            className="flex-shrink-0 inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-medium transition-colors"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                            </svg>
+                            Create Purchase Order
+                          </Link>
+                        </div>
+                        <ul className="mt-1 space-y-0.5">
+                          {lowStockItems.map(m => (
+                            <li key={m.id} className="text-xs text-orange-600 dark:text-orange-400">
+                              {m.materialType}{m.color ? ` (${m.color})` : ''}{m.pattern ? ` / ${m.pattern}` : ''} — {m.stockQuantity} remaining
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -878,19 +931,53 @@ export default function InventoryPage() {
             </nav>
           </div>
 
-          {/* Search */}
+          {/* Search + Filters */}
           <div className="p-4 border-b border-zinc-200 dark:border-zinc-800">
-            <div className="relative max-w-md w-full">
-              <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
-              <input
-                type="text"
-                placeholder="Search inventory..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-              />
+            <div className="flex flex-col sm:flex-row gap-3">
+              <div className="relative flex-1 max-w-md">
+                <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                <input
+                  type="text"
+                  placeholder="Search by type, color, pattern, ID..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                />
+              </div>
+              {activeTab === 'raw-materials' && (
+                <>
+                  <select
+                    value={materialTypeFilter}
+                    onChange={(e) => setMaterialTypeFilter(e.target.value)}
+                    className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  >
+                    <option value="">All Types</option>
+                    {uniqueMaterialTypes.map(t => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={statusFilter}
+                    onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
+                    className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  >
+                    <option value="all">All Status</option>
+                    <option value="in-stock">In Stock</option>
+                    <option value="low-stock">Low Stock</option>
+                    <option value="out-of-stock">Out of Stock</option>
+                  </select>
+                  {(searchTerm || materialTypeFilter || statusFilter !== 'all') && (
+                    <button
+                      onClick={() => { setSearchTerm(''); setMaterialTypeFilter(''); setStatusFilter('all'); }}
+                      className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 text-sm text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap"
+                    >
+                      Clear filters
+                    </button>
+                  )}
+                </>
+              )}
             </div>
           </div>
 
@@ -901,136 +988,135 @@ export default function InventoryPage() {
               <p className="mt-4 text-zinc-500 dark:text-zinc-400">Loading inventory...</p>
             </div>
           ) : activeTab === 'raw-materials' ? (
-            <div className="overflow-x-auto">
+            <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+              {/* Result count */}
+              <div className="px-5 py-2 bg-zinc-50 dark:bg-zinc-800/40 flex items-center justify-between">
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                  {filteredRawMaterials.length} of {rawMaterials.length} item{rawMaterials.length !== 1 ? 's' : ''}
+                </p>
+              </div>
               {filteredRawMaterials.length === 0 ? (
-                <div className="p-8 text-center">
-                  <svg className="w-16 h-16 mx-auto text-zinc-300 dark:text-zinc-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <div className="p-10 text-center">
+                  <svg className="w-14 h-14 mx-auto text-zinc-300 dark:text-zinc-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
                   </svg>
-                  <h3 className="text-lg font-medium text-zinc-900 dark:text-white mb-2">No inventory items found</h3>
-                  <p className="text-zinc-500 dark:text-zinc-400">Add your first item to get started.</p>
+                  <h3 className="text-base font-medium text-zinc-900 dark:text-white mb-1">No items found</h3>
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                    {searchTerm || materialTypeFilter || statusFilter !== 'all'
+                      ? 'Try adjusting your search or filters.'
+                      : 'Add your first item to get started.'}
+                  </p>
                 </div>
               ) : (
-                <table className="w-full">
-                  <thead className="bg-zinc-50 dark:bg-zinc-800/50">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Item ID</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Material Type</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Color</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Pattern</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Unit Price</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Stock Quantity</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Status</th>
-                      <th className="px-6 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                    {filteredRawMaterials.map((material) => {
-                      const status = getStockStatus(material.stockQuantity);
-                      return (
-                        <tr key={material.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
-                          <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-zinc-500 dark:text-zinc-400">
-                            {material.itemId}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            {editingMaterialId === material.id ? (
-                              <input
-                                type="text"
-                                value={editMaterial.materialType}
-                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, materialType: e.target.value }))}
-                                className="w-36 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
-                              />
-                            ) : (
-                              <span className="text-sm font-medium text-zinc-900 dark:text-white">{material.materialType}</span>
-                            )}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            {editingMaterialId === material.id ? (
-                              <input
-                                type="text"
-                                value={editMaterial.color}
-                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, color: e.target.value }))}
-                                className="w-28 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
-                              />
-                            ) : (
-                              <span className="text-sm text-zinc-600 dark:text-zinc-300">{material.color || '-'}</span>
-                            )}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            {editingMaterialId === material.id ? (
-                              <input
-                                type="text"
-                                value={editMaterial.pattern}
-                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, pattern: e.target.value }))}
-                                className="w-28 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
-                              />
-                            ) : (
-                              <span className="text-sm text-zinc-600 dark:text-zinc-300">{material.pattern || '-'}</span>
-                            )}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            {editingMaterialId === material.id ? (
-                              <input
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                value={editMaterial.unitPrice}
-                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, unitPrice: e.target.value }))}
-                                className="w-24 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
-                              />
-                            ) : (
-                              <span className="text-sm text-zinc-600 dark:text-zinc-300">{formatCurrency(material.unitPrice)}</span>
-                            )}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            {editingMaterialId === material.id ? (
-                              <input
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                value={editMaterial.stockQuantity}
-                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, stockQuantity: e.target.value }))}
-                                className="w-24 px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
-                              />
-                            ) : (
-                              <span className="text-sm font-medium text-zinc-900 dark:text-white">{material.stockQuantity}</span>
-                            )}
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap">
+                filteredRawMaterials.map((material) => {
+                  const status = getStockStatus(material.stockQuantity);
+                  const isEditing = editingMaterialId === material.id;
+                  return (
+                    <div key={material.id} className="px-5 py-4 hover:bg-zinc-50 dark:hover:bg-zinc-800/30 transition-colors">
+                      {isEditing ? (
+                        /* Edit mode — inline grid */
+                        <div className="space-y-3">
+                          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
+                            <input
+                              type="text"
+                              value={editMaterial.materialType}
+                              onChange={(e) => setEditMaterial((prev) => ({ ...prev, materialType: e.target.value }))}
+                              placeholder="Material Type"
+                              className="px-2 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                            />
+                            <input
+                              type="text"
+                              value={editMaterial.color}
+                              onChange={(e) => setEditMaterial((prev) => ({ ...prev, color: e.target.value }))}
+                              placeholder="Color"
+                              className="px-2 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                            />
+                            <input
+                              type="text"
+                              value={editMaterial.pattern}
+                              onChange={(e) => setEditMaterial((prev) => ({ ...prev, pattern: e.target.value }))}
+                              placeholder="Pattern"
+                              className="px-2 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                            />
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={editMaterial.unitPrice}
+                              onChange={(e) => setEditMaterial((prev) => ({ ...prev, unitPrice: e.target.value }))}
+                              placeholder="Unit Price"
+                              className="px-2 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                            />
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={editMaterial.stockQuantity}
+                              onChange={(e) => setEditMaterial((prev) => ({ ...prev, stockQuantity: e.target.value }))}
+                              placeholder="Stock Qty"
+                              className="px-2 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white"
+                            />
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <button
+                              onClick={() => handleSaveMaterial(material.id)}
+                              className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium transition-colors"
+                            >
+                              Save
+                            </button>
+                            <button
+                              onClick={() => setEditingMaterialId(null)}
+                              className="px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-sm text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        /* View mode */
+                        <div className="flex items-center gap-4">
+                          {/* Color swatch */}
+                          <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
+                            <svg className="w-5 h-5 text-amber-600 dark:text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+                            </svg>
+                          </div>
+                          {/* Main info */}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-semibold text-zinc-900 dark:text-white">{material.materialType}</span>
+                              {material.color && (
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300">{material.color}</span>
+                              )}
+                              {material.pattern && (
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300">{material.pattern}</span>
+                              )}
+                              {material.itemId && (
+                                <span className="text-xs font-mono text-zinc-400 dark:text-zinc-500">{material.itemId}</span>
+                              )}
+                            </div>
+                            <div className="mt-1 flex items-center gap-4 text-xs text-zinc-500 dark:text-zinc-400">
+                              <span>Unit Price: <span className="font-medium text-zinc-700 dark:text-zinc-300">{formatCurrency(material.unitPrice)}</span></span>
+                              <span>Stock: <span className="font-medium text-zinc-700 dark:text-zinc-300">{material.stockQuantity}</span></span>
+                            </div>
+                          </div>
+                          {/* Status + actions */}
+                          <div className="flex-shrink-0 flex items-center gap-3">
                             <span className={`px-2 py-1 text-xs font-medium rounded-full ${status.class}`}>
                               {status.label}
                             </span>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-right">
-                            {editingMaterialId === material.id ? (
-                              <div className="flex items-center justify-end gap-2">
-                                <button
-                                  onClick={() => handleSaveMaterial(material.id)}
-                                  className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium"
-                                >
-                                  Save
-                                </button>
-                                <button
-                                  onClick={() => setEditingMaterialId(null)}
-                                  className="text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 text-sm font-medium"
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                onClick={() => startEditMaterial(material)}
-                                className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium"
-                              >
-                                Edit
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                            <button
+                              onClick={() => startEditMaterial(material)}
+                              className="text-sm font-medium text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 transition-colors"
+                            >
+                              Edit
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
               )}
             </div>
           ) : activeTab === 'finished-goods' ? (
