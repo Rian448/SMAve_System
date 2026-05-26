@@ -257,6 +257,50 @@ export interface MaterialWasteLog {
   createdAt: string;
 }
 
+export interface AIPrediction {
+  itemId: string;
+  materialType: string;
+  color: string;
+  pattern: string;
+  currentStock: number;
+  avgDailyUsage: number;
+  daysUntilStockout: number;
+  stockoutDate: string | null;
+  restockByDate: string | null;
+  suggestedRestockQty: number;
+  avgLeadTimeDays: number;
+  confidence: 'low' | 'medium' | 'high';
+  dataSource: 'xlsx' | 'hybrid' | 'live';
+  dataPoints: number;
+  hasCurrentInventory: boolean;
+}
+
+export interface AIStatus {
+  status: 'idle' | 'computing' | 'done' | 'error';
+  predictions: AIPrediction[];
+  totalItems: number;
+  processedItems: number;
+  uploadRows: number;
+  uploadItems: number;
+  lastUploadedAt: string | null;
+  computedAt: string | null;
+  error: string | null;
+}
+
+export interface InventoryForecastData {
+  restockItems: (AIPrediction & { estimatedCost: number })[];
+  monthlyUsageTrend: { month: string; total: number; projected: boolean }[];
+  totalPredictedItems: number;
+  urgentCount: number;
+  soonCount: number;
+  periodItemCount: number;
+  estimatedRestockCost: number;
+  topConsuming: AIPrediction | null;
+  hasPredictions: boolean;
+  predictionStatus: string;
+  period: string;
+}
+
 export interface PaymentRecord {
   id: number;
   jobOrderId: number;
@@ -519,6 +563,16 @@ export interface Delivery {
   notes: string;
   createdAt: string;
   createdBy: number;
+}
+
+export interface JobOrderCost {
+  id: number;
+  jobOrderNumber: string;
+  materialsCost: number;
+  laborCost: number;
+  overheadCost: number;
+  totalAmount: number;
+  status: string;
 }
 
 export interface CostingData {
@@ -858,6 +912,25 @@ export const api = {
     },
     createWasteLog: (data: { materialId: number; quantity: number; reason: string; notes?: string; branchId?: number }) =>
       fetchApi<MaterialWasteLog>('/api/inventory/waste-logs', { method: 'POST', body: JSON.stringify(data) }),
+
+    // AI Predictions
+    ai: {
+      getPredictions: () => fetchApi<AIStatus>('/api/inventory/ai/predictions'),
+      recompute: () => fetchApi<{ message: string }>('/api/inventory/ai/recompute', { method: 'POST' }),
+      uploadHistorical: async (file: File): Promise<ApiResponse<{ rowsSaved: number; uniqueItems: number; message: string }>> => {
+        const token = getAuthToken();
+        const formData = new FormData();
+        formData.append('file', file);
+        const response = await fetch(`${API_BASE_URL}/api/inventory/ai/upload-historical`, {
+          method: 'POST',
+          headers: { ...(token && { Authorization: `Bearer ${token}` }) },
+          body: formData,
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message || `Upload failed: ${response.status}`);
+        return data;
+      },
+    },
   },
 
   // ==================
@@ -946,6 +1019,8 @@ export const api = {
   // COSTING
   // ==================
   costing: {
+    getAll: () => fetchApi<JobOrderCost[]>('/api/costing/all'),
+
     getJobOrderCosting: (orderId: number) =>
       fetchApi<CostingData>(`/api/costing/job-order/${orderId}`),
     
@@ -1226,8 +1301,11 @@ export const api = {
   // ==================
   forecasting: {
     getDemandForecast: () => fetchApi<ForecastItem[]>('/api/forecasting/demand'),
-    
     getMaterialForecast: () => fetchApi<MaterialForecast[]>('/api/forecasting/materials'),
+    getInventoryForecast: (params?: { period?: string }) => {
+      const q = params?.period ? `?period=${params.period}` : '';
+      return fetchApi<InventoryForecastData>(`/api/forecasting/inventory${q}`);
+    },
   },
 
   // ==================

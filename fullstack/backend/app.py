@@ -337,6 +337,32 @@ class MaterialWasteLog(db.Model):
     branch = db.relationship('Branch')
     logged_by_user = db.relationship('User', foreign_keys=[logged_by])
 
+class HistoricalInventoryData(db.Model):
+    __tablename__ = 'historical_inventory_data'
+    id = db.Column(db.Integer, primary_key=True)
+    item_id = db.Column(db.String(50), nullable=False, index=True)
+    material_type = db.Column(db.String(255), default='')
+    stock_quantity = db.Column(db.Float, default=0)
+    incoming_date = db.Column(db.Date, nullable=True)
+    outgoing_date = db.Column(db.Date, nullable=True)
+    restock_date = db.Column(db.Date, nullable=True)
+    restock_quantity = db.Column(db.Float, default=0)
+    restock_cycle = db.Column(db.Integer, default=0)
+    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class AIPredictionCache(db.Model):
+    __tablename__ = 'ai_prediction_cache'
+    id = db.Column(db.Integer, primary_key=True)
+    status = db.Column(db.String(20), default='idle')  # idle, computing, done, error
+    predictions_json = db.Column(db.Text, default='[]')
+    total_items = db.Column(db.Integer, default=0)
+    processed_items = db.Column(db.Integer, default=0)
+    error_message = db.Column(db.Text, nullable=True)
+    computed_at = db.Column(db.DateTime, nullable=True)
+    upload_rows = db.Column(db.Integer, default=0)
+    upload_items = db.Column(db.Integer, default=0)
+    last_uploaded_at = db.Column(db.DateTime, nullable=True)
+
 class PaymentRecord(db.Model):
     __tablename__ = 'payment_records'
     id = db.Column(db.Integer, primary_key=True)
@@ -2381,6 +2407,36 @@ def update_lineup_slip(slip_id):
 # JOB ORDER COSTING MODULE
 # ============================================
 
+@app.route('/api/costing/all', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def get_all_costings():
+    user = request.current_user
+    orders = list(job_orders)
+
+    if user['role'] != 'administrator':
+        user_branch = Branch.query.filter_by(name=user['branch']).first()
+        if user_branch:
+            orders = [jo for jo in orders if jo['branchId'] == user_branch.id]
+
+    result = []
+    for order in orders:
+        total_material_cost = sum(item.get('materialCost', 0) * item['quantity'] for item in order.get('items', []))
+        total_labor_cost = sum(item.get('laborCost', 0) * item['quantity'] for item in order.get('items', []))
+        overhead = total_material_cost * 0.1
+
+        result.append({
+            'id': order['id'],
+            'jobOrderNumber': order['jobOrderId'],
+            'materialsCost': round(total_material_cost, 2),
+            'laborCost': round(total_labor_cost, 2),
+            'overheadCost': round(overhead, 2),
+            'totalAmount': order.get('totalPrice', 0),
+            'status': order.get('status', ''),
+        })
+
+    return jsonify({'status': 'success', 'data': result})
+
 @app.route('/api/costing/job-order/<int:order_id>', methods=['GET'])
 @require_auth
 def get_job_order_costing(order_id):
@@ -3869,6 +3925,86 @@ def respond_to_quotation(order_id):
 # FORECASTING MODULE
 # ============================================
 
+@app.route('/api/forecasting/inventory', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def get_inventory_forecast():
+    from sqlalchemy import func
+    period = request.args.get('period', 'month')
+    period_days = {'week': 7, 'month': 30, 'quarter': 90}.get(period, 30)
+    today = datetime.now().date()
+    cutoff = today + timedelta(days=period_days)
+
+    cache = AIPredictionCache.query.first()
+    predictions = []
+    if cache and cache.status == 'done':
+        try:
+            predictions = json.loads(cache.predictions_json or '[]')
+        except Exception:
+            predictions = []
+
+    # Items needing restock within the selected period
+    restock_items = []
+    for p in predictions:
+        days_left = p.get('daysUntilStockout', 9999)
+        restock_by = p.get('restockByDate')
+        in_period = days_left <= period_days
+        if restock_by:
+            try:
+                in_period = in_period or (datetime.strptime(restock_by, '%Y-%m-%d').date() <= cutoff)
+            except Exception:
+                pass
+        if in_period:
+            mat = InventoryMaterial.query.filter_by(item_id=p['itemId'], is_archived=False).first()
+            unit_price = float(mat.unit_price) if mat else 0
+            restock_items.append({**p, 'estimatedCost': round(p.get('suggestedRestockQty', 0) * unit_price, 2)})
+
+    restock_items.sort(key=lambda x: x.get('daysUntilStockout', 9999))
+
+    # Monthly usage trend from MaterialUsageLog — last 6 months
+    six_months_ago = datetime.now() - timedelta(days=180)
+    is_sqlite = 'sqlite' in str(db.engine.url)
+    if is_sqlite:
+        rows = db.session.query(
+            func.strftime('%Y-%m', MaterialUsageLog.created_at).label('month'),
+            func.sum(MaterialUsageLog.quantity_used).label('total')
+        ).filter(MaterialUsageLog.created_at >= six_months_ago).group_by('month').order_by('month').all()
+    else:
+        rows = db.session.query(
+            func.to_char(MaterialUsageLog.created_at, 'YYYY-MM').label('month'),
+            func.sum(MaterialUsageLog.quantity_used).label('total')
+        ).filter(MaterialUsageLog.created_at >= six_months_ago).group_by('month').order_by('month').all()
+
+    monthly_usage = [{'month': r.month, 'total': float(r.total or 0), 'projected': False} for r in rows]
+
+    # Add 3 projected months using avg daily usage from AI
+    avg_daily_all = sum(p.get('avgDailyUsage', 0) for p in predictions) if predictions else 0
+    for i in range(1, 4):
+        future = datetime.now() + timedelta(days=30 * i)
+        monthly_usage.append({
+            'month': future.strftime('%Y-%m'),
+            'total': round(avg_daily_all * 30, 1),
+            'projected': True
+        })
+
+    urgent = [p for p in predictions if p.get('daysUntilStockout', 9999) <= 7]
+    soon = [p for p in predictions if 7 < p.get('daysUntilStockout', 9999) <= 30]
+    top_consuming = max(predictions, key=lambda p: p.get('avgDailyUsage', 0)) if predictions else None
+
+    return jsonify({'status': 'success', 'data': {
+        'restockItems': restock_items,
+        'monthlyUsageTrend': monthly_usage,
+        'totalPredictedItems': len(predictions),
+        'urgentCount': len(urgent),
+        'soonCount': len(soon),
+        'periodItemCount': len(restock_items),
+        'estimatedRestockCost': round(sum(r.get('estimatedCost', 0) for r in restock_items), 2),
+        'topConsuming': top_consuming,
+        'hasPredictions': len(predictions) > 0,
+        'predictionStatus': cache.status if cache else 'idle',
+        'period': period,
+    }})
+
 @app.route('/api/forecasting/demand', methods=['GET'])
 @require_auth
 @require_roles('administrator', 'supervisor')
@@ -5053,6 +5189,341 @@ def upload_catalog_image(item_id):
 @app.route('/api/catalog/images/<filename>', methods=['GET'])
 def serve_catalog_image(filename):
     return send_from_directory(CATALOG_UPLOAD_FOLDER, filename)
+
+# ============================================
+# AI PREDICTIONS - PROPHET
+# ============================================
+
+import json
+import threading
+from collections import defaultdict
+from datetime import date as date_type
+
+def _parse_date(val):
+    if not val or str(val).strip().lower() in ('', 'no restock', 'none', 'nat', 'nan'):
+        return None
+    try:
+        import pandas as pd
+        ts = pd.to_datetime(val, errors='coerce')
+        return None if pd.isna(ts) else ts.date()
+    except Exception:
+        return None
+
+def _compute_prediction_for_item(item_id):
+    try:
+        import pandas as pd
+        from prophet import Prophet
+    except ImportError:
+        return None
+
+    xlsx_rows = HistoricalInventoryData.query.filter_by(item_id=item_id).order_by(
+        HistoricalInventoryData.incoming_date
+    ).all()
+
+    daily_records = []
+    for row in xlsx_rows:
+        if row.incoming_date and row.outgoing_date and row.stock_quantity:
+            days = max(1, (row.outgoing_date - row.incoming_date).days)
+            daily_usage = float(row.stock_quantity) / days
+            cur = row.incoming_date
+            while cur <= row.outgoing_date:
+                daily_records.append({'ds': pd.Timestamp(cur), 'y': round(daily_usage, 4)})
+                cur += timedelta(days=1)
+
+    material = InventoryMaterial.query.filter_by(item_id=item_id, is_archived=False).first()
+    live_day_span = 0
+    if material:
+        logs = MaterialUsageLog.query.filter_by(material_id=material.id).all()
+        day_totals = defaultdict(float)
+        for log in logs:
+            day_totals[log.created_at.date()] += log.quantity_used
+        if day_totals:
+            sorted_days = sorted(day_totals.keys())
+            live_day_span = (sorted_days[-1] - sorted_days[0]).days
+            for d, qty in day_totals.items():
+                daily_records.append({'ds': pd.Timestamp(d), 'y': round(qty, 4)})
+
+    if not daily_records:
+        return None
+
+    data_source = 'live' if live_day_span >= 90 else ('hybrid' if live_day_span >= 30 else 'xlsx')
+    material_type = xlsx_rows[0].material_type if xlsx_rows else (material.material_type if material else 'Unknown')
+
+    lead_times = [
+        (row.restock_date - row.outgoing_date).days
+        for row in xlsx_rows
+        if row.outgoing_date and row.restock_date and 0 < (row.restock_date - row.outgoing_date).days < 180
+    ]
+    avg_lead_time = int(sum(lead_times) / len(lead_times)) if lead_times else 7
+
+    restock_qtys = [float(row.restock_quantity) for row in xlsx_rows if row.restock_quantity and float(row.restock_quantity) > 0]
+    suggested_qty = round(sum(restock_qtys) / len(restock_qtys)) if restock_qtys else None
+
+    df = None
+    try:
+        import pandas as pd
+        df = pd.DataFrame(daily_records).groupby('ds', as_index=False)['y'].sum()
+        df = df.sort_values('ds').reset_index(drop=True)
+        df['y'] = df['y'].clip(lower=0)
+    except Exception:
+        pass
+
+    n_unique = len(df) if df is not None else 0
+    confidence = 'low' if n_unique < 5 else ('medium' if n_unique < 20 else 'high')
+
+    avg_daily_usage = 0.001
+    try:
+        if df is not None and n_unique >= 2:
+            import pandas as pd
+            model = Prophet(
+                yearly_seasonality=n_unique > 365,
+                weekly_seasonality=n_unique > 14,
+                daily_seasonality=False,
+                changepoint_prior_scale=0.05,
+                seasonality_mode='additive'
+            )
+            model.fit(df)
+            future = model.make_future_dataframe(periods=60)
+            forecast = model.predict(future)
+            future_only = forecast[forecast['ds'] > pd.Timestamp.now()]
+            avg_daily_usage = max(0.001, float(future_only['yhat'].head(60).mean()))
+        elif daily_records:
+            avg_daily_usage = max(0.001, sum(r['y'] for r in daily_records) / len(daily_records))
+    except Exception:
+        if daily_records:
+            avg_daily_usage = max(0.001, sum(r['y'] for r in daily_records) / len(daily_records))
+
+    current_stock = float(material.stock_quantity) if material else 0
+    days_until_stockout = min(9999, int(current_stock / avg_daily_usage))
+    stockout_date = (datetime.now() + timedelta(days=days_until_stockout)).date() if days_until_stockout < 9999 else None
+    restock_by = (datetime.now() + timedelta(days=max(0, days_until_stockout - avg_lead_time))).date() if days_until_stockout < 9999 else None
+
+    if not suggested_qty:
+        suggested_qty = max(1, round(avg_daily_usage * 30))
+
+    return {
+        'itemId': item_id,
+        'materialType': material_type,
+        'color': material.color if material else '',
+        'pattern': material.pattern if material else '',
+        'currentStock': current_stock,
+        'avgDailyUsage': round(avg_daily_usage, 3),
+        'daysUntilStockout': days_until_stockout,
+        'stockoutDate': stockout_date.isoformat() if stockout_date else None,
+        'restockByDate': restock_by.isoformat() if restock_by else None,
+        'suggestedRestockQty': int(suggested_qty),
+        'avgLeadTimeDays': avg_lead_time,
+        'confidence': confidence,
+        'dataSource': data_source,
+        'dataPoints': n_unique,
+        'hasCurrentInventory': material is not None,
+    }
+
+def _run_predictions_background(app_obj):
+    with app_obj.app_context():
+        cache = AIPredictionCache.query.first()
+        if not cache:
+            return
+        try:
+            item_ids = [
+                r[0] for r in db.session.query(HistoricalInventoryData.item_id).distinct().all()
+            ]
+            cache.total_items = len(item_ids)
+            cache.processed_items = 0
+            db.session.commit()
+
+            results = []
+            for i, item_id in enumerate(item_ids):
+                try:
+                    pred = _compute_prediction_for_item(item_id)
+                    if pred:
+                        results.append(pred)
+                except Exception:
+                    pass
+                cache.processed_items = i + 1
+                if i % 10 == 0:
+                    db.session.commit()
+
+            cache.predictions_json = json.dumps(results)
+            cache.status = 'done'
+            cache.computed_at = datetime.utcnow()
+            db.session.commit()
+        except Exception as e:
+            cache.status = 'error'
+            cache.error_message = str(e)
+            db.session.commit()
+
+@app.route('/api/inventory/ai/upload-historical', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def upload_historical_inventory():
+    try:
+        import pandas as pd
+    except ImportError:
+        return jsonify({'status': 'error', 'message': 'pandas not installed. Run: pip install pandas openpyxl'}), 503
+
+    if 'file' not in request.files:
+        return jsonify({'status': 'error', 'message': 'No file provided'}), 400
+
+    file = request.files['file']
+    if not file.filename or not file.filename.lower().endswith(('.xlsx', '.xls')):
+        return jsonify({'status': 'error', 'message': 'Please upload an Excel file (.xlsx or .xls)'}), 400
+
+    try:
+        df = pd.read_excel(file, engine='openpyxl')
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': f'Could not read file: {str(e)}'}), 400
+
+    # Normalize column names
+    df.columns = [str(c).strip().lower().replace(' ', '_') for c in df.columns]
+
+    col_map = {
+        'item_id': next((c for c in df.columns if 'item' in c and 'id' in c), None),
+        'material_type': next((c for c in df.columns if 'material' in c and 'type' in c), None),
+        'stock_quantity': next((c for c in df.columns if 'stock' in c and 'qty' in c or ('stock' in c and 'quantity' in c)), None),
+        'incoming_date': next((c for c in df.columns if 'incoming' in c), None),
+        'outgoing_date': next((c for c in df.columns if 'outgoing' in c), None),
+        'restock_date': next((c for c in df.columns if 'restock' in c and 'date' in c), None),
+        'restock_quantity': next((c for c in df.columns if 'restock' in c and ('qty' in c or 'quantity' in c)), None),
+        'restock_cycle': next((c for c in df.columns if 'restock' in c and 'cycle' in c), None),
+    }
+
+    if not col_map['item_id'] or not col_map['stock_quantity'] or not col_map['incoming_date'] or not col_map['outgoing_date']:
+        missing = [k for k, v in col_map.items() if v is None and k in ('item_id', 'stock_quantity', 'incoming_date', 'outgoing_date')]
+        return jsonify({'status': 'error', 'message': f'Missing required columns: {", ".join(missing)}. Found columns: {list(df.columns)}'}), 400
+
+    # Clear old data
+    HistoricalInventoryData.query.delete()
+    db.session.commit()
+
+    rows_saved = 0
+    for _, row in df.iterrows():
+        item_id = str(row.get(col_map['item_id'], '') or '').strip()
+        if not item_id:
+            continue
+
+        stock_qty = row.get(col_map['stock_quantity'], 0)
+        try:
+            stock_qty = float(stock_qty)
+        except (ValueError, TypeError):
+            stock_qty = 0
+
+        restock_qty = 0
+        if col_map['restock_quantity']:
+            try:
+                restock_qty = float(row.get(col_map['restock_quantity'], 0) or 0)
+            except (ValueError, TypeError):
+                restock_qty = 0
+
+        restock_cycle = 0
+        if col_map['restock_cycle']:
+            try:
+                restock_cycle = int(float(row.get(col_map['restock_cycle'], 0) or 0))
+            except (ValueError, TypeError):
+                restock_cycle = 0
+
+        entry = HistoricalInventoryData(
+            item_id=item_id,
+            material_type=str(row.get(col_map['material_type'], '') or '').strip() if col_map['material_type'] else '',
+            stock_quantity=stock_qty,
+            incoming_date=_parse_date(row.get(col_map['incoming_date'])),
+            outgoing_date=_parse_date(row.get(col_map['outgoing_date'])),
+            restock_date=_parse_date(row.get(col_map['restock_date'])) if col_map['restock_date'] else None,
+            restock_quantity=restock_qty,
+            restock_cycle=restock_cycle,
+        )
+        db.session.add(entry)
+        rows_saved += 1
+
+    # Update/create cache record
+    cache = AIPredictionCache.query.first()
+    if not cache:
+        cache = AIPredictionCache()
+        db.session.add(cache)
+
+    unique_items = len(df[col_map['item_id']].dropna().unique()) if col_map['item_id'] else 0
+    cache.status = 'computing'
+    cache.predictions_json = '[]'
+    cache.total_items = unique_items
+    cache.processed_items = 0
+    cache.upload_rows = rows_saved
+    cache.upload_items = unique_items
+    cache.last_uploaded_at = datetime.utcnow()
+    cache.error_message = None
+    db.session.commit()
+
+    log_action(
+        request.current_user['id'], request.current_user['fullName'],
+        'CREATE', 'AI', f"Uploaded {rows_saved} historical rows for {unique_items} items",
+        request.remote_addr or '0.0.0.0'
+    )
+
+    # Start background computation
+    t = threading.Thread(target=_run_predictions_background, args=(app,), daemon=True)
+    t.start()
+
+    return jsonify({
+        'status': 'success',
+        'message': f'Uploaded {rows_saved} rows for {unique_items} items. Computing predictions in background...',
+        'rowsSaved': rows_saved,
+        'uniqueItems': unique_items,
+    })
+
+@app.route('/api/inventory/ai/predictions', methods=['GET'])
+@require_auth
+def get_ai_predictions():
+    cache = AIPredictionCache.query.first()
+    if not cache:
+        return jsonify({'status': 'success', 'data': {
+            'status': 'idle',
+            'predictions': [],
+            'totalItems': 0,
+            'processedItems': 0,
+            'uploadRows': 0,
+            'uploadItems': 0,
+            'lastUploadedAt': None,
+            'computedAt': None,
+            'error': None,
+        }})
+
+    try:
+        predictions = json.loads(cache.predictions_json or '[]')
+    except Exception:
+        predictions = []
+
+    return jsonify({'status': 'success', 'data': {
+        'status': cache.status,
+        'predictions': predictions,
+        'totalItems': cache.total_items,
+        'processedItems': cache.processed_items,
+        'uploadRows': cache.upload_rows,
+        'uploadItems': cache.upload_items,
+        'lastUploadedAt': cache.last_uploaded_at.isoformat() if cache.last_uploaded_at else None,
+        'computedAt': cache.computed_at.isoformat() if cache.computed_at else None,
+        'error': cache.error_message,
+    }})
+
+@app.route('/api/inventory/ai/recompute', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def recompute_ai_predictions():
+    cache = AIPredictionCache.query.first()
+    if not cache or cache.upload_rows == 0:
+        return jsonify({'status': 'error', 'message': 'No historical data uploaded yet'}), 400
+
+    if cache.status == 'computing':
+        return jsonify({'status': 'error', 'message': 'Computation already in progress'}), 400
+
+    cache.status = 'computing'
+    cache.predictions_json = '[]'
+    cache.processed_items = 0
+    cache.error_message = None
+    db.session.commit()
+
+    t = threading.Thread(target=_run_predictions_background, args=(app,), daemon=True)
+    t.start()
+
+    return jsonify({'status': 'success', 'message': 'Recomputing predictions...'})
 
 if __name__ == '__main__':
     with app.app_context():
