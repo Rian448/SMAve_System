@@ -22,23 +22,21 @@ function NewDeliveryForm() {
   const [notes, setNotes] = useState('');
 
   useEffect(() => {
-    api.getJobOrders()
+    api.sales.getJobOrders()
       .then(response => {
-        // Filter to only show completed job orders that are ready for delivery
         const completedOrders = (response.data || []).filter(
           (jo: JobOrder) => jo.status === 'completed'
         );
         setJobOrders(completedOrders);
         setLoadingJobOrders(false);
 
-        // Pre-fill customer details if job order is selected
         const preselectedId = searchParams.get('jobOrderId');
         if (preselectedId) {
-          const selectedOrder = completedOrders.find((jo: JobOrder) => jo.id === preselectedId);
+          const selectedOrder = completedOrders.find((jo: JobOrder) => String(jo.id) === preselectedId);
           if (selectedOrder) {
-            setRecipientName(selectedOrder.customer_name);
-            setDeliveryAddress(selectedOrder.customer_address || '');
-            setContactNumber(selectedOrder.customer_phone || '');
+            setRecipientName(selectedOrder.customerName);
+            setDeliveryAddress(selectedOrder.customerEmail || '');
+            setContactNumber(selectedOrder.customerPhone || '');
           }
         }
       })
@@ -50,11 +48,11 @@ function NewDeliveryForm() {
 
   const handleJobOrderChange = (id: string) => {
     setJobOrderId(id);
-    const selectedOrder = jobOrders.find(jo => jo.id === id);
+    const selectedOrder = jobOrders.find(jo => String(jo.id) === id);
     if (selectedOrder) {
-      setRecipientName(selectedOrder.customer_name);
-      setDeliveryAddress(selectedOrder.customer_address || '');
-      setContactNumber(selectedOrder.customer_phone || '');
+      setRecipientName(selectedOrder.customerName);
+      setDeliveryAddress(selectedOrder.customerEmail || '');
+      setContactNumber(selectedOrder.customerPhone || '');
     }
   };
 
@@ -64,19 +62,20 @@ function NewDeliveryForm() {
 
     try {
       const delivery = {
-        job_order_id: jobOrderId,
-        scheduled_date: scheduledDate,
-        time_slot: timeSlot,
-        recipient_name: recipientName,
-        delivery_address: deliveryAddress,
-        contact_number: contactNumber,
-        driver_name: driverName,
-        vehicle_assigned: vehicleAssigned,
-        delivery_notes: notes,
-        status: 'scheduled'
+        type: 'customer_delivery' as const,
+        fromBranchId: 1,
+        customerName: recipientName,
+        customerPhone: contactNumber,
+        customerAddress: deliveryAddress,
+        jobOrderId: parseInt(jobOrderId) || undefined,
+        items: [],
+        scheduledDate,
+        driverName,
+        vehiclePlate: vehicleAssigned,
+        notes,
       };
 
-      await api.createDelivery(delivery);
+      await api.deliveries.create(delivery);
       router.push('/delivery');
     } catch (err) {
       console.error(err);
@@ -159,21 +158,21 @@ function NewDeliveryForm() {
                       type="radio"
                       name="jobOrder"
                       value={jo.id}
-                      checked={jobOrderId === jo.id}
+                      checked={jobOrderId === String(jo.id)}
                       onChange={(e) => handleJobOrderChange(e.target.value)}
                       className="sr-only"
                     />
                     <div className="flex-1">
                       <div className="flex items-center justify-between">
                         <p className="text-sm font-medium text-zinc-900 dark:text-white">
-                          #{jo.id} - {jo.customer_name}
+                          #{jo.id} - {jo.customerName}
                         </p>
                         <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400">
                           COMPLETED
                         </span>
                       </div>
                       <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
-                        {jo.vehicle_make} {jo.vehicle_model} • {jo.service_type}
+                        {jo.vehicleInfo?.make} {jo.vehicleInfo?.model} • {jo.description}
                       </p>
                     </div>
                     <div className={`w-5 h-5 rounded-full border-2 ml-4 flex items-center justify-center ${

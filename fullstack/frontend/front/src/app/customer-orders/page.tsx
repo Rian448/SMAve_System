@@ -1,34 +1,10 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useAuth, hasAccess } from '@/context/AuthContext';
-import { api } from '@/lib/api';
+import { api, CustomerOrder } from '@/lib/api';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
-interface CustomerOrder {
-  id: number;
-  orderNumber: string;
-  customerName: string;
-  customerPhone: string;
-  customerEmail: string;
-  vehicleInfo: {
-    make: string;
-    model: string;
-    year: string;
-    plateNumber: string;
-  };
-  services: Array<{
-    type: string;
-    material?: string;
-    design?: string;
-    pocket?: string;
-    others?: string;
-    description?: string;
-  }>;
-  notes: string;
-  status: 'pending' | 'processing' | 'completed';
-  createdAt: string;
-}
 
 export default function CustomerOrdersPage() {
   const { user, isLoading: authLoading } = useAuth();
