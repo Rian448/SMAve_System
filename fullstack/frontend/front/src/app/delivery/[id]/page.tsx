@@ -1,7 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import Navigation from '@/components/Navigation';
 import { api, Delivery } from '@/lib/api';
 
 export default function DeliveryDetailPage() {
@@ -13,7 +12,7 @@ export default function DeliveryDetailPage() {
 
   useEffect(() => {
     if (params.id) {
-      api.getDelivery(params.id as string)
+      api.deliveries.get(parseInt(params.id as string))
         .then(response => {
           setDelivery(response.data || null);
           setLoading(false);
@@ -29,8 +28,8 @@ export default function DeliveryDetailPage() {
     if (!delivery) return;
     setUpdating(true);
     try {
-      await api.updateDelivery(delivery.id, { status: newStatus });
-      setDelivery({ ...delivery, status: newStatus });
+      await api.deliveries.updateStatus(delivery.id, newStatus);
+      setDelivery({ ...delivery, status: newStatus as any });
     } catch (err) {
       console.error(err);
     }
@@ -79,7 +78,6 @@ export default function DeliveryDetailPage() {
   if (loading) {
     return (
       <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-        <Navigation />
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="flex items-center justify-center h-64">
             <div className="animate-spin w-8 h-8 border-4 border-amber-600 border-t-transparent rounded-full"></div>
@@ -92,7 +90,6 @@ export default function DeliveryDetailPage() {
   if (!delivery) {
     return (
       <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-        <Navigation />
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-6 text-center">
             <p className="text-red-600 dark:text-red-400">Delivery not found</p>
@@ -110,7 +107,6 @@ export default function DeliveryDetailPage() {
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      <Navigation />
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
@@ -128,7 +124,7 @@ export default function DeliveryDetailPage() {
               Delivery #{delivery.id}
             </h1>
             <p className="text-zinc-500 dark:text-zinc-400 mt-1">
-              Job Order #{delivery.job_order_id}
+              Job Order #{delivery.jobOrderId}
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -139,10 +135,10 @@ export default function DeliveryDetailPage() {
         </div>
 
         {/* Status Timeline */}
-        <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6 mb-6">
+        <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-4 sm:p-6 mb-6">
           <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-6">Delivery Progress</h2>
           <div className="relative">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2 sm:gap-4">
               {['scheduled', 'in_transit', 'delivered'].map((status, index) => {
                 const isCompleted = 
                   (delivery.status === 'in_transit' && index === 0) ||
@@ -151,15 +147,15 @@ export default function DeliveryDetailPage() {
                 const isCurrent = delivery.status === status;
                 
                 return (
-                  <div key={status} className="flex flex-col items-center relative z-10">
-                    <div className={`w-16 h-16 rounded-full flex items-center justify-center ${
+                  <div key={status} className="flex flex-col items-center relative z-10 flex-1">
+                    <div className={`w-12 h-12 sm:w-16 sm:h-16 rounded-full flex items-center justify-center flex-shrink-0 ${
                       isCompleted || isCurrent
                         ? 'bg-amber-100 dark:bg-amber-900/30'
                         : 'bg-zinc-100 dark:bg-zinc-800'
                     }`}>
                       {getStatusIcon(isCompleted || isCurrent ? status : 'pending')}
                     </div>
-                    <p className={`mt-2 text-sm font-medium ${
+                    <p className={`mt-2 text-xs sm:text-sm font-medium text-center ${
                       isCompleted || isCurrent
                         ? 'text-amber-600 dark:text-amber-400'
                         : 'text-zinc-400 dark:text-zinc-500'
@@ -171,7 +167,7 @@ export default function DeliveryDetailPage() {
               })}
             </div>
             {/* Progress line */}
-            <div className="absolute top-8 left-8 right-8 h-0.5 bg-zinc-200 dark:bg-zinc-700 -z-0">
+            <div className="absolute top-6 sm:top-8 left-6 sm:left-8 right-6 sm:right-8 h-0.5 bg-zinc-200 dark:bg-zinc-700 -z-0">
               <div 
                 className="h-full bg-amber-500 transition-all duration-500"
                 style={{
@@ -184,12 +180,12 @@ export default function DeliveryDetailPage() {
           </div>
 
           {/* Action Buttons */}
-          <div className="mt-8 flex justify-center gap-4">
+          <div className="mt-8 flex flex-wrap justify-center gap-2 sm:gap-4">
             {delivery.status === 'scheduled' && (
               <button
                 onClick={() => updateStatus('in_transit')}
                 disabled={updating}
-                className="inline-flex items-center px-6 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
+                className="inline-flex items-center px-4 sm:px-6 py-2 bg-yellow-600 hover:bg-yellow-700 text-white text-sm sm:text-base rounded-lg font-medium transition-colors disabled:opacity-50"
               >
                 <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1m-6-1a1 1 0 001 1h1M5 17a2 2 0 104 0m-4 0a2 2 0 114 0m6 0a2 2 0 104 0m-4 0a2 2 0 114 0" />
@@ -201,7 +197,7 @@ export default function DeliveryDetailPage() {
               <button
                 onClick={() => updateStatus('delivered')}
                 disabled={updating}
-                className="inline-flex items-center px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
+                className="inline-flex items-center px-4 sm:px-6 py-2 bg-green-600 hover:bg-green-700 text-white text-sm sm:text-base rounded-lg font-medium transition-colors disabled:opacity-50"
               >
                 <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -225,25 +221,25 @@ export default function DeliveryDetailPage() {
               <div className="flex items-center justify-between py-3 border-b border-zinc-100 dark:border-zinc-800">
                 <span className="text-sm text-zinc-500 dark:text-zinc-400">Scheduled Date</span>
                 <span className="text-sm font-medium text-zinc-900 dark:text-white">
-                  {new Date(delivery.scheduled_date).toLocaleDateString()}
+                  {new Date(delivery.scheduledDate).toLocaleDateString()}
                 </span>
               </div>
               <div className="flex items-center justify-between py-3 border-b border-zinc-100 dark:border-zinc-800">
                 <span className="text-sm text-zinc-500 dark:text-zinc-400">Time Slot</span>
                 <span className="text-sm font-medium text-zinc-900 dark:text-white">
-                  {delivery.time_slot || '9:00 AM - 12:00 PM'}
+                  {'9:00 AM - 12:00 PM'}
                 </span>
               </div>
               <div className="flex items-center justify-between py-3 border-b border-zinc-100 dark:border-zinc-800">
                 <span className="text-sm text-zinc-500 dark:text-zinc-400">Driver</span>
                 <span className="text-sm font-medium text-zinc-900 dark:text-white">
-                  {delivery.driver_name || 'Not assigned'}
+                  {'Not assigned'}
                 </span>
               </div>
               <div className="flex items-center justify-between py-3">
                 <span className="text-sm text-zinc-500 dark:text-zinc-400">Vehicle</span>
                 <span className="text-sm font-medium text-zinc-900 dark:text-white">
-                  {delivery.vehicle_assigned || 'Delivery Van 01'}
+                  {'Delivery Van 01'}
                 </span>
               </div>
             </div>
@@ -262,26 +258,26 @@ export default function DeliveryDetailPage() {
               <div>
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">Recipient</p>
                 <p className="text-sm font-medium text-zinc-900 dark:text-white mt-1">
-                  {delivery.recipient_name || delivery.customer_name}
+                  {'Recipient Name'}
                 </p>
               </div>
               <div>
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">Address</p>
                 <p className="text-sm font-medium text-zinc-900 dark:text-white mt-1">
-                  {delivery.delivery_address}
+                  {delivery.address || 'No address provided'}
                 </p>
               </div>
               <div>
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">Contact Number</p>
                 <p className="text-sm font-medium text-zinc-900 dark:text-white mt-1">
-                  {delivery.contact_number || 'N/A'}
+                  {delivery.contactNumber || 'N/A'}
                 </p>
               </div>
-              {delivery.delivery_notes && (
+              {delivery.notes && (
                 <div>
                   <p className="text-sm text-zinc-500 dark:text-zinc-400">Notes</p>
                   <p className="text-sm font-medium text-zinc-900 dark:text-white mt-1">
-                    {delivery.delivery_notes}
+                    {delivery.notes}
                   </p>
                 </div>
               )}
@@ -328,18 +324,18 @@ export default function DeliveryDetailPage() {
         </div>
 
         {/* Actions */}
-        <div className="mt-6 flex flex-wrap gap-3">
+        <div className="mt-6 flex flex-wrap gap-2 sm:gap-3">
           <button 
-            onClick={() => router.push(`/sales/${delivery.job_order_id}`)}
-            className="inline-flex items-center px-4 py-2 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 hover:border-amber-300 text-zinc-700 dark:text-zinc-300 rounded-lg font-medium transition-colors"
+            onClick={() => router.push(`/sales/${delivery.jobOrderId}`)}
+            className="inline-flex items-center px-3 sm:px-4 py-2 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 hover:border-amber-300 text-zinc-700 dark:text-zinc-300 text-sm sm:text-base rounded-lg font-medium transition-colors"
           >
-            <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <svg className="w-4 h-4 sm:w-5 sm:h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
             View Job Order
           </button>
-          <button className="inline-flex items-center px-4 py-2 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 hover:border-amber-300 text-zinc-700 dark:text-zinc-300 rounded-lg font-medium transition-colors">
-            <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <button className="inline-flex items-center px-3 sm:px-4 py-2 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 hover:border-amber-300 text-zinc-700 dark:text-zinc-300 text-sm sm:text-base rounded-lg font-medium transition-colors">
+            <svg className="w-4 h-4 sm:w-5 sm:h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
             </svg>
             Print Delivery Note
@@ -348,9 +344,9 @@ export default function DeliveryDetailPage() {
             <button
               onClick={() => updateStatus('cancelled')}
               disabled={updating}
-              className="inline-flex items-center px-4 py-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 hover:bg-red-100 text-red-600 dark:text-red-400 rounded-lg font-medium transition-colors disabled:opacity-50"
+              className="inline-flex items-center px-3 sm:px-4 py-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 hover:bg-red-100 text-red-600 dark:text-red-400 text-sm sm:text-base rounded-lg font-medium transition-colors disabled:opacity-50"
             >
-              <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg className="w-4 h-4 sm:w-5 sm:h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
               </svg>
               Cancel Delivery

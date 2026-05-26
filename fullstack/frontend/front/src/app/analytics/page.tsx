@@ -1,7 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { api, AnalyticsData } from '@/lib/api';
-import Navigation from '@/components/Navigation';
 
 export default function AnalyticsPage() {
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
@@ -25,8 +24,7 @@ export default function AnalyticsPage() {
   if (loading) {
     return (
       <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-        <Navigation />
-        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="flex items-center justify-center h-64">
             <div className="animate-spin w-8 h-8 border-4 border-amber-600 border-t-transparent rounded-full"></div>
           </div>
@@ -38,8 +36,7 @@ export default function AnalyticsPage() {
   if (error) {
     return (
       <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-        <Navigation />
-        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-6 text-center">
             <p className="text-red-600 dark:text-red-400">{error}</p>
           </div>
@@ -54,7 +51,6 @@ export default function AnalyticsPage() {
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      <Navigation />
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
@@ -287,3 +283,5 @@ export default function AnalyticsPage() {
     </div>
   );
 }
+
+

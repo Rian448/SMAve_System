@@ -1,8 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import Navigation from '@/components/Navigation';
-import { api, RawMaterial } from '@/lib/api';
+import { api, RawMaterial, Supplier } from '@/lib/api';
 
 interface POItem {
   material_id: string;
@@ -17,6 +16,7 @@ export default function NewPurchaseOrderPage() {
   const [loading, setLoading] = useState(false);
   const [materials, setMaterials] = useState<RawMaterial[]>([]);
   const [loadingMaterials, setLoadingMaterials] = useState(true);
+  const [savedSuppliers, setSavedSuppliers] = useState<Supplier[]>([]);
   
   // Form state
   const [supplier, setSupplier] = useState('');
@@ -29,7 +29,7 @@ export default function NewPurchaseOrderPage() {
   ]);
 
   useEffect(() => {
-    api.getRawMaterials()
+    api.inventory.getRawMaterials()
       .then(response => {
         setMaterials(response.data || []);
         setLoadingMaterials(false);
@@ -38,6 +38,9 @@ export default function NewPurchaseOrderPage() {
         console.error(err);
         setLoadingMaterials(false);
       });
+    api.inventory.getSuppliers()
+      .then(response => setSavedSuppliers((response.data || []).filter((s: Supplier) => s.isActive)))
+      .catch(err => console.error(err));
   }, []);
 
   const addItem = () => {
@@ -55,12 +58,13 @@ export default function NewPurchaseOrderPage() {
     if (field === 'material_id') {
       const material = materials.find(m => m.id === value);
       if (material) {
+        const label = [material.materialType, material.color, material.pattern].filter(Boolean).join(' - ');
         newItems[index] = {
           ...newItems[index],
-          material_id: material.id,
-          material_name: material.name,
-          unit_cost: material.unit_cost,
-          unit: material.unit
+          material_id: material.id.toString(),
+          material_name: label,
+          unit_cost: material.unitPrice,
+          unit: 'unit'
         };
       }
     } else {
@@ -79,17 +83,18 @@ export default function NewPurchaseOrderPage() {
 
     try {
       const purchaseOrder = {
-        supplier_name: supplier,
-        supplier_contact: supplierContact,
-        supplier_email: supplierEmail,
-        expected_date: expectedDate,
-        notes,
-        items: items.filter(item => item.material_id),
-        total_amount: calculateTotal(),
-        status: 'pending'
+        supplierName: supplier,
+        items: items.filter(item => item.material_id).map(item => ({
+          materialId: Number(item.material_id),
+          name: item.material_name,
+          quantity: item.quantity,
+          unit: item.unit,
+          unitPrice: item.unit_cost
+        })),
+        expectedDelivery: expectedDate
       };
 
-      await api.createPurchaseOrder(purchaseOrder);
+      await api.purchaseOrders.create(purchaseOrder);
       router.push('/inventory?tab=purchase-orders');
     } catch (err) {
       console.error(err);
@@ -97,16 +102,9 @@ export default function NewPurchaseOrderPage() {
     setLoading(false);
   };
 
-  const suppliers = [
-    { name: 'Premium Leather Supplies', contact: '(02) 8555-1234', email: 'sales@premiumleather.ph' },
-    { name: 'Foam & Padding Co.', contact: '(02) 8666-5678', email: 'orders@foampadding.ph' },
-    { name: 'Auto Interior Parts', contact: '(02) 8777-9012', email: 'info@autointerior.ph' },
-    { name: 'Fabric World Trading', contact: '(02) 8888-3456', email: 'supply@fabricworld.ph' },
-  ];
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      <Navigation />
       <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="mb-8">
@@ -143,27 +141,27 @@ export default function NewPurchaseOrderPage() {
                 <select
                   value={supplier}
                   onChange={(e) => {
-                    const selected = suppliers.find(s => s.name === e.target.value);
+                    const selected = savedSuppliers.find((s: Supplier) => s.name === e.target.value);
                     setSupplier(e.target.value);
                     if (selected) {
-                      setSupplierContact(selected.contact);
-                      setSupplierEmail(selected.email);
+                      setSupplierContact(selected.phone || '');
+                      setSupplierEmail(selected.email || '');
                     }
                   }}
                   className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-                  required
                 >
-                  <option value="">Select supplier or enter new</option>
-                  {suppliers.map(s => (
-                    <option key={s.name} value={s.name}>{s.name}</option>
+                  <option value="">Select a saved supplier (optional)</option>
+                  {savedSuppliers.map((s: Supplier) => (
+                    <option key={s.id} value={s.name}>{s.name}</option>
                   ))}
                 </select>
                 <input
                   type="text"
                   value={supplier}
                   onChange={(e) => setSupplier(e.target.value)}
-                  placeholder="Or enter supplier name"
+                  placeholder="Or type supplier name manually"
                   className="mt-2 w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  required
                 />
               </div>
               <div>
@@ -247,8 +245,8 @@ export default function NewPurchaseOrderPage() {
                         >
                           <option value="">Select material</option>
                           {materials.map(m => (
-                            <option key={m.id} value={m.id}>
-                              {m.name} ({m.quantity} {m.unit} in stock)
+                            <option key={m.id} value={m.id.toString()}>
+                              {m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} in stock)
                             </option>
                           ))}
                         </select>
@@ -385,3 +383,5 @@ export default function NewPurchaseOrderPage() {
     </div>
   );
 }
+
+
