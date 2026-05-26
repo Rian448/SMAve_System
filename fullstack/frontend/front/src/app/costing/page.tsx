@@ -17,7 +17,7 @@ export default function CostingPage() {
   const fetchCostings = async () => {
     try {
       const data = await api.costing.getAll();
-      setCostings(data);
+      setCostings(data.data || []);
     } catch (error) {
       console.error('Error fetching costings:', error);
     } finally {

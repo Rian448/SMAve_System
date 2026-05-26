@@ -264,13 +264,13 @@ export default function DeliveryDetailPage() {
               <div>
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">Address</p>
                 <p className="text-sm font-medium text-zinc-900 dark:text-white mt-1">
-                  {delivery.address || 'No address provided'}
+                  {delivery.customerAddress || 'No address provided'}
                 </p>
               </div>
               <div>
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">Contact Number</p>
                 <p className="text-sm font-medium text-zinc-900 dark:text-white mt-1">
-                  {delivery.contactNumber || 'N/A'}
+                  {delivery.customerPhone || 'N/A'}
                 </p>
               </div>
               {delivery.notes && (

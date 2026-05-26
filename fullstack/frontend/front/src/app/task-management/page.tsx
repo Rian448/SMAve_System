@@ -195,9 +195,9 @@ export default function TaskManagement() {
         title: formData.title,
         description: formData.description,
         taskType: formData.taskType,
-        priority: formData.priority,
-        estimatedHours: formData.estimatedHours ? parseFloat(formData.estimatedHours) : null,
-        dueDate: formData.dueDate || null
+        priority: formData.priority as 'low' | 'normal' | 'high' | 'urgent',
+        estimatedHours: formData.estimatedHours ? parseFloat(formData.estimatedHours) : undefined,
+        dueDate: formData.dueDate || undefined
       });
       
       alert('Task created successfully!');
