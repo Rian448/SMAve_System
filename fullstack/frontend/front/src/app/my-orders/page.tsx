@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { api, Appointment, CustomerOrder, ProductOrder } from '@/lib/api';
 import Link from 'next/link';
@@ -8,6 +8,27 @@ import { useRouter, useSearchParams } from 'next/navigation';
 type OrderTab = 'custom' | 'premade' | 'appointments';
 
 export default function MyOrdersPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 pt-8">
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="animate-pulse space-y-4">
+            <div className="h-8 w-48 bg-zinc-200 dark:bg-zinc-800 rounded"></div>
+            <div className="space-y-3">
+              {[...Array(3)].map((_, i) => (
+                <div key={i} className="h-32 bg-zinc-200 dark:bg-zinc-800 rounded-xl"></div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    }>
+      <MyOrdersContent />
+    </Suspense>
+  );
+}
+
+function MyOrdersContent() {
   const { user, isLoading: authLoading } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
