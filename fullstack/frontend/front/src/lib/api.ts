@@ -612,6 +612,12 @@ export interface Receipt {
   paymentStatus: string;
 }
 
+export interface AnalyticsData {
+  categoryDistribution: Array<{ name: string; count: number; value: number }>;
+  topMaterials: Array<{ name: string; value: number }>;
+  monthlyTrends: Array<{ month: string; purchases: number; sales: number }>;
+}
+
 export interface ForecastItem {
   month: string;
   forecastedOrders: number;
@@ -763,6 +769,9 @@ async function fetchApi<T>(
 export const api = {
   // Health check
   healthCheck: () => fetchApi<null>('/api/health'),
+
+  // Analytics
+  getAnalytics: () => fetchApi<AnalyticsData>('/api/analytics'),
 
   // ==================
   // AUTHENTICATION
