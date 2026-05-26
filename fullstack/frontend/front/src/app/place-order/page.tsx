@@ -38,8 +38,9 @@ export default function PlaceOrderPage() {
   const [loadingProducts, setLoadingProducts] = useState(true);
   const [cart, setCart] = useState<CartItem[]>([]);
 
-  // Branch filter for product browsing
+  // Branch filter and search for product browsing
   const [branchFilter, setBranchFilter] = useState<number | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   // Checkout modal
   const [showCheckout, setShowCheckout] = useState(false);
@@ -279,6 +280,8 @@ export default function PlaceOrderPage() {
     );
   }
 
+  const currentStep = successMessage ? 3 : showCheckout ? 2 : 1;
+
   // ── Main page ─────────────────────────────────────────────────────────────
 
   return (
@@ -288,6 +291,31 @@ export default function PlaceOrderPage() {
           <Link href="/" className="text-amber-600 dark:text-amber-400 text-sm font-medium mb-4 inline-block">← Back to Home</Link>
           <h1 className="text-3xl font-bold text-zinc-900 dark:text-white">Place Your Order</h1>
           <p className="text-zinc-600 dark:text-zinc-400 mt-2">Welcome back, {user?.fullName}! Shop ready-made products from any branch or request a custom order.</p>
+
+          {/* Progress Steps (only shown on products tab) */}
+          {activeTab === 'products' && (
+            <div className="mt-6 flex items-center gap-0">
+              {[
+                { step: 1, label: 'Browse & Add to Cart' },
+                { step: 2, label: 'Checkout' },
+                { step: 3, label: 'Order Confirmed' },
+              ].map((s, i) => (
+                <div key={s.step} className="flex items-center flex-1">
+                  <div className="flex flex-col items-center flex-1">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold transition-colors ${currentStep >= s.step ? 'bg-amber-600 text-white' : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-400'}`}>
+                      {currentStep > s.step ? (
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
+                      ) : s.step}
+                    </div>
+                    <span className={`text-xs mt-1 font-medium hidden sm:block ${currentStep >= s.step ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-400'}`}>{s.label}</span>
+                  </div>
+                  {i < 2 && (
+                    <div className={`h-0.5 flex-1 mx-1 transition-colors ${currentStep > s.step ? 'bg-amber-600' : 'bg-zinc-200 dark:bg-zinc-700'}`} />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -337,6 +365,23 @@ export default function PlaceOrderPage() {
                 <h2 className="text-xl font-semibold text-zinc-900 dark:text-white mb-2">Available Products</h2>
                 <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Browse by branch or view all — you can add items from multiple branches to your cart.</p>
 
+                {/* Search bar */}
+                <div className="relative mb-4">
+                  <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                  <input
+                    type="text"
+                    placeholder="Search products by name or category..."
+                    value={searchQuery}
+                    onChange={e => setSearchQuery(e.target.value)}
+                    className="w-full pl-9 pr-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  />
+                  {searchQuery && (
+                    <button onClick={() => setSearchQuery('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                  )}
+                </div>
+
                 {/* Branch filter */}
                 {!loadingBranches && branches.length > 0 && (
                   <div className="flex gap-2 flex-wrap mb-5">
@@ -361,12 +406,32 @@ export default function PlaceOrderPage() {
                 )}
 
                 {loadingProducts ? (
-                  <div className="text-center py-8 text-zinc-500 dark:text-zinc-400">Loading products...</div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {[...Array(4)].map((_, i) => (
+                      <div key={i} className="border border-zinc-200 dark:border-zinc-700 rounded-lg p-4 space-y-3">
+                        <div className="flex justify-between">
+                          <div className="space-y-2 flex-1">
+                            <div className="h-4 bg-zinc-100 dark:bg-zinc-800 rounded animate-pulse w-3/4" />
+                            <div className="h-3 bg-zinc-100 dark:bg-zinc-800 rounded animate-pulse w-1/2" />
+                          </div>
+                          <div className="h-6 w-16 bg-zinc-100 dark:bg-zinc-800 rounded animate-pulse ml-4" />
+                        </div>
+                        <div className="h-3 bg-zinc-100 dark:bg-zinc-800 rounded animate-pulse w-2/3" />
+                        <div className="h-9 bg-zinc-100 dark:bg-zinc-800 rounded-lg animate-pulse" />
+                      </div>
+                    ))}
+                  </div>
                 ) : (() => {
-                  const visible = branchFilter === null ? products : products.filter(p => p.branchId === branchFilter);
+                  const filtered = (branchFilter === null ? products : products.filter(p => p.branchId === branchFilter))
+                    .filter(p => {
+                      if (!searchQuery.trim()) return true;
+                      const q = searchQuery.toLowerCase();
+                      return p.name.toLowerCase().includes(q) || p.category.toLowerCase().includes(q);
+                    });
+                  const visible = filtered;
                   if (visible.length === 0) return (
                     <div className="text-center py-8 text-zinc-500 dark:text-zinc-400">
-                      {branchFilter ? 'No products available at this branch.' : 'No premade products available at the moment.'}
+                      {searchQuery ? `No products found for "${searchQuery}".` : branchFilter ? 'No products available at this branch.' : 'No premade products available at the moment.'}
                     </div>
                   );
                   return (
