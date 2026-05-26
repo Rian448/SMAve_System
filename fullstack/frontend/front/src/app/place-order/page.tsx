@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api, setAuthToken, PublicProduct, VehicleInfo } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
@@ -22,6 +22,18 @@ interface CartItem {
 type OrderTab = 'products' | 'appointment';
 
 export default function PlaceOrderPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 flex items-center justify-center">
+        <div className="animate-spin w-8 h-8 border-4 border-amber-600 border-t-transparent rounded-full"></div>
+      </div>
+    }>
+      <PlaceOrderContent />
+    </Suspense>
+  );
+}
+
+function PlaceOrderContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { user, isLoading: authLoading, isAuthenticated, checkAuth } = useAuth();
