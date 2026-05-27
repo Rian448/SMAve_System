@@ -106,7 +106,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
     return (
       <nav className="fixed top-0 left-0 right-0 h-16 bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 z-50 flex items-center px-4 sm:px-6 gap-4">
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-amber-600 rounded-lg flex items-center justify-center">
+          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
             <LogoIcon />
           </div>
           <span className="font-bold text-zinc-900 dark:text-white hidden sm:block">Seatmakers Avenue</span>
@@ -114,7 +114,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
         <div className="ml-auto">
           <Link
             href="/login"
-            className="px-4 py-2 rounded-lg bg-amber-600 text-white text-sm font-semibold hover:bg-amber-500 transition-colors"
+            className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-500 transition-colors"
           >
             Login
           </Link>
@@ -160,7 +160,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
       case 'sales_manager': return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
       case 'seat_maker': return 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400';
       case 'sewer': return 'bg-pink-100 text-pink-700 dark:bg-pink-900/30 dark:text-pink-400';
-      case 'customer': return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400';
+      case 'customer': return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400';
       default: return 'bg-zinc-100 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300';
     }
   };
@@ -173,7 +173,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
     >
       {/* Header */}
       <div className={`flex items-center h-16 px-3 border-b border-zinc-200 dark:border-zinc-800 shrink-0 ${collapsed ? 'justify-center' : 'gap-2'}`}>
-        <div className="w-8 h-8 bg-amber-600 rounded-lg flex items-center justify-center shrink-0">
+        <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shrink-0">
           <LogoIcon />
         </div>
         {!collapsed && (
@@ -212,7 +212,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
                 collapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
               } ${
                 isActive
-                  ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
+                  ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
                   : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white'
               }`}
             >
@@ -228,7 +228,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
         {collapsed ? (
           <div className="flex flex-col items-center gap-2">
             <div
-              className="w-8 h-8 bg-amber-600 rounded-full flex items-center justify-center"
+              className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center"
               title={user?.fullName}
             >
               <span className="text-white text-sm font-semibold">
@@ -246,7 +246,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
           </div>
         ) : (
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-amber-600 rounded-full flex items-center justify-center shrink-0">
+            <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center shrink-0">
               <span className="text-white text-sm font-semibold">
                 {user?.fullName?.charAt(0).toUpperCase()}
               </span>

@@ -87,7 +87,7 @@ function CatalogCard({
         )}
         <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleImageChange} />
         {item.tag && !editing && (
-          <span className="absolute top-2 left-2 text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 font-medium">
+          <span className="absolute top-2 left-2 text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 font-medium">
             {item.tag}
           </span>
         )}
@@ -98,19 +98,19 @@ function CatalogCard({
         {editing ? (
           <>
             <input
-              className="w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-sm font-semibold text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+              className="w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-sm font-semibold text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
               value={form.title}
               onChange={e => setForm(f => ({ ...f, title: e.target.value }))}
               placeholder="Title"
             />
             <input
-              className="w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
+              className="w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
               value={form.tag}
               onChange={e => setForm(f => ({ ...f, tag: e.target.value }))}
               placeholder="Tag (e.g. New Arrival, Best Seller)"
             />
             <textarea
-              className="w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-sm text-zinc-600 dark:text-zinc-300 focus:outline-none focus:ring-2 focus:ring-amber-500 resize-none"
+              className="w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-sm text-zinc-600 dark:text-zinc-300 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
               rows={3}
               value={form.description}
               onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
@@ -120,7 +120,7 @@ function CatalogCard({
               <button
                 onClick={handleSave}
                 disabled={saving || !form.title.trim()}
-                className="flex-1 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-sm font-semibold transition-colors disabled:opacity-50"
+                className="flex-1 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors disabled:opacity-50"
               >
                 {saving ? 'Saving…' : 'Save'}
               </button>
@@ -294,10 +294,10 @@ export default function LandingPage() {
 
         {/* Hero */}
         <section className="mb-14">
-          <div className="rounded-3xl bg-gradient-to-br from-amber-600 to-amber-700 dark:from-amber-700 dark:to-amber-900 p-10 sm:p-14 relative overflow-hidden">
+          <div className="rounded-3xl bg-gradient-to-br from-blue-600 to-blue-700 dark:from-blue-700 dark:to-blue-900 p-10 sm:p-14 relative overflow-hidden">
             <div className="absolute inset-0 opacity-10 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-white via-transparent to-transparent" />
             <div className="relative max-w-2xl">
-              <p className="text-xs uppercase tracking-[0.25em] text-amber-200 font-semibold mb-3">Premium Automotive Upholstery</p>
+              <p className="text-xs uppercase tracking-[0.25em] text-blue-200 font-semibold mb-3">Premium Automotive Upholstery</p>
 
               {editingHero && isAdmin ? (
                 <div className="space-y-3">
@@ -313,16 +313,16 @@ export default function LandingPage() {
                     onChange={e => setHeroForm(f => ({ ...f, desc: e.target.value }))}
                   />
                   <div className="flex gap-2">
-                    <button onClick={() => { setHeroTitle(heroForm.title); setHeroDesc(heroForm.desc); setEditingHero(false); }} className="px-4 py-2 rounded-lg bg-white text-amber-700 text-sm font-semibold hover:bg-amber-50 transition-colors">Save</button>
+                    <button onClick={() => { setHeroTitle(heroForm.title); setHeroDesc(heroForm.desc); setEditingHero(false); }} className="px-4 py-2 rounded-lg bg-white text-blue-700 text-sm font-semibold hover:bg-blue-50 transition-colors">Save</button>
                     <button onClick={() => { setHeroForm({ title: heroTitle, desc: heroDesc }); setEditingHero(false); }} className="px-4 py-2 rounded-lg bg-white/20 text-white text-sm hover:bg-white/30 transition-colors">Cancel</button>
                   </div>
                 </div>
               ) : (
                 <>
                   <h1 className="text-3xl sm:text-4xl font-bold text-white leading-snug">{heroTitle}</h1>
-                  <p className="mt-4 text-amber-100 text-base leading-relaxed">{heroDesc}</p>
+                  <p className="mt-4 text-blue-100 text-base leading-relaxed">{heroDesc}</p>
                   <div className="mt-8 flex flex-col sm:flex-row gap-3">
-                    <a href="#catalog" className="inline-flex items-center justify-center px-6 py-3 rounded-xl bg-white text-amber-700 font-semibold hover:bg-amber-50 transition-colors text-sm">
+                    <a href="#catalog" className="inline-flex items-center justify-center px-6 py-3 rounded-xl bg-white text-blue-700 font-semibold hover:bg-blue-50 transition-colors text-sm">
                       Browse Catalog
                     </a>
                     <Link href="/place-order?tab=appointment" className="inline-flex items-center justify-center px-6 py-3 rounded-xl border border-white/40 text-white font-semibold hover:bg-white/10 transition-colors text-sm">
@@ -330,7 +330,7 @@ export default function LandingPage() {
                     </Link>
                   </div>
                   {isAdmin && (
-                    <button onClick={() => { setHeroForm({ title: heroTitle, desc: heroDesc }); setEditingHero(true); }} className="mt-4 text-xs text-amber-200 hover:text-white underline underline-offset-2 transition-colors">
+                    <button onClick={() => { setHeroForm({ title: heroTitle, desc: heroDesc }); setEditingHero(true); }} className="mt-4 text-xs text-blue-200 hover:text-white underline underline-offset-2 transition-colors">
                       Edit hero text
                     </button>
                   )}
@@ -350,35 +350,35 @@ export default function LandingPage() {
             {[
               {
                 icon: (
-                  <svg className="w-7 h-7 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" /></svg>
+                  <svg className="w-7 h-7 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" /></svg>
                 ),
                 title: 'Premium Quality',
                 desc: 'Only the best materials — durable, comfortable, and built to last.',
               },
               {
                 icon: (
-                  <svg className="w-7 h-7 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm0-5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z" /></svg>
+                  <svg className="w-7 h-7 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm0-5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z" /></svg>
                 ),
                 title: 'Custom Made',
                 desc: 'Every piece tailored to fit your exact vehicle and style preference.',
               },
               {
                 icon: (
-                  <svg className="w-7 h-7 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                  <svg className="w-7 h-7 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
                 ),
                 title: 'Fast Turnaround',
                 desc: 'Most orders completed in 3–7 business days so you are back on the road fast.',
               },
               {
                 icon: (
-                  <svg className="w-7 h-7 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                  <svg className="w-7 h-7 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
                 ),
                 title: 'Multiple Branches',
                 desc: 'Conveniently located branches across the city for easy drop-off and pickup.',
               },
             ].map((item) => (
-              <div key={item.title} className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 p-6 text-center hover:border-amber-300 dark:hover:border-amber-700 transition-colors">
-                <div className="w-14 h-14 rounded-2xl bg-amber-50 dark:bg-amber-900/20 flex items-center justify-center mx-auto mb-4">
+              <div key={item.title} className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 p-6 text-center hover:border-blue-300 dark:hover:border-blue-700 transition-colors">
+                <div className="w-14 h-14 rounded-2xl bg-blue-50 dark:bg-blue-900/20 flex items-center justify-center mx-auto mb-4">
                   {item.icon}
                 </div>
                 <h3 className="font-semibold text-zinc-900 dark:text-white mb-2">{item.title}</h3>
@@ -395,7 +395,7 @@ export default function LandingPage() {
             <p className="text-zinc-500 dark:text-zinc-400 mt-2 text-sm">Three simple steps to get your perfect seat covers</p>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 relative">
-            <div className="hidden md:block absolute top-9 left-[calc(33%+1rem)] right-[calc(33%+1rem)] h-0.5 bg-amber-200 dark:bg-amber-800 z-0" />
+            <div className="hidden md:block absolute top-9 left-[calc(33%+1rem)] right-[calc(33%+1rem)] h-0.5 bg-blue-200 dark:bg-blue-800 z-0" />
             {[
               {
                 step: '01',
@@ -420,12 +420,12 @@ export default function LandingPage() {
               },
             ].map((item) => (
               <div key={item.step} className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 p-7 text-center relative z-10 flex flex-col items-center">
-                <div className="w-16 h-16 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 font-bold text-xl flex items-center justify-center mb-4">
+                <div className="w-16 h-16 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 font-bold text-xl flex items-center justify-center mb-4">
                   {item.step}
                 </div>
                 <h3 className="font-semibold text-zinc-900 dark:text-white mb-2">{item.title}</h3>
                 <p className="text-sm text-zinc-500 dark:text-zinc-400 leading-relaxed mb-4">{item.desc}</p>
-                <a href={item.href} className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline mt-auto">
+                <a href={item.href} className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline mt-auto">
                   {item.cta} →
                 </a>
               </div>
@@ -443,7 +443,7 @@ export default function LandingPage() {
             {isAdmin && (
               <button
                 onClick={() => setAdding(true)}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-sm font-semibold transition-colors"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
                 Add Item
@@ -453,23 +453,23 @@ export default function LandingPage() {
 
           {/* Add Item Form */}
           {adding && isAdmin && (
-            <div className="mb-8 rounded-2xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/10 p-6">
-              <h3 className="text-sm font-semibold text-amber-800 dark:text-amber-300 mb-4">New Catalog Item</h3>
+            <div className="mb-8 rounded-2xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/10 p-6">
+              <h3 className="text-sm font-semibold text-blue-800 dark:text-blue-300 mb-4">New Catalog Item</h3>
               <div className="grid sm:grid-cols-2 gap-3">
                 <input
-                  className="rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 px-3 py-2 text-sm text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  className="rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 px-3 py-2 text-sm text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="Title *"
                   value={newForm.title}
                   onChange={e => setNewForm(f => ({ ...f, title: e.target.value }))}
                 />
                 <input
-                  className="rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 px-3 py-2 text-sm text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  className="rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 px-3 py-2 text-sm text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="Tag (e.g. New Arrival)"
                   value={newForm.tag}
                   onChange={e => setNewForm(f => ({ ...f, tag: e.target.value }))}
                 />
                 <textarea
-                  className="sm:col-span-2 rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 px-3 py-2 text-sm text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500 resize-none"
+                  className="sm:col-span-2 rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 px-3 py-2 text-sm text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
                   rows={2}
                   placeholder="Description"
                   value={newForm.description}
@@ -481,7 +481,7 @@ export default function LandingPage() {
                 <button
                   onClick={handleAddItem}
                   disabled={submitting || !newForm.title.trim()}
-                  className="px-5 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-sm font-semibold transition-colors disabled:opacity-50"
+                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-colors disabled:opacity-50"
                 >
                   {submitting ? 'Adding…' : 'Add to Catalog'}
                 </button>
@@ -525,7 +525,7 @@ export default function LandingPage() {
                   <button
                     onClick={() => setCarouselIndex(i => Math.max(0, i - 1))}
                     disabled={carouselIndex === 0}
-                    className="absolute -left-4 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 shadow-md flex items-center justify-center text-zinc-700 dark:text-zinc-300 hover:bg-amber-50 dark:hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                    className="absolute -left-4 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 shadow-md flex items-center justify-center text-zinc-700 dark:text-zinc-300 hover:bg-blue-50 dark:hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
                     aria-label="Previous"
                   >
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
@@ -559,7 +559,7 @@ export default function LandingPage() {
                   <button
                     onClick={() => setCarouselIndex(i => Math.min(maxIdx, i + 1))}
                     disabled={carouselIndex >= maxIdx}
-                    className="absolute -right-4 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 shadow-md flex items-center justify-center text-zinc-700 dark:text-zinc-300 hover:bg-amber-50 dark:hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                    className="absolute -right-4 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 shadow-md flex items-center justify-center text-zinc-700 dark:text-zinc-300 hover:bg-blue-50 dark:hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
                     aria-label="Next"
                   >
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
@@ -573,7 +573,7 @@ export default function LandingPage() {
                       <button
                         key={i}
                         onClick={() => setCarouselIndex(i)}
-                        className={`rounded-full transition-all duration-200 ${i === carouselIndex ? 'w-6 h-2.5 bg-amber-600' : 'w-2.5 h-2.5 bg-zinc-300 dark:bg-zinc-600 hover:bg-amber-400'}`}
+                        className={`rounded-full transition-all duration-200 ${i === carouselIndex ? 'w-6 h-2.5 bg-blue-600' : 'w-2.5 h-2.5 bg-zinc-300 dark:bg-zinc-600 hover:bg-blue-400'}`}
                         aria-label={`Go to slide ${i + 1}`}
                       />
                     ))}
@@ -590,10 +590,10 @@ export default function LandingPage() {
             <h2 className="text-xl font-bold text-zinc-900 dark:text-white">Ready to order?</h2>
             <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-2">Choose a design from our catalog and place your order, or book an appointment for a custom consultation.</p>
             <div className="mt-6 flex flex-col sm:flex-row items-center justify-center gap-3">
-              <Link href="/place-order?tab=appointment" className="inline-flex items-center justify-center px-7 py-3 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-semibold transition-colors text-sm">
+              <Link href="/place-order?tab=appointment" className="inline-flex items-center justify-center px-7 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold transition-colors text-sm">
                 Book Appointment
               </Link>
-              <Link href="/place-order?tab=products" className="inline-flex items-center justify-center px-7 py-3 rounded-xl border border-amber-600 text-amber-700 dark:text-amber-400 font-semibold hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors text-sm">
+              <Link href="/place-order?tab=products" className="inline-flex items-center justify-center px-7 py-3 rounded-xl border border-blue-600 text-blue-700 dark:text-blue-400 font-semibold hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors text-sm">
                 Purchase Premade Products
               </Link>
             </div>
@@ -651,7 +651,7 @@ export default function LandingPage() {
                   { label: 'Track My Order', href: '/my-orders' },
                 ].map(link => (
                   <li key={link.label}>
-                    <a href={link.href} className="text-xs text-zinc-500 dark:text-zinc-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors">
+                    <a href={link.href} className="text-xs text-zinc-500 dark:text-zinc-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
                       {link.label}
                     </a>
                   </li>
