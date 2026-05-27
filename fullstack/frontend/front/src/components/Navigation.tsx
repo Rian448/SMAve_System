@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth, hasAccess } from '@/context/AuthContext';
@@ -91,6 +91,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
   const router = useRouter();
   const { user, isAuthenticated, logout, isLoading } = useAuth();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const publicRoutes = ['/', '/login', '/place-order'];
 
@@ -103,22 +104,84 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
       router.push('/login');
       return null;
     }
+    const navLinks = [
+      { label: 'Home',         href: '#home' },
+      { label: 'Why Us',       href: '#why-us' },
+      { label: 'How It Works', href: '#process' },
+      { label: 'Catalog',      href: '#catalog' },
+      { label: 'FAQ',          href: '#faq' },
+      { label: 'Contact',      href: '#contact' },
+    ];
+
     return (
-      <nav className="fixed top-0 left-0 right-0 h-16 bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 z-50 flex items-center px-4 sm:px-6 gap-4">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-            <LogoIcon />
+      <nav className="fixed top-0 left-0 right-0 bg-white border-b border-gray-200 z-50 shadow-sm">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex items-center h-16 gap-4">
+
+            {/* Logo */}
+            <a href="#home" className="flex items-center gap-2.5 flex-shrink-0">
+              <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center">
+                <LogoIcon />
+              </div>
+              <span className="font-bold text-gray-900 text-sm tracking-wide hidden sm:block">Seatmakers Avenue</span>
+            </a>
+
+            {/* Desktop nav links */}
+            <div className="hidden md:flex items-center gap-1 ml-6 flex-1">
+              {navLinks.map(link => (
+                <a
+                  key={link.label}
+                  href={link.href}
+                  className="px-3 py-2 text-sm font-medium text-gray-600 hover:text-[#011c72] hover:bg-gray-50 rounded-md transition-colors"
+                >
+                  {link.label}
+                </a>
+              ))}
+            </div>
+
+            {/* Right side: Login + hamburger */}
+            <div className="ml-auto flex items-center gap-3">
+              <Link
+                href="/login"
+                className="px-5 py-2 rounded-md bg-[#011c72] hover:bg-[#01268c] text-white text-sm font-semibold uppercase tracking-wide transition-colors shadow-sm"
+              >
+                Login
+              </Link>
+              {/* Mobile hamburger */}
+              <button
+                onClick={() => setMobileMenuOpen(o => !o)}
+                className="md:hidden p-2 rounded-md text-gray-600 hover:text-[#011c72] hover:bg-gray-50 transition-colors"
+                aria-label="Toggle menu"
+              >
+                {mobileMenuOpen ? (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                ) : (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                  </svg>
+                )}
+              </button>
+            </div>
           </div>
-          <span className="font-bold text-zinc-900 dark:text-white hidden sm:block">Seatmakers Avenue</span>
         </div>
-        <div className="ml-auto">
-          <Link
-            href="/login"
-            className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-500 transition-colors"
-          >
-            Login
-          </Link>
-        </div>
+
+        {/* Mobile dropdown */}
+        {mobileMenuOpen && (
+          <div className="md:hidden border-t border-gray-100 bg-white px-4 py-3 space-y-1">
+            {navLinks.map(link => (
+              <a
+                key={link.label}
+                href={link.href}
+                onClick={() => setMobileMenuOpen(false)}
+                className="block px-3 py-2.5 text-sm font-medium text-gray-600 hover:text-[#011c72] hover:bg-gray-50 rounded-md transition-colors"
+              >
+                {link.label}
+              </a>
+            ))}
+          </div>
+        )}
       </nav>
     );
   }
@@ -127,7 +190,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
     { name: 'My Orders', path: '/my-orders', icon: OrdersIcon, roles: ['customer'] },
     { name: 'Shop Products', path: '/place-order', icon: ShoppingIcon, roles: ['customer'] },
     { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, roles: ['administrator', 'supervisor', 'sales_manager', 'staff'] },
-    { name: 'Worker Dashboard', path: '/worker-dashboard', icon: WorkerIcon, roles: ['seat_maker', 'sewer', 'staff'] },
+    { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, roles: ['administrator'] },
     { name: 'Sales', path: '/sales', icon: SalesIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
     { name: 'Payments', path: '/payments', icon: PaymentsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
     { name: 'Appointments', path: '/appointments', icon: AppointmentsIcon, roles: ['administrator', 'supervisor'] },
@@ -137,7 +200,6 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
     { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, roles: ['administrator', 'supervisor'] },
     { name: 'Item Trail', path: '/delivery', icon: DeliveryIcon, roles: ['administrator', 'supervisor'] },
     { name: 'Reports', path: '/reports', icon: ReportsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Task Management', path: '/task-management', icon: WorkerIcon, roles: ['administrator', 'supervisor'] },
     { name: 'Settings', path: '/settings', icon: SettingsIcon, roles: ['administrator', 'supervisor'] },
   ];
 
@@ -155,35 +217,35 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
 
   const getRoleBadgeColor = (role: string) => {
     switch (role) {
-      case 'administrator': return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
-      case 'supervisor': return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400';
-      case 'sales_manager': return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
-      case 'seat_maker': return 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400';
-      case 'sewer': return 'bg-pink-100 text-pink-700 dark:bg-pink-900/30 dark:text-pink-400';
-      case 'customer': return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400';
-      default: return 'bg-zinc-100 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300';
+      case 'administrator': return 'bg-red-100 text-red-700';
+      case 'supervisor': return 'bg-[#dde6ff] text-[#011c72]';
+      case 'sales_manager': return 'bg-green-100 text-green-700';
+      case 'seat_maker': return 'bg-purple-100 text-purple-700';
+      case 'sewer': return 'bg-pink-100 text-pink-700';
+      case 'customer': return 'bg-[#dde6ff] text-[#011c72]';
+      default: return 'bg-gray-100 text-gray-700';
     }
   };
 
   return (
     <aside
-      className={`fixed left-0 top-0 h-full bg-white dark:bg-zinc-900 border-r border-zinc-200 dark:border-zinc-800 z-40 flex flex-col shadow-sm transition-all duration-300 ${
+      className={`fixed left-0 top-0 h-full bg-white border-r border-gray-200 z-40 flex flex-col shadow-sm transition-all duration-300 ${
         collapsed ? 'w-16' : 'w-64'
       }`}
     >
       {/* Header */}
-      <div className={`flex items-center h-16 px-3 border-b border-zinc-200 dark:border-zinc-800 shrink-0 ${collapsed ? 'justify-center' : 'gap-2'}`}>
-        <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shrink-0">
+      <div className={`flex items-center h-16 px-3 border-b border-gray-200 shrink-0 ${collapsed ? 'justify-center' : 'gap-2'}`}>
+        <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0">
           <LogoIcon />
         </div>
         {!collapsed && (
-          <span className="font-bold text-zinc-900 dark:text-white text-sm flex-1 truncate">
+          <span className="font-bold text-gray-900 text-sm flex-1 truncate">
             Seatmakers Ave
           </span>
         )}
         <button
           onClick={onToggle}
-          className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 transition-colors shrink-0"
+          className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0"
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -212,8 +274,8 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
                 collapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
               } ${
                 isActive
-                  ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
-                  : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white'
+                  ? 'bg-[#dde6ff] text-[#011c72]'
+                  : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
               }`}
             >
               <Icon />
@@ -224,11 +286,11 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
       </nav>
 
       {/* User Section */}
-      <div className="border-t border-zinc-200 dark:border-zinc-800 p-3 shrink-0">
+      <div className="border-t border-gray-200 p-3 shrink-0">
         {collapsed ? (
           <div className="flex flex-col items-center gap-2">
             <div
-              className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center"
+              className="w-8 h-8 bg-[#011c72] rounded-full flex items-center justify-center"
               title={user?.fullName}
             >
               <span className="text-white text-sm font-semibold">
@@ -239,20 +301,20 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
               onClick={handleLogout}
               disabled={isLoggingOut}
               title="Sign Out"
-              className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors disabled:opacity-50"
+              className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50"
             >
               <LogoutIcon />
             </button>
           </div>
         ) : (
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center shrink-0">
+            <div className="w-8 h-8 bg-[#011c72] rounded-full flex items-center justify-center shrink-0">
               <span className="text-white text-sm font-semibold">
                 {user?.fullName?.charAt(0).toUpperCase()}
               </span>
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-zinc-900 dark:text-white truncate">
+              <p className="text-sm font-medium text-gray-900 truncate">
                 {user?.fullName}
               </p>
               <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${getRoleBadgeColor(user?.role || '')}`}>
@@ -263,7 +325,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
               onClick={handleLogout}
               disabled={isLoggingOut}
               title="Sign Out"
-              className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors disabled:opacity-50 shrink-0"
+              className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50 shrink-0"
             >
               <LogoutIcon />
             </button>

@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
@@ -435,48 +435,48 @@ export default function NewJobOrderPage() {
       return (
         <div className="space-y-6">
           <div>
-            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white mb-1">Walk-in Premade Order</h3>
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Step 1 of 2 — Customer & Items</p>
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">Walk-in Premade Order</h3>
+            <p className="text-sm text-gray-500 mb-4">Step 1 of 2 — Customer & Items</p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Customer Name *</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Customer Name *</label>
                 <input
                   type="text"
                   value={customerName}
                   onChange={(e) => setCustomerName(e.target.value)}
                   required
-                  className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="Walk-in customer name"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Phone Number *</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Phone Number *</label>
                 <input
                   type="tel"
                   value={customerPhone}
                   onChange={(e) => setCustomerPhone(e.target.value)}
                   required
-                  className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="09XX XXX XXXX"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Email Address</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
                 <input
                   type="email"
                   value={customerEmail}
                   onChange={(e) => setCustomerEmail(e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="customer@email.com"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Address</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Address</label>
                 <input
                   type="text"
                   value={customerAddress}
                   onChange={(e) => setCustomerAddress(e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="Customer address"
                 />
               </div>
@@ -485,36 +485,36 @@ export default function NewJobOrderPage() {
 
           <div>
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Finished Goods</h3>
+              <h3 className="text-lg font-semibold text-gray-900">Finished Goods</h3>
               <button
                 type="button"
                 onClick={addPremadeSelection}
-                className="inline-flex items-center px-3 py-1.5 bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 rounded-lg text-sm font-medium hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors"
+                className="inline-flex items-center px-3 py-1.5 bg-[#dde6ff] text-[#011c72] rounded-lg text-sm font-medium hover:bg-[#dde6ff] transition-colors"
               >
                 + Add Item
               </button>
             </div>
 
             {premadeLoading ? (
-              <div className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400 py-4">
-                <div className="animate-spin w-4 h-4 border-2 border-amber-600 border-t-transparent rounded-full"></div>
+              <div className="flex items-center gap-2 text-sm text-gray-500 py-4">
+                <div className="animate-spin w-4 h-4 border-2 border-[#011c72] border-t-transparent rounded-full"></div>
                 Loading premade inventory...
               </div>
             ) : (
               <>
                 {premadeItems.length === 0 && (
-                  <div className="text-sm text-zinc-500 dark:text-zinc-400 mb-3">No finished goods found in inventory.</div>
+                  <div className="text-sm text-gray-500 mb-3">No finished goods found in inventory.</div>
                 )}
                 <div className="space-y-3">
                   {premadeSelections.map((selection) => {
                     const selectedItem = premadeItems.find((item) => item.id === selection.productId);
                     return (
-                      <div key={selection.id} className="grid grid-cols-1 md:grid-cols-12 gap-3 p-3 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg border border-zinc-200 dark:border-zinc-700">
+                      <div key={selection.id} className="grid grid-cols-1 md:grid-cols-12 gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
                         <div className="md:col-span-7">
                           <select
                             value={selection.productId}
                             onChange={(e) => updatePremadeSelection(selection.id, 'productId', e.target.value ? Number(e.target.value) : '')}
-                            className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
+                            className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
                             disabled={premadeItems.length === 0}
                           >
                             <option value="">Select finished good item</option>
@@ -536,10 +536,10 @@ export default function NewJobOrderPage() {
                               const boundedValue = selectedItem ? Math.min(nextValue, Number(selectedItem.quantity)) : nextValue;
                               updatePremadeSelection(selection.id, 'quantity', boundedValue);
                             }}
-                            className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
+                            className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
                           />
                         </div>
-                        <div className="md:col-span-2 flex items-center text-sm font-semibold text-zinc-900 dark:text-white">
+                        <div className="md:col-span-2 flex items-center text-sm font-semibold text-gray-900">
                           {selectedItem ? `₱${(selectedItem.price * selection.quantity).toLocaleString()}` : '—'}
                         </div>
                         <div className="md:col-span-1 flex items-center justify-end">
@@ -547,7 +547,7 @@ export default function NewJobOrderPage() {
                             type="button"
                             onClick={() => removePremadeSelection(selection.id)}
                             disabled={premadeSelections.length === 1}
-                            className="p-2 text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            className="p-2 text-red-500 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                           >
                             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -562,9 +562,9 @@ export default function NewJobOrderPage() {
             )}
           </div>
 
-          <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-4 flex justify-between items-center">
-            <span className="text-sm font-medium text-amber-800 dark:text-amber-300">Order Total</span>
-            <span className="text-xl font-bold text-amber-700 dark:text-amber-400">₱{premadeTotal.toLocaleString()}</span>
+          <div className="bg-[#eef1fb] border border-[#c7d2f5] rounded-xl p-4 flex justify-between items-center">
+            <span className="text-sm font-medium text-[#011c72]">Order Total</span>
+            <span className="text-xl font-bold text-[#011c72]">₱{premadeTotal.toLocaleString()}</span>
           </div>
         </div>
       );
@@ -574,36 +574,36 @@ export default function NewJobOrderPage() {
     return (
       <div className="space-y-6">
         <div>
-          <h3 className="text-lg font-semibold text-zinc-900 dark:text-white mb-1">Payment</h3>
-          <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Step 2 of 2 — Review & Payment</p>
+          <h3 className="text-lg font-semibold text-gray-900 mb-1">Payment</h3>
+          <p className="text-sm text-gray-500 mb-4">Step 2 of 2 — Review & Payment</p>
         </div>
 
         {/* Order Summary */}
-        <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-xl border border-zinc-200 dark:border-zinc-700 p-4 space-y-2">
-          <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-3">Order Summary</p>
-          <div className="flex justify-between text-sm text-zinc-700 dark:text-zinc-300">
+        <div className="bg-gray-50 rounded-xl border border-gray-200 p-4 space-y-2">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Order Summary</p>
+          <div className="flex justify-between text-sm text-gray-700">
             <span>Customer</span>
-            <span className="font-medium text-zinc-900 dark:text-white">{customerName}</span>
+            <span className="font-medium text-gray-900">{customerName}</span>
           </div>
-          <div className="flex justify-between text-sm text-zinc-700 dark:text-zinc-300">
+          <div className="flex justify-between text-sm text-gray-700">
             <span>Items</span>
-            <span className="font-medium text-zinc-900 dark:text-white">
+            <span className="font-medium text-gray-900">
               {premadeSelections.filter(s => s.productId).length} item(s)
             </span>
           </div>
-          <div className="flex justify-between items-center pt-2 border-t border-zinc-200 dark:border-zinc-700">
-            <span className="font-semibold text-zinc-900 dark:text-white">Total Due</span>
-            <span className="text-lg font-bold text-amber-600 dark:text-amber-400">₱{premadeTotal.toLocaleString()}</span>
+          <div className="flex justify-between items-center pt-2 border-t border-gray-200">
+            <span className="font-semibold text-gray-900">Total Due</span>
+            <span className="text-lg font-bold text-[#011c72]">₱{premadeTotal.toLocaleString()}</span>
           </div>
         </div>
 
         {/* Amount to Pay */}
         <div>
-          <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
             Amount to Pay
           </label>
           <div className="relative">
-            <span className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500 dark:text-zinc-400 font-medium">₱</span>
+            <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">₱</span>
             <input
               type="number"
               min="0"
@@ -614,7 +614,7 @@ export default function NewJobOrderPage() {
                 const val = e.target.value === '' ? '' : parseFloat(e.target.value);
                 setPaymentAmount(val === '' ? '' : (isNaN(val as number) ? '' : val as number));
               }}
-              className="w-full pl-8 pr-4 py-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent text-lg"
+              className="w-full pl-8 pr-4 py-3 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-lg"
               placeholder="0.00"
             />
           </div>
@@ -623,42 +623,42 @@ export default function NewJobOrderPage() {
           {premadePaymentAmount > 0 && (
             <div className="mt-3 space-y-2">
               {isPremadeFullPayment ? (
-                <div className="flex items-center gap-2 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg">
-                  <svg className="w-5 h-5 text-green-600 dark:text-green-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <div className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg">
+                  <svg className="w-5 h-5 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                   </svg>
-                  <span className="text-sm font-semibold text-green-700 dark:text-green-400">Full Payment — Order will be marked as Paid</span>
+                  <span className="text-sm font-semibold text-green-700">Full Payment — Order will be marked as Paid</span>
                 </div>
               ) : isPremadePartialPayment ? (
-                <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg space-y-1">
+                <div className="p-3 bg-[#eef1fb] border border-[#c7d2f5] rounded-lg space-y-1">
                   <div className="flex items-center gap-2">
-                    <svg className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <svg className="w-5 h-5 text-[#011c72] flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
-                    <span className="text-sm font-semibold text-amber-700 dark:text-amber-400">Partial Payment</span>
+                    <span className="text-sm font-semibold text-[#011c72]">Partial Payment</span>
                   </div>
-                  <div className="flex justify-between text-sm text-amber-700 dark:text-amber-300 pl-7">
+                  <div className="flex justify-between text-sm text-[#011c72] pl-7">
                     <span>Remaining balance:</span>
                     <span className="font-bold">₱{premadeRemaining.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   </div>
-                  <p className="text-xs text-amber-600 dark:text-amber-400 pl-7">The remaining balance can be settled from the order detail page.</p>
+                  <p className="text-xs text-[#011c72] pl-7">The remaining balance can be settled from the order detail page.</p>
                 </div>
               ) : null}
             </div>
           )}
 
           {paymentAmount === '' || premadePaymentAmount === 0 ? (
-            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-2">Leave at ₱0 to record as unpaid.</p>
+            <p className="text-xs text-gray-500 mt-2">Leave at ₱0 to record as unpaid.</p>
           ) : null}
         </div>
 
         {/* Payment Method */}
         <div>
-          <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Payment Method</label>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Payment Method</label>
           <select
             value={paymentMethod}
             onChange={(e) => setPaymentMethod(e.target.value)}
-            className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+            className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
           >
             <option value="cash">Cash</option>
             <option value="gcash">GCash</option>
@@ -669,12 +669,12 @@ export default function NewJobOrderPage() {
 
         {/* Notes */}
         <div>
-          <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Additional Notes</label>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Additional Notes</label>
           <input
             type="text"
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
-            className="w-full px-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+            className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
             placeholder="Walk-in order notes"
           />
         </div>
@@ -716,16 +716,16 @@ export default function NewJobOrderPage() {
         return (
           <div className="space-y-6">
             <div className="text-center py-4">
-              <div className="w-16 h-16 bg-amber-100 dark:bg-amber-900/30 rounded-full flex items-center justify-center mx-auto mb-4">
-                <svg className="w-8 h-8 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <div className="w-16 h-16 bg-[#dde6ff] rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg className="w-8 h-8 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                 </svg>
               </div>
-              <h3 className="text-xl font-bold text-zinc-900 dark:text-white">Who is this order for?</h3>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">Enter the customer's name to get started</p>
+              <h3 className="text-xl font-bold text-gray-900">Who is this order for?</h3>
+              <p className="text-sm text-gray-500 mt-1">Enter the customer's name to get started</p>
             </div>
             <div>
-              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
                 Customer Name <span className="text-red-500">*</span>
               </label>
               <input
@@ -733,7 +733,7 @@ export default function NewJobOrderPage() {
                 value={customerName}
                 onChange={(e) => setCustomerName(e.target.value)}
                 required
-                className="w-full px-4 py-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent text-lg"
+                className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-lg"
                 placeholder="e.g. Juan dela Cruz"
                 autoFocus
               />
@@ -745,8 +745,8 @@ export default function NewJobOrderPage() {
         return (
           <div className="space-y-5">
             <div>
-              <h3 className="text-xl font-bold text-zinc-900 dark:text-white">Select Services</h3>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">Choose one or more services needed</p>
+              <h3 className="text-xl font-bold text-gray-900">Select Services</h3>
+              <p className="text-sm text-gray-500 mt-1">Choose one or more services needed</p>
             </div>
 
             <div className="grid grid-cols-1 gap-3">
@@ -755,13 +755,13 @@ export default function NewJobOrderPage() {
                 onClick={() => setFlooring({ ...flooring, selected: !flooring.selected })}
                 className={`cursor-pointer rounded-xl border-2 p-4 transition-all ${
                   flooring.selected
-                    ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20'
-                    : 'border-zinc-200 dark:border-zinc-700 hover:border-amber-300 dark:hover:border-amber-700'
+                    ? 'border-[#011c72] bg-[#eef1fb]'
+                    : 'border-gray-200 hover:border-[#011c72]'
                 }`}
               >
                 <div className="flex items-start gap-3">
                   <div className={`mt-0.5 w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors ${
-                    flooring.selected ? 'border-amber-500 bg-amber-500' : 'border-zinc-300 dark:border-zinc-600'
+                    flooring.selected ? 'border-[#011c72] bg-[#011c72]' : 'border-gray-300'
                   }`}>
                     {flooring.selected && (
                       <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -771,12 +771,12 @@ export default function NewJobOrderPage() {
                   </div>
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
-                      <span className={`${flooring.selected ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-500 dark:text-zinc-400'}`}>
+                      <span className={`${flooring.selected ? 'text-[#011c72]' : 'text-gray-500'}`}>
                         {SERVICE_ICONS.flooring}
                       </span>
-                      <span className="font-semibold text-zinc-900 dark:text-white">Flooring</span>
+                      <span className="font-semibold text-gray-900">Flooring</span>
                     </div>
-                    <ul className="text-xs text-zinc-500 dark:text-zinc-400 mt-1.5 space-y-0.5">
+                    <ul className="text-xs text-gray-500 mt-1.5 space-y-0.5">
                       <li>• Auto Standard carpet material</li>
                       <li>• All sides trim • With rebonded foam underlay</li>
                     </ul>
@@ -787,7 +787,7 @@ export default function NewJobOrderPage() {
                         onChange={(e) => { e.stopPropagation(); setFlooring({ ...flooring, material: e.target.value }); }}
                         onClick={(e) => e.stopPropagation()}
                         placeholder="Specify material"
-                        className="mt-3 w-full px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                        className="mt-3 w-full px-3 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                       />
                     )}
                   </div>
@@ -799,13 +799,13 @@ export default function NewJobOrderPage() {
                 onClick={() => setReupholstery({ ...reupholstery, selected: !reupholstery.selected })}
                 className={`cursor-pointer rounded-xl border-2 p-4 transition-all ${
                   reupholstery.selected
-                    ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20'
-                    : 'border-zinc-200 dark:border-zinc-700 hover:border-amber-300 dark:hover:border-amber-700'
+                    ? 'border-[#011c72] bg-[#eef1fb]'
+                    : 'border-gray-200 hover:border-[#011c72]'
                 }`}
               >
                 <div className="flex items-start gap-3">
                   <div className={`mt-0.5 w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors ${
-                    reupholstery.selected ? 'border-amber-500 bg-amber-500' : 'border-zinc-300 dark:border-zinc-600'
+                    reupholstery.selected ? 'border-[#011c72] bg-[#011c72]' : 'border-gray-300'
                   }`}>
                     {reupholstery.selected && (
                       <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -815,12 +815,12 @@ export default function NewJobOrderPage() {
                   </div>
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
-                      <span className={`${reupholstery.selected ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-500 dark:text-zinc-400'}`}>
+                      <span className={`${reupholstery.selected ? 'text-[#011c72]' : 'text-gray-500'}`}>
                         {SERVICE_ICONS.reupholstery}
                       </span>
-                      <span className="font-semibold text-zinc-900 dark:text-white">Reupholstery</span>
+                      <span className="font-semibold text-gray-900">Reupholstery</span>
                     </div>
-                    <ul className="text-xs text-zinc-500 dark:text-zinc-400 mt-1.5 space-y-0.5">
+                    <ul className="text-xs text-gray-500 mt-1.5 space-y-0.5">
                       <li>• Auto Standard material • Class A Uratex foam</li>
                       <li>• Includes spring & frame repair</li>
                     </ul>
@@ -831,7 +831,7 @@ export default function NewJobOrderPage() {
                         onChange={(e) => { e.stopPropagation(); setReupholstery({ ...reupholstery, material: e.target.value }); }}
                         onClick={(e) => e.stopPropagation()}
                         placeholder="Specify material"
-                        className="mt-3 w-full px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                        className="mt-3 w-full px-3 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                       />
                     )}
                   </div>
@@ -843,13 +843,13 @@ export default function NewJobOrderPage() {
                 onClick={() => setCeiling({ ...ceiling, selected: !ceiling.selected })}
                 className={`cursor-pointer rounded-xl border-2 p-4 transition-all ${
                   ceiling.selected
-                    ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20'
-                    : 'border-zinc-200 dark:border-zinc-700 hover:border-amber-300 dark:hover:border-amber-700'
+                    ? 'border-[#011c72] bg-[#eef1fb]'
+                    : 'border-gray-200 hover:border-[#011c72]'
                 }`}
               >
                 <div className="flex items-start gap-3">
                   <div className={`mt-0.5 w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors ${
-                    ceiling.selected ? 'border-amber-500 bg-amber-500' : 'border-zinc-300 dark:border-zinc-600'
+                    ceiling.selected ? 'border-[#011c72] bg-[#011c72]' : 'border-gray-300'
                   }`}>
                     {ceiling.selected && (
                       <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -859,12 +859,12 @@ export default function NewJobOrderPage() {
                   </div>
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
-                      <span className={`${ceiling.selected ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-500 dark:text-zinc-400'}`}>
+                      <span className={`${ceiling.selected ? 'text-[#011c72]' : 'text-gray-500'}`}>
                         {SERVICE_ICONS.ceiling}
                       </span>
-                      <span className="font-semibold text-zinc-900 dark:text-white">Ceiling</span>
+                      <span className="font-semibold text-gray-900">Ceiling</span>
                     </div>
-                    <ul className="text-xs text-zinc-500 dark:text-zinc-400 mt-1.5 space-y-0.5">
+                    <ul className="text-xs text-gray-500 mt-1.5 space-y-0.5">
                       <li>• Auto Standard ceiling material • Heat insulation</li>
                       <li>• Includes all post and sunvisor</li>
                     </ul>
@@ -875,7 +875,7 @@ export default function NewJobOrderPage() {
                         onChange={(e) => { e.stopPropagation(); setCeiling({ ...ceiling, material: e.target.value }); }}
                         onClick={(e) => e.stopPropagation()}
                         placeholder="Specify material"
-                        className="mt-3 w-full px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                        className="mt-3 w-full px-3 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                       />
                     )}
                   </div>
@@ -887,13 +887,13 @@ export default function NewJobOrderPage() {
                 onClick={() => setSidings({ ...sidings, selected: !sidings.selected })}
                 className={`cursor-pointer rounded-xl border-2 p-4 transition-all ${
                   sidings.selected
-                    ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20'
-                    : 'border-zinc-200 dark:border-zinc-700 hover:border-amber-300 dark:hover:border-amber-700'
+                    ? 'border-[#011c72] bg-[#eef1fb]'
+                    : 'border-gray-200 hover:border-[#011c72]'
                 }`}
               >
                 <div className="flex items-start gap-3">
                   <div className={`mt-0.5 w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors ${
-                    sidings.selected ? 'border-amber-500 bg-amber-500' : 'border-zinc-300 dark:border-zinc-600'
+                    sidings.selected ? 'border-[#011c72] bg-[#011c72]' : 'border-gray-300'
                   }`}>
                     {sidings.selected && (
                       <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -903,12 +903,12 @@ export default function NewJobOrderPage() {
                   </div>
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
-                      <span className={`${sidings.selected ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-500 dark:text-zinc-400'}`}>
+                      <span className={`${sidings.selected ? 'text-[#011c72]' : 'text-gray-500'}`}>
                         {SERVICE_ICONS.sidings}
                       </span>
-                      <span className="font-semibold text-zinc-900 dark:text-white">Sidings</span>
+                      <span className="font-semibold text-gray-900">Sidings</span>
                     </div>
-                    <ul className="text-xs text-zinc-500 dark:text-zinc-400 mt-1.5 space-y-0.5">
+                    <ul className="text-xs text-gray-500 mt-1.5 space-y-0.5">
                       <li>• Electric pressed design • With 1/8 plyboard base</li>
                       <li>• Note: SIDINGS clips not included (₱5.00 each)</li>
                     </ul>
@@ -919,7 +919,7 @@ export default function NewJobOrderPage() {
                         onChange={(e) => { e.stopPropagation(); setSidings({ ...sidings, material: e.target.value }); }}
                         onClick={(e) => e.stopPropagation()}
                         placeholder="Specify material"
-                        className="mt-3 w-full px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                        className="mt-3 w-full px-3 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                       />
                     )}
                   </div>
@@ -931,13 +931,13 @@ export default function NewJobOrderPage() {
                 onClick={() => setSeatCovers({ ...seatCovers, selected: !seatCovers.selected })}
                 className={`cursor-pointer rounded-xl border-2 p-4 transition-all ${
                   seatCovers.selected
-                    ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20'
-                    : 'border-zinc-200 dark:border-zinc-700 hover:border-amber-300 dark:hover:border-amber-700'
+                    ? 'border-[#011c72] bg-[#eef1fb]'
+                    : 'border-gray-200 hover:border-[#011c72]'
                 }`}
               >
                 <div className="flex items-start gap-3">
                   <div className={`mt-0.5 w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors ${
-                    seatCovers.selected ? 'border-amber-500 bg-amber-500' : 'border-zinc-300 dark:border-zinc-600'
+                    seatCovers.selected ? 'border-[#011c72] bg-[#011c72]' : 'border-gray-300'
                   }`}>
                     {seatCovers.selected && (
                       <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -947,17 +947,17 @@ export default function NewJobOrderPage() {
                   </div>
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
-                      <span className={`${seatCovers.selected ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-500 dark:text-zinc-400'}`}>
+                      <span className={`${seatCovers.selected ? 'text-[#011c72]' : 'text-gray-500'}`}>
                         {SERVICE_ICONS.seatCovers}
                       </span>
-                      <span className="font-semibold text-zinc-900 dark:text-white">Seat Covers</span>
+                      <span className="font-semibold text-gray-900">Seat Covers</span>
                     </div>
                     {seatCovers.selected && (
                       <div className="mt-3 grid grid-cols-2 gap-2" onClick={(e) => e.stopPropagation()}>
-                        <input type="text" value={seatCovers.design} onChange={(e) => setSeatCovers({ ...seatCovers, design: e.target.value })} placeholder="Design" className="w-full px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent" />
-                        <input type="text" value={seatCovers.material} onChange={(e) => setSeatCovers({ ...seatCovers, material: e.target.value })} placeholder="Material" className="w-full px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent" />
-                        <input type="text" value={seatCovers.pocket} onChange={(e) => setSeatCovers({ ...seatCovers, pocket: e.target.value })} placeholder="Pocket" className="w-full px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent" />
-                        <input type="text" value={seatCovers.others} onChange={(e) => setSeatCovers({ ...seatCovers, others: e.target.value })} placeholder="Others" className="w-full px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent" />
+                        <input type="text" value={seatCovers.design} onChange={(e) => setSeatCovers({ ...seatCovers, design: e.target.value })} placeholder="Design" className="w-full px-3 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                        <input type="text" value={seatCovers.material} onChange={(e) => setSeatCovers({ ...seatCovers, material: e.target.value })} placeholder="Material" className="w-full px-3 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                        <input type="text" value={seatCovers.pocket} onChange={(e) => setSeatCovers({ ...seatCovers, pocket: e.target.value })} placeholder="Pocket" className="w-full px-3 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                        <input type="text" value={seatCovers.others} onChange={(e) => setSeatCovers({ ...seatCovers, others: e.target.value })} placeholder="Others" className="w-full px-3 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
                       </div>
                     )}
                   </div>
@@ -969,13 +969,13 @@ export default function NewJobOrderPage() {
                 onClick={() => setOtherServices({ ...otherServices, selected: !otherServices.selected })}
                 className={`cursor-pointer rounded-xl border-2 p-4 transition-all ${
                   otherServices.selected
-                    ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20'
-                    : 'border-zinc-200 dark:border-zinc-700 hover:border-amber-300 dark:hover:border-amber-700'
+                    ? 'border-[#011c72] bg-[#eef1fb]'
+                    : 'border-gray-200 hover:border-[#011c72]'
                 }`}
               >
                 <div className="flex items-start gap-3">
                   <div className={`mt-0.5 w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors ${
-                    otherServices.selected ? 'border-amber-500 bg-amber-500' : 'border-zinc-300 dark:border-zinc-600'
+                    otherServices.selected ? 'border-[#011c72] bg-[#011c72]' : 'border-gray-300'
                   }`}>
                     {otherServices.selected && (
                       <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -985,10 +985,10 @@ export default function NewJobOrderPage() {
                   </div>
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
-                      <span className={`${otherServices.selected ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-500 dark:text-zinc-400'}`}>
+                      <span className={`${otherServices.selected ? 'text-[#011c72]' : 'text-gray-500'}`}>
                         {SERVICE_ICONS.other}
                       </span>
-                      <span className="font-semibold text-zinc-900 dark:text-white">Other Services</span>
+                      <span className="font-semibold text-gray-900">Other Services</span>
                     </div>
                     {otherServices.selected && (
                       <input
@@ -997,7 +997,7 @@ export default function NewJobOrderPage() {
                         onChange={(e) => { e.stopPropagation(); setOtherServices({ ...otherServices, description: e.target.value }); }}
                         onClick={(e) => e.stopPropagation()}
                         placeholder="Describe your service needs"
-                        className="mt-3 w-full px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                        className="mt-3 w-full px-3 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                       />
                     )}
                   </div>
@@ -1008,11 +1008,11 @@ export default function NewJobOrderPage() {
             {/* Additional Details */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Priority</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Priority</label>
                 <select
                   value={priority}
                   onChange={(e) => setPriority(e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                 >
                   <option value="low">Low</option>
                   <option value="normal">Normal</option>
@@ -1021,12 +1021,12 @@ export default function NewJobOrderPage() {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Estimated Completion Date</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Estimated Completion Date</label>
                 <input
                   type="date"
                   value={estimatedCompletionDate}
                   onChange={(e) => setEstimatedCompletionDate(e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                 />
               </div>
             </div>
@@ -1037,12 +1037,12 @@ export default function NewJobOrderPage() {
         return (
           <div className="space-y-6">
             <div>
-              <h3 className="text-xl font-bold text-zinc-900 dark:text-white">Customer Contact Details</h3>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">How can we reach {customerName || 'the customer'}?</p>
+              <h3 className="text-xl font-bold text-gray-900">Customer Contact Details</h3>
+              <p className="text-sm text-gray-500 mt-1">How can we reach {customerName || 'the customer'}?</p>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
                   Phone Number <span className="text-red-500">*</span>
                 </label>
                 <input
@@ -1050,27 +1050,27 @@ export default function NewJobOrderPage() {
                   value={customerPhone}
                   onChange={(e) => setCustomerPhone(e.target.value)}
                   required
-                  className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="09XX XXX XXXX"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Email Address</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
                 <input
                   type="email"
                   value={customerEmail}
                   onChange={(e) => setCustomerEmail(e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="customer@email.com"
                 />
               </div>
               <div className="md:col-span-2">
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Address</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Address</label>
                 <input
                   type="text"
                   value={customerAddress}
                   onChange={(e) => setCustomerAddress(e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="123 Main St, City"
                 />
               </div>
@@ -1082,16 +1082,16 @@ export default function NewJobOrderPage() {
         return (
           <div className="space-y-6">
             <div>
-              <h3 className="text-xl font-bold text-zinc-900 dark:text-white">
+              <h3 className="text-xl font-bold text-gray-900">
                 {reupholstery.selected ? 'Reupholstery Item Details' : 'Vehicle Information'}
               </h3>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+              <p className="text-sm text-gray-500 mt-1">
                 {reupholstery.selected ? 'What item needs to be reupholstered?' : 'Tell us about the vehicle'}
               </p>
             </div>
             {reupholstery.selected ? (
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
                   Furniture or item to reupholster <span className="text-red-500">*</span>
                 </label>
                 <input
@@ -1099,14 +1099,14 @@ export default function NewJobOrderPage() {
                   value={reupholsteryItemType}
                   onChange={(e) => setReupholsteryItemType(e.target.value)}
                   required
-                  className="w-full px-4 py-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="e.g. Sofa set, dining chair, office chair, motorcycle seat"
                 />
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                 <div>
-                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
                     Vehicle Make <span className="text-red-500">*</span>
                   </label>
                   <input
@@ -1114,12 +1114,12 @@ export default function NewJobOrderPage() {
                     value={vehicleMake}
                     onChange={(e) => setVehicleMake(e.target.value)}
                     required
-                    className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                     placeholder="Toyota"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
                     Vehicle Model <span className="text-red-500">*</span>
                   </label>
                   <input
@@ -1127,12 +1127,12 @@ export default function NewJobOrderPage() {
                     value={vehicleModel}
                     onChange={(e) => setVehicleModel(e.target.value)}
                     required
-                    className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                     placeholder="Fortuner"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
                     Year <span className="text-red-500">*</span>
                   </label>
                   <input
@@ -1140,17 +1140,17 @@ export default function NewJobOrderPage() {
                     value={vehicleYear}
                     onChange={(e) => setVehicleYear(e.target.value)}
                     required
-                    className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                     placeholder="2023"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Plate Number</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Plate Number</label>
                   <input
                     type="text"
                     value={vehiclePlate}
                     onChange={(e) => setVehiclePlate(e.target.value)}
-                    className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                     placeholder="ABC 1234"
                   />
                 </div>
@@ -1163,36 +1163,36 @@ export default function NewJobOrderPage() {
         return (
           <div className="space-y-5">
             <div>
-              <h3 className="text-xl font-bold text-zinc-900 dark:text-white">Review & Submit</h3>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">Confirm the job order details before submitting</p>
+              <h3 className="text-xl font-bold text-gray-900">Review & Submit</h3>
+              <p className="text-sm text-gray-500 mt-1">Confirm the job order details before submitting</p>
             </div>
 
             {/* Summary Cards */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-xl p-4 border border-zinc-200 dark:border-zinc-700">
-                <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2">Customer</p>
-                <p className="font-semibold text-zinc-900 dark:text-white text-base">{customerName || '—'}</p>
-                {customerPhone && <p className="text-sm text-zinc-600 dark:text-zinc-300 mt-0.5">{customerPhone}</p>}
-                {customerEmail && <p className="text-sm text-zinc-500 dark:text-zinc-400">{customerEmail}</p>}
+              <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Customer</p>
+                <p className="font-semibold text-gray-900 text-base">{customerName || '—'}</p>
+                {customerPhone && <p className="text-sm text-gray-600 mt-0.5">{customerPhone}</p>}
+                {customerEmail && <p className="text-sm text-gray-500">{customerEmail}</p>}
               </div>
-              <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-xl p-4 border border-zinc-200 dark:border-zinc-700">
-                <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2">
+              <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">
                   {reupholstery.selected ? 'Item' : 'Vehicle'}
                 </p>
-                <p className="font-semibold text-zinc-900 dark:text-white text-base">
+                <p className="font-semibold text-gray-900 text-base">
                   {reupholstery.selected
                     ? (reupholsteryItemType.trim() || 'Reupholstery item')
                     : `${vehicleMake || '—'} ${vehicleModel || ''}`.trim()}
                 </p>
-                <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-0.5">
+                <p className="text-sm text-gray-500 mt-0.5">
                   {reupholstery.selected ? 'Reupholstery request' : `${vehicleYear || ''} ${vehiclePlate || ''}`.trim() || '—'}
                 </p>
               </div>
             </div>
 
             {/* Services */}
-            <div className="bg-amber-50 dark:bg-amber-900/20 rounded-xl p-4 border border-amber-200 dark:border-amber-800">
-              <p className="text-xs font-medium text-amber-700 dark:text-amber-400 uppercase tracking-wide mb-2">Selected Services</p>
+            <div className="bg-[#eef1fb] rounded-xl p-4 border border-[#c7d2f5]">
+              <p className="text-xs font-medium text-[#011c72] uppercase tracking-wide mb-2">Selected Services</p>
               <div className="flex flex-wrap gap-2">
                 {[
                   flooring.selected && 'Flooring',
@@ -1202,35 +1202,35 @@ export default function NewJobOrderPage() {
                   seatCovers.selected && 'Seat Covers',
                   otherServices.selected && 'Other Services'
                 ].filter(Boolean).map((service) => (
-                  <span key={service as string} className="px-2.5 py-1 bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-300 text-sm font-medium rounded-full">
+                  <span key={service as string} className="px-2.5 py-1 bg-[#dde6ff] text-[#011c72] text-sm font-medium rounded-full">
                     {service}
                   </span>
                 ))}
                 {![flooring.selected, reupholstery.selected, ceiling.selected, sidings.selected, seatCovers.selected, otherServices.selected].some(Boolean) && (
-                  <span className="text-sm text-amber-600 dark:text-amber-400">No services selected yet</span>
+                  <span className="text-sm text-[#011c72]">No services selected yet</span>
                 )}
               </div>
               {estimatedCompletionDate && (
-                <p className="text-xs text-amber-700 dark:text-amber-400 mt-2">
+                <p className="text-xs text-[#011c72] mt-2">
                   Est. completion: {new Date(estimatedCompletionDate).toLocaleDateString('en-PH', { month: 'long', day: 'numeric', year: 'numeric' })}
                 </p>
               )}
             </div>
 
-            <div className="bg-blue-50 dark:bg-blue-900/20 rounded-xl p-4 border border-blue-200 dark:border-blue-800">
-              <p className="text-xs font-medium text-blue-700 dark:text-blue-400 mb-1">Note</p>
-              <p className="text-sm text-blue-700 dark:text-blue-300">
+            <div className="bg-blue-50 rounded-xl p-4 border border-blue-200">
+              <p className="text-xs font-medium text-blue-700 mb-1">Note</p>
+              <p className="text-sm text-blue-700">
                 Materials, labor, and final pricing will be added by admin or supervisor after the job order is created.
               </p>
             </div>
 
             <div className="space-y-3">
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
                   Estimated Total Amount for the Work
                 </label>
                 <div className="relative">
-                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500 dark:text-zinc-400 font-medium">₱</span>
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">₱</span>
                   <input
                     type="number"
                     min="0"
@@ -1241,29 +1241,29 @@ export default function NewJobOrderPage() {
                       setEstimatedTotal(val);
                       setDownPayment(val / 2);
                     }}
-                    className="w-full pl-8 pr-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    className="w-full pl-8 pr-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                     placeholder="0.00"
                   />
                 </div>
               </div>
-              <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-4 flex items-center justify-between">
+              <div className="bg-[#eef1fb] border border-[#c7d2f5] rounded-xl p-4 flex items-center justify-between">
                 <div>
-                  <p className="text-sm font-medium text-amber-800 dark:text-amber-300">Down Payment (50%)</p>
-                  <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5">Half of estimated total</p>
+                  <p className="text-sm font-medium text-[#011c72]">Down Payment (50%)</p>
+                  <p className="text-xs text-[#011c72] mt-0.5">Half of estimated total</p>
                 </div>
-                <span className="text-xl font-bold text-amber-700 dark:text-amber-400">
+                <span className="text-xl font-bold text-[#011c72]">
                   ₱{downPayment.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Additional Notes</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Additional Notes</label>
               <textarea
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 rows={3}
-                className="w-full px-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent resize-none"
+                className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent resize-none"
                 placeholder="Any special instructions or notes..."
               />
             </div>
@@ -1276,34 +1276,34 @@ export default function NewJobOrderPage() {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
+    <div className="min-h-screen bg-gray-50">
       <main className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="mb-8">
           <button
             onClick={() => router.back()}
-            className="inline-flex items-center text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white mb-4 transition-colors"
+            className="inline-flex items-center text-gray-600 hover:text-gray-900 mb-4 transition-colors"
           >
             <svg className="w-5 h-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
             Back
           </button>
-          <h1 className="text-3xl font-bold text-zinc-900 dark:text-white">New Job Order</h1>
-          <p className="text-zinc-500 dark:text-zinc-400 mt-1">Create a new service order for a customer</p>
+          <h1 className="text-3xl font-bold text-gray-900">New Job Order</h1>
+          <p className="text-gray-500 mt-1">Create a new service order for a customer</p>
         </div>
 
         {/* Order Type Selector */}
-        <div className="mb-6 bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
-          <p className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-3">Order Type</p>
+        <div className="mb-6 bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
+          <p className="text-sm font-semibold text-gray-700 mb-3">Order Type</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <button
               type="button"
               onClick={() => setOrderType('normal')}
               className={`text-left px-4 py-3.5 rounded-xl border-2 transition-all ${
                 orderType === 'normal'
-                  ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 shadow-sm'
-                  : 'border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:border-amber-300 dark:hover:border-amber-800'
+                  ? 'border-[#011c72] bg-[#eef1fb] text-[#011c72] shadow-sm'
+                  : 'border-gray-200 text-gray-700 hover:border-[#011c72]'
               }`}
             >
               <div className="flex items-center gap-2 mb-1">
@@ -1319,8 +1319,8 @@ export default function NewJobOrderPage() {
               onClick={() => setOrderType('premade')}
               className={`text-left px-4 py-3.5 rounded-xl border-2 transition-all ${
                 orderType === 'premade'
-                  ? 'border-amber-500 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 shadow-sm'
-                  : 'border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:border-amber-300 dark:hover:border-amber-800'
+                  ? 'border-[#011c72] bg-[#eef1fb] text-[#011c72] shadow-sm'
+                  : 'border-gray-200 text-gray-700 hover:border-[#011c72]'
               }`}
             >
               <div className="flex items-center gap-2 mb-1">
@@ -1345,10 +1345,10 @@ export default function NewJobOrderPage() {
                       onClick={() => setStep(s.num)}
                       className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold text-sm transition-all duration-200 ${
                         step > s.num
-                          ? 'bg-amber-600 text-white shadow-md'
+                          ? 'bg-[#011c72] text-white shadow-md'
                           : step === s.num
-                          ? 'bg-amber-600 text-white shadow-lg ring-4 ring-amber-200 dark:ring-amber-900/50'
-                          : 'bg-white dark:bg-zinc-800 border-2 border-zinc-200 dark:border-zinc-700 text-zinc-400 dark:text-zinc-500'
+                          ? 'bg-[#011c72] text-white shadow-lg ring-4 ring-amber-200'
+                          : 'bg-white border-2 border-gray-200 text-gray-400'
                       }`}
                     >
                       {step > s.num ? (
@@ -1358,14 +1358,14 @@ export default function NewJobOrderPage() {
                       ) : s.num}
                     </button>
                     <span className={`mt-1.5 text-xs font-medium hidden sm:block ${
-                      step >= s.num ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-400 dark:text-zinc-500'
+                      step >= s.num ? 'text-[#011c72]' : 'text-gray-400'
                     }`}>
                       {s.label}
                     </span>
                   </div>
                   {index < STEPS.length - 1 && (
                     <div className={`flex-1 h-0.5 mt-5 mx-1 rounded-full transition-colors duration-300 ${
-                      step > s.num ? 'bg-amber-500' : 'bg-zinc-200 dark:bg-zinc-700'
+                      step > s.num ? 'bg-[#011c72]' : 'bg-gray-200'
                     }`} />
                   )}
                 </div>
@@ -1376,7 +1376,7 @@ export default function NewJobOrderPage() {
 
         {/* Form Card */}
         <form onSubmit={handleSubmit}>
-          <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6 mb-5">
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-5">
             {orderType === 'normal' ? renderStep() : renderPremadeForm()}
           </div>
 
@@ -1389,8 +1389,8 @@ export default function NewJobOrderPage() {
                 disabled={step === 1}
                 className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors ${
                   step === 1
-                    ? 'bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-600 cursor-not-allowed'
-                    : 'bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-700'
+                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'
                 }`}
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1403,7 +1403,7 @@ export default function NewJobOrderPage() {
                   key="next-btn"
                   type="button"
                   onClick={(e) => { e.preventDefault(); setStep(step + 1); }}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-medium transition-colors shadow-sm"
+                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#011c72] hover:bg-[#01268c] text-white rounded-xl font-medium transition-colors shadow-sm"
                 >
                   Next
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1415,7 +1415,7 @@ export default function NewJobOrderPage() {
                   key="submit-btn"
                   type="submit"
                   disabled={loading}
-                  className="inline-flex items-center gap-2 px-6 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-2 px-6 py-2.5 bg-[#011c72] hover:bg-[#01268c] text-white rounded-xl font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {loading ? (
                     <>
@@ -1439,7 +1439,7 @@ export default function NewJobOrderPage() {
                 <button
                   type="button"
                   onClick={() => router.back()}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors"
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 transition-colors"
                 >
                   Cancel
                 </button>
@@ -1447,7 +1447,7 @@ export default function NewJobOrderPage() {
                 <button
                   type="button"
                   onClick={() => { setError(''); setPremadeStep(1); }}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-700 transition-colors"
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 transition-colors"
                 >
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -1460,7 +1460,7 @@ export default function NewJobOrderPage() {
                   <button
                     type="button"
                     onClick={() => router.back()}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white dark:bg-zinc-800 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
                   >
                     Cancel
                   </button>
@@ -1468,7 +1468,7 @@ export default function NewJobOrderPage() {
                 <button
                   type="submit"
                   disabled={loading}
-                  className="inline-flex items-center gap-2 px-6 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-2 px-6 py-2.5 bg-[#011c72] hover:bg-[#01268c] text-white rounded-xl font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {loading ? (
                     <>
@@ -1496,7 +1496,7 @@ export default function NewJobOrderPage() {
           )}
 
           {error && (
-            <div className="mt-4 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl text-red-600 dark:text-red-400 text-sm flex items-start gap-2">
+            <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-xl text-red-600 text-sm flex items-start gap-2">
               <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>

@@ -377,6 +377,34 @@ class PaymentRecord(db.Model):
     job_order = db.relationship('JobOrder', backref='payment_records')
     recorder = db.relationship('User', foreign_keys=[recorded_by])
 
+class ManagedWorker(db.Model):
+    __tablename__ = 'managed_workers'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    work_type = db.Column(db.String(100), nullable=False)  # seat_maker, sewer, upholstery, installer
+    rate_per_hour = db.Column(db.Float, nullable=False, default=0)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class WorkerAssignment(db.Model):
+    __tablename__ = 'worker_assignments'
+    id = db.Column(db.Integer, primary_key=True)
+    worker_id = db.Column(db.Integer, db.ForeignKey('managed_workers.id'), nullable=False)
+    job_order_ref = db.Column(db.String(50), nullable=False)  # job order number e.g. JO-BA-2026-0001
+    job_order_db_id = db.Column(db.Integer, nullable=True)    # numeric DB id for linking
+    description = db.Column(db.String(255), nullable=True)    # task description from labor line
+    start_time = db.Column(db.DateTime, nullable=True)
+    end_time = db.Column(db.DateTime, nullable=True)
+    hours_worked = db.Column(db.Float, nullable=True)         # computed or manually entered
+    pay = db.Column(db.Float, nullable=True)                  # hours_worked * rate_per_hour
+    status = db.Column(db.String(50), default='pending')      # pending, in_progress, completed
+    notes = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    worker = db.relationship('ManagedWorker', backref='assignments')
+
 # ============================================
 # SEED DATA
 # ============================================
@@ -5041,6 +5069,248 @@ def debug_workers():
             'totalRoles': len(all_roles)
         }
     })
+
+# ============================================
+# MANAGED WORKERS & ASSIGNMENTS
+# ============================================
+
+@app.route('/api/managed-workers', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def list_managed_workers():
+    workers = ManagedWorker.query.order_by(ManagedWorker.name).all()
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'workers': [
+                {
+                    'id': w.id,
+                    'name': w.name,
+                    'workType': w.work_type,
+                    'ratePerHour': w.rate_per_hour,
+                    'isActive': w.is_active,
+                    'createdAt': w.created_at.isoformat(),
+                }
+                for w in workers
+            ]
+        }
+    })
+
+@app.route('/api/managed-workers', methods=['POST'])
+@require_auth
+@require_roles('administrator')
+def create_managed_worker():
+    data = request.get_json()
+    name = (data.get('name') or '').strip()
+    work_type = (data.get('workType') or '').strip()
+    rate = float(data.get('ratePerHour') or 0)
+    if not name or not work_type:
+        return jsonify({'error': 'name and workType are required'}), 400
+    worker = ManagedWorker(name=name, work_type=work_type, rate_per_hour=rate)
+    db.session.add(worker)
+    db.session.commit()
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'worker': {
+                'id': worker.id,
+                'name': worker.name,
+                'workType': worker.work_type,
+                'ratePerHour': worker.rate_per_hour,
+                'isActive': worker.is_active,
+            }
+        }
+    }), 201
+
+@app.route('/api/managed-workers/<int:worker_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator')
+def update_managed_worker(worker_id):
+    worker = ManagedWorker.query.get(worker_id)
+    if not worker:
+        return jsonify({'error': 'Worker not found'}), 404
+    data = request.get_json()
+    if 'name' in data:
+        worker.name = (data['name'] or '').strip()
+    if 'workType' in data:
+        worker.work_type = (data['workType'] or '').strip()
+    if 'ratePerHour' in data:
+        worker.rate_per_hour = float(data['ratePerHour'] or 0)
+    if 'isActive' in data:
+        worker.is_active = bool(data['isActive'])
+    db.session.commit()
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'worker': {
+                'id': worker.id,
+                'name': worker.name,
+                'workType': worker.work_type,
+                'ratePerHour': worker.rate_per_hour,
+                'isActive': worker.is_active,
+            }
+        }
+    })
+
+@app.route('/api/managed-workers/<int:worker_id>', methods=['DELETE'])
+@require_auth
+@require_roles('administrator')
+def deactivate_managed_worker(worker_id):
+    worker = ManagedWorker.query.get(worker_id)
+    if not worker:
+        return jsonify({'error': 'Worker not found'}), 404
+    worker.is_active = False
+    db.session.commit()
+    return jsonify({'status': 'success', 'message': 'Worker deactivated'})
+
+@app.route('/api/worker-assignments', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def list_worker_assignments():
+    worker_id = request.args.get('workerId', type=int)
+    query = WorkerAssignment.query
+    if worker_id:
+        query = query.filter_by(worker_id=worker_id)
+    assignments = query.order_by(WorkerAssignment.created_at.desc()).all()
+    result = []
+    for a in assignments:
+        result.append({
+            'id': a.id,
+            'workerId': a.worker_id,
+            'workerName': a.worker.name if a.worker else '',
+            'workType': a.worker.work_type if a.worker else '',
+            'ratePerHour': a.worker.rate_per_hour if a.worker else 0,
+            'jobOrderRef': a.job_order_ref,
+            'jobOrderDbId': a.job_order_db_id,
+            'description': a.description,
+            'startTime': a.start_time.isoformat() if a.start_time else None,
+            'endTime': a.end_time.isoformat() if a.end_time else None,
+            'hoursWorked': a.hours_worked,
+            'pay': a.pay,
+            'status': a.status,
+            'notes': a.notes,
+            'createdAt': a.created_at.isoformat(),
+        })
+    return jsonify({'status': 'success', 'data': {'assignments': result}})
+
+@app.route('/api/worker-assignments', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def create_worker_assignment():
+    data = request.get_json()
+    worker_id = data.get('workerId')
+    job_order_ref = (data.get('jobOrderRef') or '').strip()
+    if not worker_id or not job_order_ref:
+        return jsonify({'error': 'workerId and jobOrderRef are required'}), 400
+    worker = ManagedWorker.query.get(worker_id)
+    if not worker:
+        return jsonify({'error': 'Worker not found'}), 404
+    description = data.get('description', '') or ''
+    # Prevent exact duplicates (same worker + job order + description)
+    existing = WorkerAssignment.query.filter_by(
+        worker_id=worker_id,
+        job_order_ref=job_order_ref,
+        description=description,
+    ).first()
+    if existing:
+        return jsonify({
+            'status': 'success',
+            'data': {
+                'assignment': {
+                    'id': existing.id,
+                    'workerId': existing.worker_id,
+                    'workerName': worker.name,
+                    'jobOrderRef': existing.job_order_ref,
+                    'description': existing.description,
+                    'status': existing.status,
+                }
+            }
+        })
+    assignment = WorkerAssignment(
+        worker_id=worker_id,
+        job_order_ref=job_order_ref,
+        job_order_db_id=data.get('jobOrderDbId'),
+        description=description,
+        status='pending',
+        notes=data.get('notes', ''),
+    )
+    db.session.add(assignment)
+    db.session.commit()
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'assignment': {
+                'id': assignment.id,
+                'workerId': assignment.worker_id,
+                'workerName': worker.name,
+                'jobOrderRef': assignment.job_order_ref,
+                'description': assignment.description,
+                'status': assignment.status,
+            }
+        }
+    }), 201
+
+@app.route('/api/worker-assignments/<int:assignment_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def update_worker_assignment(assignment_id):
+    assignment = WorkerAssignment.query.get(assignment_id)
+    if not assignment:
+        return jsonify({'error': 'Assignment not found'}), 404
+    data = request.get_json()
+    new_status = data.get('status')
+    if new_status:
+        assignment.status = new_status
+        if new_status == 'in_progress' and not assignment.start_time:
+            assignment.start_time = datetime.utcnow()
+        elif new_status == 'completed' and not assignment.end_time:
+            assignment.end_time = datetime.utcnow()
+            if assignment.start_time:
+                delta = assignment.end_time - assignment.start_time
+                assignment.hours_worked = round(delta.total_seconds() / 3600, 2)
+            if data.get('hoursWorked') is not None:
+                assignment.hours_worked = float(data['hoursWorked'])
+            if assignment.hours_worked and assignment.worker:
+                assignment.pay = round(assignment.hours_worked * assignment.worker.rate_per_hour, 2)
+    if 'hoursWorked' in data and data['hoursWorked'] is not None:
+        assignment.hours_worked = float(data['hoursWorked'])
+        if assignment.worker:
+            assignment.pay = round(assignment.hours_worked * assignment.worker.rate_per_hour, 2)
+    if 'notes' in data:
+        assignment.notes = data['notes']
+    if 'description' in data:
+        assignment.description = data['description']
+    assignment.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'assignment': {
+                'id': assignment.id,
+                'workerId': assignment.worker_id,
+                'workerName': assignment.worker.name if assignment.worker else '',
+                'jobOrderRef': assignment.job_order_ref,
+                'description': assignment.description,
+                'startTime': assignment.start_time.isoformat() if assignment.start_time else None,
+                'endTime': assignment.end_time.isoformat() if assignment.end_time else None,
+                'hoursWorked': assignment.hours_worked,
+                'pay': assignment.pay,
+                'status': assignment.status,
+                'notes': assignment.notes,
+            }
+        }
+    })
+
+@app.route('/api/worker-assignments/<int:assignment_id>', methods=['DELETE'])
+@require_auth
+@require_roles('administrator')
+def delete_worker_assignment(assignment_id):
+    assignment = WorkerAssignment.query.get(assignment_id)
+    if not assignment:
+        return jsonify({'error': 'Assignment not found'}), 404
+    db.session.delete(assignment)
+    db.session.commit()
+    return jsonify({'status': 'success', 'message': 'Assignment deleted'})
 
 # ============================================
 # HEALTH CHECK

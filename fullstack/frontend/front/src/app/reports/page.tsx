@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { api, SalesReport, InventoryReport, AuditLog } from '@/lib/api';
@@ -32,23 +32,23 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 const STATUS_LABEL_COLORS: Record<string, string> = {
-  completed:   'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
-  in_progress: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
-  pending:     'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400',
-  cancelled:   'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
-  for_pickup:  'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
-  delivered:   'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400',
+  completed:   'bg-green-100 text-green-700',
+  in_progress: 'bg-blue-100 text-blue-700',
+  pending:     'bg-yellow-100 text-yellow-700',
+  cancelled:   'bg-red-100 text-red-700',
+  for_pickup:  'bg-purple-100 text-purple-700',
+  delivered:   'bg-teal-100 text-teal-700',
 };
 
 function SkeletonCard() {
-  return <div className="h-32 bg-zinc-200 dark:bg-zinc-800 rounded-xl animate-pulse" />;
+  return <div className="h-32 bg-gray-200 rounded-xl animate-pulse" />;
 }
 
 function SummaryCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color: string }) {
   return (
-    <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
-      <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400 mb-1">{label}</p>
-      <p className="text-2xl font-bold text-zinc-900 dark:text-white">{value}</p>
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+      <p className="text-sm font-medium text-gray-500 mb-1">{label}</p>
+      <p className="text-2xl font-bold text-gray-900">{value}</p>
       {sub && <p className={`text-xs mt-1 ${color}`}>{sub}</p>}
     </div>
   );
@@ -153,19 +153,19 @@ export default function ReportsPage() {
   const showDateFilter = reportType !== 'inventory';
 
   return (
-    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
+    <div className="min-h-screen bg-gray-50">
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
 
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-8 gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">Reports & Analytics</h1>
-            <p className="text-zinc-500 dark:text-zinc-400 mt-1">View business performance and generate reports</p>
+            <h1 className="text-2xl font-bold text-gray-900">Reports & Analytics</h1>
+            <p className="text-gray-500 mt-1">View business performance and generate reports</p>
           </div>
           <div className="flex gap-2">
             <button
               onClick={exportCsv}
-              className="inline-flex items-center px-4 py-2 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 rounded-lg font-medium text-sm transition-colors"
+              className="inline-flex items-center px-4 py-2 bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 rounded-lg font-medium text-sm transition-colors"
             >
               <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -174,7 +174,7 @@ export default function ReportsPage() {
             </button>
             <button
               onClick={() => window.print()}
-              className="inline-flex items-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium text-sm transition-colors"
+              className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium text-sm transition-colors"
             >
               <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
@@ -192,19 +192,19 @@ export default function ReportsPage() {
               onClick={() => setReportType(type.id)}
               className={`p-4 rounded-xl border text-left transition-all ${
                 reportType === type.id
-                  ? 'bg-amber-50 dark:bg-amber-900/20 border-amber-500 ring-2 ring-amber-500'
-                  : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 hover:border-zinc-300 dark:hover:border-zinc-700'
+                  ? 'bg-[#eef1fb] border-[#011c72] ring-2 ring-[#011c72]'
+                  : 'bg-white border-gray-200 hover:border-gray-300'
               }`}
             >
               <div className={`w-10 h-10 rounded-lg flex items-center justify-center mb-3 ${
                 reportType === type.id
-                  ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400'
-                  : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400'
+                  ? 'bg-[#dde6ff] text-[#011c72]'
+                  : 'bg-gray-100 text-gray-500'
               }`}>
                 {type.icon}
               </div>
               <p className={`text-sm font-semibold ${
-                reportType === type.id ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-900 dark:text-white'
+                reportType === type.id ? 'text-[#011c72]' : 'text-gray-900'
               }`}>
                 {type.name}
               </p>
@@ -213,7 +213,7 @@ export default function ReportsPage() {
         </div>
 
         {/* Filters */}
-        <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 mb-6">
+        <div className="bg-white rounded-xl border border-gray-200 p-4 mb-6">
           <div className="flex flex-col sm:flex-row sm:items-center gap-4">
             {showDateFilter && (
               <>
@@ -224,8 +224,8 @@ export default function ReportsPage() {
                       onClick={() => { setDateRange(r); setCustomStart(''); setCustomEnd(''); }}
                       className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                         dateRange === r && !customStart
-                          ? 'bg-amber-600 text-white'
-                          : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                          ? 'bg-[#011c72] text-white'
+                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                       }`}
                     >
                       {r === 'week' ? 'This Week' : r === 'month' ? 'This Month' : r === 'quarter' ? 'This Quarter' : 'This Year'}
@@ -237,14 +237,14 @@ export default function ReportsPage() {
                     type="date"
                     value={customStart}
                     onChange={(e) => setCustomStart(e.target.value)}
-                    className="px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
+                    className="px-3 py-1.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 text-sm"
                   />
-                  <span className="text-zinc-400 text-sm">to</span>
+                  <span className="text-gray-400 text-sm">to</span>
                   <input
                     type="date"
                     value={customEnd}
                     onChange={(e) => setCustomEnd(e.target.value)}
-                    className="px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
+                    className="px-3 py-1.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 text-sm"
                   />
                 </div>
               </>
@@ -253,7 +253,7 @@ export default function ReportsPage() {
               <select
                 value={auditModule}
                 onChange={(e) => setAuditModule(e.target.value)}
-                className="px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm"
+                className="px-3 py-1.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 text-sm"
               >
                 <option value="">All Modules</option>
                 <option value="auth">Auth</option>
@@ -266,7 +266,7 @@ export default function ReportsPage() {
             <button
               onClick={fetchData}
               disabled={loading}
-              className="ml-auto px-4 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
+              className="ml-auto px-4 py-1.5 bg-[#011c72] hover:bg-[#01268c] disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
             >
               {loading ? 'Loading…' : 'Refresh'}
             </button>
@@ -275,7 +275,7 @@ export default function ReportsPage() {
 
         {/* Error state */}
         {error && (
-          <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl text-red-700 dark:text-red-400 text-sm">
+          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">
             {error}
           </div>
         )}
@@ -295,37 +295,37 @@ export default function ReportsPage() {
                     label="Total Revenue"
                     value={formatCurrency(salesData.summary.totalRevenue)}
                     sub={`Period: ${formatDate(salesData.period.startDate)} – ${formatDate(salesData.period.endDate)}`}
-                    color="text-green-600 dark:text-green-400"
+                    color="text-green-600"
                   />
                   <SummaryCard
                     label="Total Orders"
                     value={salesData.summary.totalOrders.toString()}
                     sub={`${salesData.summary.completedOrders} completed`}
-                    color="text-blue-600 dark:text-blue-400"
+                    color="text-blue-600"
                   />
                   <SummaryCard
                     label="Avg. Order Value"
                     value={formatCurrency(salesData.summary.averageOrderValue)}
-                    color="text-amber-600 dark:text-amber-400"
+                    color="text-[#011c72]"
                   />
                   <SummaryCard
                     label="Pending Revenue"
                     value={formatCurrency(salesData.summary.pendingRevenue)}
                     sub="Unpaid balances"
-                    color="text-red-600 dark:text-red-400"
+                    color="text-red-600"
                   />
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
                   {/* Daily Sales Trend */}
-                  <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-                    <div className="px-6 py-4 border-b border-zinc-200 dark:border-zinc-800">
-                      <h2 className="text-base font-semibold text-zinc-900 dark:text-white">Daily Sales Trend</h2>
-                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">Revenue per day</p>
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-200">
+                      <h2 className="text-base font-semibold text-gray-900">Daily Sales Trend</h2>
+                      <p className="text-xs text-gray-500 mt-0.5">Revenue per day</p>
                     </div>
                     <div className="p-6">
                       {salesData.dailySales.length === 0 ? (
-                        <p className="text-center text-zinc-400 py-12 text-sm">No sales data for this period</p>
+                        <p className="text-center text-gray-400 py-12 text-sm">No sales data for this period</p>
                       ) : (
                         <DailyBarChart data={salesData.dailySales} />
                       )}
@@ -333,14 +333,14 @@ export default function ReportsPage() {
                   </div>
 
                   {/* Order Status Breakdown */}
-                  <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-                    <div className="px-6 py-4 border-b border-zinc-200 dark:border-zinc-800">
-                      <h2 className="text-base font-semibold text-zinc-900 dark:text-white">Order Status Breakdown</h2>
-                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">Distribution by current status</p>
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-200">
+                      <h2 className="text-base font-semibold text-gray-900">Order Status Breakdown</h2>
+                      <p className="text-xs text-gray-500 mt-0.5">Distribution by current status</p>
                     </div>
                     <div className="p-6">
                       {salesData.statusBreakdown.length === 0 ? (
-                        <p className="text-center text-zinc-400 py-12 text-sm">No orders in this period</p>
+                        <p className="text-center text-gray-400 py-12 text-sm">No orders in this period</p>
                       ) : (
                         <StatusBreakdown breakdown={salesData.statusBreakdown} total={salesData.summary.totalOrders} />
                       )}
@@ -368,37 +368,37 @@ export default function ReportsPage() {
                     label="Raw Materials"
                     value={inventoryData.summary.totalRawMaterials.toString()}
                     sub={`Value: ${formatCurrency(inventoryData.summary.rawMaterialsValue)}`}
-                    color="text-blue-600 dark:text-blue-400"
+                    color="text-blue-600"
                   />
                   <SummaryCard
                     label="Finished Goods"
                     value={inventoryData.summary.totalFinishedGoods.toString()}
                     sub={`Value: ${formatCurrency(inventoryData.summary.finishedGoodsValue)}`}
-                    color="text-purple-600 dark:text-purple-400"
+                    color="text-purple-600"
                   />
                   <SummaryCard
                     label="Potential Profit"
                     value={formatCurrency(inventoryData.summary.potentialProfit)}
                     sub="From finished goods"
-                    color="text-green-600 dark:text-green-400"
+                    color="text-green-600"
                   />
                   <SummaryCard
                     label="Low Stock Items"
                     value={inventoryData.summary.lowStockItemsCount.toString()}
                     sub={inventoryData.summary.lowStockItemsCount > 0 ? 'Needs restocking' : 'All stocked'}
-                    color={inventoryData.summary.lowStockItemsCount > 0 ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}
+                    color={inventoryData.summary.lowStockItemsCount > 0 ? 'text-red-600' : 'text-green-600'}
                   />
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
                   {/* Category Breakdown */}
-                  <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-                    <div className="px-6 py-4 border-b border-zinc-200 dark:border-zinc-800">
-                      <h2 className="text-base font-semibold text-zinc-900 dark:text-white">Raw Materials by Category</h2>
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-200">
+                      <h2 className="text-base font-semibold text-gray-900">Raw Materials by Category</h2>
                     </div>
                     <div className="p-6">
                       {inventoryData.categoryBreakdown.length === 0 ? (
-                        <p className="text-center text-zinc-400 py-12 text-sm">No categories found</p>
+                        <p className="text-center text-gray-400 py-12 text-sm">No categories found</p>
                       ) : (
                         <CategoryBreakdown data={inventoryData.categoryBreakdown} />
                       )}
@@ -406,23 +406,23 @@ export default function ReportsPage() {
                   </div>
 
                   {/* Low Stock Items */}
-                  <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-                    <div className="px-6 py-4 border-b border-zinc-200 dark:border-zinc-800">
-                      <h2 className="text-base font-semibold text-zinc-900 dark:text-white">Low Stock Alert</h2>
-                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">Items at or below reorder point</p>
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-200">
+                      <h2 className="text-base font-semibold text-gray-900">Low Stock Alert</h2>
+                      <p className="text-xs text-gray-500 mt-0.5">Items at or below reorder point</p>
                     </div>
-                    <div className="divide-y divide-zinc-100 dark:divide-zinc-800 max-h-80 overflow-y-auto">
+                    <div className="divide-y divide-gray-100 max-h-80 overflow-y-auto">
                       {inventoryData.lowStockItems.length === 0 ? (
-                        <p className="text-center text-zinc-400 py-12 text-sm">All items are sufficiently stocked</p>
+                        <p className="text-center text-gray-400 py-12 text-sm">All items are sufficiently stocked</p>
                       ) : inventoryData.lowStockItems.map((item) => (
-                        <div key={item.id} className="px-6 py-3 flex items-center justify-between hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                        <div key={item.id} className="px-6 py-3 flex items-center justify-between hover:bg-gray-50">
                           <div>
-                            <p className="text-sm font-medium text-zinc-900 dark:text-white">{item.name}</p>
-                            <p className="text-xs text-zinc-500 dark:text-zinc-400">Reorder at: {item.reorderPoint} {item.unit}</p>
+                            <p className="text-sm font-medium text-gray-900">{item.name}</p>
+                            <p className="text-xs text-gray-500">Reorder at: {item.reorderPoint} {item.unit}</p>
                           </div>
                           <div className="text-right">
-                            <p className="text-sm font-bold text-red-600 dark:text-red-400">{item.currentStock} {item.unit}</p>
-                            <p className="text-xs text-zinc-500 dark:text-zinc-400">current stock</p>
+                            <p className="text-sm font-bold text-red-600">{item.currentStock} {item.unit}</p>
+                            <p className="text-xs text-gray-500">current stock</p>
                           </div>
                         </div>
                       ))}
@@ -442,18 +442,18 @@ export default function ReportsPage() {
             {loading ? (
               <div className="space-y-3">
                 {[...Array(5)].map((_, i) => (
-                  <div key={i} className="h-16 bg-zinc-200 dark:bg-zinc-800 rounded-xl animate-pulse" />
+                  <div key={i} className="h-16 bg-gray-200 rounded-xl animate-pulse" />
                 ))}
               </div>
             ) : auditData ? (
-              <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-                <div className="px-6 py-4 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between">
-                  <h2 className="text-base font-semibold text-zinc-900 dark:text-white">Audit Log</h2>
-                  <span className="text-sm text-zinc-500 dark:text-zinc-400">{auditData.length} entries</span>
+              <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+                  <h2 className="text-base font-semibold text-gray-900">Audit Log</h2>
+                  <span className="text-sm text-gray-500">{auditData.length} entries</span>
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
-                    <thead className="bg-zinc-50 dark:bg-zinc-800/50 text-xs text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">
+                    <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
                       <tr>
                         <th className="px-5 py-3 text-left">Timestamp</th>
                         <th className="px-5 py-3 text-left">User</th>
@@ -463,25 +463,25 @@ export default function ReportsPage() {
                         <th className="px-5 py-3 text-left">IP</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                    <tbody className="divide-y divide-gray-100">
                       {auditData.length === 0 ? (
                         <tr>
-                          <td colSpan={6} className="px-5 py-12 text-center text-zinc-400">No audit entries for this period</td>
+                          <td colSpan={6} className="px-5 py-12 text-center text-gray-400">No audit entries for this period</td>
                         </tr>
                       ) : auditData.map((log) => (
-                        <tr key={log.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
-                          <td className="px-5 py-3 whitespace-nowrap text-zinc-500 dark:text-zinc-400">
+                        <tr key={log.id} className="hover:bg-gray-50 transition-colors">
+                          <td className="px-5 py-3 whitespace-nowrap text-gray-500">
                             {new Date(log.timestamp).toLocaleString('en-PH')}
                           </td>
-                          <td className="px-5 py-3 whitespace-nowrap font-medium text-zinc-900 dark:text-white">{log.userName}</td>
+                          <td className="px-5 py-3 whitespace-nowrap font-medium text-gray-900">{log.userName}</td>
                           <td className="px-5 py-3 whitespace-nowrap">
-                            <span className="px-2 py-0.5 rounded-full text-xs bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 capitalize">
+                            <span className="px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-600 capitalize">
                               {log.module}
                             </span>
                           </td>
-                          <td className="px-5 py-3 whitespace-nowrap text-zinc-700 dark:text-zinc-300">{log.action}</td>
-                          <td className="px-5 py-3 text-zinc-500 dark:text-zinc-400 max-w-xs truncate">{log.details}</td>
-                          <td className="px-5 py-3 whitespace-nowrap text-zinc-400 font-mono text-xs">{log.ipAddress}</td>
+                          <td className="px-5 py-3 whitespace-nowrap text-gray-700">{log.action}</td>
+                          <td className="px-5 py-3 text-gray-500 max-w-xs truncate">{log.details}</td>
+                          <td className="px-5 py-3 whitespace-nowrap text-gray-400 font-mono text-xs">{log.ipAddress}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -502,7 +502,7 @@ export default function ReportsPage() {
 
 function EmptyState({ message }: { message: string }) {
   return (
-    <div className="flex flex-col items-center justify-center py-20 text-zinc-400">
+    <div className="flex flex-col items-center justify-center py-20 text-gray-400">
       <svg className="w-12 h-12 mb-3 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
       </svg>
@@ -527,12 +527,12 @@ function DailyBarChart({ data }: { data: Array<{ date: string; orders: number; r
               style={{ height: `${h}%`, minHeight: d.revenue > 0 ? '4px' : '0' }}
             />
             {/* Tooltip */}
-            <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-zinc-800 text-white text-xs rounded px-2 py-1 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
+            <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-gray-100 text-white text-xs rounded px-2 py-1 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
               <p>{formatDate(d.date)}</p>
               <p>₱{d.revenue.toLocaleString()}</p>
               <p>{d.orders} orders</p>
             </div>
-            <span className="text-[9px] text-zinc-400 mt-1 hidden sm:block">
+            <span className="text-[9px] text-gray-400 mt-1 hidden sm:block">
               {new Date(d.date + 'T00:00:00').getDate()}
             </span>
           </div>
@@ -555,21 +555,21 @@ function StatusBreakdown({ breakdown, total }: {
         return (
           <div key={item.status}>
             <div className="flex justify-between mb-1">
-              <span className="text-sm font-medium text-zinc-900 dark:text-white capitalize">
+              <span className="text-sm font-medium text-gray-900 capitalize">
                 {item.status.replace(/_/g, ' ')}
               </span>
               <div className="flex items-center gap-2">
-                <span className="text-xs text-zinc-500 dark:text-zinc-400">{item.count} orders</span>
-                <span className="text-xs font-medium text-zinc-900 dark:text-white">
+                <span className="text-xs text-gray-500">{item.count} orders</span>
+                <span className="text-xs font-medium text-gray-900">
                   ₱{item.value.toLocaleString()}
                 </span>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <div className="flex-1 h-2 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
+              <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
                 <div className={`h-full ${color} rounded-full transition-all duration-500`} style={{ width: `${pct}%` }} />
               </div>
-              <span className="text-xs text-zinc-400 w-8 text-right">{pct}%</span>
+              <span className="text-xs text-gray-400 w-8 text-right">{pct}%</span>
             </div>
           </div>
         );
@@ -589,17 +589,17 @@ function CategoryBreakdown({ data }: { data: Array<{ category: string; count: nu
         return (
           <div key={cat.category}>
             <div className="flex justify-between mb-1">
-              <span className="text-sm font-medium text-zinc-900 dark:text-white capitalize">{cat.category}</span>
+              <span className="text-sm font-medium text-gray-900 capitalize">{cat.category}</span>
               <div className="flex items-center gap-2">
-                <span className="text-xs text-zinc-500 dark:text-zinc-400">{cat.count} items</span>
-                <span className="text-xs font-medium text-zinc-900 dark:text-white">{formatCurrency(cat.value)}</span>
+                <span className="text-xs text-gray-500">{cat.count} items</span>
+                <span className="text-xs font-medium text-gray-900">{formatCurrency(cat.value)}</span>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <div className="flex-1 h-2 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
+              <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
                 <div className={`h-full ${colors[i % colors.length]} rounded-full transition-all duration-500`} style={{ width: `${pct}%` }} />
               </div>
-              <span className="text-xs text-zinc-400 w-8 text-right">{pct}%</span>
+              <span className="text-xs text-gray-400 w-8 text-right">{pct}%</span>
             </div>
           </div>
         );

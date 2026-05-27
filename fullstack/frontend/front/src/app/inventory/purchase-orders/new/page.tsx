@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, RawMaterial, Supplier } from '@/lib/api';
@@ -104,30 +104,30 @@ export default function NewPurchaseOrderPage() {
 
 
   return (
-    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
+    <div className="min-h-screen bg-gray-50">
       <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="mb-8">
           <button
             onClick={() => router.push('/inventory')}
-            className="flex items-center text-zinc-600 dark:text-zinc-400 hover:text-amber-600 mb-2"
+            className="flex items-center text-gray-600 hover:text-[#011c72] mb-2"
           >
             <svg className="w-5 h-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
             Back to Inventory
           </button>
-          <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">New Purchase Order</h1>
-          <p className="text-zinc-500 dark:text-zinc-400 mt-1">
+          <h1 className="text-2xl font-bold text-gray-900">New Purchase Order</h1>
+          <p className="text-gray-500 mt-1">
             Create a new purchase order for raw materials
           </p>
         </div>
 
         <form onSubmit={handleSubmit}>
           {/* Supplier Information */}
-          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6 mb-6">
-            <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4 flex items-center">
-              <svg className="w-5 h-5 mr-2 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+              <svg className="w-5 h-5 mr-2 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
               </svg>
               Supplier Information
@@ -135,7 +135,7 @@ export default function NewPurchaseOrderPage() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="md:col-span-2">
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
                   Supplier Name *
                 </label>
                 <select
@@ -148,7 +148,7 @@ export default function NewPurchaseOrderPage() {
                       setSupplierEmail(selected.email || '');
                     }
                   }}
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                 >
                   <option value="">Select a saved supplier (optional)</option>
                   {savedSuppliers.map((s: Supplier) => (
@@ -160,12 +160,12 @@ export default function NewPurchaseOrderPage() {
                   value={supplier}
                   onChange={(e) => setSupplier(e.target.value)}
                   placeholder="Or type supplier name manually"
-                  className="mt-2 w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="mt-2 w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   required
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
                   Contact Number
                 </label>
                 <input
@@ -173,11 +173,11 @@ export default function NewPurchaseOrderPage() {
                   value={supplierContact}
                   onChange={(e) => setSupplierContact(e.target.value)}
                   placeholder="(02) 8XXX-XXXX"
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
                   Email Address
                 </label>
                 <input
@@ -185,18 +185,18 @@ export default function NewPurchaseOrderPage() {
                   value={supplierEmail}
                   onChange={(e) => setSupplierEmail(e.target.value)}
                   placeholder="supplier@email.com"
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
                   Expected Delivery Date *
                 </label>
                 <input
                   type="date"
                   value={expectedDate}
                   onChange={(e) => setExpectedDate(e.target.value)}
-                  className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                  className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   required
                 />
               </div>
@@ -204,10 +204,10 @@ export default function NewPurchaseOrderPage() {
           </div>
 
           {/* Order Items */}
-          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6 mb-6">
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-zinc-900 dark:text-white flex items-center">
-                <svg className="w-5 h-5 mr-2 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+                <svg className="w-5 h-5 mr-2 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
                 </svg>
                 Order Items
@@ -215,7 +215,7 @@ export default function NewPurchaseOrderPage() {
               <button
                 type="button"
                 onClick={addItem}
-                className="inline-flex items-center px-3 py-1.5 bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 rounded-lg text-sm font-medium hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors"
+                className="inline-flex items-center px-3 py-1.5 bg-[#dde6ff] text-[#011c72] rounded-lg text-sm font-medium hover:bg-[#dde6ff] transition-colors"
               >
                 <svg className="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -226,21 +226,21 @@ export default function NewPurchaseOrderPage() {
 
             {loadingMaterials ? (
               <div className="flex items-center justify-center py-8">
-                <div className="animate-spin w-6 h-6 border-2 border-amber-600 border-t-transparent rounded-full"></div>
+                <div className="animate-spin w-6 h-6 border-2 border-[#011c72] border-t-transparent rounded-full"></div>
               </div>
             ) : (
               <div className="space-y-4">
                 {items.map((item, index) => (
-                  <div key={index} className="p-4 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
+                  <div key={index} className="p-4 bg-gray-50 rounded-lg">
                     <div className="grid grid-cols-12 gap-4 items-end">
                       <div className="col-span-12 md:col-span-4">
-                        <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                        <label className="block text-xs font-medium text-gray-500 mb-1">
                           Material
                         </label>
                         <select
                           value={item.material_id}
                           onChange={(e) => updateItem(index, 'material_id', e.target.value)}
-                          className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                           required
                         >
                           <option value="">Select material</option>
@@ -252,7 +252,7 @@ export default function NewPurchaseOrderPage() {
                         </select>
                       </div>
                       <div className="col-span-4 md:col-span-2">
-                        <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                        <label className="block text-xs font-medium text-gray-500 mb-1">
                           Quantity
                         </label>
                         <input
@@ -260,24 +260,24 @@ export default function NewPurchaseOrderPage() {
                           min="1"
                           value={item.quantity}
                           onChange={(e) => updateItem(index, 'quantity', Number(e.target.value))}
-                          className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                           required
                         />
                       </div>
                       <div className="col-span-4 md:col-span-2">
-                        <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                        <label className="block text-xs font-medium text-gray-500 mb-1">
                           Unit
                         </label>
                         <input
                           type="text"
                           value={item.unit}
                           onChange={(e) => updateItem(index, 'unit', e.target.value)}
-                          className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                           readOnly
                         />
                       </div>
                       <div className="col-span-4 md:col-span-2">
-                        <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                        <label className="block text-xs font-medium text-gray-500 mb-1">
                           Unit Cost
                         </label>
                         <input
@@ -286,15 +286,15 @@ export default function NewPurchaseOrderPage() {
                           step="0.01"
                           value={item.unit_cost}
                           onChange={(e) => updateItem(index, 'unit_cost', Number(e.target.value))}
-                          className="w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                           required
                         />
                       </div>
                       <div className="col-span-10 md:col-span-1 text-right">
-                        <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                        <label className="block text-xs font-medium text-gray-500 mb-1">
                           Total
                         </label>
-                        <p className="py-2 text-sm font-medium text-zinc-900 dark:text-white">
+                        <p className="py-2 text-sm font-medium text-gray-900">
                           ₱{(item.quantity * item.unit_cost).toLocaleString()}
                         </p>
                       </div>
@@ -317,18 +317,18 @@ export default function NewPurchaseOrderPage() {
             )}
 
             {/* Order Total */}
-            <div className="mt-6 pt-6 border-t border-zinc-200 dark:border-zinc-800">
+            <div className="mt-6 pt-6 border-t border-gray-200">
               <div className="flex justify-end">
                 <div className="w-64">
                   <div className="flex justify-between py-2">
-                    <span className="text-sm text-zinc-600 dark:text-zinc-400">Subtotal</span>
-                    <span className="text-sm font-medium text-zinc-900 dark:text-white">
+                    <span className="text-sm text-gray-600">Subtotal</span>
+                    <span className="text-sm font-medium text-gray-900">
                       ₱{calculateTotal().toLocaleString()}
                     </span>
                   </div>
-                  <div className="flex justify-between py-2 border-t border-zinc-200 dark:border-zinc-800">
-                    <span className="text-base font-medium text-zinc-900 dark:text-white">Total</span>
-                    <span className="text-base font-bold text-amber-600 dark:text-amber-400">
+                  <div className="flex justify-between py-2 border-t border-gray-200">
+                    <span className="text-base font-medium text-gray-900">Total</span>
+                    <span className="text-base font-bold text-[#011c72]">
                       ₱{calculateTotal().toLocaleString()}
                     </span>
                   </div>
@@ -338,14 +338,14 @@ export default function NewPurchaseOrderPage() {
           </div>
 
           {/* Notes */}
-          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6 mb-6">
-            <h2 className="text-lg font-semibold text-zinc-900 dark:text-white mb-4">Additional Notes</h2>
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Additional Notes</h2>
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               rows={3}
               placeholder="Any special instructions or notes for this order..."
-              className="w-full px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent resize-none"
+              className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent resize-none"
             />
           </div>
 
@@ -354,14 +354,14 @@ export default function NewPurchaseOrderPage() {
             <button
               type="button"
               onClick={() => router.push('/inventory')}
-              className="px-6 py-2 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-lg font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors"
+              className="px-6 py-2 border border-gray-200 text-gray-700 rounded-lg font-medium hover:bg-gray-50 transition-colors"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={loading || items.every(i => !i.material_id)}
-              className="inline-flex items-center px-6 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
+              className="inline-flex items-center px-6 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors disabled:opacity-50"
             >
               {loading ? (
                 <>
