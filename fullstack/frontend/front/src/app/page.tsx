@@ -65,14 +65,16 @@ function CatalogCard({
   }
 
   return (
-    <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-sm overflow-hidden flex flex-col hover:shadow-md transition-shadow">
+    <div className="group rounded-2xl bg-white/[0.03] border border-white/[0.07] overflow-hidden flex flex-col hover:bg-white/[0.05] hover:border-white/[0.13] hover:shadow-[0_0_30px_rgba(99,102,241,0.08)] transition-all duration-300">
       {/* Image */}
-      <div className="relative h-56 bg-zinc-100 dark:bg-zinc-800">
+      <div className="relative h-52 bg-white/[0.03]">
         {imageUrl ? (
-          <Image src={imageUrl} alt={item.title} fill className="object-cover" unoptimized />
+          <Image src={imageUrl} alt={item.title} fill className="object-cover opacity-90 group-hover:opacity-100 transition-opacity duration-300" unoptimized />
         ) : (
-          <div className="flex flex-col items-center justify-center h-full text-zinc-400 gap-2">
-            <svg className="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+          <div className="flex flex-col items-center justify-center h-full text-white/20 gap-2">
+            <svg className="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
             <span className="text-xs">No image</span>
           </div>
         )}
@@ -80,14 +82,14 @@ function CatalogCard({
           <button
             onClick={() => fileRef.current?.click()}
             disabled={uploading}
-            className="absolute bottom-2 right-2 bg-black/60 hover:bg-black/80 text-white text-xs px-2 py-1 rounded-lg transition-colors"
+            className="absolute bottom-2 right-2 bg-black/60 backdrop-blur-sm hover:bg-black/80 text-white text-xs px-3 py-1.5 rounded-lg border border-white/10 transition-colors"
           >
             {uploading ? 'Uploading…' : 'Change Photo'}
           </button>
         )}
         <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleImageChange} />
         {item.tag && !editing && (
-          <span className="absolute top-2 left-2 text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 font-medium">
+          <span className="absolute top-3 left-3 text-xs px-2.5 py-1 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/25 font-medium backdrop-blur-sm">
             {item.tag}
           </span>
         )}
@@ -98,19 +100,19 @@ function CatalogCard({
         {editing ? (
           <>
             <input
-              className="w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-sm font-semibold text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+              className="w-full rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2 text-sm font-semibold text-white placeholder-white/30 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/40"
               value={form.title}
               onChange={e => setForm(f => ({ ...f, title: e.target.value }))}
               placeholder="Title"
             />
             <input
-              className="w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
+              className="w-full rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2 text-xs text-white/60 placeholder-white/30 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/40"
               value={form.tag}
               onChange={e => setForm(f => ({ ...f, tag: e.target.value }))}
               placeholder="Tag (e.g. New Arrival, Best Seller)"
             />
             <textarea
-              className="w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-sm text-zinc-600 dark:text-zinc-300 focus:outline-none focus:ring-2 focus:ring-amber-500 resize-none"
+              className="w-full rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2 text-sm text-white/60 placeholder-white/30 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/40 resize-none"
               rows={3}
               value={form.description}
               onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
@@ -120,13 +122,13 @@ function CatalogCard({
               <button
                 onClick={handleSave}
                 disabled={saving || !form.title.trim()}
-                className="flex-1 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-sm font-semibold transition-colors disabled:opacity-50"
+                className="flex-1 py-2 rounded-xl bg-gradient-to-r from-blue-500 to-violet-600 text-white text-sm font-semibold transition-all hover:shadow-[0_0_20px_rgba(99,102,241,0.35)] disabled:opacity-40"
               >
                 {saving ? 'Saving…' : 'Save'}
               </button>
               <button
                 onClick={() => { setEditing(false); setForm({ title: item.title, description: item.description, tag: item.tag }); }}
-                className="flex-1 py-2 rounded-lg border border-zinc-300 dark:border-zinc-600 text-sm text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors"
+                className="flex-1 py-2 rounded-xl border border-white/10 text-sm text-white/50 hover:bg-white/[0.05] transition-colors"
               >
                 Cancel
               </button>
@@ -134,19 +136,19 @@ function CatalogCard({
           </>
         ) : (
           <>
-            <h3 className="text-base font-semibold text-zinc-900 dark:text-white leading-tight">{item.title}</h3>
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 flex-1">{item.description || <span className="italic">No description</span>}</p>
+            <h3 className="text-base font-semibold text-white leading-tight">{item.title}</h3>
+            <p className="text-sm text-white/50 flex-1">{item.description || <span className="italic">No description</span>}</p>
             {isAdmin && (
               <div className="flex gap-2 mt-2">
                 <button
                   onClick={() => { setForm({ title: item.title, description: item.description, tag: item.tag }); setEditing(true); }}
-                  className="flex-1 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-600 text-xs font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors"
+                  className="flex-1 py-1.5 rounded-xl border border-white/10 text-xs font-medium text-white/50 hover:bg-white/[0.05] hover:border-white/20 transition-colors"
                 >
                   Edit
                 </button>
                 <button
                   onClick={() => onDelete(item.id)}
-                  className="py-1.5 px-3 rounded-lg border border-red-200 dark:border-red-900 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                  className="py-1.5 px-3 rounded-xl border border-red-500/20 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors"
                 >
                   Remove
                 </button>
@@ -274,14 +276,21 @@ export default function LandingPage() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
+    <div className="min-h-screen bg-[#07070f] text-white relative overflow-x-hidden">
+
+      {/* Ambient background glows */}
+      <div className="fixed inset-0 pointer-events-none overflow-hidden">
+        <div className="absolute -top-40 -left-40 w-[700px] h-[700px] rounded-full bg-indigo-700/[0.07] blur-[140px]" />
+        <div className="absolute top-1/3 -right-40 w-[600px] h-[600px] rounded-full bg-violet-700/[0.06] blur-[130px]" />
+        <div className="absolute bottom-0 left-1/4 w-[500px] h-[500px] rounded-full bg-blue-700/[0.04] blur-[120px]" />
+      </div>
 
       {/* Floating WhatsApp Button */}
       <a
         href="https://wa.me/639XXXXXXXXX"
         target="_blank"
         rel="noopener noreferrer"
-        className="fixed bottom-6 right-6 z-50 flex items-center gap-2 bg-green-500 hover:bg-green-600 text-white px-4 py-3 rounded-full shadow-xl transition-all hover:scale-105"
+        className="fixed bottom-6 right-6 z-50 flex items-center gap-2 bg-green-500/90 hover:bg-green-500 text-white px-4 py-3 rounded-full shadow-[0_0_24px_rgba(34,197,94,0.3)] hover:shadow-[0_0_36px_rgba(34,197,94,0.5)] backdrop-blur-sm transition-all duration-300 hover:scale-105"
         aria-label="Chat with us on WhatsApp"
       >
         <svg className="w-5 h-5 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
@@ -290,142 +299,171 @@ export default function LandingPage() {
         <span className="text-sm font-semibold hidden sm:inline">Chat with Us</span>
       </a>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+      <main className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
 
-        {/* Hero */}
-        <section className="mb-14">
-          <div className="rounded-3xl bg-gradient-to-br from-amber-600 to-amber-700 dark:from-amber-700 dark:to-amber-900 p-10 sm:p-14 relative overflow-hidden">
-            <div className="absolute inset-0 opacity-10 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-white via-transparent to-transparent" />
+        {/* ── Hero ── */}
+        <section className="mb-24 pt-6">
+          <div className="relative rounded-3xl overflow-hidden border border-white/[0.07] bg-white/[0.02] p-10 sm:p-16">
+            {/* inner gradient overlay */}
+            <div className="absolute inset-0 bg-gradient-to-br from-indigo-600/[0.07] via-transparent to-violet-600/[0.07] pointer-events-none" />
+            {/* top border shimmer */}
+            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-2/3 h-px bg-gradient-to-r from-transparent via-indigo-400/40 to-transparent" />
+
             <div className="relative max-w-2xl">
-              <p className="text-xs uppercase tracking-[0.25em] text-amber-200 font-semibold mb-3">Premium Automotive Upholstery</p>
+              {/* badge */}
+              <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-medium mb-6 select-none">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
+                Premium Automotive Upholstery
+              </div>
 
               {editingHero && isAdmin ? (
                 <div className="space-y-3">
                   <input
-                    className="w-full rounded-xl bg-white/20 text-white placeholder-white/60 px-4 py-2 text-2xl font-bold focus:outline-none focus:ring-2 focus:ring-white/50"
+                    className="w-full rounded-xl bg-white/[0.05] border border-white/10 text-white placeholder-white/30 px-4 py-2.5 text-2xl font-bold focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
                     value={heroForm.title}
                     onChange={e => setHeroForm(f => ({ ...f, title: e.target.value }))}
                   />
                   <textarea
                     rows={3}
-                    className="w-full rounded-xl bg-white/20 text-white placeholder-white/60 px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-white/50 resize-none"
+                    className="w-full rounded-xl bg-white/[0.05] border border-white/10 text-white/70 placeholder-white/30 px-4 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500/50 resize-none"
                     value={heroForm.desc}
                     onChange={e => setHeroForm(f => ({ ...f, desc: e.target.value }))}
                   />
                   <div className="flex gap-2">
-                    <button onClick={() => { setHeroTitle(heroForm.title); setHeroDesc(heroForm.desc); setEditingHero(false); }} className="px-4 py-2 rounded-lg bg-white text-amber-700 text-sm font-semibold hover:bg-amber-50 transition-colors">Save</button>
-                    <button onClick={() => { setHeroForm({ title: heroTitle, desc: heroDesc }); setEditingHero(false); }} className="px-4 py-2 rounded-lg bg-white/20 text-white text-sm hover:bg-white/30 transition-colors">Cancel</button>
+                    <button
+                      onClick={() => { setHeroTitle(heroForm.title); setHeroDesc(heroForm.desc); setEditingHero(false); }}
+                      className="px-5 py-2 rounded-xl bg-gradient-to-r from-blue-500 to-violet-600 text-white text-sm font-semibold hover:shadow-[0_0_20px_rgba(99,102,241,0.4)] transition-all"
+                    >
+                      Save
+                    </button>
+                    <button
+                      onClick={() => { setHeroForm({ title: heroTitle, desc: heroDesc }); setEditingHero(false); }}
+                      className="px-5 py-2 rounded-xl border border-white/10 text-white/50 text-sm hover:bg-white/[0.05] transition-colors"
+                    >
+                      Cancel
+                    </button>
                   </div>
                 </div>
               ) : (
                 <>
-                  <h1 className="text-3xl sm:text-4xl font-bold text-white leading-snug">{heroTitle}</h1>
-                  <p className="mt-4 text-amber-100 text-base leading-relaxed">{heroDesc}</p>
-                  <div className="mt-8 flex flex-col sm:flex-row gap-3">
-                    <a href="#catalog" className="inline-flex items-center justify-center px-6 py-3 rounded-xl bg-white text-amber-700 font-semibold hover:bg-amber-50 transition-colors text-sm">
+                  <h1 className="text-4xl sm:text-5xl font-bold text-white leading-tight tracking-tight mb-5">
+                    {heroTitle}
+                  </h1>
+                  <p className="text-white/55 text-base leading-relaxed mb-9 max-w-xl">{heroDesc}</p>
+                  <div className="flex flex-col sm:flex-row gap-3">
+                    <a
+                      href="#catalog"
+                      className="inline-flex items-center justify-center px-7 py-3 rounded-xl bg-gradient-to-r from-blue-500 to-violet-600 text-white font-semibold text-sm hover:shadow-[0_0_28px_rgba(99,102,241,0.5)] hover:scale-[1.02] active:scale-[0.99] transition-all duration-200"
+                    >
                       Browse Catalog
                     </a>
-                    <Link href="/place-order?tab=appointment" className="inline-flex items-center justify-center px-6 py-3 rounded-xl border border-white/40 text-white font-semibold hover:bg-white/10 transition-colors text-sm">
+                    <Link
+                      href="/place-order?tab=appointment"
+                      className="inline-flex items-center justify-center px-7 py-3 rounded-xl border border-white/[0.12] text-white/80 font-semibold text-sm hover:bg-white/[0.05] hover:border-white/20 active:scale-[0.99] transition-all duration-200"
+                    >
                       Book Appointment
                     </Link>
                   </div>
                   {isAdmin && (
-                    <button onClick={() => { setHeroForm({ title: heroTitle, desc: heroDesc }); setEditingHero(true); }} className="mt-4 text-xs text-amber-200 hover:text-white underline underline-offset-2 transition-colors">
+                    <button
+                      onClick={() => { setHeroForm({ title: heroTitle, desc: heroDesc }); setEditingHero(true); }}
+                      className="mt-6 text-xs text-white/25 hover:text-white/50 underline underline-offset-2 transition-colors"
+                    >
                       Edit hero text
                     </button>
                   )}
                 </>
               )}
             </div>
+
+            {/* corner glow */}
+            <div className="absolute -bottom-12 -right-12 w-72 h-72 bg-violet-600/[0.08] rounded-full blur-3xl pointer-events-none" />
           </div>
         </section>
 
-        {/* Why Choose Us */}
-        <section className="mb-16">
-          <div className="text-center mb-10">
-            <h2 className="text-2xl font-bold text-zinc-900 dark:text-white">Why Choose Seatmakers Avenue?</h2>
-            <p className="text-zinc-500 dark:text-zinc-400 mt-2 text-sm">Quality craftsmanship, trusted by hundreds of vehicle owners</p>
+        {/* ── Why Choose Us ── */}
+        <section className="mb-24">
+          <div className="text-center mb-14">
+            <p className="text-xs font-semibold tracking-[0.2em] text-indigo-400 uppercase mb-3">Why Us</p>
+            <h2 className="text-3xl font-bold text-white">Why Choose Seatmakers Avenue?</h2>
+            <p className="text-white/45 mt-3 text-sm max-w-sm mx-auto">Quality craftsmanship, trusted by hundreds of vehicle owners</p>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             {[
               {
-                icon: (
-                  <svg className="w-7 h-7 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" /></svg>
-                ),
+                icon: <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" /></svg>,
                 title: 'Premium Quality',
                 desc: 'Only the best materials — durable, comfortable, and built to last.',
+                iconColor: 'text-blue-400',
+                iconBg: 'bg-blue-500/10',
+                hoverGlow: 'group-hover:bg-gradient-to-br group-hover:from-blue-500/[0.07] group-hover:to-transparent',
               },
               {
-                icon: (
-                  <svg className="w-7 h-7 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm0-5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z" /></svg>
-                ),
+                icon: <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm0-5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z" /></svg>,
                 title: 'Custom Made',
                 desc: 'Every piece tailored to fit your exact vehicle and style preference.',
+                iconColor: 'text-violet-400',
+                iconBg: 'bg-violet-500/10',
+                hoverGlow: 'group-hover:bg-gradient-to-br group-hover:from-violet-500/[0.07] group-hover:to-transparent',
               },
               {
-                icon: (
-                  <svg className="w-7 h-7 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-                ),
+                icon: <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>,
                 title: 'Fast Turnaround',
                 desc: 'Most orders completed in 3–7 business days so you are back on the road fast.',
+                iconColor: 'text-indigo-400',
+                iconBg: 'bg-indigo-500/10',
+                hoverGlow: 'group-hover:bg-gradient-to-br group-hover:from-indigo-500/[0.07] group-hover:to-transparent',
               },
               {
-                icon: (
-                  <svg className="w-7 h-7 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-                ),
+                icon: <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>,
                 title: 'Multiple Branches',
                 desc: 'Conveniently located branches across the city for easy drop-off and pickup.',
+                iconColor: 'text-purple-400',
+                iconBg: 'bg-purple-500/10',
+                hoverGlow: 'group-hover:bg-gradient-to-br group-hover:from-purple-500/[0.07] group-hover:to-transparent',
               },
             ].map((item) => (
-              <div key={item.title} className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 p-6 text-center hover:border-amber-300 dark:hover:border-amber-700 transition-colors">
-                <div className="w-14 h-14 rounded-2xl bg-amber-50 dark:bg-amber-900/20 flex items-center justify-center mx-auto mb-4">
-                  {item.icon}
+              <div
+                key={item.title}
+                className="group relative rounded-2xl bg-white/[0.02] border border-white/[0.07] p-6 overflow-hidden hover:border-white/[0.13] transition-all duration-300"
+              >
+                <div className={`absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-300 ${item.hoverGlow}`} />
+                <div className="relative">
+                  <div className={`w-11 h-11 rounded-xl ${item.iconBg} ${item.iconColor} flex items-center justify-center mb-5`}>
+                    {item.icon}
+                  </div>
+                  <h3 className="font-semibold text-white mb-2">{item.title}</h3>
+                  <p className="text-sm text-white/45 leading-relaxed">{item.desc}</p>
                 </div>
-                <h3 className="font-semibold text-zinc-900 dark:text-white mb-2">{item.title}</h3>
-                <p className="text-sm text-zinc-500 dark:text-zinc-400 leading-relaxed">{item.desc}</p>
               </div>
             ))}
           </div>
         </section>
 
-        {/* How It Works */}
-        <section className="mb-16">
-          <div className="text-center mb-10">
-            <h2 className="text-2xl font-bold text-zinc-900 dark:text-white">How It Works</h2>
-            <p className="text-zinc-500 dark:text-zinc-400 mt-2 text-sm">Three simple steps to get your perfect seat covers</p>
+        {/* ── How It Works ── */}
+        <section className="mb-24">
+          <div className="text-center mb-14">
+            <p className="text-xs font-semibold tracking-[0.2em] text-indigo-400 uppercase mb-3">Process</p>
+            <h2 className="text-3xl font-bold text-white">How It Works</h2>
+            <p className="text-white/45 mt-3 text-sm max-w-sm mx-auto">Three simple steps to get your perfect seat covers</p>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 relative">
-            <div className="hidden md:block absolute top-9 left-[calc(33%+1rem)] right-[calc(33%+1rem)] h-0.5 bg-amber-200 dark:bg-amber-800 z-0" />
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5 relative">
+            <div className="hidden md:block absolute top-[2.25rem] left-[calc(33%+1rem)] right-[calc(33%+1rem)] h-px bg-gradient-to-r from-transparent via-indigo-500/25 to-transparent z-0" />
             {[
-              {
-                step: '01',
-                title: 'Browse & Book',
-                desc: 'Explore our catalog or book an appointment for a custom order consultation.',
-                href: '#catalog',
-                cta: 'See Catalog',
-              },
-              {
-                step: '02',
-                title: 'Get Quoted',
-                desc: 'Our team reviews your request, prepares a quote, and confirms the appointment.',
-                href: '/place-order?tab=appointment',
-                cta: 'Book Now',
-              },
-              {
-                step: '03',
-                title: 'Pick Up & Enjoy',
-                desc: 'Come to your chosen branch when your order is ready and drive away in style.',
-                href: '/my-orders',
-                cta: 'Track Orders',
-              },
+              { step: '01', title: 'Browse & Book', desc: 'Explore our catalog or book an appointment for a custom order consultation.', href: '#catalog', cta: 'See Catalog' },
+              { step: '02', title: 'Get Quoted', desc: 'Our team reviews your request, prepares a quote, and confirms the appointment.', href: '/place-order?tab=appointment', cta: 'Book Now' },
+              { step: '03', title: 'Pick Up & Enjoy', desc: 'Come to your chosen branch when your order is ready and drive away in style.', href: '/my-orders', cta: 'Track Orders' },
             ].map((item) => (
-              <div key={item.step} className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 p-7 text-center relative z-10 flex flex-col items-center">
-                <div className="w-16 h-16 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 font-bold text-xl flex items-center justify-center mb-4">
+              <div
+                key={item.step}
+                className="relative z-10 rounded-2xl bg-white/[0.02] border border-white/[0.07] p-7 text-center flex flex-col items-center hover:border-white/[0.13] hover:bg-white/[0.04] transition-all duration-300"
+              >
+                <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500/15 to-violet-500/15 border border-indigo-500/20 text-indigo-300 font-bold text-lg flex items-center justify-center mb-5">
                   {item.step}
                 </div>
-                <h3 className="font-semibold text-zinc-900 dark:text-white mb-2">{item.title}</h3>
-                <p className="text-sm text-zinc-500 dark:text-zinc-400 leading-relaxed mb-4">{item.desc}</p>
-                <a href={item.href} className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline mt-auto">
+                <h3 className="font-semibold text-white mb-2">{item.title}</h3>
+                <p className="text-sm text-white/45 leading-relaxed mb-5">{item.desc}</p>
+                <a href={item.href} className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 transition-colors mt-auto">
                   {item.cta} →
                 </a>
               </div>
@@ -433,17 +471,18 @@ export default function LandingPage() {
           </div>
         </section>
 
-        {/* Catalog Section */}
-        <section id="catalog">
-          <div className="flex items-center justify-between mb-8">
+        {/* ── Catalog ── */}
+        <section id="catalog" className="mb-24">
+          <div className="flex items-end justify-between mb-10">
             <div>
-              <h2 className="text-2xl font-bold text-zinc-900 dark:text-white">Our Catalog</h2>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">Browse our available styles and designs.</p>
+              <p className="text-xs font-semibold tracking-[0.2em] text-indigo-400 uppercase mb-3">Portfolio</p>
+              <h2 className="text-3xl font-bold text-white">Our Catalog</h2>
+              <p className="text-sm text-white/45 mt-1.5">Browse our available styles and designs.</p>
             </div>
             {isAdmin && (
               <button
                 onClick={() => setAdding(true)}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-sm font-semibold transition-colors"
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-blue-500 to-violet-600 text-white text-sm font-semibold hover:shadow-[0_0_20px_rgba(99,102,241,0.4)] hover:scale-[1.02] active:scale-[0.99] transition-all duration-200"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
                 Add Item
@@ -453,41 +492,41 @@ export default function LandingPage() {
 
           {/* Add Item Form */}
           {adding && isAdmin && (
-            <div className="mb-8 rounded-2xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/10 p-6">
-              <h3 className="text-sm font-semibold text-amber-800 dark:text-amber-300 mb-4">New Catalog Item</h3>
+            <div className="mb-8 rounded-2xl border border-indigo-500/20 bg-indigo-500/[0.04] p-6">
+              <h3 className="text-sm font-semibold text-indigo-300 mb-4">New Catalog Item</h3>
               <div className="grid sm:grid-cols-2 gap-3">
                 <input
-                  className="rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 px-3 py-2 text-sm text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  className="rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
                   placeholder="Title *"
                   value={newForm.title}
                   onChange={e => setNewForm(f => ({ ...f, title: e.target.value }))}
                 />
                 <input
-                  className="rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 px-3 py-2 text-sm text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  className="rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
                   placeholder="Tag (e.g. New Arrival)"
                   value={newForm.tag}
                   onChange={e => setNewForm(f => ({ ...f, tag: e.target.value }))}
                 />
                 <textarea
-                  className="sm:col-span-2 rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 px-3 py-2 text-sm text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500 resize-none"
+                  className="sm:col-span-2 rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 resize-none"
                   rows={2}
                   placeholder="Description"
                   value={newForm.description}
                   onChange={e => setNewForm(f => ({ ...f, description: e.target.value }))}
                 />
               </div>
-              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-2">You can upload a photo after creating the item.</p>
+              <p className="text-xs text-white/30 mt-2">You can upload a photo after creating the item.</p>
               <div className="flex gap-2 mt-4">
                 <button
                   onClick={handleAddItem}
                   disabled={submitting || !newForm.title.trim()}
-                  className="px-5 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-sm font-semibold transition-colors disabled:opacity-50"
+                  className="px-5 py-2 rounded-xl bg-gradient-to-r from-blue-500 to-violet-600 text-white text-sm font-semibold hover:shadow-[0_0_20px_rgba(99,102,241,0.4)] transition-all disabled:opacity-40"
                 >
                   {submitting ? 'Adding…' : 'Add to Catalog'}
                 </button>
                 <button
                   onClick={() => { setAdding(false); setNewForm({ title: '', description: '', tag: '' }); }}
-                  className="px-5 py-2 rounded-lg border border-zinc-300 dark:border-zinc-600 text-sm text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors"
+                  className="px-5 py-2 rounded-xl border border-white/10 text-sm text-white/45 hover:bg-white/[0.04] transition-colors"
                 >
                   Cancel
                 </button>
@@ -499,21 +538,21 @@ export default function LandingPage() {
           {loading ? (
             <div className="flex gap-5 overflow-hidden">
               {[...Array(3)].map((_, i) => (
-                <div key={i} className="flex-shrink-0 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 overflow-hidden" style={{ width: `calc(${100 / cardsPerView}% - 1.25rem)` }}>
-                  <div className="h-56 bg-zinc-100 dark:bg-zinc-800 animate-pulse" />
+                <div key={i} className="flex-shrink-0 rounded-2xl border border-white/[0.06] bg-white/[0.02] overflow-hidden" style={{ width: `calc(${100 / cardsPerView}% - 1.25rem)` }}>
+                  <div className="h-52 bg-white/[0.03] animate-pulse" />
                   <div className="p-5 space-y-3">
-                    <div className="h-4 bg-zinc-100 dark:bg-zinc-800 rounded animate-pulse w-3/4" />
-                    <div className="h-3 bg-zinc-100 dark:bg-zinc-800 rounded animate-pulse w-full" />
-                    <div className="h-3 bg-zinc-100 dark:bg-zinc-800 rounded animate-pulse w-2/3" />
+                    <div className="h-4 bg-white/[0.04] rounded-lg animate-pulse w-3/4" />
+                    <div className="h-3 bg-white/[0.03] rounded-lg animate-pulse w-full" />
+                    <div className="h-3 bg-white/[0.03] rounded-lg animate-pulse w-2/3" />
                   </div>
                 </div>
               ))}
             </div>
           ) : items.length === 0 ? (
-            <div className="text-center py-20 text-zinc-400 dark:text-zinc-600">
-              <svg className="w-12 h-12 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+            <div className="text-center py-24 text-white/20">
+              <svg className="w-12 h-12 mx-auto mb-4 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
               <p className="text-lg font-medium">No catalog items yet.</p>
-              {isAdmin && <p className="text-sm mt-1">Click &ldquo;Add Item&rdquo; to get started.</p>}
+              {isAdmin && <p className="text-sm mt-1 text-white/20">Click &ldquo;Add Item&rdquo; to get started.</p>}
             </div>
           ) : (() => {
             const maxIdx = Math.max(0, items.length - cardsPerView);
@@ -521,17 +560,15 @@ export default function LandingPage() {
             return (
               <div>
                 <div className="relative">
-                  {/* Prev button */}
                   <button
                     onClick={() => setCarouselIndex(i => Math.max(0, i - 1))}
                     disabled={carouselIndex === 0}
-                    className="absolute -left-4 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 shadow-md flex items-center justify-center text-zinc-700 dark:text-zinc-300 hover:bg-amber-50 dark:hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                    className="absolute -left-4 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-white/[0.04] border border-white/[0.09] backdrop-blur-sm flex items-center justify-center text-white/50 hover:bg-white/[0.09] hover:text-white disabled:opacity-20 disabled:cursor-not-allowed transition-all"
                     aria-label="Previous"
                   >
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
                   </button>
 
-                  {/* Sliding track */}
                   <div className="overflow-hidden">
                     <div
                       className="flex transition-transform duration-300 ease-in-out"
@@ -555,25 +592,23 @@ export default function LandingPage() {
                     </div>
                   </div>
 
-                  {/* Next button */}
                   <button
                     onClick={() => setCarouselIndex(i => Math.min(maxIdx, i + 1))}
                     disabled={carouselIndex >= maxIdx}
-                    className="absolute -right-4 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 shadow-md flex items-center justify-center text-zinc-700 dark:text-zinc-300 hover:bg-amber-50 dark:hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                    className="absolute -right-4 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-white/[0.04] border border-white/[0.09] backdrop-blur-sm flex items-center justify-center text-white/50 hover:bg-white/[0.09] hover:text-white disabled:opacity-20 disabled:cursor-not-allowed transition-all"
                     aria-label="Next"
                   >
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
                   </button>
                 </div>
 
-                {/* Dot indicators */}
                 {items.length > cardsPerView && (
-                  <div className="flex justify-center gap-2 mt-6">
+                  <div className="flex justify-center gap-2 mt-7">
                     {Array.from({ length: maxIdx + 1 }).map((_, i) => (
                       <button
                         key={i}
                         onClick={() => setCarouselIndex(i)}
-                        className={`rounded-full transition-all duration-200 ${i === carouselIndex ? 'w-6 h-2.5 bg-amber-600' : 'w-2.5 h-2.5 bg-zinc-300 dark:bg-zinc-600 hover:bg-amber-400'}`}
+                        className={`rounded-full transition-all duration-200 ${i === carouselIndex ? 'w-6 h-2 bg-indigo-500' : 'w-2 h-2 bg-white/20 hover:bg-white/40'}`}
                         aria-label={`Go to slide ${i + 1}`}
                       />
                     ))}
@@ -584,45 +619,62 @@ export default function LandingPage() {
           })()}
         </section>
 
-        {/* CTA */}
-        <section className="mt-16">
-          <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-8 text-center">
-            <h2 className="text-xl font-bold text-zinc-900 dark:text-white">Ready to order?</h2>
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-2">Choose a design from our catalog and place your order, or book an appointment for a custom consultation.</p>
-            <div className="mt-6 flex flex-col sm:flex-row items-center justify-center gap-3">
-              <Link href="/place-order?tab=appointment" className="inline-flex items-center justify-center px-7 py-3 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-semibold transition-colors text-sm">
-                Book Appointment
-              </Link>
-              <Link href="/place-order?tab=products" className="inline-flex items-center justify-center px-7 py-3 rounded-xl border border-amber-600 text-amber-700 dark:text-amber-400 font-semibold hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors text-sm">
-                Purchase Premade Products
-              </Link>
+        {/* ── CTA ── */}
+        <section className="mb-24">
+          <div className="relative rounded-2xl border border-white/[0.07] bg-white/[0.02] overflow-hidden p-10 sm:p-14 text-center">
+            <div className="absolute inset-0 bg-gradient-to-br from-indigo-600/[0.07] via-transparent to-violet-600/[0.07] pointer-events-none" />
+            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-2/3 h-px bg-gradient-to-r from-transparent via-indigo-400/30 to-transparent" />
+            <div className="relative">
+              <h2 className="text-2xl font-bold text-white">Ready to order?</h2>
+              <p className="text-sm text-white/45 mt-3 max-w-md mx-auto leading-relaxed">
+                Choose a design from our catalog and place your order, or book an appointment for a custom consultation.
+              </p>
+              <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-3">
+                <Link
+                  href="/place-order?tab=appointment"
+                  className="inline-flex items-center justify-center px-7 py-3 rounded-xl bg-gradient-to-r from-blue-500 to-violet-600 text-white font-semibold text-sm hover:shadow-[0_0_28px_rgba(99,102,241,0.5)] hover:scale-[1.02] active:scale-[0.99] transition-all duration-200"
+                >
+                  Book Appointment
+                </Link>
+                <Link
+                  href="/place-order?tab=products"
+                  className="inline-flex items-center justify-center px-7 py-3 rounded-xl border border-white/[0.12] text-white/75 font-semibold text-sm hover:bg-white/[0.05] hover:border-white/20 active:scale-[0.99] transition-all duration-200"
+                >
+                  Purchase Premade Products
+                </Link>
+              </div>
             </div>
+            <div className="absolute -bottom-10 -right-10 w-56 h-56 bg-violet-600/[0.07] rounded-full blur-3xl pointer-events-none" />
           </div>
         </section>
 
-        {/* FAQ */}
-        <section className="mt-16">
-          <div className="text-center mb-8">
-            <h2 className="text-2xl font-bold text-zinc-900 dark:text-white">Frequently Asked Questions</h2>
-            <p className="text-zinc-500 dark:text-zinc-400 mt-2 text-sm">Everything you need to know before ordering</p>
+        {/* ── FAQ ── */}
+        <section className="mb-24">
+          <div className="text-center mb-12">
+            <p className="text-xs font-semibold tracking-[0.2em] text-indigo-400 uppercase mb-3">FAQ</p>
+            <h2 className="text-3xl font-bold text-white">Frequently Asked Questions</h2>
+            <p className="text-white/45 mt-3 text-sm max-w-sm mx-auto">Everything you need to know before ordering</p>
           </div>
-          <div className="max-w-2xl mx-auto space-y-3">
+          <div className="max-w-2xl mx-auto space-y-2">
             {faqs.map((faq, i) => (
-              <div key={i} className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+              <div
+                key={i}
+                className={`rounded-xl border overflow-hidden transition-all duration-200 ${openFaq === i ? 'border-indigo-500/25 bg-indigo-500/[0.04]' : 'border-white/[0.07] bg-white/[0.02] hover:border-white/[0.11]'}`}
+              >
                 <button
                   onClick={() => setOpenFaq(openFaq === i ? null : i)}
-                  className="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors"
+                  className="w-full flex items-center justify-between px-5 py-4 text-left"
                 >
-                  <span className="font-medium text-zinc-900 dark:text-white text-sm pr-4">{faq.q}</span>
+                  <span className="font-medium text-white/85 text-sm pr-4">{faq.q}</span>
                   <svg
-                    className={`w-5 h-5 text-zinc-400 flex-shrink-0 transition-transform duration-200 ${openFaq === i ? 'rotate-180' : ''}`}
+                    className={`w-4 h-4 text-indigo-400 flex-shrink-0 transition-transform duration-200 ${openFaq === i ? 'rotate-180' : ''}`}
                     fill="none" viewBox="0 0 24 24" stroke="currentColor"
                   >
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                   </svg>
                 </button>
                 {openFaq === i && (
-                  <div className="px-5 pb-4 text-sm text-zinc-600 dark:text-zinc-400 border-t border-zinc-100 dark:border-zinc-800 pt-3 leading-relaxed">
+                  <div className="px-5 pb-5 text-sm text-white/45 border-t border-white/[0.05] pt-4 leading-relaxed">
                     {faq.a}
                   </div>
                 )}
@@ -633,17 +685,24 @@ export default function LandingPage() {
 
       </main>
 
-      {/* Footer */}
-      <footer className="border-t border-zinc-200 dark:border-zinc-800 mt-16">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 mb-8">
+      {/* ── Footer ── */}
+      <footer className="border-t border-white/[0.06]">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-10 mb-10">
             <div>
-              <p className="text-sm font-bold text-zinc-900 dark:text-white mb-2">Seatmakers Avenue</p>
-              <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">Premium automotive upholstery and custom seat covers. Crafted with care for every vehicle.</p>
+              <div className="flex items-center gap-2.5 mb-3">
+                <div className="w-7 h-7 bg-gradient-to-br from-blue-500 to-violet-600 rounded-lg flex items-center justify-center flex-shrink-0">
+                  <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                  </svg>
+                </div>
+                <p className="text-sm font-bold text-white">Seatmakers Avenue</p>
+              </div>
+              <p className="text-xs text-white/35 leading-relaxed">Premium automotive upholstery and custom seat covers. Crafted with care for every vehicle.</p>
             </div>
             <div>
-              <p className="text-sm font-semibold text-zinc-900 dark:text-white mb-3">Quick Links</p>
-              <ul className="space-y-2">
+              <p className="text-xs font-semibold text-white/40 uppercase tracking-widest mb-4">Quick Links</p>
+              <ul className="space-y-2.5">
                 {[
                   { label: 'Browse Catalog', href: '#catalog' },
                   { label: 'Book Appointment', href: '/place-order?tab=appointment' },
@@ -651,7 +710,7 @@ export default function LandingPage() {
                   { label: 'Track My Order', href: '/my-orders' },
                 ].map(link => (
                   <li key={link.label}>
-                    <a href={link.href} className="text-xs text-zinc-500 dark:text-zinc-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors">
+                    <a href={link.href} className="text-xs text-white/35 hover:text-indigo-400 transition-colors">
                       {link.label}
                     </a>
                   </li>
@@ -659,25 +718,25 @@ export default function LandingPage() {
               </ul>
             </div>
             <div>
-              <p className="text-sm font-semibold text-zinc-900 dark:text-white mb-3">Contact Us</p>
-              <ul className="space-y-2">
-                <li className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-                  <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" /></svg>
+              <p className="text-xs font-semibold text-white/40 uppercase tracking-widest mb-4">Contact Us</p>
+              <ul className="space-y-3">
+                <li className="flex items-center gap-2.5 text-xs text-white/35">
+                  <svg className="w-4 h-4 flex-shrink-0 text-indigo-500/60" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" /></svg>
                   +63 9XX XXX XXXX
                 </li>
-                <li className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-                  <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+                <li className="flex items-center gap-2.5 text-xs text-white/35">
+                  <svg className="w-4 h-4 flex-shrink-0 text-indigo-500/60" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
                   hello@seatmakersavenue.com
                 </li>
-                <li className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-                  <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                <li className="flex items-center gap-2.5 text-xs text-white/35">
+                  <svg className="w-4 h-4 flex-shrink-0 text-indigo-500/60" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
                   Multiple branches available
                 </li>
               </ul>
             </div>
           </div>
-          <div className="border-t border-zinc-200 dark:border-zinc-800 pt-6 text-center">
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">© 2026 Seatmakers Avenue. All rights reserved.</p>
+          <div className="border-t border-white/[0.05] pt-6 text-center">
+            <p className="text-xs text-white/20">© 2026 Seatmakers Avenue. All rights reserved.</p>
           </div>
         </div>
       </footer>
