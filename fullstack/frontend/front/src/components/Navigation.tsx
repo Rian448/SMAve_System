@@ -104,17 +104,17 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
       return null;
     }
     return (
-      <nav className="fixed top-0 left-0 right-0 h-16 bg-[#07070f]/80 backdrop-blur-md border-b border-white/[0.06] z-50 flex items-center px-4 sm:px-6 gap-4">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-violet-600 rounded-lg flex items-center justify-center shadow-[0_0_12px_rgba(99,102,241,0.4)]">
+      <nav className="fixed top-0 left-0 right-0 h-16 bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 z-50 flex items-center px-4 sm:px-6 gap-4">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 bg-amber-600 rounded-lg flex items-center justify-center">
             <LogoIcon />
           </div>
-          <span className="font-bold text-white hidden sm:block text-sm">Seatmakers Avenue</span>
+          <span className="font-bold text-zinc-900 dark:text-white hidden sm:block">Seatmakers Avenue</span>
         </div>
         <div className="ml-auto">
           <Link
             href="/login"
-            className="px-4 py-2 rounded-lg bg-gradient-to-r from-blue-500 to-violet-600 text-white text-sm font-semibold hover:shadow-[0_0_16px_rgba(99,102,241,0.45)] hover:scale-[1.02] active:scale-[0.98] transition-all duration-200"
+            className="px-4 py-2 rounded-lg bg-amber-600 text-white text-sm font-semibold hover:bg-amber-500 transition-colors"
           >
             Login
           </Link>
