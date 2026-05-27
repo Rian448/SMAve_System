@@ -30,6 +30,7 @@ export default function AppointmentsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [dateFilter, setDateFilter] = useState<string>('all');
   const [selectedAppointment, setSelectedAppointment] = useState<Appointment | null>(null);
   const [adminNotes, setAdminNotes] = useState('');
   const [confirmedTime, setConfirmedTime] = useState('');
@@ -119,6 +120,35 @@ export default function AppointmentsPage() {
       weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
     });
 
+  const applyDateFilter = (list: Appointment[]) => {
+    if (dateFilter === 'all') return list;
+    const now = new Date();
+    return list.filter((a) => {
+      const date = new Date(a.preferredDate);
+      if (dateFilter === 'day') {
+        return date.toDateString() === now.toDateString();
+      }
+      if (dateFilter === 'week') {
+        const startOfWeek = new Date(now);
+        startOfWeek.setDate(now.getDate() - now.getDay());
+        startOfWeek.setHours(0, 0, 0, 0);
+        const endOfWeek = new Date(startOfWeek);
+        endOfWeek.setDate(startOfWeek.getDate() + 6);
+        endOfWeek.setHours(23, 59, 59, 999);
+        return date >= startOfWeek && date <= endOfWeek;
+      }
+      if (dateFilter === 'month') {
+        return date.getMonth() === now.getMonth() && date.getFullYear() === now.getFullYear();
+      }
+      if (dateFilter === 'year') {
+        return date.getFullYear() === now.getFullYear();
+      }
+      return true;
+    });
+  };
+
+  const filteredAppointments = applyDateFilter(appointments);
+
   const formatTime = (timeStr?: string) => {
     if (!timeStr) return 'Any time';
     switch (timeStr) {
@@ -157,20 +187,41 @@ export default function AppointmentsPage() {
         )}
 
         {/* Filters */}
-        <div className="mb-6 flex flex-wrap gap-2">
-          {['all', 'pending', 'confirmed', 'completed', 'cancelled'].map((status) => (
-            <button
-              key={status}
-              onClick={() => setStatusFilter(status)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                statusFilter === status
-                  ? 'bg-amber-600 text-white'
-                  : 'bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800'
-              }`}
+        <div className="mb-6 flex flex-wrap items-center gap-4">
+          <div className="flex items-center gap-2">
+            <label htmlFor="status-filter" className="text-sm font-medium text-zinc-700 dark:text-zinc-300 whitespace-nowrap">
+              Status:
+            </label>
+            <select
+              id="status-filter"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-colors"
             >
-              {status.charAt(0).toUpperCase() + status.slice(1)}
-            </button>
-          ))}
+              <option value="all">All</option>
+              <option value="pending">Pending</option>
+              <option value="confirmed">Confirmed</option>
+              <option value="completed">Done</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-2">
+            <label htmlFor="date-filter" className="text-sm font-medium text-zinc-700 dark:text-zinc-300 whitespace-nowrap">
+              Period:
+            </label>
+            <select
+              id="date-filter"
+              value={dateFilter}
+              onChange={(e) => setDateFilter(e.target.value)}
+              className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-white text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-colors"
+            >
+              <option value="all">All Time</option>
+              <option value="day">Today</option>
+              <option value="week">This Week</option>
+              <option value="month">This Month</option>
+              <option value="year">This Year</option>
+            </select>
+          </div>
         </div>
 
         {/* Stats */}
@@ -178,7 +229,7 @@ export default function AppointmentsPage() {
           {(['pending', 'confirmed', 'completed'] as const).map((s) => (
             <div key={s} className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-4">
               <div className="text-2xl font-bold text-zinc-900 dark:text-white">
-                {appointments.filter(a => a.status === s).length}
+                {filteredAppointments.filter(a => a.status === s).length}
               </div>
               <div className={`text-sm ${s === 'pending' ? 'text-yellow-600 dark:text-yellow-400' : s === 'confirmed' ? 'text-blue-600 dark:text-blue-400' : 'text-green-600 dark:text-green-400'}`}>
                 {s.charAt(0).toUpperCase() + s.slice(1)}
@@ -186,13 +237,13 @@ export default function AppointmentsPage() {
             </div>
           ))}
           <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-4">
-            <div className="text-2xl font-bold text-zinc-900 dark:text-white">{appointments.length}</div>
+            <div className="text-2xl font-bold text-zinc-900 dark:text-white">{filteredAppointments.length}</div>
             <div className="text-sm text-zinc-600 dark:text-zinc-400">Total</div>
           </div>
         </div>
 
         {/* Appointments List */}
-        {appointments.length === 0 ? (
+        {filteredAppointments.length === 0 ? (
           <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-12 text-center">
             <svg className="w-12 h-12 mx-auto text-zinc-400 dark:text-zinc-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
@@ -204,7 +255,7 @@ export default function AppointmentsPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            {appointments.map((appointment) => (
+            {filteredAppointments.map((appointment) => (
               <div
                 key={appointment.id}
                 className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-6"

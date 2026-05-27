@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 
 export default function LoginPage() {
   const [username, setUsername] = useState('');
@@ -63,6 +64,17 @@ export default function LoginPage() {
         <div className="bg-white dark:bg-zinc-800 rounded-2xl shadow-xl p-8">
           {!showRecovery ? (
             <>
+              <div className="mb-5">
+                <Link
+                  href="/"
+                  className="inline-flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                  </svg>
+                  Back to website
+                </Link>
+              </div>
               <h2 className="text-2xl font-semibold text-zinc-900 dark:text-white mb-6">Sign In</h2>
               
               {error && (

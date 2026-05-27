@@ -147,8 +147,8 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
     setIsLoggingOut(true);
     try {
       await logout();
-      router.push('/login');
-    } catch {
+      router.push('/');
+    } finally {
       setIsLoggingOut(false);
     }
   };

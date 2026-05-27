@@ -203,8 +203,11 @@ function MyOrdersContent() {
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
       <div className="bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <Link href="/" className="text-amber-600 dark:text-amber-400 text-sm font-medium mb-4 inline-block">
-            ← Back to Home
+          <Link href="/" className="inline-flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors mb-4">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+            Back to website
           </Link>
           <h1 className="text-3xl font-bold text-zinc-900 dark:text-white">My Orders</h1>
           <p className="text-zinc-600 dark:text-zinc-400 mt-2">
