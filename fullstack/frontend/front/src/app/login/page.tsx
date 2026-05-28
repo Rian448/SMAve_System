@@ -150,6 +150,12 @@ export default function LoginPage() {
                 </div>
               </div>
 
+              <div className="mt-4 p-4 bg-gray-50 rounded-xl">
+                <div className="text-xs text-gray-600 space-y-1">
+                  <p><span className="font-medium">Admin:</span> admin / admin123</p>
+                </div>
+              </div>
+
             </>
           ) : (
             <>
