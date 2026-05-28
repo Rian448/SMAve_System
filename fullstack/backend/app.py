@@ -985,7 +985,12 @@ def login():
     
     if not user:
         return jsonify({'status': 'error', 'message': 'Invalid credentials'}), 401
-    
+
+    # Invalidate any existing sessions for this user (prevent concurrent logins)
+    existing_tokens = [t for t, s in sessions.items() if s.get('userId') == user.id]
+    for t in existing_tokens:
+        del sessions[t]
+
     # Generate session token
     token = secrets.token_hex(32)
     sessions[token] = {
