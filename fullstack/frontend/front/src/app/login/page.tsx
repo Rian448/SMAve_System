@@ -133,25 +133,23 @@ export default function LoginPage() {
                 </button>
               </form>
 
-              <div className="mt-6 text-center">
+              <div className="mt-6 text-center space-y-3">
                 <button
                   onClick={() => setShowRecovery(true)}
                   className="text-[#011c72] hover:text-[#011c72] text-sm font-medium"
                 >
                   Forgot your password?
                 </button>
-              </div>
-
-              {/* Demo Credentials */}
-              <div className="mt-6 p-4 bg-gray-50 rounded-xl">
-                <p className="text-sm font-medium text-gray-700 mb-2">Demo Credentials:</p>
-                <div className="text-xs text-gray-600 space-y-1">
-                  <p><span className="font-medium">Admin:</span> admin / admin123</p>
-                  <p><span className="font-medium">Supervisor:</span> supervisor / super123</p>
-                  <p><span className="font-medium">Sales Manager:</span> salesmanager / sales123</p>
-                  <p><span className="font-medium">Staff:</span> staff1 / staff123</p>
+                <div className="border-t border-gray-200 pt-4">
+                  <p className="text-sm text-gray-600">
+                    Don&apos;t have an account yet?{' '}
+                    <Link href="/register" className="text-[#011c72] font-medium hover:underline">
+                      Register here
+                    </Link>
+                  </p>
                 </div>
               </div>
+
             </>
           ) : (
             <>

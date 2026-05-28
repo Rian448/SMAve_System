@@ -9,8 +9,9 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   const { isAuthenticated, isLoading } = useAuth();
   const pathname = usePathname();
 
-  const showSidebar = isAuthenticated && !isLoading && pathname !== '/login';
-  const showPublicTopNav = !isAuthenticated && !isLoading && pathname !== '/login';
+  const authlessPages = ['/login', '/register'];
+  const showSidebar = isAuthenticated && !isLoading && !authlessPages.includes(pathname);
+  const showPublicTopNav = !isAuthenticated && !isLoading && !authlessPages.includes(pathname);
 
   return (
     <div className="flex min-h-screen bg-gray-50">

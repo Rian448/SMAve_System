@@ -93,9 +93,9 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  const publicRoutes = ['/', '/login', '/place-order'];
+  const publicRoutes = ['/', '/login', '/register', '/place-order'];
 
-  if (pathname === '/login') return null;
+  if (pathname === '/login' || pathname === '/register') return null;
   if (isLoading) return null;
 
   // Unauthenticated: show minimal top bar
