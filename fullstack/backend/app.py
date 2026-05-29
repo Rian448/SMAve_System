@@ -795,7 +795,12 @@ def normalize_premade_units():
         db.session.commit()
 
 def run_migrations():
-    """Add new columns to existing tables without dropping data."""
+    """Add new columns to existing tables without dropping data.
+    Each migration runs in its own transaction so a failure (e.g. column
+    already exists) does not poison the connection for subsequent migrations.
+    This is required for PostgreSQL which marks the whole connection as aborted
+    after any error — unlike SQLite which is more forgiving.
+    """
     from sqlalchemy import text
     migrations = [
         "ALTER TABLE inventory_materials ADD COLUMN source_job_order_id VARCHAR(50)",
@@ -806,15 +811,17 @@ def run_migrations():
         "ALTER TABLE product_orders ADD COLUMN amount_paid REAL DEFAULT 0.0",
         "ALTER TABLE appointments ADD COLUMN confirmed_by INTEGER REFERENCES users(id)",
         "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN lockout_until DATETIME",
+        "ALTER TABLE users ADD COLUMN lockout_until TIMESTAMP",
+        # Expand password column for salted hashes (SQLite ignores length; PostgreSQL enforces it)
+        "ALTER TABLE users ALTER COLUMN password TYPE VARCHAR(255)",
     ]
-    with db.engine.connect() as conn:
-        for sql in migrations:
-            try:
+    for sql in migrations:
+        try:
+            # engine.begin() gives an auto-commit/auto-rollback transaction per statement
+            with db.engine.begin() as conn:
                 conn.execute(text(sql))
-                conn.commit()
-            except Exception:
-                pass  # Column already exists
+        except Exception:
+            pass  # Column already exists or statement not supported on this DB
 
 def init_db():
     db.create_all()

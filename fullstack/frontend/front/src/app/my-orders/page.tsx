@@ -238,8 +238,8 @@ function MyOrdersContent() {
             onClick={() => setActiveTab('custom')}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
               activeTab === 'custom'
-                ? 'bg-white text-white'
-                : 'bg-white text-gray-700 border border-gray-200'
+                ? 'bg-[#011c72] text-white shadow-sm'
+                : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50'
             }`}
           >
             Custom Orders ({customOrders.length})
@@ -248,8 +248,8 @@ function MyOrdersContent() {
             onClick={() => setActiveTab('premade')}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
               activeTab === 'premade'
-                ? 'bg-white text-white'
-                : 'bg-white text-gray-700 border border-gray-200'
+                ? 'bg-[#011c72] text-white shadow-sm'
+                : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50'
             }`}
           >
             Premade Purchases ({productOrders.length})
@@ -258,8 +258,8 @@ function MyOrdersContent() {
             onClick={() => setActiveTab('appointments')}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
               activeTab === 'appointments'
-                ? 'bg-white text-white'
-                : 'bg-white text-gray-700 border border-gray-200'
+                ? 'bg-[#011c72] text-white shadow-sm'
+                : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50'
             }`}
           >
             Appointments ({appointments.length})
