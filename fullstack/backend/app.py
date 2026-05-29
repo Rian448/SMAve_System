@@ -806,7 +806,9 @@ def run_migrations():
         "ALTER TABLE product_orders ADD COLUMN amount_paid REAL DEFAULT 0.0",
         "ALTER TABLE appointments ADD COLUMN confirmed_by INTEGER REFERENCES users(id)",
         "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN lockout_until DATETIME",
+        "ALTER TABLE users ADD COLUMN lockout_until TIMESTAMP",
+        # Expand password column for salted hashes (SQLite ignores length; PostgreSQL enforces it)
+        "ALTER TABLE users ALTER COLUMN password TYPE VARCHAR(255)",
     ]
     with db.engine.connect() as conn:
         for sql in migrations:
