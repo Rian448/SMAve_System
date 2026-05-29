@@ -86,6 +86,32 @@ function PlaceOrderContent() {
   const [appointmentDescription, setAppointmentDescription] = useState('');
   const [appointmentVehicleInfo, setAppointmentVehicleInfo] = useState({ make: '', model: '', year: '', plateNumber: '' });
 
+  // Date/time availability helpers — uses local browser time (Philippines)
+  const now = new Date();
+  const currentHour = now.getHours();
+  // YYYY-MM-DD in local time
+  const todayStr = now.toLocaleDateString('en-CA');
+  // If it's past 8 PM, all slots for today are gone — minimum date becomes tomorrow
+  const minBookingDate = currentHour >= 20
+    ? new Date(now.getTime() + 86400000).toLocaleDateString('en-CA')
+    : todayStr;
+
+  const PERIOD_END: Record<string, number> = { morning: 12, afternoon: 17, evening: 20 };
+
+  const isTimePeriodPast = (period: string): boolean => {
+    if (appointmentDate !== todayStr) return false;
+    return currentHour >= (PERIOD_END[period] ?? 24);
+  };
+
+  const handleAppointmentDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newDate = e.target.value;
+    setAppointmentDate(newDate);
+    // Auto-clear the time period if it's now past for today
+    if (newDate === todayStr && appointmentTime && isTimePeriodPast(appointmentTime)) {
+      setAppointmentTime('');
+    }
+  };
+
   const availableServices = ['Flooring', 'Reupholstery', 'Ceiling', 'Sidings', 'Seat Covers', 'Other Services'];
 
   useEffect(() => {
@@ -206,6 +232,17 @@ function PlaceOrderContent() {
     if (!agreeTerms) { setError('Please agree to the terms and conditions'); return; }
     if (!appointmentBranch) { setError('Please select a branch'); return; }
     if (!appointmentDate) { setError('Please select a preferred date'); return; }
+
+    // Client-side past date/time guard
+    if (appointmentDate < minBookingDate) {
+      setError('Cannot book an appointment for a past date. Please select today or a future date.');
+      return;
+    }
+    if (appointmentDate === todayStr && appointmentTime && isTimePeriodPast(appointmentTime)) {
+      setError(`The ${appointmentTime} slot has already passed for today. Please choose a later time or a different date.`);
+      return;
+    }
+
     setLoading(true); setError('');
     try {
       const vehicleInfo: VehicleInfo | undefined = appointmentVehicleInfo.make ? {
@@ -599,16 +636,79 @@ function PlaceOrderContent() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Preferred Date *</label>
-                  <input type="date" value={appointmentDate} onChange={e => setAppointmentDate(e.target.value)} min={new Date().toISOString().split('T')[0]} required className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                  <input
+                    type="date"
+                    value={appointmentDate}
+                    onChange={handleAppointmentDateChange}
+                    min={minBookingDate}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                  />
+                  {currentHour >= 20 && (
+                    <p className="mt-1 text-xs text-orange-600">
+                      All slots for today have passed. Earliest available date is tomorrow.
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Preferred Time</label>
-                  <select value={appointmentTime} onChange={e => setAppointmentTime(e.target.value)} className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
-                    <option value="">Any time</option>
-                    <option value="morning">Morning (8AM – 12PM)</option>
-                    <option value="afternoon">Afternoon (12PM – 5PM)</option>
-                    <option value="evening">Evening (5PM – 8PM)</option>
-                  </select>
+                  <div className="space-y-2">
+                    {/* "Any time" option */}
+                    <label className={`flex items-center gap-3 px-4 py-2.5 rounded-lg border-2 cursor-pointer transition-colors ${appointmentTime === '' ? 'border-[#011c72] bg-[#eef1fb]' : 'border-gray-200 hover:border-gray-300'}`}>
+                      <input type="radio" name="apptTime" value="" checked={appointmentTime === ''} onChange={() => setAppointmentTime('')} className="accent-[#011c72]" />
+                      <span className="text-sm text-gray-700">Any time</span>
+                    </label>
+
+                    {([
+                      { value: 'morning',   label: 'Morning',   range: '8:00 AM – 12:00 PM' },
+                      { value: 'afternoon', label: 'Afternoon', range: '12:00 PM – 5:00 PM'  },
+                      { value: 'evening',   label: 'Evening',   range: '5:00 PM – 8:00 PM'   },
+                    ] as const).map(({ value, label, range }) => {
+                      const past = isTimePeriodPast(value);
+                      return (
+                        <label
+                          key={value}
+                          className={`flex items-center justify-between gap-3 px-4 py-2.5 rounded-lg border-2 transition-colors
+                            ${past
+                              ? 'border-gray-200 bg-gray-50 cursor-not-allowed opacity-60'
+                              : appointmentTime === value
+                                ? 'border-[#011c72] bg-[#eef1fb] cursor-pointer'
+                                : 'border-gray-200 hover:border-gray-300 cursor-pointer'
+                            }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <input
+                              type="radio"
+                              name="apptTime"
+                              value={value}
+                              checked={appointmentTime === value}
+                              onChange={() => !past && setAppointmentTime(value)}
+                              disabled={past}
+                              className="accent-[#011c72]"
+                            />
+                            <div>
+                              <span className={`text-sm font-medium ${past ? 'line-through text-gray-400' : 'text-gray-900'}`}>
+                                {label}
+                              </span>
+                              <span className={`ml-2 text-xs ${past ? 'line-through text-gray-400' : 'text-gray-500'}`}>
+                                {range}
+                              </span>
+                            </div>
+                          </div>
+                          {past && (
+                            <span className="text-xs font-medium text-red-500 bg-red-50 px-2 py-0.5 rounded-full border border-red-200 whitespace-nowrap">
+                              Already passed
+                            </span>
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {appointmentDate === todayStr && currentHour >= 12 && currentHour < 20 && (
+                    <p className="mt-2 text-xs text-orange-600">
+                      Some time slots are no longer available for today.
+                    </p>
+                  )}
                 </div>
               </div>
             </div>

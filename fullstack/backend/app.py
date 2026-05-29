@@ -5,6 +5,7 @@ from functools import wraps
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
 import os
 import random
 import hashlib
@@ -52,13 +53,15 @@ class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(100), unique=True, nullable=False)
-    password = db.Column(db.String(64), nullable=False)
+    password = db.Column(db.String(255), nullable=False)
     email = db.Column(db.String(255), unique=True, nullable=False)
     full_name = db.Column(db.String(255), nullable=False)
     role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=False)
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
     branch = db.Column(db.String(100), nullable=True)  # Keep for backward compatibility
     is_active = db.Column(db.Boolean, default=True)
+    failed_login_attempts = db.Column(db.Integer, default=0)
+    lockout_until = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     role = db.relationship('Role')
@@ -182,13 +185,15 @@ class Appointment(db.Model):
     vehicle_info = db.Column(db.JSON)  # Optional vehicle info
     status = db.Column(db.String(50), default='pending')  # pending, confirmed, completed, cancelled
     confirmed_time = db.Column(db.String(20), nullable=True)  # e.g. "2:30 PM"
+    confirmed_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     admin_notes = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     branch = db.relationship('Branch')
     customer_user = db.relationship('User', foreign_keys=[user_id])
+    confirmer = db.relationship('User', foreign_keys=[confirmed_by])
 
 class ProductOrder(db.Model):
     __tablename__ = 'product_orders'
@@ -727,7 +732,7 @@ def seed_default_users():
 
         new_user = User(
             username=user['username'],
-            password=hashlib.sha256(user['password'].encode()).hexdigest(),
+            password=hash_password(user['password']),
             email=user['email'],
             full_name=user['fullName'],
             role_id=role.id,
@@ -799,6 +804,9 @@ def run_migrations():
         "ALTER TABLE inventory_materials ADD COLUMN low_stock_threshold REAL DEFAULT 0",
         "ALTER TABLE inventory_materials ADD COLUMN supplier_id INTEGER REFERENCES suppliers(id)",
         "ALTER TABLE product_orders ADD COLUMN amount_paid REAL DEFAULT 0.0",
+        "ALTER TABLE appointments ADD COLUMN confirmed_by INTEGER REFERENCES users(id)",
+        "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN lockout_until DATETIME",
     ]
     with db.engine.connect() as conn:
         for sql in migrations:
@@ -900,6 +908,46 @@ def require_roles(*roles):
         return decorated
     return decorator
 
+PH_OFFSET = timedelta(hours=8)
+
+# ============================================
+# PASSWORD HELPERS
+# ============================================
+
+MAX_FAILED_ATTEMPTS = 5
+LOCKOUT_MINUTES = 15
+
+def hash_password(raw_password: str) -> str:
+    """Hash a password using PBKDF2-SHA256 with a random salt (werkzeug)."""
+    return generate_password_hash(raw_password)
+
+def verify_password(user, raw_password: str) -> bool:
+    """Verify a password against the stored hash.
+    Supports both the old plain-SHA256 format and the new salted werkzeug format.
+    If the old format matches it silently upgrades the hash in-place.
+    """
+    stored = user.password
+    # New salted format from werkzeug
+    if stored.startswith('pbkdf2:') or stored.startswith('scrypt:'):
+        return check_password_hash(stored, raw_password)
+    # Legacy format: plain SHA-256 hex digest (no salt)
+    legacy_hash = hashlib.sha256(raw_password.encode()).hexdigest()
+    if legacy_hash == stored:
+        # Upgrade to salted hash on the spot — no commit here, caller does it
+        user.password = generate_password_hash(raw_password)
+        return True
+    return False
+
+def to_pht(dt):
+    """Convert a UTC datetime to Philippine Time (UTC+8) ISO-8601 string."""
+    if dt is None:
+        return None
+    return (dt + PH_OFFSET).strftime('%Y-%m-%dT%H:%M:%S+08:00')
+
+def now_pht():
+    """Current Philippine Time as a formatted string for audit logs."""
+    return (datetime.utcnow() + PH_OFFSET).strftime('%Y-%m-%d %H:%M:%S PHT')
+
 def log_action(user_id, user_name, action, module, details, ip_address='0.0.0.0'):
     """Log user action to audit trail"""
     global counters
@@ -911,7 +959,7 @@ def log_action(user_id, user_name, action, module, details, ip_address='0.0.0.0'
         'module': module,
         'details': details,
         'ipAddress': ip_address,
-        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        'timestamp': now_pht()
     })
     counters['audit_log'] += 1
 
@@ -979,19 +1027,63 @@ def generate_delivery_number():
 def login():
     data = request.get_json()
     username = data.get('username', '')
-    password = hashlib.sha256(data.get('password', '').encode()).hexdigest()
-    
-    user = User.query.filter_by(username=username, password=password, is_active=True).first()
-    
+    raw_password = data.get('password', '')
+
+    user = User.query.filter_by(username=username, is_active=True).first()
+
     if not user:
         return jsonify({'status': 'error', 'message': 'Invalid credentials'}), 401
+
+    # Check if account is locked
+    now_utc = datetime.utcnow()
+    if user.lockout_until and user.lockout_until > now_utc:
+        remaining_secs = int((user.lockout_until - now_utc).total_seconds())
+        remaining_mins = (remaining_secs // 60) + 1
+        log_action(0, username, 'LOGIN_BLOCKED', 'Auth',
+                   f'Login attempt blocked — account locked for {remaining_mins} more minute(s)',
+                   request.remote_addr or '0.0.0.0')
+        return jsonify({
+            'status': 'error',
+            'message': f'Account is locked due to too many failed attempts. Try again in {remaining_mins} minute(s).',
+            'lockedOut': True,
+            'retryAfterSeconds': remaining_secs
+        }), 429
+
+    # Verify password (supports legacy SHA-256 and new salted hash)
+    if not verify_password(user, raw_password):
+        user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
+        attempts_left = MAX_FAILED_ATTEMPTS - user.failed_login_attempts
+        if user.failed_login_attempts >= MAX_FAILED_ATTEMPTS:
+            user.lockout_until = now_utc + timedelta(minutes=LOCKOUT_MINUTES)
+            db.session.commit()
+            log_action(user.id, user.full_name, 'LOGIN_LOCKED', 'Auth',
+                       f'Account locked after {MAX_FAILED_ATTEMPTS} failed attempts',
+                       request.remote_addr or '0.0.0.0')
+            return jsonify({
+                'status': 'error',
+                'message': f'Too many failed attempts. Account locked for {LOCKOUT_MINUTES} minutes.',
+                'lockedOut': True,
+                'retryAfterSeconds': LOCKOUT_MINUTES * 60
+            }), 429
+        db.session.commit()
+        log_action(user.id, user.full_name, 'LOGIN_FAILED', 'Auth',
+                   f'Failed login attempt {user.failed_login_attempts}/{MAX_FAILED_ATTEMPTS}',
+                   request.remote_addr or '0.0.0.0')
+        return jsonify({
+            'status': 'error',
+            'message': f'Invalid credentials. {attempts_left} attempt(s) remaining before lockout.',
+            'attemptsLeft': attempts_left
+        }), 401
+
+    # Successful login — reset lockout counters and upgrade legacy hash if needed
+    user.failed_login_attempts = 0
+    user.lockout_until = None
 
     # Invalidate any existing sessions for this user (prevent concurrent logins)
     existing_tokens = [t for t, s in sessions.items() if s.get('userId') == user.id]
     for t in existing_tokens:
         del sessions[t]
 
-    # Generate session token
     token = secrets.token_hex(32)
     sessions[token] = {
         'id': user.id,
@@ -1004,15 +1096,12 @@ def login():
         'branch': user.branch,
         'branchId': user.branch_id,
         'isActive': user.is_active,
-        'createdAt': datetime.now().isoformat()
+        'createdAt': datetime.utcnow().isoformat()
     }
-    
-    print(f"DEBUG LOGIN: User {username} logged in successfully")
-    print(f"DEBUG LOGIN: Token stored with value: {token[:20]}...")
-    print(f"DEBUG LOGIN: Sessions count: {len(sessions)}")
-    
+
+    db.session.commit()
     log_action(user.id, user.full_name, 'LOGIN', 'Auth', 'User logged in', request.remote_addr or '0.0.0.0')
-    
+
     return jsonify({
         'status': 'success',
         'data': {
@@ -2880,9 +2969,12 @@ def appointment_to_dict(appointment):
         'vehicleInfo': appointment.vehicle_info,
         'status': appointment.status,
         'confirmedTime': appointment.confirmed_time,
+        'confirmedBy': appointment.confirmed_by,
+        'confirmedByName': appointment.confirmer.full_name if appointment.confirmer else None,
+        'confirmedByRole': appointment.confirmer.role.key if (appointment.confirmer and appointment.confirmer.role) else None,
         'adminNotes': appointment.admin_notes,
-        'createdAt': appointment.created_at.isoformat() if appointment.created_at else None,
-        'updatedAt': appointment.updated_at.isoformat() if appointment.updated_at else None
+        'createdAt': to_pht(appointment.created_at),
+        'updatedAt': to_pht(appointment.updated_at),
     }
 
 @app.route('/api/appointments', methods=['POST'])
@@ -2925,7 +3017,28 @@ def create_appointment():
         preferred_date = datetime.strptime(data['preferredDate'], '%Y-%m-%d').date()
     except ValueError:
         return jsonify({'status': 'error', 'message': 'Invalid date format. Use YYYY-MM-DD'}), 400
-    
+
+    # Validate date/time against Philippine time (UTC+8)
+    now_ph = datetime.utcnow() + timedelta(hours=8)
+    today_ph = now_ph.date()
+    current_hour_ph = now_ph.hour
+
+    if preferred_date < today_ph:
+        return jsonify({'status': 'error', 'message': 'Cannot book an appointment for a past date.'}), 400
+
+    if preferred_date == today_ph:
+        # All slots end at 20:00 (8 PM)
+        if current_hour_ph >= 20:
+            return jsonify({'status': 'error', 'message': 'All time slots for today have already passed. Please choose tomorrow or a later date.'}), 400
+        # Validate specific period if provided
+        preferred_time = data.get('preferredTime', '')
+        period_end = {'morning': 12, 'afternoon': 17, 'evening': 20}
+        if preferred_time in period_end and current_hour_ph >= period_end[preferred_time]:
+            return jsonify({
+                'status': 'error',
+                'message': f'The {preferred_time} slot has already ended today. Please choose a later time period or a different date.'
+            }), 400
+
     new_appointment = Appointment(
         appointment_number=appointment_number,
         customer_name=data['customerName'],
@@ -2987,19 +3100,39 @@ def update_appointment(appointment_id):
             return jsonify({'status': 'error', 'message': 'Access denied'}), 403
     
     data = request.get_json()
-    
+
     if 'status' in data:
         new_status = data['status']
         if new_status == 'confirmed':
-            if not data.get('confirmedTime'):
+            confirmed_time = data.get('confirmedTime')
+            if not confirmed_time:
                 return jsonify({'status': 'error', 'message': 'A confirmed time must be selected when confirming an appointment'}), 400
-            appointment.confirmed_time = data['confirmedTime']
+
+            # Double-booking check: same branch, same date, same time slot, already confirmed
+            if appointment.branch_id and appointment.preferred_date:
+                clash = Appointment.query.filter(
+                    Appointment.id != appointment.id,
+                    Appointment.branch_id == appointment.branch_id,
+                    Appointment.preferred_date == appointment.preferred_date,
+                    Appointment.confirmed_time == confirmed_time,
+                    Appointment.status == 'confirmed'
+                ).first()
+                if clash:
+                    return jsonify({
+                        'status': 'error',
+                        'message': f'This time slot ({confirmed_time}) is already taken by appointment {clash.appointment_number} on this date. Please choose a different time.'
+                    }), 409
+
+            appointment.confirmed_time = confirmed_time
+            appointment.confirmed_by = user['id']
+
         appointment.status = new_status
+
     if 'adminNotes' in data:
         appointment.admin_notes = data['adminNotes']
 
     db.session.commit()
-    
+
     return jsonify({'status': 'success', 'data': appointment_to_dict(appointment)})
 
 @app.route('/api/appointments/my-appointments', methods=['GET'])
@@ -3165,6 +3298,7 @@ def create_multi_branch_product_order():
     # Validate all items and enrich with source branch info
     all_items = []
     items_by_source = {}
+    same_branch_deductions = []  # items already at pickup branch — deduct immediately
     for item_data in data['items']:
         product_id = item_data.get('productId')
         quantity = int(item_data.get('quantity', 1))
@@ -3189,6 +3323,11 @@ def create_multi_branch_product_order():
         src = int(product.branch_id)
         if src != pickup_branch_id:
             items_by_source.setdefault(src, []).append(item_dict)
+        else:
+            same_branch_deductions.append((product, quantity))
+
+    needs_transfers = len(items_by_source) > 0
+    group_id = str(uuid.uuid4()) if needs_transfers else None
 
     # Create ONE order at the pickup branch with all items
     order = ProductOrder(
@@ -3201,7 +3340,8 @@ def create_multi_branch_product_order():
         total_amount=sum(i['total'] for i in all_items),
         branch_id=pickup_branch_id,
         pickup_branch_id=pickup_branch_id,
-        shipment_status='not_needed',
+        shipment_status='pending' if needs_transfers else 'not_needed',
+        group_id=group_id,
         status='pending',
         payment_status='unpaid',
         user_id=user_id,
@@ -3209,6 +3349,10 @@ def create_multi_branch_product_order():
     )
     db.session.add(order)
     db.session.flush()  # get order.id
+
+    # Deduct inventory immediately for items already at the pickup branch
+    for product, qty in same_branch_deductions:
+        product.quantity = float(product.quantity) - qty
 
     # Create a transfer request for each source branch ≠ pickup branch
     for src_branch_id, branch_items in items_by_source.items():
@@ -3374,6 +3518,16 @@ def confirm_transfer_receipt(transfer_id):
             ))
 
     transfer.status = 'received'
+    db.session.flush()
+
+    # Auto-advance the order when all transfers are received
+    if order:
+        all_transfers = ProductOrderTransfer.query.filter_by(product_order_id=order.id).all()
+        if all(t.status == 'received' for t in all_transfers):
+            order.shipment_status = 'received'
+            if order.status == 'pending':
+                order.status = 'ready'
+
     db.session.commit()
 
     log_action(user['id'], user['fullName'], 'RECEIVE', 'Product Orders',
@@ -3820,7 +3974,7 @@ def register_customer():
     # Create new customer user
     new_user = User(
         username=data['username'],
-        password=hashlib.sha256(data['password'].encode()).hexdigest(),
+        password=hash_password(data['password']),
         email=data['email'],
         full_name=data['fullName'],
         role_id=customer_role.id,
@@ -4325,7 +4479,7 @@ def create_user():
     
     new_user = User(
         username=data['username'],
-        password=hashlib.sha256(data['password'].encode()).hexdigest(),
+        password=hash_password(data['password']),
         email=data['email'],
         full_name=data['fullName'],
         role_id=role.id,
@@ -4392,7 +4546,7 @@ def update_user(user_id):
             return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
         user.role_id = role.id
     if 'password' in data and data['password']:
-        user.password = hashlib.sha256(data['password'].encode()).hexdigest()
+        user.password = hash_password(data['password'])
     
     db.session.commit()
     

@@ -1,7 +1,7 @@
 ﻿'use client';
 import { useState, useEffect } from 'react';
 import { api, Appointment } from '@/lib/api';
-import { useAuth } from '@/context/AuthContext';
+import { useAuth, hasAccess } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 
 const TIME_RANGES: Record<string, [number, number]> = {
@@ -25,7 +25,8 @@ function getTimeSlots(preferredTime?: string): string[] {
 
 export default function AppointmentsPage() {
   const router = useRouter();
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
+  const isAdmin = user?.role === 'administrator';
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -61,8 +62,18 @@ export default function AppointmentsPage() {
     }
   }, [isAuthenticated, statusFilter]);
 
+  const todayDate = new Date(new Date().toDateString());
+
+  const isOverdue = (apt: Appointment) =>
+    apt.status === 'pending' && new Date(apt.preferredDate) < todayDate;
+
+  // A confirmed appointment whose scheduled date has already passed
+  const isPastSchedule = (apt: Appointment) =>
+    apt.status === 'confirmed' && new Date(apt.preferredDate) < todayDate;
+
   const handleStatusUpdate = async (appointmentId: number, newStatus: string, time?: string) => {
     setUpdating(true);
+    setError('');
     try {
       await api.appointments.update(appointmentId, {
         status: newStatus,
@@ -258,7 +269,11 @@ export default function AppointmentsPage() {
             {filteredAppointments.map((appointment) => (
               <div
                 key={appointment.id}
-                className="bg-white rounded-xl shadow-sm border border-gray-200 p-6"
+                className={`bg-white rounded-xl shadow-sm border p-6 ${
+                  isOverdue(appointment) ? 'border-red-300' :
+                  isPastSchedule(appointment) ? 'border-gray-300 opacity-75' :
+                  'border-gray-200'
+                }`}
               >
                 <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
                   {/* Left side */}
@@ -269,9 +284,21 @@ export default function AppointmentsPage() {
                         <h3 className="font-semibold text-gray-900">{appointment.customerName}</h3>
                         <p className="text-sm text-gray-500">{appointment.appointmentNumber}</p>
                       </div>
-                      <span className={`ml-auto lg:ml-0 px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(appointment.status)}`}>
-                        {appointment.status.charAt(0).toUpperCase() + appointment.status.slice(1)}
-                      </span>
+                      <div className="ml-auto lg:ml-0 flex items-center gap-2">
+                        {isOverdue(appointment) && (
+                          <span className="px-2 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 border border-red-300">
+                            Overdue
+                          </span>
+                        )}
+                        {isPastSchedule(appointment) && (
+                          <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-500 border border-gray-300">
+                            Past Schedule
+                          </span>
+                        )}
+                        <span className={`px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(appointment.status)}`}>
+                          {appointment.status.charAt(0).toUpperCase() + appointment.status.slice(1)}
+                        </span>
+                      </div>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
@@ -293,7 +320,13 @@ export default function AppointmentsPage() {
                       </div>
                       <div>
                         <span className="text-gray-500">Preferred Date & Time:</span>
-                        <p className="text-gray-900 font-medium">{formatDate(appointment.preferredDate)}</p>
+                        <p className={`font-medium ${
+                          isOverdue(appointment) ? 'text-red-500 line-through' :
+                          isPastSchedule(appointment) ? 'text-gray-400 line-through' :
+                          'text-gray-900'
+                        }`}>
+                          {formatDate(appointment.preferredDate)}
+                        </p>
                         <p className="text-gray-600">{formatTime(appointment.preferredTime)}</p>
                         {appointment.confirmedTime && (
                           <p className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-100 text-blue-700 text-xs font-semibold">
@@ -301,6 +334,14 @@ export default function AppointmentsPage() {
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                             </svg>
                             Confirmed at {appointment.confirmedTime}
+                            {appointment.confirmedByName && (
+                              <span className="ml-1 text-blue-500">
+                                by {appointment.confirmedByName}
+                                {appointment.confirmedByRole === 'administrator' && (
+                                  <span className="ml-1 text-orange-500 font-bold">(Admin Override)</span>
+                                )}
+                              </span>
+                            )}
                           </p>
                         )}
                       </div>
@@ -326,7 +367,7 @@ export default function AppointmentsPage() {
 
                     {appointment.adminNotes && (
                       <div className="mt-3 p-3 bg-blue-50 rounded-lg">
-                        <span className="text-xs font-medium text-blue-600 uppercase">Admin Notes:</span>
+                        <span className="text-xs font-medium text-blue-600 uppercase">Notes:</span>
                         <p className="text-sm text-blue-700 mt-1">{appointment.adminNotes}</p>
                       </div>
                     )}
@@ -337,14 +378,23 @@ export default function AppointmentsPage() {
                   </div>
 
                   {/* Right side - Actions */}
-                  <div className="flex flex-col gap-2 lg:w-48">
+                  <div className="flex flex-col gap-2 lg:w-52">
                     {appointment.status === 'pending' && (
                       <>
+                        {isAdmin && appointment.branchId && (
+                          <p className="text-xs text-orange-600 text-center leading-tight">
+                            Branch supervisor should confirm
+                          </p>
+                        )}
                         <button
                           onClick={() => openConfirmModal(appointment)}
-                          className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 transition-colors"
+                          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                            isAdmin
+                              ? 'bg-orange-500 text-white hover:bg-orange-600'
+                              : 'bg-blue-600 text-white hover:bg-blue-700'
+                          }`}
                         >
-                          Confirm
+                          {isAdmin ? 'Override & Confirm' : 'Confirm'}
                         </button>
                         <button
                           onClick={() => handleStatusUpdate(appointment.id, 'cancelled')}
@@ -379,12 +429,18 @@ export default function AppointmentsPage() {
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
             <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
               <h3 className="text-lg font-semibold text-gray-900 mb-1">
-                Confirm Appointment
+                {isAdmin ? 'Override & Confirm Appointment' : 'Confirm Appointment'}
               </h3>
               <p className="text-sm text-gray-600 mb-4">
                 <strong>{selectedAppointment.customerName}</strong> —{' '}
                 {formatDate(selectedAppointment.preferredDate)}
               </p>
+
+              {isAdmin && (
+                <div className="mb-4 px-3 py-2 rounded-lg bg-orange-50 border border-orange-200 text-sm text-orange-700">
+                  You are confirming as an administrator. Ideally the branch supervisor should confirm their own appointments.
+                </div>
+              )}
 
               {/* Preferred window reminder */}
               <div className="mb-4 px-3 py-2 rounded-lg bg-[#eef1fb] border border-[#c7d2f5] text-sm text-[#011c72]">
@@ -412,7 +468,7 @@ export default function AppointmentsPage() {
               {/* Optional notes */}
               <div className="mb-5">
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Notes (Optional)
+                  Notes <span className="text-gray-400 font-normal">(Optional)</span>
                 </label>
                 <textarea
                   value={adminNotes}
@@ -437,9 +493,11 @@ export default function AppointmentsPage() {
                 <button
                   onClick={() => handleStatusUpdate(selectedAppointment.id, 'confirmed', confirmedTime)}
                   disabled={updating || !confirmedTime}
-                  className="flex-1 px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  className={`flex-1 px-4 py-2 rounded-lg text-white text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${
+                    isAdmin ? 'bg-orange-500 hover:bg-orange-600' : 'bg-blue-600 hover:bg-blue-700'
+                  }`}
                 >
-                  {updating ? 'Confirming...' : 'Confirm Appointment'}
+                  {updating ? 'Confirming...' : isAdmin ? 'Override & Confirm' : 'Confirm Appointment'}
                 </button>
               </div>
             </div>

@@ -1,8 +1,11 @@
 ﻿'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
+import { setAuthToken } from '@/lib/api';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
 export default function LoginPage() {
   const [username, setUsername] = useState('');
@@ -12,30 +15,67 @@ export default function LoginPage() {
   const [showRecovery, setShowRecovery] = useState(false);
   const [recoveryEmail, setRecoveryEmail] = useState('');
   const [recoveryMessage, setRecoveryMessage] = useState('');
+  const [attemptsLeft, setAttemptsLeft] = useState<number | null>(null);
+  const [lockoutSeconds, setLockoutSeconds] = useState(0);
 
-  const { login } = useAuth();
+  const { checkAuth } = useAuth();
   const router = useRouter();
+
+  // Countdown timer when account is locked
+  useEffect(() => {
+    if (lockoutSeconds <= 0) return;
+    const id = setInterval(() => {
+      setLockoutSeconds(s => {
+        if (s <= 1) { clearInterval(id); setError(''); return 0; }
+        return s - 1;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, [lockoutSeconds]);
+
+  const formatCountdown = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (lockoutSeconds > 0) return;
     setError('');
+    setAttemptsLeft(null);
     setIsLoading(true);
 
     try {
-      const result = await login(username, password);
-      // Redirect based on user role
-      if (result && result.user) {
-        const workerRoles = ['seat_maker', 'sewer'];
-        if (workerRoles.includes(result.user.role)) {
-          router.push('/worker-dashboard');
-        } else {
-          router.push('/dashboard');
+      const res = await fetch(`${API_BASE}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        if (data.lockedOut) {
+          setLockoutSeconds(data.retryAfterSeconds || 900);
+          setAttemptsLeft(null);
+        } else if (data.attemptsLeft !== undefined) {
+          setAttemptsLeft(data.attemptsLeft);
         }
+        setError(data.message || 'Invalid credentials');
+        return;
+      }
+
+      // Success — store token and load user
+      setAuthToken(data.data.token);
+      await checkAuth();
+      const role = data.data.user?.role;
+      if (role === 'seat_maker' || role === 'sewer') {
+        router.push('/worker-dashboard');
       } else {
         router.push('/dashboard');
       }
-    } catch (err) {
-      setError('Invalid username or password');
+    } catch {
+      setError('Connection error. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -77,9 +117,27 @@ export default function LoginPage() {
               </div>
               <h2 className="text-2xl font-semibold text-gray-900 mb-6">Sign In</h2>
               
-              {error && (
+              {lockoutSeconds > 0 && (
+                <div className="mb-4 p-4 bg-red-50 border border-red-300 rounded-lg">
+                  <div className="flex items-center gap-2 text-red-700 font-semibold text-sm mb-1">
+                    <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m0 0v2m0-2h2m-2 0H10m10-6a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Account Locked
+                  </div>
+                  <p className="text-sm text-red-600">Too many failed attempts. Try again in:</p>
+                  <p className="text-2xl font-mono font-bold text-red-700 mt-1">{formatCountdown(lockoutSeconds)}</p>
+                </div>
+              )}
+
+              {error && lockoutSeconds === 0 && (
                 <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm">
                   {error}
+                  {attemptsLeft !== null && attemptsLeft > 0 && (
+                    <div className="mt-1.5 font-semibold">
+                      {attemptsLeft} attempt{attemptsLeft !== 1 ? 's' : ''} remaining before lockout.
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -93,7 +151,8 @@ export default function LoginPage() {
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    className="w-full px-4 py-3 rounded-xl border border-gray-300 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent transition-all"
+                    disabled={lockoutSeconds > 0}
+                    className="w-full px-4 py-3 rounded-xl border border-gray-300 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                     placeholder="Enter your username"
                     required
                   />
@@ -108,7 +167,8 @@ export default function LoginPage() {
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    className="w-full px-4 py-3 rounded-xl border border-gray-300 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent transition-all"
+                    disabled={lockoutSeconds > 0}
+                    className="w-full px-4 py-3 rounded-xl border border-gray-300 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                     placeholder="Enter your password"
                     required
                   />
@@ -116,7 +176,7 @@ export default function LoginPage() {
 
                 <button
                   type="submit"
-                  disabled={isLoading}
+                  disabled={isLoading || lockoutSeconds > 0}
                   className="w-full py-3 px-4 bg-[#011c72] hover:bg-[#01268c] text-white font-medium rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isLoading ? (

@@ -120,6 +120,9 @@ export interface Appointment {
   vehicleInfo?: VehicleInfo;
   status: 'pending' | 'confirmed' | 'completed' | 'cancelled';
   confirmedTime?: string;
+  confirmedBy?: number;
+  confirmedByName?: string;
+  confirmedByRole?: string;
   adminNotes?: string;
   createdAt: string;
   updatedAt?: string;
