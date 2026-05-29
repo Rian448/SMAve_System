@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { api, User, setAuthToken, getAuthToken } from '@/lib/api';

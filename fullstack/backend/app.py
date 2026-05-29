@@ -5,6 +5,7 @@ from functools import wraps
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
 import os
 import random
 import hashlib
@@ -52,13 +53,15 @@ class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(100), unique=True, nullable=False)
-    password = db.Column(db.String(64), nullable=False)
+    password = db.Column(db.String(255), nullable=False)
     email = db.Column(db.String(255), unique=True, nullable=False)
     full_name = db.Column(db.String(255), nullable=False)
     role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=False)
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
     branch = db.Column(db.String(100), nullable=True)  # Keep for backward compatibility
     is_active = db.Column(db.Boolean, default=True)
+    failed_login_attempts = db.Column(db.Integer, default=0)
+    lockout_until = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     role = db.relationship('Role')
@@ -182,13 +185,15 @@ class Appointment(db.Model):
     vehicle_info = db.Column(db.JSON)  # Optional vehicle info
     status = db.Column(db.String(50), default='pending')  # pending, confirmed, completed, cancelled
     confirmed_time = db.Column(db.String(20), nullable=True)  # e.g. "2:30 PM"
+    confirmed_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     admin_notes = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     branch = db.relationship('Branch')
     customer_user = db.relationship('User', foreign_keys=[user_id])
+    confirmer = db.relationship('User', foreign_keys=[confirmed_by])
 
 class ProductOrder(db.Model):
     __tablename__ = 'product_orders'
@@ -376,6 +381,34 @@ class PaymentRecord(db.Model):
 
     job_order = db.relationship('JobOrder', backref='payment_records')
     recorder = db.relationship('User', foreign_keys=[recorded_by])
+
+class ManagedWorker(db.Model):
+    __tablename__ = 'managed_workers'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    work_type = db.Column(db.String(100), nullable=False)  # seat_maker, sewer, upholstery, installer
+    rate_per_hour = db.Column(db.Float, nullable=False, default=0)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class WorkerAssignment(db.Model):
+    __tablename__ = 'worker_assignments'
+    id = db.Column(db.Integer, primary_key=True)
+    worker_id = db.Column(db.Integer, db.ForeignKey('managed_workers.id'), nullable=False)
+    job_order_ref = db.Column(db.String(50), nullable=False)  # job order number e.g. JO-BA-2026-0001
+    job_order_db_id = db.Column(db.Integer, nullable=True)    # numeric DB id for linking
+    description = db.Column(db.String(255), nullable=True)    # task description from labor line
+    start_time = db.Column(db.DateTime, nullable=True)
+    end_time = db.Column(db.DateTime, nullable=True)
+    hours_worked = db.Column(db.Float, nullable=True)         # computed or manually entered
+    pay = db.Column(db.Float, nullable=True)                  # hours_worked * rate_per_hour
+    status = db.Column(db.String(50), default='pending')      # pending, in_progress, completed
+    notes = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    worker = db.relationship('ManagedWorker', backref='assignments')
 
 # ============================================
 # SEED DATA
@@ -699,7 +732,7 @@ def seed_default_users():
 
         new_user = User(
             username=user['username'],
-            password=hashlib.sha256(user['password'].encode()).hexdigest(),
+            password=hash_password(user['password']),
             email=user['email'],
             full_name=user['fullName'],
             role_id=role.id,
@@ -771,6 +804,9 @@ def run_migrations():
         "ALTER TABLE inventory_materials ADD COLUMN low_stock_threshold REAL DEFAULT 0",
         "ALTER TABLE inventory_materials ADD COLUMN supplier_id INTEGER REFERENCES suppliers(id)",
         "ALTER TABLE product_orders ADD COLUMN amount_paid REAL DEFAULT 0.0",
+        "ALTER TABLE appointments ADD COLUMN confirmed_by INTEGER REFERENCES users(id)",
+        "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN lockout_until DATETIME",
     ]
     with db.engine.connect() as conn:
         for sql in migrations:
@@ -872,6 +908,46 @@ def require_roles(*roles):
         return decorated
     return decorator
 
+PH_OFFSET = timedelta(hours=8)
+
+# ============================================
+# PASSWORD HELPERS
+# ============================================
+
+MAX_FAILED_ATTEMPTS = 5
+LOCKOUT_MINUTES = 15
+
+def hash_password(raw_password: str) -> str:
+    """Hash a password using PBKDF2-SHA256 with a random salt (werkzeug)."""
+    return generate_password_hash(raw_password)
+
+def verify_password(user, raw_password: str) -> bool:
+    """Verify a password against the stored hash.
+    Supports both the old plain-SHA256 format and the new salted werkzeug format.
+    If the old format matches it silently upgrades the hash in-place.
+    """
+    stored = user.password
+    # New salted format from werkzeug
+    if stored.startswith('pbkdf2:') or stored.startswith('scrypt:'):
+        return check_password_hash(stored, raw_password)
+    # Legacy format: plain SHA-256 hex digest (no salt)
+    legacy_hash = hashlib.sha256(raw_password.encode()).hexdigest()
+    if legacy_hash == stored:
+        # Upgrade to salted hash on the spot — no commit here, caller does it
+        user.password = generate_password_hash(raw_password)
+        return True
+    return False
+
+def to_pht(dt):
+    """Convert a UTC datetime to Philippine Time (UTC+8) ISO-8601 string."""
+    if dt is None:
+        return None
+    return (dt + PH_OFFSET).strftime('%Y-%m-%dT%H:%M:%S+08:00')
+
+def now_pht():
+    """Current Philippine Time as a formatted string for audit logs."""
+    return (datetime.utcnow() + PH_OFFSET).strftime('%Y-%m-%d %H:%M:%S PHT')
+
 def log_action(user_id, user_name, action, module, details, ip_address='0.0.0.0'):
     """Log user action to audit trail"""
     global counters
@@ -883,7 +959,7 @@ def log_action(user_id, user_name, action, module, details, ip_address='0.0.0.0'
         'module': module,
         'details': details,
         'ipAddress': ip_address,
-        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        'timestamp': now_pht()
     })
     counters['audit_log'] += 1
 
@@ -951,14 +1027,63 @@ def generate_delivery_number():
 def login():
     data = request.get_json()
     username = data.get('username', '')
-    password = hashlib.sha256(data.get('password', '').encode()).hexdigest()
-    
-    user = User.query.filter_by(username=username, password=password, is_active=True).first()
-    
+    raw_password = data.get('password', '')
+
+    user = User.query.filter_by(username=username, is_active=True).first()
+
     if not user:
         return jsonify({'status': 'error', 'message': 'Invalid credentials'}), 401
-    
-    # Generate session token
+
+    # Check if account is locked
+    now_utc = datetime.utcnow()
+    if user.lockout_until and user.lockout_until > now_utc:
+        remaining_secs = int((user.lockout_until - now_utc).total_seconds())
+        remaining_mins = (remaining_secs // 60) + 1
+        log_action(0, username, 'LOGIN_BLOCKED', 'Auth',
+                   f'Login attempt blocked — account locked for {remaining_mins} more minute(s)',
+                   request.remote_addr or '0.0.0.0')
+        return jsonify({
+            'status': 'error',
+            'message': f'Account is locked due to too many failed attempts. Try again in {remaining_mins} minute(s).',
+            'lockedOut': True,
+            'retryAfterSeconds': remaining_secs
+        }), 429
+
+    # Verify password (supports legacy SHA-256 and new salted hash)
+    if not verify_password(user, raw_password):
+        user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
+        attempts_left = MAX_FAILED_ATTEMPTS - user.failed_login_attempts
+        if user.failed_login_attempts >= MAX_FAILED_ATTEMPTS:
+            user.lockout_until = now_utc + timedelta(minutes=LOCKOUT_MINUTES)
+            db.session.commit()
+            log_action(user.id, user.full_name, 'LOGIN_LOCKED', 'Auth',
+                       f'Account locked after {MAX_FAILED_ATTEMPTS} failed attempts',
+                       request.remote_addr or '0.0.0.0')
+            return jsonify({
+                'status': 'error',
+                'message': f'Too many failed attempts. Account locked for {LOCKOUT_MINUTES} minutes.',
+                'lockedOut': True,
+                'retryAfterSeconds': LOCKOUT_MINUTES * 60
+            }), 429
+        db.session.commit()
+        log_action(user.id, user.full_name, 'LOGIN_FAILED', 'Auth',
+                   f'Failed login attempt {user.failed_login_attempts}/{MAX_FAILED_ATTEMPTS}',
+                   request.remote_addr or '0.0.0.0')
+        return jsonify({
+            'status': 'error',
+            'message': f'Invalid credentials. {attempts_left} attempt(s) remaining before lockout.',
+            'attemptsLeft': attempts_left
+        }), 401
+
+    # Successful login — reset lockout counters and upgrade legacy hash if needed
+    user.failed_login_attempts = 0
+    user.lockout_until = None
+
+    # Invalidate any existing sessions for this user (prevent concurrent logins)
+    existing_tokens = [t for t, s in sessions.items() if s.get('userId') == user.id]
+    for t in existing_tokens:
+        del sessions[t]
+
     token = secrets.token_hex(32)
     sessions[token] = {
         'id': user.id,
@@ -971,15 +1096,12 @@ def login():
         'branch': user.branch,
         'branchId': user.branch_id,
         'isActive': user.is_active,
-        'createdAt': datetime.now().isoformat()
+        'createdAt': datetime.utcnow().isoformat()
     }
-    
-    print(f"DEBUG LOGIN: User {username} logged in successfully")
-    print(f"DEBUG LOGIN: Token stored with value: {token[:20]}...")
-    print(f"DEBUG LOGIN: Sessions count: {len(sessions)}")
-    
+
+    db.session.commit()
     log_action(user.id, user.full_name, 'LOGIN', 'Auth', 'User logged in', request.remote_addr or '0.0.0.0')
-    
+
     return jsonify({
         'status': 'success',
         'data': {
@@ -2847,9 +2969,12 @@ def appointment_to_dict(appointment):
         'vehicleInfo': appointment.vehicle_info,
         'status': appointment.status,
         'confirmedTime': appointment.confirmed_time,
+        'confirmedBy': appointment.confirmed_by,
+        'confirmedByName': appointment.confirmer.full_name if appointment.confirmer else None,
+        'confirmedByRole': appointment.confirmer.role.key if (appointment.confirmer and appointment.confirmer.role) else None,
         'adminNotes': appointment.admin_notes,
-        'createdAt': appointment.created_at.isoformat() if appointment.created_at else None,
-        'updatedAt': appointment.updated_at.isoformat() if appointment.updated_at else None
+        'createdAt': to_pht(appointment.created_at),
+        'updatedAt': to_pht(appointment.updated_at),
     }
 
 @app.route('/api/appointments', methods=['POST'])
@@ -2892,7 +3017,28 @@ def create_appointment():
         preferred_date = datetime.strptime(data['preferredDate'], '%Y-%m-%d').date()
     except ValueError:
         return jsonify({'status': 'error', 'message': 'Invalid date format. Use YYYY-MM-DD'}), 400
-    
+
+    # Validate date/time against Philippine time (UTC+8)
+    now_ph = datetime.utcnow() + timedelta(hours=8)
+    today_ph = now_ph.date()
+    current_hour_ph = now_ph.hour
+
+    if preferred_date < today_ph:
+        return jsonify({'status': 'error', 'message': 'Cannot book an appointment for a past date.'}), 400
+
+    if preferred_date == today_ph:
+        # All slots end at 20:00 (8 PM)
+        if current_hour_ph >= 20:
+            return jsonify({'status': 'error', 'message': 'All time slots for today have already passed. Please choose tomorrow or a later date.'}), 400
+        # Validate specific period if provided
+        preferred_time = data.get('preferredTime', '')
+        period_end = {'morning': 12, 'afternoon': 17, 'evening': 20}
+        if preferred_time in period_end and current_hour_ph >= period_end[preferred_time]:
+            return jsonify({
+                'status': 'error',
+                'message': f'The {preferred_time} slot has already ended today. Please choose a later time period or a different date.'
+            }), 400
+
     new_appointment = Appointment(
         appointment_number=appointment_number,
         customer_name=data['customerName'],
@@ -2954,19 +3100,39 @@ def update_appointment(appointment_id):
             return jsonify({'status': 'error', 'message': 'Access denied'}), 403
     
     data = request.get_json()
-    
+
     if 'status' in data:
         new_status = data['status']
         if new_status == 'confirmed':
-            if not data.get('confirmedTime'):
+            confirmed_time = data.get('confirmedTime')
+            if not confirmed_time:
                 return jsonify({'status': 'error', 'message': 'A confirmed time must be selected when confirming an appointment'}), 400
-            appointment.confirmed_time = data['confirmedTime']
+
+            # Double-booking check: same branch, same date, same time slot, already confirmed
+            if appointment.branch_id and appointment.preferred_date:
+                clash = Appointment.query.filter(
+                    Appointment.id != appointment.id,
+                    Appointment.branch_id == appointment.branch_id,
+                    Appointment.preferred_date == appointment.preferred_date,
+                    Appointment.confirmed_time == confirmed_time,
+                    Appointment.status == 'confirmed'
+                ).first()
+                if clash:
+                    return jsonify({
+                        'status': 'error',
+                        'message': f'This time slot ({confirmed_time}) is already taken by appointment {clash.appointment_number} on this date. Please choose a different time.'
+                    }), 409
+
+            appointment.confirmed_time = confirmed_time
+            appointment.confirmed_by = user['id']
+
         appointment.status = new_status
+
     if 'adminNotes' in data:
         appointment.admin_notes = data['adminNotes']
 
     db.session.commit()
-    
+
     return jsonify({'status': 'success', 'data': appointment_to_dict(appointment)})
 
 @app.route('/api/appointments/my-appointments', methods=['GET'])
@@ -3132,6 +3298,7 @@ def create_multi_branch_product_order():
     # Validate all items and enrich with source branch info
     all_items = []
     items_by_source = {}
+    same_branch_deductions = []  # items already at pickup branch — deduct immediately
     for item_data in data['items']:
         product_id = item_data.get('productId')
         quantity = int(item_data.get('quantity', 1))
@@ -3156,6 +3323,11 @@ def create_multi_branch_product_order():
         src = int(product.branch_id)
         if src != pickup_branch_id:
             items_by_source.setdefault(src, []).append(item_dict)
+        else:
+            same_branch_deductions.append((product, quantity))
+
+    needs_transfers = len(items_by_source) > 0
+    group_id = str(uuid.uuid4()) if needs_transfers else None
 
     # Create ONE order at the pickup branch with all items
     order = ProductOrder(
@@ -3168,7 +3340,8 @@ def create_multi_branch_product_order():
         total_amount=sum(i['total'] for i in all_items),
         branch_id=pickup_branch_id,
         pickup_branch_id=pickup_branch_id,
-        shipment_status='not_needed',
+        shipment_status='pending' if needs_transfers else 'not_needed',
+        group_id=group_id,
         status='pending',
         payment_status='unpaid',
         user_id=user_id,
@@ -3176,6 +3349,10 @@ def create_multi_branch_product_order():
     )
     db.session.add(order)
     db.session.flush()  # get order.id
+
+    # Deduct inventory immediately for items already at the pickup branch
+    for product, qty in same_branch_deductions:
+        product.quantity = float(product.quantity) - qty
 
     # Create a transfer request for each source branch ≠ pickup branch
     for src_branch_id, branch_items in items_by_source.items():
@@ -3341,6 +3518,16 @@ def confirm_transfer_receipt(transfer_id):
             ))
 
     transfer.status = 'received'
+    db.session.flush()
+
+    # Auto-advance the order when all transfers are received
+    if order:
+        all_transfers = ProductOrderTransfer.query.filter_by(product_order_id=order.id).all()
+        if all(t.status == 'received' for t in all_transfers):
+            order.shipment_status = 'received'
+            if order.status == 'pending':
+                order.status = 'ready'
+
     db.session.commit()
 
     log_action(user['id'], user['fullName'], 'RECEIVE', 'Product Orders',
@@ -3787,7 +3974,7 @@ def register_customer():
     # Create new customer user
     new_user = User(
         username=data['username'],
-        password=hashlib.sha256(data['password'].encode()).hexdigest(),
+        password=hash_password(data['password']),
         email=data['email'],
         full_name=data['fullName'],
         role_id=customer_role.id,
@@ -4292,7 +4479,7 @@ def create_user():
     
     new_user = User(
         username=data['username'],
-        password=hashlib.sha256(data['password'].encode()).hexdigest(),
+        password=hash_password(data['password']),
         email=data['email'],
         full_name=data['fullName'],
         role_id=role.id,
@@ -4359,7 +4546,7 @@ def update_user(user_id):
             return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
         user.role_id = role.id
     if 'password' in data and data['password']:
-        user.password = hashlib.sha256(data['password'].encode()).hexdigest()
+        user.password = hash_password(data['password'])
     
     db.session.commit()
     
@@ -5041,6 +5228,248 @@ def debug_workers():
             'totalRoles': len(all_roles)
         }
     })
+
+# ============================================
+# MANAGED WORKERS & ASSIGNMENTS
+# ============================================
+
+@app.route('/api/managed-workers', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def list_managed_workers():
+    workers = ManagedWorker.query.order_by(ManagedWorker.name).all()
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'workers': [
+                {
+                    'id': w.id,
+                    'name': w.name,
+                    'workType': w.work_type,
+                    'ratePerHour': w.rate_per_hour,
+                    'isActive': w.is_active,
+                    'createdAt': w.created_at.isoformat(),
+                }
+                for w in workers
+            ]
+        }
+    })
+
+@app.route('/api/managed-workers', methods=['POST'])
+@require_auth
+@require_roles('administrator')
+def create_managed_worker():
+    data = request.get_json()
+    name = (data.get('name') or '').strip()
+    work_type = (data.get('workType') or '').strip()
+    rate = float(data.get('ratePerHour') or 0)
+    if not name or not work_type:
+        return jsonify({'error': 'name and workType are required'}), 400
+    worker = ManagedWorker(name=name, work_type=work_type, rate_per_hour=rate)
+    db.session.add(worker)
+    db.session.commit()
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'worker': {
+                'id': worker.id,
+                'name': worker.name,
+                'workType': worker.work_type,
+                'ratePerHour': worker.rate_per_hour,
+                'isActive': worker.is_active,
+            }
+        }
+    }), 201
+
+@app.route('/api/managed-workers/<int:worker_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator')
+def update_managed_worker(worker_id):
+    worker = ManagedWorker.query.get(worker_id)
+    if not worker:
+        return jsonify({'error': 'Worker not found'}), 404
+    data = request.get_json()
+    if 'name' in data:
+        worker.name = (data['name'] or '').strip()
+    if 'workType' in data:
+        worker.work_type = (data['workType'] or '').strip()
+    if 'ratePerHour' in data:
+        worker.rate_per_hour = float(data['ratePerHour'] or 0)
+    if 'isActive' in data:
+        worker.is_active = bool(data['isActive'])
+    db.session.commit()
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'worker': {
+                'id': worker.id,
+                'name': worker.name,
+                'workType': worker.work_type,
+                'ratePerHour': worker.rate_per_hour,
+                'isActive': worker.is_active,
+            }
+        }
+    })
+
+@app.route('/api/managed-workers/<int:worker_id>', methods=['DELETE'])
+@require_auth
+@require_roles('administrator')
+def deactivate_managed_worker(worker_id):
+    worker = ManagedWorker.query.get(worker_id)
+    if not worker:
+        return jsonify({'error': 'Worker not found'}), 404
+    worker.is_active = False
+    db.session.commit()
+    return jsonify({'status': 'success', 'message': 'Worker deactivated'})
+
+@app.route('/api/worker-assignments', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def list_worker_assignments():
+    worker_id = request.args.get('workerId', type=int)
+    query = WorkerAssignment.query
+    if worker_id:
+        query = query.filter_by(worker_id=worker_id)
+    assignments = query.order_by(WorkerAssignment.created_at.desc()).all()
+    result = []
+    for a in assignments:
+        result.append({
+            'id': a.id,
+            'workerId': a.worker_id,
+            'workerName': a.worker.name if a.worker else '',
+            'workType': a.worker.work_type if a.worker else '',
+            'ratePerHour': a.worker.rate_per_hour if a.worker else 0,
+            'jobOrderRef': a.job_order_ref,
+            'jobOrderDbId': a.job_order_db_id,
+            'description': a.description,
+            'startTime': a.start_time.isoformat() if a.start_time else None,
+            'endTime': a.end_time.isoformat() if a.end_time else None,
+            'hoursWorked': a.hours_worked,
+            'pay': a.pay,
+            'status': a.status,
+            'notes': a.notes,
+            'createdAt': a.created_at.isoformat(),
+        })
+    return jsonify({'status': 'success', 'data': {'assignments': result}})
+
+@app.route('/api/worker-assignments', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def create_worker_assignment():
+    data = request.get_json()
+    worker_id = data.get('workerId')
+    job_order_ref = (data.get('jobOrderRef') or '').strip()
+    if not worker_id or not job_order_ref:
+        return jsonify({'error': 'workerId and jobOrderRef are required'}), 400
+    worker = ManagedWorker.query.get(worker_id)
+    if not worker:
+        return jsonify({'error': 'Worker not found'}), 404
+    description = data.get('description', '') or ''
+    # Prevent exact duplicates (same worker + job order + description)
+    existing = WorkerAssignment.query.filter_by(
+        worker_id=worker_id,
+        job_order_ref=job_order_ref,
+        description=description,
+    ).first()
+    if existing:
+        return jsonify({
+            'status': 'success',
+            'data': {
+                'assignment': {
+                    'id': existing.id,
+                    'workerId': existing.worker_id,
+                    'workerName': worker.name,
+                    'jobOrderRef': existing.job_order_ref,
+                    'description': existing.description,
+                    'status': existing.status,
+                }
+            }
+        })
+    assignment = WorkerAssignment(
+        worker_id=worker_id,
+        job_order_ref=job_order_ref,
+        job_order_db_id=data.get('jobOrderDbId'),
+        description=description,
+        status='pending',
+        notes=data.get('notes', ''),
+    )
+    db.session.add(assignment)
+    db.session.commit()
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'assignment': {
+                'id': assignment.id,
+                'workerId': assignment.worker_id,
+                'workerName': worker.name,
+                'jobOrderRef': assignment.job_order_ref,
+                'description': assignment.description,
+                'status': assignment.status,
+            }
+        }
+    }), 201
+
+@app.route('/api/worker-assignments/<int:assignment_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def update_worker_assignment(assignment_id):
+    assignment = WorkerAssignment.query.get(assignment_id)
+    if not assignment:
+        return jsonify({'error': 'Assignment not found'}), 404
+    data = request.get_json()
+    new_status = data.get('status')
+    if new_status:
+        assignment.status = new_status
+        if new_status == 'in_progress' and not assignment.start_time:
+            assignment.start_time = datetime.utcnow()
+        elif new_status == 'completed' and not assignment.end_time:
+            assignment.end_time = datetime.utcnow()
+            if assignment.start_time:
+                delta = assignment.end_time - assignment.start_time
+                assignment.hours_worked = round(delta.total_seconds() / 3600, 2)
+            if data.get('hoursWorked') is not None:
+                assignment.hours_worked = float(data['hoursWorked'])
+            if assignment.hours_worked and assignment.worker:
+                assignment.pay = round(assignment.hours_worked * assignment.worker.rate_per_hour, 2)
+    if 'hoursWorked' in data and data['hoursWorked'] is not None:
+        assignment.hours_worked = float(data['hoursWorked'])
+        if assignment.worker:
+            assignment.pay = round(assignment.hours_worked * assignment.worker.rate_per_hour, 2)
+    if 'notes' in data:
+        assignment.notes = data['notes']
+    if 'description' in data:
+        assignment.description = data['description']
+    assignment.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'assignment': {
+                'id': assignment.id,
+                'workerId': assignment.worker_id,
+                'workerName': assignment.worker.name if assignment.worker else '',
+                'jobOrderRef': assignment.job_order_ref,
+                'description': assignment.description,
+                'startTime': assignment.start_time.isoformat() if assignment.start_time else None,
+                'endTime': assignment.end_time.isoformat() if assignment.end_time else None,
+                'hoursWorked': assignment.hours_worked,
+                'pay': assignment.pay,
+                'status': assignment.status,
+                'notes': assignment.notes,
+            }
+        }
+    })
+
+@app.route('/api/worker-assignments/<int:assignment_id>', methods=['DELETE'])
+@require_auth
+@require_roles('administrator')
+def delete_worker_assignment(assignment_id):
+    assignment = WorkerAssignment.query.get(assignment_id)
+    if not assignment:
+        return jsonify({'error': 'Assignment not found'}), 404
+    db.session.delete(assignment)
+    db.session.commit()
+    return jsonify({'status': 'success', 'message': 'Assignment deleted'})
 
 # ============================================
 # HEALTH CHECK

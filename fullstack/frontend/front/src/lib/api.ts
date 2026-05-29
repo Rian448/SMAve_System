@@ -1,4 +1,4 @@
-// API client for Seatmakers Avenue System
+﻿// API client for Seatmakers Avenue System
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
@@ -120,6 +120,9 @@ export interface Appointment {
   vehicleInfo?: VehicleInfo;
   status: 'pending' | 'confirmed' | 'completed' | 'cancelled';
   confirmedTime?: string;
+  confirmedBy?: number;
+  confirmedByName?: string;
+  confirmedByRole?: string;
   adminNotes?: string;
   createdAt: string;
   updatedAt?: string;
@@ -410,9 +413,37 @@ export interface JobOrderItem {
   materialName?: string;
   workerName?: string;
   workerRate?: number;
+  workerId?: number;
   notes?: string;
   /** FK to inventory_materials.id — used to deduct stock on job order completion */
   materialId?: number;
+}
+
+export interface ManagedWorker {
+  id: number;
+  name: string;
+  workType: string;
+  ratePerHour: number;
+  isActive: boolean;
+  createdAt?: string;
+}
+
+export interface WorkerAssignment {
+  id: number;
+  workerId: number;
+  workerName: string;
+  workType: string;
+  ratePerHour: number;
+  jobOrderRef: string;
+  jobOrderDbId?: number;
+  description?: string;
+  startTime?: string;
+  endTime?: string;
+  hoursWorked?: number;
+  pay?: number;
+  status: 'pending' | 'in_progress' | 'completed';
+  notes?: string;
+  createdAt: string;
 }
 
 export interface VehicleInfo {
@@ -1459,6 +1490,42 @@ export const api = {
       fetchApi<{ status: string; message: string; created: number }>('/api/workers/sync', {
         method: 'POST',
       }),
+  },
+
+  managedWorkers: {
+    list: () =>
+      fetchApi<{ workers: ManagedWorker[] }>('/api/managed-workers'),
+    create: (data: { name: string; workType: string; ratePerHour: number }) =>
+      fetchApi<{ worker: ManagedWorker }>('/api/managed-workers', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    update: (id: number, data: Partial<{ name: string; workType: string; ratePerHour: number; isActive: boolean }>) =>
+      fetchApi<{ worker: ManagedWorker }>(`/api/managed-workers/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    deactivate: (id: number) =>
+      fetchApi<{ message: string }>(`/api/managed-workers/${id}`, { method: 'DELETE' }),
+  },
+
+  workerAssignments: {
+    list: (workerId?: number) => {
+      const query = workerId ? `?workerId=${workerId}` : '';
+      return fetchApi<{ assignments: WorkerAssignment[] }>(`/api/worker-assignments${query}`);
+    },
+    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; notes?: string }) =>
+      fetchApi<{ assignment: WorkerAssignment }>('/api/worker-assignments', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    update: (id: number, data: Partial<{ status: string; hoursWorked: number; notes: string; description: string }>) =>
+      fetchApi<{ assignment: WorkerAssignment }>(`/api/worker-assignments/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    delete: (id: number) =>
+      fetchApi<{ message: string }>(`/api/worker-assignments/${id}`, { method: 'DELETE' }),
   },
 };
 

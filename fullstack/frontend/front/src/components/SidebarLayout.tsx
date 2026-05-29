@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 import { useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { usePathname } from 'next/navigation';
@@ -9,11 +9,12 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   const { isAuthenticated, isLoading } = useAuth();
   const pathname = usePathname();
 
-  const showSidebar = isAuthenticated && !isLoading && pathname !== '/login';
-  const showPublicTopNav = !isAuthenticated && !isLoading && pathname !== '/login';
+  const authlessPages = ['/login', '/register'];
+  const showSidebar = isAuthenticated && !isLoading && !authlessPages.includes(pathname);
+  const showPublicTopNav = !isAuthenticated && !isLoading && !authlessPages.includes(pathname);
 
   return (
-    <div className="flex min-h-screen bg-zinc-50 dark:bg-zinc-950">
+    <div className="flex min-h-screen bg-gray-50">
       <Navigation collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
       <div
         className={`flex-1 min-w-0 transition-all duration-300 ${

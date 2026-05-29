@@ -1,7 +1,7 @@
-'use client';
+﻿'use client';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord } from '@/lib/api';
+import { api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord, ManagedWorker } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 
 type EditableJobOrderItem = JobOrderItem & {
@@ -33,6 +33,13 @@ export default function JobOrderDetailPage() {
   const [newPaymentNotes, setNewPaymentNotes] = useState('');
   const [savingPayment, setSavingPayment] = useState(false);
   const [showRevertConfirm, setShowRevertConfirm] = useState(false);
+  const [managedWorkers, setManagedWorkers] = useState<ManagedWorker[]>([]);
+
+  useEffect(() => {
+    api.managedWorkers.list().then(res => {
+      setManagedWorkers((res.data?.workers || []).filter(w => w.isActive));
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (params.id) {
@@ -70,6 +77,7 @@ export default function JobOrderDetailPage() {
           materialId: undefined,
           workerName: item.workerName || '',
           workerRate: Number(item.workerRate) || 0,
+          workerId: item.workerId,
           notes: item.notes || '',
           category: (Number(item.laborCost) > 0 && Number(item.materialCost) === 0)
             ? 'labor'
@@ -242,6 +250,7 @@ export default function JobOrderDetailPage() {
         materialName: item.materialName?.trim() || '',
         workerName: item.workerName?.trim() || '',
         workerRate: Number(item.workerRate) || 0,
+        workerId: item.workerId || undefined,
         notes: item.notes?.trim() || '',
         ...(resolvedMaterialId ? { materialId: resolvedMaterialId } : {})
       });
@@ -279,6 +288,21 @@ export default function JobOrderDetailPage() {
           balance: updated.balance ?? Math.max(totalPrice - (jobOrder.downPayment || 0), 0),
           paymentStatus: updated.paymentStatus || jobOrder.paymentStatus
         });
+      }
+
+      // Create worker assignments for labor items with an assigned worker
+      const laborItems = normalizedItems.filter(i => i.workerId && (i.laborCost || 0) > 0);
+      for (const item of laborItems) {
+        try {
+          await api.workerAssignments.create({
+            workerId: item.workerId!,
+            jobOrderRef: jobOrder.jobOrderId,
+            jobOrderDbId: jobOrder.id,
+            description: item.name || '',
+          });
+        } catch {
+          // Assignment may already exist; ignore duplicate errors
+        }
       }
     } catch (err) {
       console.error(err);
@@ -330,13 +354,13 @@ export default function JobOrderDetailPage() {
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'pending': return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400';
-      case 'in_progress': return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400';
-      case 'ready_for_installation': return 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400';
-      case 'completed': return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
-      case 'delivered': return 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400';
-      case 'cancelled': return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
-      default: return 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400';
+      case 'pending': return 'bg-yellow-100 text-yellow-700';
+      case 'in_progress': return 'bg-blue-100 text-blue-700';
+      case 'ready_for_installation': return 'bg-orange-100 text-orange-700';
+      case 'completed': return 'bg-green-100 text-green-700';
+      case 'delivered': return 'bg-purple-100 text-purple-700';
+      case 'cancelled': return 'bg-red-100 text-red-700';
+      default: return 'bg-gray-100 text-gray-700';
     }
   };
 
@@ -352,10 +376,10 @@ export default function JobOrderDetailPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
+      <div className="min-h-screen bg-gray-50">
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="flex items-center justify-center h-64">
-            <div className="animate-spin w-8 h-8 border-4 border-amber-600 border-t-transparent rounded-full"></div>
+            <div className="animate-spin w-8 h-8 border-4 border-[#011c72] border-t-transparent rounded-full"></div>
           </div>
         </main>
       </div>
@@ -364,11 +388,11 @@ export default function JobOrderDetailPage() {
 
   if (!jobOrder) {
     return (
-      <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
+      <div className="min-h-screen bg-gray-50">
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-6 text-center">
-            <p className="text-red-600 dark:text-red-400">Job order not found</p>
-            <button onClick={() => router.push('/sales')} className="mt-4 text-amber-600 hover:text-amber-700 font-medium">
+          <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-center">
+            <p className="text-red-600">Job order not found</p>
+            <button onClick={() => router.push('/sales')} className="mt-4 text-[#011c72] hover:text-[#011c72] font-medium">
               Back to Sales
             </button>
           </div>
@@ -424,10 +448,10 @@ export default function JobOrderDetailPage() {
   const remainingBalance = Math.max(0, (jobOrder.totalPrice || 0) - totalPaid);
   const isFullySettled = remainingBalance <= 0;
 
-  const inputClass = "w-full px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent";
+  const inputClass = "w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent";
 
   return (
-    <div className="job-order-print min-h-screen bg-zinc-50 dark:bg-zinc-950">
+    <div className="job-order-print min-h-screen bg-gray-50">
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
 
         {/* Header */}
@@ -435,17 +459,17 @@ export default function JobOrderDetailPage() {
           <div>
             <button
               onClick={() => router.push('/sales')}
-              className="flex items-center text-zinc-500 dark:text-zinc-400 hover:text-amber-600 mb-3 text-sm transition-colors"
+              className="flex items-center text-gray-500 hover:text-[#011c72] mb-3 text-sm transition-colors"
             >
               <svg className="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
               </svg>
               Back to Sales
             </button>
-            <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">
-              Job Order <span className="text-amber-600">#{jobOrder.jobOrderId}</span>
+            <h1 className="text-2xl font-bold text-gray-900">
+              Job Order <span className="text-[#011c72]">#{jobOrder.jobOrderId}</span>
             </h1>
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+            <p className="text-sm text-gray-500 mt-1">
               Created {new Date(jobOrder.createdAt).toLocaleDateString('en-PH', { month: 'long', day: 'numeric', year: 'numeric' })}
             </p>
           </div>
@@ -457,7 +481,7 @@ export default function JobOrderDetailPage() {
               <button
                 onClick={() => updateStatus('pending')}
                 disabled={updating}
-                className="px-4 py-2 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 border border-zinc-300 dark:border-zinc-600 rounded-lg font-medium transition-colors disabled:opacity-50 text-sm flex items-center gap-1.5"
+                className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300 rounded-lg font-medium transition-colors disabled:opacity-50 text-sm flex items-center gap-1.5"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -469,7 +493,7 @@ export default function JobOrderDetailPage() {
               <button
                 onClick={() => setShowRevertConfirm(true)}
                 disabled={updating}
-                className="px-4 py-2 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 border border-zinc-300 dark:border-zinc-600 rounded-lg font-medium transition-colors disabled:opacity-50 text-sm flex items-center gap-1.5"
+                className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300 rounded-lg font-medium transition-colors disabled:opacity-50 text-sm flex items-center gap-1.5"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -496,7 +520,7 @@ export default function JobOrderDetailPage() {
         </div>
 
         {error && (
-          <div className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/40 dark:bg-red-900/20 dark:text-red-300 flex items-start gap-2">
+          <div className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 flex items-start gap-2">
             <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
@@ -507,25 +531,25 @@ export default function JobOrderDetailPage() {
         {/* Revert-to-in_progress confirmation modal */}
         {showRevertConfirm && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm px-4">
-            <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-700 w-full max-w-md p-6">
+            <div className="bg-white rounded-2xl shadow-xl border border-gray-200 w-full max-w-md p-6">
               <div className="flex items-center gap-3 mb-4">
-                <div className="w-10 h-10 rounded-full bg-yellow-100 dark:bg-yellow-900/30 flex items-center justify-center shrink-0">
-                  <svg className="w-5 h-5 text-yellow-600 dark:text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <div className="w-10 h-10 rounded-full bg-yellow-100 flex items-center justify-center shrink-0">
+                  <svg className="w-5 h-5 text-yellow-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
                   </svg>
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-zinc-900 dark:text-white">Revert to In Progress?</h3>
-                  <p className="text-sm text-zinc-500 dark:text-zinc-400">This order is currently marked as completed.</p>
+                  <h3 className="text-base font-bold text-gray-900">Revert to In Progress?</h3>
+                  <p className="text-sm text-gray-500">This order is currently marked as completed.</p>
                 </div>
               </div>
-              <p className="text-sm text-zinc-600 dark:text-zinc-400 mb-6">
-                Are you sure you want to move this job order back to <span className="font-semibold text-blue-600 dark:text-blue-400">In Progress</span>? This will undo the completed status.
+              <p className="text-sm text-gray-600 mb-6">
+                Are you sure you want to move this job order back to <span className="font-semibold text-blue-600">In Progress</span>? This will undo the completed status.
               </p>
               <div className="flex gap-3 justify-end">
                 <button
                   onClick={() => setShowRevertConfirm(false)}
-                  className="px-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 text-sm font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                  className="px-4 py-2 rounded-lg border border-gray-200 text-gray-700 text-sm font-medium hover:bg-gray-100 transition-colors"
                 >
                   Cancel
                 </button>
@@ -544,85 +568,85 @@ export default function JobOrderDetailPage() {
         {/* Info Cards Row */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-5">
           {/* Customer Info */}
-          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
-            <h2 className="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-4 flex items-center gap-2">
-              <svg className="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-4 flex items-center gap-2">
+              <svg className="w-4 h-4 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
               </svg>
               Customer
             </h2>
             <div className="space-y-2.5">
               <div>
-                <p className="text-xs text-zinc-400 dark:text-zinc-500">Name</p>
-                <p className="text-sm font-semibold text-zinc-900 dark:text-white">{jobOrder.customerName}</p>
+                <p className="text-xs text-gray-400">Name</p>
+                <p className="text-sm font-semibold text-gray-900">{jobOrder.customerName}</p>
               </div>
               <div>
-                <p className="text-xs text-zinc-400 dark:text-zinc-500">Phone</p>
-                <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{jobOrder.customerPhone || 'N/A'}</p>
+                <p className="text-xs text-gray-400">Phone</p>
+                <p className="text-sm font-medium text-gray-700">{jobOrder.customerPhone || 'N/A'}</p>
               </div>
               <div>
-                <p className="text-xs text-zinc-400 dark:text-zinc-500">Email</p>
-                <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{jobOrder.customerEmail || 'N/A'}</p>
+                <p className="text-xs text-gray-400">Email</p>
+                <p className="text-sm font-medium text-gray-700">{jobOrder.customerEmail || 'N/A'}</p>
               </div>
               <div>
-                <p className="text-xs text-zinc-400 dark:text-zinc-500">Address</p>
-                <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{(jobOrder as any).customer_address || (jobOrder as any).customerAddress || 'N/A'}</p>
+                <p className="text-xs text-gray-400">Address</p>
+                <p className="text-sm font-medium text-gray-700">{(jobOrder as any).customer_address || (jobOrder as any).customerAddress || 'N/A'}</p>
               </div>
             </div>
           </div>
 
           {/* Vehicle Info */}
-          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
-            <h2 className="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-4 flex items-center gap-2">
-              <svg className="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-4 flex items-center gap-2">
+              <svg className="w-4 h-4 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0zM13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1m-6-1a1 1 0 001 1h1M5 17a2 2 0 104 0m-4 0a2 2 0 114 0m6 0a2 2 0 104 0m-4 0a2 2 0 114 0" />
               </svg>
               Vehicle
             </h2>
             <div className="space-y-2.5">
               <div>
-                <p className="text-xs text-zinc-400 dark:text-zinc-500">Make & Model</p>
-                <p className="text-sm font-semibold text-zinc-900 dark:text-white">
+                <p className="text-xs text-gray-400">Make & Model</p>
+                <p className="text-sm font-semibold text-gray-900">
                   {jobOrder.vehicleInfo ? `${jobOrder.vehicleInfo.make} ${jobOrder.vehicleInfo.model}` : 'N/A'}
                 </p>
               </div>
               <div>
-                <p className="text-xs text-zinc-400 dark:text-zinc-500">Year</p>
-                <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{jobOrder.vehicleInfo?.year || 'N/A'}</p>
+                <p className="text-xs text-gray-400">Year</p>
+                <p className="text-sm font-medium text-gray-700">{jobOrder.vehicleInfo?.year || 'N/A'}</p>
               </div>
               <div>
-                <p className="text-xs text-zinc-400 dark:text-zinc-500">Color</p>
-                <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{jobOrder.vehicleInfo?.color || 'N/A'}</p>
+                <p className="text-xs text-gray-400">Color</p>
+                <p className="text-sm font-medium text-gray-700">{jobOrder.vehicleInfo?.color || 'N/A'}</p>
               </div>
               <div>
-                <p className="text-xs text-zinc-400 dark:text-zinc-500">Plate Number</p>
-                <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{jobOrder.vehicleInfo?.plateNumber || 'N/A'}</p>
+                <p className="text-xs text-gray-400">Plate Number</p>
+                <p className="text-sm font-medium text-gray-700">{jobOrder.vehicleInfo?.plateNumber || 'N/A'}</p>
               </div>
             </div>
           </div>
 
           {/* Service Info */}
-          <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
-            <h2 className="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-4 flex items-center gap-2">
-              <svg className="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-4 flex items-center gap-2">
+              <svg className="w-4 h-4 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
               </svg>
               Service
             </h2>
             <div className="space-y-2.5">
               <div>
-                <p className="text-xs text-zinc-400 dark:text-zinc-500">Description</p>
-                <p className="text-sm font-semibold text-zinc-900 dark:text-white">{jobOrder.description || 'N/A'}</p>
+                <p className="text-xs text-gray-400">Description</p>
+                <p className="text-sm font-semibold text-gray-900">{jobOrder.description || 'N/A'}</p>
               </div>
               <div>
-                <p className="text-xs text-zinc-400 dark:text-zinc-500">Estimated Completion</p>
-                <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                <p className="text-xs text-gray-400">Estimated Completion</p>
+                <p className="text-sm font-medium text-gray-700">
                   {jobOrder.estimatedCompletion ? new Date(jobOrder.estimatedCompletion).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Not set'}
                 </p>
               </div>
               <div>
-                <p className="text-xs text-zinc-400 dark:text-zinc-500">Line Items</p>
-                <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">{jobOrder.items.length} item(s)</p>
+                <p className="text-xs text-gray-400">Line Items</p>
+                <p className="text-sm font-medium text-gray-700">{jobOrder.items.length} item(s)</p>
               </div>
             </div>
           </div>
@@ -630,33 +654,33 @@ export default function JobOrderDetailPage() {
 
         {/* Assigned Workers */}
         {canEditParts && (jobOrder as any).tasks && (jobOrder as any).tasks.length > 0 && (
-          <div className="no-print mb-5 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
-            <h2 className="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-4 flex items-center gap-2">
-              <svg className="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="no-print mb-5 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-4 flex items-center gap-2">
+              <svg className="w-4 h-4 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
               </svg>
               Assigned Workers
             </h2>
             <div className="space-y-2">
               {(jobOrder as any).tasks.map((task: any) => (
-                <div key={task.id} className="flex items-center justify-between py-3 px-4 bg-zinc-50 dark:bg-zinc-800/50 rounded-lg">
+                <div key={task.id} className="flex items-center justify-between py-3 px-4 bg-gray-50 rounded-lg">
                   <div>
-                    <p className="text-sm font-medium text-zinc-900 dark:text-white">{task.title}</p>
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">Task #{task.taskNumber}</p>
+                    <p className="text-sm font-medium text-gray-900">{task.title}</p>
+                    <p className="text-xs text-gray-500 mt-0.5">Task #{task.taskNumber}</p>
                   </div>
                   <div className="flex items-center gap-3">
                     {task.worker ? (
                       <div className="text-right">
-                        <p className="text-sm font-medium text-zinc-900 dark:text-white">{task.worker.name}</p>
-                        <p className="text-xs text-zinc-500 dark:text-zinc-400">{task.worker.specialization}</p>
+                        <p className="text-sm font-medium text-gray-900">{task.worker.name}</p>
+                        <p className="text-xs text-gray-500">{task.worker.specialization}</p>
                       </div>
                     ) : (
-                      <p className="text-sm text-zinc-400 italic">Unassigned</p>
+                      <p className="text-sm text-gray-400 italic">Unassigned</p>
                     )}
                     <span className={`px-2 py-0.5 text-xs rounded-full font-medium ${
-                      task.status === 'completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
-                      task.status === 'in_progress' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' :
-                      'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                      task.status === 'completed' ? 'bg-green-100 text-green-700' :
+                      task.status === 'in_progress' ? 'bg-blue-100 text-blue-700' :
+                      'bg-yellow-100 text-yellow-700'
                     }`}>
                       {task.status.replace(/_/g, ' ')}
                     </span>
@@ -669,10 +693,10 @@ export default function JobOrderDetailPage() {
 
         {/* ── Admin: Order Parts ── */}
         {canEditParts && (
-          <div className="no-print mb-5 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
+          <div className="no-print mb-5 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
-              <h2 className="text-base font-semibold text-zinc-900 dark:text-white flex items-center gap-2">
-                <svg className="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                <svg className="w-5 h-5 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
                 </svg>
                 Order Parts &amp; Labor
@@ -681,7 +705,7 @@ export default function JobOrderDetailPage() {
                 type="button"
                 onClick={saveOrderParts}
                 disabled={savingParts}
-                className="px-4 py-2 rounded-lg bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 text-sm font-medium transition-colors"
+                className="px-4 py-2 rounded-lg bg-[#011c72] text-white hover:bg-[#01268c] disabled:opacity-50 text-sm font-medium transition-colors"
               >
                 {savingParts ? 'Saving...' : 'Save All Parts'}
               </button>
@@ -690,14 +714,14 @@ export default function JobOrderDetailPage() {
             {/* ── Materials Section ── */}
             <div className="mb-8">
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 flex items-center gap-2">
+                <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
                   <span className="w-2.5 h-2.5 rounded-full bg-blue-500 inline-block"></span>
                   Materials
                 </h3>
                 <button
                   type="button"
                   onClick={addMaterialPart}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-blue-200 dark:border-blue-900/40 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 text-xs font-medium transition-colors"
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-blue-200 text-blue-700 hover:bg-blue-50 text-xs font-medium transition-colors"
                 >
                   <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -706,18 +730,18 @@ export default function JobOrderDetailPage() {
                 </button>
               </div>
 
-              <div className="overflow-x-auto border border-zinc-200 dark:border-zinc-800 rounded-lg">
+              <div className="overflow-x-auto border border-gray-200 rounded-lg">
                 <table className="w-full min-w-[640px]">
-                  <thead className="bg-zinc-50 dark:bg-zinc-800/50">
+                  <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider w-[40%]">Material / Part</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider w-20">Qty</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider w-32">Unit Cost (₱)</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider w-28">Line Total</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[40%]">Material / Part</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-20">Qty</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-32">Unit Cost (₱)</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-28">Line Total</th>
                       <th className="px-4 py-3 w-16"></th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800 bg-white dark:bg-zinc-900">
+                  <tbody className="divide-y divide-gray-100 bg-white">
                     {editingParts.map((part, globalIndex) => {
                       if (part.category !== 'material') return null;
                       const lineTotal = (Number(part.quantity) || 0) * (Number(part.materialCost) || 0);
@@ -747,7 +771,7 @@ export default function JobOrderDetailPage() {
                                   placeholder="New material name"
                                 />
                               ) : (
-                                <p className="text-xs text-zinc-400 dark:text-zinc-500 pl-1">
+                                <p className="text-xs text-gray-400 pl-1">
                                   {part.name || 'No material selected'}
                                 </p>
                               )}
@@ -760,7 +784,7 @@ export default function JobOrderDetailPage() {
                               step="1"
                               value={part.quantity}
                               onChange={(e) => updateOrderPart(globalIndex, 'quantity', e.target.value)}
-                              className="w-16 px-2 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white text-right"
+                              className="w-16 px-2 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 text-right"
                             />
                           </td>
                           <td className="px-4 py-3 text-right">
@@ -770,17 +794,17 @@ export default function JobOrderDetailPage() {
                               step="0.01"
                               value={part.materialCost || 0}
                               onChange={(e) => updateOrderPart(globalIndex, 'materialCost', e.target.value)}
-                              className="w-28 px-2 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white text-right"
+                              className="w-28 px-2 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 text-right"
                             />
                           </td>
-                          <td className="px-4 py-3 text-right text-sm font-semibold text-zinc-900 dark:text-white">
+                          <td className="px-4 py-3 text-right text-sm font-semibold text-gray-900">
                             {formatCurrency(lineTotal)}
                           </td>
                           <td className="px-4 py-3 text-center">
                             <button
                               type="button"
                               onClick={() => removeOrderPart(globalIndex)}
-                              className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
+                              className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                               title="Remove"
                             >
                               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -793,19 +817,19 @@ export default function JobOrderDetailPage() {
                     })}
                     {!editingParts.some(p => p.category === 'material') && (
                       <tr>
-                        <td colSpan={5} className="px-4 py-6 text-center text-sm text-zinc-400 dark:text-zinc-500">
+                        <td colSpan={5} className="px-4 py-6 text-center text-sm text-gray-400">
                           No materials added yet. Click &quot;Add Material&quot; to begin.
                         </td>
                       </tr>
                     )}
                   </tbody>
                   {editingParts.some(p => p.category === 'material') && (
-                    <tfoot className="bg-blue-50 dark:bg-blue-900/20">
+                    <tfoot className="bg-blue-50">
                       <tr>
-                        <td colSpan={3} className="px-4 py-2.5 text-right text-xs font-semibold text-blue-700 dark:text-blue-400 uppercase tracking-wide">
+                        <td colSpan={3} className="px-4 py-2.5 text-right text-xs font-semibold text-blue-700 uppercase tracking-wide">
                           Materials Subtotal
                         </td>
-                        <td className="px-4 py-2.5 text-right text-sm font-bold text-blue-700 dark:text-blue-400">
+                        <td className="px-4 py-2.5 text-right text-sm font-bold text-blue-700">
                           {formatCurrency(materialPartsTotal)}
                         </td>
                         <td></td>
@@ -819,14 +843,14 @@ export default function JobOrderDetailPage() {
             {/* ── Labor Section ── */}
             <div className="mb-6">
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"></span>
+                <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#011c72] inline-block"></span>
                   Labor
                 </h3>
                 <button
                   type="button"
                   onClick={addLaborPart}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-amber-200 dark:border-amber-900/40 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/20 text-xs font-medium transition-colors"
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-[#c7d2f5] text-[#011c72] hover:bg-[#eef1fb] text-xs font-medium transition-colors"
                 >
                   <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -835,19 +859,19 @@ export default function JobOrderDetailPage() {
                 </button>
               </div>
 
-              <div className="overflow-x-auto border border-zinc-200 dark:border-zinc-800 rounded-lg">
+              <div className="overflow-x-auto border border-gray-200 rounded-lg">
                 <table className="w-full min-w-[700px]">
-                  <thead className="bg-zinc-50 dark:bg-zinc-800/50">
+                  <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider w-[30%]">Description / Task</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider w-[25%]">Worker</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider w-20">Hours</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider w-32">Rate / Hr (₱)</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider w-28">Line Total</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[30%]">Description / Task</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[25%]">Worker</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-20">Hours</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-32">Rate / Hr (₱)</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-28">Line Total</th>
                       <th className="px-4 py-3 w-16"></th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800 bg-white dark:bg-zinc-900">
+                  <tbody className="divide-y divide-gray-100 bg-white">
                     {editingParts.map((part, globalIndex) => {
                       if (part.category !== 'labor') return null;
                       const lineTotal = (Number(part.quantity) || 0) * (Number(part.laborCost) || 0);
@@ -863,13 +887,24 @@ export default function JobOrderDetailPage() {
                             />
                           </td>
                           <td className="px-4 py-3">
-                            <input
-                              type="text"
-                              value={part.workerName || ''}
-                              onChange={(e) => updateOrderPart(globalIndex, 'workerName', e.target.value)}
+                            <select
+                              value={part.workerId || ''}
+                              onChange={(e) => {
+                                const wid = parseInt(e.target.value) || undefined;
+                                const found = managedWorkers.find(w => w.id === wid);
+                                updateOrderPart(globalIndex, 'workerId', wid ?? '');
+                                updateOrderPart(globalIndex, 'workerName', found?.name ?? '');
+                                if (found && !part.laborCost) {
+                                  updateOrderPart(globalIndex, 'laborCost', found.ratePerHour);
+                                }
+                              }}
                               className={inputClass}
-                              placeholder="Worker name"
-                            />
+                            >
+                              <option value="">— Select worker —</option>
+                              {managedWorkers.map(w => (
+                                <option key={w.id} value={w.id}>{w.name} ({w.workType})</option>
+                              ))}
+                            </select>
                           </td>
                           <td className="px-4 py-3 text-right">
                             <input
@@ -878,7 +913,7 @@ export default function JobOrderDetailPage() {
                               step="0.5"
                               value={part.quantity}
                               onChange={(e) => updateOrderPart(globalIndex, 'quantity', e.target.value)}
-                              className="w-16 px-2 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white text-right"
+                              className="w-16 px-2 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 text-right"
                             />
                           </td>
                           <td className="px-4 py-3 text-right">
@@ -888,17 +923,17 @@ export default function JobOrderDetailPage() {
                               step="0.01"
                               value={part.laborCost || 0}
                               onChange={(e) => updateOrderPart(globalIndex, 'laborCost', e.target.value)}
-                              className="w-28 px-2 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-white text-right"
+                              className="w-28 px-2 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 text-right"
                             />
                           </td>
-                          <td className="px-4 py-3 text-right text-sm font-semibold text-zinc-900 dark:text-white">
+                          <td className="px-4 py-3 text-right text-sm font-semibold text-gray-900">
                             {formatCurrency(lineTotal)}
                           </td>
                           <td className="px-4 py-3 text-center">
                             <button
                               type="button"
                               onClick={() => removeOrderPart(globalIndex)}
-                              className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
+                              className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                               title="Remove"
                             >
                               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -911,19 +946,19 @@ export default function JobOrderDetailPage() {
                     })}
                     {!editingParts.some(p => p.category === 'labor') && (
                       <tr>
-                        <td colSpan={6} className="px-4 py-6 text-center text-sm text-zinc-400 dark:text-zinc-500">
+                        <td colSpan={6} className="px-4 py-6 text-center text-sm text-gray-400">
                           No labor entries added yet. Click &quot;Add Labor&quot; to begin.
                         </td>
                       </tr>
                     )}
                   </tbody>
                   {editingParts.some(p => p.category === 'labor') && (
-                    <tfoot className="bg-amber-50 dark:bg-amber-900/20">
+                    <tfoot className="bg-[#eef1fb]">
                       <tr>
-                        <td colSpan={4} className="px-4 py-2.5 text-right text-xs font-semibold text-amber-700 dark:text-amber-400 uppercase tracking-wide">
+                        <td colSpan={4} className="px-4 py-2.5 text-right text-xs font-semibold text-[#011c72] uppercase tracking-wide">
                           Labor Subtotal
                         </td>
-                        <td className="px-4 py-2.5 text-right text-sm font-bold text-amber-700 dark:text-amber-400">
+                        <td className="px-4 py-2.5 text-right text-sm font-bold text-[#011c72]">
                           {formatCurrency(laborPartsTotal)}
                         </td>
                         <td></td>
@@ -935,28 +970,28 @@ export default function JobOrderDetailPage() {
             </div>
 
             {/* Grand Total / Price Override */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4 border-t border-zinc-100 dark:border-zinc-800">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4 border-t border-gray-100">
               <div className="md:col-span-2">
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">Final Total Price Override</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Final Total Price Override</label>
                 <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 text-sm">₱</span>
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">₱</span>
                   <input
                     type="number"
                     min="0"
                     step="0.01"
                     value={editedTotalPrice}
                     onChange={(e) => setEditedTotalPrice(e.target.value)}
-                    className="w-full pl-7 pr-4 py-2.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent text-sm"
+                    className="w-full pl-7 pr-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm"
                   />
                 </div>
-                <p className="text-xs text-zinc-400 mt-1">Leave at computed value or override with a custom price.</p>
+                <p className="text-xs text-gray-400 mt-1">Leave at computed value or override with a custom price.</p>
               </div>
-              <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-lg p-4 flex flex-col justify-center">
-                <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">Computed Total</p>
-                <p className="text-xl font-bold text-zinc-900 dark:text-white">{formatCurrency(computedPartsTotal)}</p>
-                <div className="flex items-center gap-3 mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+              <div className="bg-gray-50 rounded-lg p-4 flex flex-col justify-center">
+                <p className="text-xs text-gray-500 mb-1">Computed Total</p>
+                <p className="text-xl font-bold text-gray-900">{formatCurrency(computedPartsTotal)}</p>
+                <div className="flex items-center gap-3 mt-1 text-xs text-gray-500">
                   <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-400 inline-block"></span>Mat: {formatCurrency(materialPartsTotal)}</span>
-                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block"></span>Lab: {formatCurrency(laborPartsTotal)}</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#4a6aff] inline-block"></span>Lab: {formatCurrency(laborPartsTotal)}</span>
                 </div>
               </div>
             </div>
@@ -965,56 +1000,56 @@ export default function JobOrderDetailPage() {
 
         {/* ── Cost Breakdown (read-only view) ── */}
         {canEditParts && (
-          <div className="no-print mb-5 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
-            <h2 className="text-base font-semibold text-zinc-900 dark:text-white mb-4 flex items-center gap-2">
-              <svg className="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="no-print mb-5 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+            <h2 className="text-base font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <svg className="w-5 h-5 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
               </svg>
               Cost Breakdown
             </h2>
 
             {itemBreakdown.length > 0 ? (
-              <div className="overflow-x-auto border border-zinc-200 dark:border-zinc-800 rounded-lg mb-5">
+              <div className="overflow-x-auto border border-gray-200 rounded-lg mb-5">
                 <table className="w-full min-w-[600px]">
-                  <thead className="bg-zinc-50 dark:bg-zinc-800/50">
+                  <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Material / Item</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Qty</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Unit Price</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-blue-500 dark:text-blue-400 uppercase tracking-wider">Material Cost</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-amber-500 dark:text-amber-400 uppercase tracking-wider">Labor Cost</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Line Price</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Material / Item</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Qty</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Unit Price</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-blue-500 uppercase tracking-wider">Material Cost</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-amber-500 uppercase tracking-wider">Labor Cost</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Line Price</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                  <tbody className="divide-y divide-gray-100">
                     {itemBreakdown.map((item, index) => (
-                      <tr key={`${item.name}-${index}`} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors">
-                        <td className="px-4 py-3 text-sm font-medium text-zinc-900 dark:text-white">{item.name || `Item ${index + 1}`}</td>
-                        <td className="px-4 py-3 text-sm text-right text-zinc-600 dark:text-zinc-400">{item.quantity}</td>
-                        <td className="px-4 py-3 text-sm text-right text-zinc-600 dark:text-zinc-400">{formatCurrency(item.unitPrice)}</td>
-                        <td className="px-4 py-3 text-sm text-right text-blue-600 dark:text-blue-400">{formatCurrency(item.lineMaterialCost)}</td>
-                        <td className="px-4 py-3 text-sm text-right text-amber-600 dark:text-amber-400">{formatCurrency(item.lineLaborCost)}</td>
-                        <td className="px-4 py-3 text-sm text-right font-semibold text-zinc-900 dark:text-white">{formatCurrency(item.linePrice)}</td>
+                      <tr key={`${item.name}-${index}`} className="hover:bg-gray-50 transition-colors">
+                        <td className="px-4 py-3 text-sm font-medium text-gray-900">{item.name || `Item ${index + 1}`}</td>
+                        <td className="px-4 py-3 text-sm text-right text-gray-600">{item.quantity}</td>
+                        <td className="px-4 py-3 text-sm text-right text-gray-600">{formatCurrency(item.unitPrice)}</td>
+                        <td className="px-4 py-3 text-sm text-right text-blue-600">{formatCurrency(item.lineMaterialCost)}</td>
+                        <td className="px-4 py-3 text-sm text-right text-[#011c72]">{formatCurrency(item.lineLaborCost)}</td>
+                        <td className="px-4 py-3 text-sm text-right font-semibold text-gray-900">{formatCurrency(item.linePrice)}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
             ) : (
-              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-5">No material or item details recorded for this order.</p>
+              <p className="text-sm text-gray-500 mb-5">No material or item details recorded for this order.</p>
             )}
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-blue-50 dark:bg-blue-900/20 rounded-xl p-4 text-center border border-blue-100 dark:border-blue-900/40">
-                <p className="text-xs font-medium text-blue-600 dark:text-blue-400 mb-1">Material Cost</p>
-                <p className="text-xl font-bold text-blue-700 dark:text-blue-400">{formatCurrency(materialSubtotal)}</p>
+              <div className="bg-blue-50 rounded-xl p-4 text-center border border-blue-100">
+                <p className="text-xs font-medium text-blue-600 mb-1">Material Cost</p>
+                <p className="text-xl font-bold text-blue-700">{formatCurrency(materialSubtotal)}</p>
               </div>
-              <div className="bg-amber-50 dark:bg-amber-900/20 rounded-xl p-4 text-center border border-amber-100 dark:border-amber-900/40">
-                <p className="text-xs font-medium text-amber-600 dark:text-amber-400 mb-1">Labor Cost</p>
-                <p className="text-xl font-bold text-amber-700 dark:text-amber-400">{formatCurrency(laborSubtotal)}</p>
+              <div className="bg-[#eef1fb] rounded-xl p-4 text-center border border-[#dde6ff]">
+                <p className="text-xs font-medium text-[#011c72] mb-1">Labor Cost</p>
+                <p className="text-xl font-bold text-[#011c72]">{formatCurrency(laborSubtotal)}</p>
               </div>
-              <div className="bg-zinc-900 dark:bg-zinc-800 rounded-xl p-4 text-center border-2 border-zinc-700">
-                <p className="text-xs font-medium text-zinc-400 mb-1">TOTAL PRICE</p>
+              <div className="bg-white rounded-xl p-4 text-center border-2 border-gray-200">
+                <p className="text-xs font-medium text-gray-400 mb-1">TOTAL PRICE</p>
                 <p className="text-2xl font-bold text-white">{formatCurrency(jobOrder.totalPrice || 0)}</p>
               </div>
             </div>
@@ -1022,9 +1057,9 @@ export default function JobOrderDetailPage() {
         )}
 
         {/* ── Payment Information ── */}
-        <div className="mb-5 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
-          <h2 className="text-base font-semibold text-zinc-900 dark:text-white mb-5 flex items-center gap-2">
-            <svg className="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <div className="mb-5 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <h2 className="text-base font-semibold text-gray-900 mb-5 flex items-center gap-2">
+            <svg className="w-5 h-5 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z" />
             </svg>
             Payment Information
@@ -1032,24 +1067,24 @@ export default function JobOrderDetailPage() {
 
           {/* Summary Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-5">
-            <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-xl p-4 border border-zinc-200 dark:border-zinc-700 text-center">
-              <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-1">Total Amount</p>
-              <p className="text-2xl font-bold text-zinc-900 dark:text-white">{formatCurrency(jobOrder.totalPrice || 0)}</p>
+            <div className="bg-gray-50 rounded-xl p-4 border border-gray-200 text-center">
+              <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Total Amount</p>
+              <p className="text-2xl font-bold text-gray-900">{formatCurrency(jobOrder.totalPrice || 0)}</p>
             </div>
-            <div className="bg-green-50 dark:bg-green-900/20 rounded-xl p-4 border border-green-100 dark:border-green-900/40 text-center">
-              <p className="text-xs font-medium text-green-600 dark:text-green-400 uppercase tracking-wide mb-1">Amount Paid</p>
-              <p className="text-2xl font-bold text-green-700 dark:text-green-400">{formatCurrency(totalPaid)}</p>
+            <div className="bg-green-50 rounded-xl p-4 border border-green-100 text-center">
+              <p className="text-xs font-medium text-green-600 uppercase tracking-wide mb-1">Amount Paid</p>
+              <p className="text-2xl font-bold text-green-700">{formatCurrency(totalPaid)}</p>
             </div>
             <div className={`rounded-xl p-4 border text-center ${
               remainingBalance <= 0
-                ? 'bg-green-50 dark:bg-green-900/20 border-green-100 dark:border-green-900/40'
-                : 'bg-red-50 dark:bg-red-900/20 border-red-100 dark:border-red-900/40'
+                ? 'bg-green-50 border-green-100'
+                : 'bg-red-50 border-red-100'
             }`}>
               <p className={`text-xs font-medium uppercase tracking-wide mb-1 ${
-                remainingBalance <= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
+                remainingBalance <= 0 ? 'text-green-600' : 'text-red-600'
               }`}>Balance Due</p>
               <p className={`text-2xl font-bold ${
-                remainingBalance <= 0 ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'
+                remainingBalance <= 0 ? 'text-green-700' : 'text-red-700'
               }`}>
                 {formatCurrency(remainingBalance)}
               </p>
@@ -1060,15 +1095,15 @@ export default function JobOrderDetailPage() {
           <div className="flex items-center gap-3 mb-5">
             <span className={`px-3 py-1.5 text-sm font-semibold rounded-full ${
               jobOrder.paymentStatus === 'paid'
-                ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                ? 'bg-green-100 text-green-700'
                 : jobOrder.paymentStatus === 'partial'
-                ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
-                : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                ? 'bg-yellow-100 text-yellow-700'
+                : 'bg-red-100 text-red-700'
             }`}>
               {(jobOrder.paymentStatus || 'unpaid').toUpperCase()}
             </span>
             {jobOrder.paymentStatus === 'paid' && (
-              <span className="text-sm text-green-600 dark:text-green-400 font-medium flex items-center gap-1">
+              <span className="text-sm text-green-600 font-medium flex items-center gap-1">
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
@@ -1079,41 +1114,41 @@ export default function JobOrderDetailPage() {
 
           {/* Payment History */}
           <div className="mb-5">
-            <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-3">Payment History</h3>
+            <h3 className="text-sm font-semibold text-gray-700 mb-3">Payment History</h3>
             {loadingPayments ? (
               <div className="flex items-center justify-center py-6">
-                <div className="animate-spin w-5 h-5 border-2 border-amber-600 border-t-transparent rounded-full"></div>
+                <div className="animate-spin w-5 h-5 border-2 border-[#011c72] border-t-transparent rounded-full"></div>
               </div>
             ) : paymentRecords.length === 0 ? (
-              <p className="text-sm text-zinc-400 dark:text-zinc-500 italic py-4 text-center">No payments recorded yet.</p>
+              <p className="text-sm text-gray-400 italic py-4 text-center">No payments recorded yet.</p>
             ) : (
-              <div className="overflow-x-auto border border-zinc-200 dark:border-zinc-800 rounded-lg">
+              <div className="overflow-x-auto border border-gray-200 rounded-lg">
                 <table className="w-full min-w-[500px]">
-                  <thead className="bg-zinc-50 dark:bg-zinc-800/50">
+                  <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-4 py-2.5 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Date</th>
-                      <th className="px-4 py-2.5 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Amount</th>
-                      <th className="px-4 py-2.5 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Method</th>
-                      <th className="px-4 py-2.5 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Reference</th>
-                      <th className="px-4 py-2.5 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">Recorded By</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                      <th className="px-4 py-2.5 text-right text-xs font-medium text-gray-500 uppercase">Amount</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">Method</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">Reference</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">Recorded By</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                  <tbody className="divide-y divide-gray-100">
                     {paymentRecords.map(record => (
-                      <tr key={record.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40">
-                        <td className="px-4 py-3 text-sm text-zinc-600 dark:text-zinc-400">
+                      <tr key={record.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-sm text-gray-600">
                           {new Date(record.createdAt).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' })}
                         </td>
-                        <td className="px-4 py-3 text-sm font-semibold text-green-700 dark:text-green-400 text-right">
+                        <td className="px-4 py-3 text-sm font-semibold text-green-700 text-right">
                           {formatCurrency(record.amount)}
                         </td>
-                        <td className="px-4 py-3 text-sm text-zinc-700 dark:text-zinc-300 capitalize">
+                        <td className="px-4 py-3 text-sm text-gray-700 capitalize">
                           {record.paymentMethod.replace(/_/g, ' ')}
                         </td>
-                        <td className="px-4 py-3 text-sm text-zinc-500 dark:text-zinc-400">
+                        <td className="px-4 py-3 text-sm text-gray-500">
                           {record.referenceNumber || '—'}
                         </td>
-                        <td className="px-4 py-3 text-sm text-zinc-500 dark:text-zinc-400">
+                        <td className="px-4 py-3 text-sm text-gray-500">
                           {record.recordedByName || '—'}
                         </td>
                       </tr>
@@ -1131,7 +1166,7 @@ export default function JobOrderDetailPage() {
                 <button
                   type="button"
                   onClick={() => setShowPaymentForm(true)}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium text-sm transition-colors"
+                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium text-sm transition-colors"
                 >
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -1139,18 +1174,18 @@ export default function JobOrderDetailPage() {
                   Record Payment
                 </button>
               ) : (
-                <div className="border border-zinc-200 dark:border-zinc-700 rounded-xl p-4 bg-zinc-50 dark:bg-zinc-800/50">
-                  <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 mb-4 flex items-center gap-2">
-                    <svg className="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <div className="border border-gray-200 rounded-xl p-4 bg-gray-50">
+                  <h3 className="text-sm font-semibold text-gray-700 mb-4 flex items-center gap-2">
+                    <svg className="w-4 h-4 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                     New Payment Entry
                   </h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
                     <div>
-                      <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">Amount (₱) *</label>
+                      <label className="block text-xs font-medium text-gray-600 mb-1.5">Amount (₱) *</label>
                       <div className="relative">
-                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 text-sm font-medium">₱</span>
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm font-medium">₱</span>
                         <input
                           type="number"
                           min="0.01"
@@ -1158,17 +1193,17 @@ export default function JobOrderDetailPage() {
                           max={remainingBalance}
                           value={newPaymentAmount}
                           onChange={(e) => setNewPaymentAmount(e.target.value)}
-                          className="w-full pl-8 pr-3 py-2.5 rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent text-sm"
+                          className="w-full pl-8 pr-3 py-2.5 rounded-lg border border-gray-300 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm"
                           placeholder={`Max: ${formatCurrency(remainingBalance)}`}
                         />
                       </div>
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">Payment Method *</label>
+                      <label className="block text-xs font-medium text-gray-600 mb-1.5">Payment Method *</label>
                       <select
                         value={newPaymentMethod}
                         onChange={(e) => setNewPaymentMethod(e.target.value)}
-                        className="w-full px-3 py-2.5 rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent text-sm"
+                        className="w-full px-3 py-2.5 rounded-lg border border-gray-300 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm"
                       >
                         <option value="cash">Cash</option>
                         <option value="gcash">GCash</option>
@@ -1178,23 +1213,23 @@ export default function JobOrderDetailPage() {
                       </select>
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">Reference Number</label>
+                      <label className="block text-xs font-medium text-gray-600 mb-1.5">Reference Number</label>
                       <input
                         type="text"
                         value={newPaymentRef}
                         onChange={(e) => setNewPaymentRef(e.target.value)}
                         placeholder="GCash ref, check no., etc."
-                        className="w-full px-3 py-2.5 rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent text-sm"
+                        className="w-full px-3 py-2.5 rounded-lg border border-gray-300 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm"
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">Notes</label>
+                      <label className="block text-xs font-medium text-gray-600 mb-1.5">Notes</label>
                       <input
                         type="text"
                         value={newPaymentNotes}
                         onChange={(e) => setNewPaymentNotes(e.target.value)}
                         placeholder="Optional note"
-                        className="w-full px-3 py-2.5 rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent text-sm"
+                        className="w-full px-3 py-2.5 rounded-lg border border-gray-300 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm"
                       />
                     </div>
                   </div>
@@ -1202,7 +1237,7 @@ export default function JobOrderDetailPage() {
                     <button
                       type="button"
                       onClick={() => { setShowPaymentForm(false); setNewPaymentAmount(''); setNewPaymentRef(''); setNewPaymentNotes(''); }}
-                      className="px-4 py-2 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 rounded-lg text-sm font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                      className="px-4 py-2 border border-gray-200 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-100 transition-colors"
                     >
                       Cancel
                     </button>
@@ -1210,7 +1245,7 @@ export default function JobOrderDetailPage() {
                       type="button"
                       onClick={recordPayment}
                       disabled={savingPayment || !newPaymentAmount || parseFloat(newPaymentAmount) <= 0}
-                      className="inline-flex items-center gap-2 px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="inline-flex items-center gap-2 px-5 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {savingPayment ? (
                         <>
@@ -1232,7 +1267,7 @@ export default function JobOrderDetailPage() {
             </div>
           )}
           {canUpdatePaymentStatus && isFullySettled && (
-            <div className="flex items-center gap-2 px-4 py-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg text-sm text-green-700 dark:text-green-400 font-medium">
+            <div className="flex items-center gap-2 px-4 py-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-700 font-medium">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
@@ -1243,18 +1278,18 @@ export default function JobOrderDetailPage() {
 
         {/* ── Job Financial Summary (completed / delivered only) ── */}
         {(jobOrder.status === 'completed' || jobOrder.status === 'delivered') && (
-          <div className="mb-5 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-5">
+          <div className="mb-5 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <div className="flex items-center justify-between mb-5">
-              <h2 className="text-base font-semibold text-zinc-900 dark:text-white flex items-center gap-2">
-                <svg className="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                <svg className="w-5 h-5 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                 </svg>
                 Job Financial Summary
               </h2>
               <span className={`px-3 py-1 text-sm font-bold rounded-full ${
                 isProfit
-                  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                  : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-red-100 text-red-700'
               }`}>
                 {isProfit ? 'PROFITABLE' : 'AT A LOSS'}
               </span>
@@ -1262,15 +1297,15 @@ export default function JobOrderDetailPage() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               {/* Left: Expense Breakdown */}
-              <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-xl p-5 border border-zinc-200 dark:border-zinc-700">
-                <h3 className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-4">
+              <div className="bg-gray-50 rounded-xl p-5 border border-gray-200">
+                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-4">
                   Actual Expense Breakdown
                 </h3>
 
                 {/* Materials */}
                 {itemBreakdown.some(i => i.lineMaterialCost > 0) && (
                   <div className="mb-4">
-                    <p className="flex items-center gap-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400 mb-2">
+                    <p className="flex items-center gap-1.5 text-xs font-semibold text-blue-600 mb-2">
                       <span className="w-2 h-2 rounded-full bg-blue-500 inline-block"></span>
                       Materials
                     </p>
@@ -1283,22 +1318,22 @@ export default function JobOrderDetailPage() {
                         const pattern = inv?.pattern || '';
                         const detail = [color, pattern].filter(Boolean).join(' · ');
                         return (
-                          <div key={idx} className="flex justify-between items-start text-sm py-1.5 border-b border-zinc-200 dark:border-zinc-700 last:border-0">
+                          <div key={idx} className="flex justify-between items-start text-sm py-1.5 border-b border-gray-200 last:border-0">
                             <div className="truncate pr-2">
-                              <span className="text-zinc-800 dark:text-zinc-200 font-medium">{item.name || `Item ${idx + 1}`}</span>
+                              <span className="text-gray-800 font-medium">{item.name || `Item ${idx + 1}`}</span>
                               {detail && (
-                                <span className="block text-xs text-zinc-400 dark:text-zinc-500">{detail}</span>
+                                <span className="block text-xs text-gray-400">{detail}</span>
                               )}
-                              <span className="block text-xs text-zinc-400 dark:text-zinc-500">Qty: {item.quantity}</span>
+                              <span className="block text-xs text-gray-400">Qty: {item.quantity}</span>
                             </div>
-                            <span className="text-zinc-700 dark:text-zinc-300 shrink-0 font-medium">{formatCurrency(item.lineMaterialCost)}</span>
+                            <span className="text-gray-700 shrink-0 font-medium">{formatCurrency(item.lineMaterialCost)}</span>
                           </div>
                         );
                       })}
                     </div>
                     <div className="flex justify-between items-center mt-2 pt-1">
-                      <span className="text-xs font-semibold text-blue-600 dark:text-blue-400">Materials Subtotal</span>
-                      <span className="text-sm font-bold text-blue-700 dark:text-blue-400">{formatCurrency(materialSubtotal)}</span>
+                      <span className="text-xs font-semibold text-blue-600">Materials Subtotal</span>
+                      <span className="text-sm font-bold text-blue-700">{formatCurrency(materialSubtotal)}</span>
                     </div>
                   </div>
                 )}
@@ -1306,60 +1341,60 @@ export default function JobOrderDetailPage() {
                 {/* Labor */}
                 {itemBreakdown.some(i => i.lineLaborCost > 0) && (
                   <div className="mb-4">
-                    <p className="flex items-center gap-1.5 text-xs font-semibold text-amber-600 dark:text-amber-400 mb-2">
-                      <span className="w-2 h-2 rounded-full bg-amber-500 inline-block"></span>
+                    <p className="flex items-center gap-1.5 text-xs font-semibold text-[#011c72] mb-2">
+                      <span className="w-2 h-2 rounded-full bg-[#011c72] inline-block"></span>
                       Labor
                     </p>
                     <div className="space-y-1">
                       {itemBreakdown.filter(i => i.lineLaborCost > 0).map((item, idx) => (
-                        <div key={idx} className="flex justify-between items-center text-sm py-1 border-b border-zinc-200 dark:border-zinc-700 last:border-0">
-                          <span className="text-zinc-700 dark:text-zinc-300 truncate pr-2">
+                        <div key={idx} className="flex justify-between items-center text-sm py-1 border-b border-gray-200 last:border-0">
+                          <span className="text-gray-700 truncate pr-2">
                             {item.name || `Task ${idx + 1}`}
                             {item.workerName && (
-                              <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-1">({item.workerName})</span>
+                              <span className="text-xs text-gray-400 ml-1">({item.workerName})</span>
                             )}
-                            <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-1">× {item.quantity}</span>
+                            <span className="text-xs text-gray-400 ml-1">× {item.quantity}</span>
                           </span>
-                          <span className="text-zinc-700 dark:text-zinc-300 shrink-0">{formatCurrency(item.lineLaborCost)}</span>
+                          <span className="text-gray-700 shrink-0">{formatCurrency(item.lineLaborCost)}</span>
                         </div>
                       ))}
                     </div>
                     <div className="flex justify-between items-center mt-2 pt-1">
-                      <span className="text-xs font-semibold text-amber-600 dark:text-amber-400">Labor Subtotal</span>
-                      <span className="text-sm font-bold text-amber-700 dark:text-amber-400">{formatCurrency(laborSubtotal)}</span>
+                      <span className="text-xs font-semibold text-[#011c72]">Labor Subtotal</span>
+                      <span className="text-sm font-bold text-[#011c72]">{formatCurrency(laborSubtotal)}</span>
                     </div>
                   </div>
                 )}
 
                 {itemBreakdown.length === 0 && (
-                  <p className="text-sm text-zinc-400 dark:text-zinc-500 italic mb-4">No items recorded.</p>
+                  <p className="text-sm text-gray-400 italic mb-4">No items recorded.</p>
                 )}
 
-                <div className="flex justify-between items-center pt-2 border-t-2 border-zinc-300 dark:border-zinc-600">
-                  <span className="text-sm font-bold text-zinc-900 dark:text-white">Total Expenses</span>
-                  <span className="text-xl font-bold text-zinc-900 dark:text-white">{formatCurrency(actualExpenses)}</span>
+                <div className="flex justify-between items-center pt-2 border-t-2 border-gray-300">
+                  <span className="text-sm font-bold text-gray-900">Total Expenses</span>
+                  <span className="text-xl font-bold text-gray-900">{formatCurrency(actualExpenses)}</span>
                 </div>
               </div>
 
               {/* Right: Price Comparison & Profit/Loss */}
               <div className="space-y-3">
                 {/* Estimated vs Final comparison */}
-                <div className="bg-zinc-50 dark:bg-zinc-800/50 rounded-xl p-5 border border-zinc-200 dark:border-zinc-700">
-                  <h3 className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-4">
+                <div className="bg-gray-50 rounded-xl p-5 border border-gray-200">
+                  <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-4">
                     Estimated vs. Final Price
                   </h3>
                   <div className="space-y-3">
-                    <div className="flex justify-between items-center py-2 border-b border-zinc-200 dark:border-zinc-700">
-                      <span className="text-sm text-zinc-600 dark:text-zinc-400">Estimated Cost</span>
-                      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatCurrency(estimatedCostQuoted)}</span>
+                    <div className="flex justify-between items-center py-2 border-b border-gray-200">
+                      <span className="text-sm text-gray-600">Estimated Cost</span>
+                      <span className="text-sm font-semibold text-gray-700">{formatCurrency(estimatedCostQuoted)}</span>
                     </div>
-                    <div className="flex justify-between items-center py-2 border-b border-zinc-200 dark:border-zinc-700">
-                      <span className="text-sm text-zinc-600 dark:text-zinc-400">Final Price Charged</span>
-                      <span className="text-sm font-semibold text-zinc-900 dark:text-white">{formatCurrency(finalPrice)}</span>
+                    <div className="flex justify-between items-center py-2 border-b border-gray-200">
+                      <span className="text-sm text-gray-600">Final Price Charged</span>
+                      <span className="text-sm font-semibold text-gray-900">{formatCurrency(finalPrice)}</span>
                     </div>
                     <div className="flex justify-between items-center pt-1">
-                      <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Variance</span>
-                      <span className={`text-sm font-bold ${priceDiff >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                      <span className="text-sm font-medium text-gray-700">Variance</span>
+                      <span className={`text-sm font-bold ${priceDiff >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                         {priceDiff >= 0 ? '+' : ''}{formatCurrency(priceDiff)}
                         <span className="text-xs ml-1 font-medium opacity-80">
                           ({priceDiff >= 0 ? '+' : ''}{priceDiffPct.toFixed(1)}%)
@@ -1372,11 +1407,11 @@ export default function JobOrderDetailPage() {
                 {/* Profit/Loss card */}
                 <div className={`rounded-xl p-5 border-2 ${
                   isProfit
-                    ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'
-                    : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'
+                    ? 'bg-green-50 border-green-200'
+                    : 'bg-red-50 border-red-200'
                 }`}>
                   <div className="flex items-center justify-between mb-2">
-                    <span className={`text-xs font-semibold uppercase tracking-wider ${isProfit ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                    <span className={`text-xs font-semibold uppercase tracking-wider ${isProfit ? 'text-green-600' : 'text-red-600'}`}>
                       {isProfit ? 'Gross Profit' : 'Net Loss'}
                     </span>
                     <svg className={`w-5 h-5 ${isProfit ? 'text-green-500' : 'text-red-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1387,14 +1422,14 @@ export default function JobOrderDetailPage() {
                     </svg>
                   </div>
                   <div className="flex items-end gap-3">
-                    <span className={`text-3xl font-bold ${isProfit ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}`}>
+                    <span className={`text-3xl font-bold ${isProfit ? 'text-green-700' : 'text-red-700'}`}>
                       {isProfit ? '' : '-'}{formatCurrency(Math.abs(grossProfit))}
                     </span>
-                    <span className={`text-base font-semibold mb-0.5 ${isProfit ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                    <span className={`text-base font-semibold mb-0.5 ${isProfit ? 'text-green-600' : 'text-red-600'}`}>
                       ({isProfit ? '+' : '-'}{Math.abs(profitMarginPct).toFixed(1)}%)
                     </span>
                   </div>
-                  <p className={`text-xs mt-2 ${isProfit ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                  <p className={`text-xs mt-2 ${isProfit ? 'text-green-600' : 'text-red-600'}`}>
                     {isProfit
                       ? `Revenue of ${formatCurrency(finalPrice)} minus ${formatCurrency(actualExpenses)} in expenses`
                       : `Expenses of ${formatCurrency(actualExpenses)} exceeded revenue of ${formatCurrency(finalPrice)}`
@@ -1410,7 +1445,7 @@ export default function JobOrderDetailPage() {
         <div className="no-print flex flex-wrap gap-3">
           <button
             onClick={printReceipt}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 hover:border-amber-300 text-zinc-700 dark:text-zinc-300 rounded-lg font-medium text-sm transition-colors"
+            className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 hover:border-[#011c72] text-gray-700 rounded-lg font-medium text-sm transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
@@ -1421,7 +1456,7 @@ export default function JobOrderDetailPage() {
             <button
               onClick={saveOrderParts}
               disabled={savingParts}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 hover:border-amber-300 text-zinc-700 dark:text-zinc-300 rounded-lg font-medium text-sm transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 hover:border-[#011c72] text-gray-700 rounded-lg font-medium text-sm transition-colors disabled:opacity-50"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
@@ -1433,7 +1468,7 @@ export default function JobOrderDetailPage() {
             <button
               onClick={() => updateStatus('cancelled')}
               disabled={updating}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 hover:bg-red-100 text-red-600 dark:text-red-400 rounded-lg font-medium text-sm transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 border border-red-200 hover:bg-red-100 text-red-600 rounded-lg font-medium text-sm transition-colors disabled:opacity-50"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />

@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 import { useState, useEffect, Suspense } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { api, Appointment, CustomerOrder, ProductOrder } from '@/lib/api';
@@ -10,13 +10,13 @@ type OrderTab = 'custom' | 'premade' | 'appointments';
 export default function MyOrdersPage() {
   return (
     <Suspense fallback={
-      <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 pt-8">
+      <div className="min-h-screen bg-gray-50 pt-8">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="animate-pulse space-y-4">
-            <div className="h-8 w-48 bg-zinc-200 dark:bg-zinc-800 rounded"></div>
+            <div className="h-8 w-48 bg-gray-200 rounded"></div>
             <div className="space-y-3">
               {[...Array(3)].map((_, i) => (
-                <div key={i} className="h-32 bg-zinc-200 dark:bg-zinc-800 rounded-xl"></div>
+                <div key={i} className="h-32 bg-gray-200 rounded-xl"></div>
               ))}
             </div>
           </div>
@@ -79,49 +79,49 @@ function MyOrdersContent() {
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'pending':
-        return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400';
+        return 'bg-yellow-100 text-yellow-700';
       case 'confirmed':
       case 'processing':
       case 'in_progress':
-        return 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400';
+        return 'bg-blue-100 text-blue-700';
       case 'ready_for_installation':
       case 'ready':
-        return 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400';
+        return 'bg-orange-100 text-orange-700';
       case 'completed':
-        return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
+        return 'bg-green-100 text-green-700';
       case 'delivered':
-        return 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400';
+        return 'bg-purple-100 text-purple-700';
       case 'cancelled':
-        return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
+        return 'bg-red-100 text-red-700';
       default:
-        return 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400';
+        return 'bg-gray-100 text-gray-700';
     }
   };
 
   const getPaymentStatusColor = (status: string) => {
     switch (status) {
       case 'paid':
-        return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
+        return 'bg-green-100 text-green-700';
       case 'partial':
-        return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400';
+        return 'bg-[#dde6ff] text-[#011c72]';
       case 'unpaid':
       default:
-        return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
+        return 'bg-red-100 text-red-700';
     }
   };
 
   const getQuotationStatusColor = (status?: string) => {
     switch (status) {
       case 'pending_quotation':
-        return 'bg-gray-100 text-gray-700 dark:bg-gray-900/30 dark:text-gray-400';
+        return 'bg-gray-100 text-gray-700';
       case 'quoted':
-        return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400';
+        return 'bg-[#dde6ff] text-[#011c72]';
       case 'accepted':
-        return 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400';
+        return 'bg-green-100 text-green-700';
       case 'rejected':
-        return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400';
+        return 'bg-red-100 text-red-700';
       default:
-        return 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400';
+        return 'bg-gray-100 text-gray-700';
     }
   };
 
@@ -158,7 +158,7 @@ function MyOrdersContent() {
         return {
           label: 'Waiting for confirmation from admin/supervisor',
           progress: 33,
-          progressClass: 'bg-amber-500'
+          progressClass: 'bg-[#011c72]'
         };
       case 'confirmed':
         return {
@@ -184,13 +184,13 @@ function MyOrdersContent() {
 
   if (authLoading || loading) {
     return (
-      <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 pt-8">
+      <div className="min-h-screen bg-gray-50 pt-8">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="animate-pulse space-y-4">
-            <div className="h-8 w-48 bg-zinc-200 dark:bg-zinc-800 rounded"></div>
+            <div className="h-8 w-48 bg-gray-200 rounded"></div>
             <div className="space-y-3">
               {[...Array(3)].map((_, i) => (
-                <div key={i} className="h-32 bg-zinc-200 dark:bg-zinc-800 rounded-xl"></div>
+                <div key={i} className="h-32 bg-gray-200 rounded-xl"></div>
               ))}
             </div>
           </div>
@@ -200,14 +200,17 @@ function MyOrdersContent() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
-      <div className="bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800">
+    <div className="min-h-screen bg-gray-50">
+      <div className="bg-white border-b border-gray-200">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <Link href="/" className="text-amber-600 dark:text-amber-400 text-sm font-medium mb-4 inline-block">
-            ← Back to Home
+          <Link href="/" className="inline-flex items-center gap-2 text-sm text-gray-600 hover:text-[#011c72] transition-colors mb-4">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+            Back to website
           </Link>
-          <h1 className="text-3xl font-bold text-zinc-900 dark:text-white">My Orders</h1>
-          <p className="text-zinc-600 dark:text-zinc-400 mt-2">
+          <h1 className="text-3xl font-bold text-gray-900">My Orders</h1>
+          <p className="text-gray-600 mt-2">
             Track custom service orders and premade product purchases
           </p>
         </div>
@@ -215,7 +218,7 @@ function MyOrdersContent() {
 
       <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {error && (
-          <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-xl text-red-700 dark:text-red-400">
+          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700">
             {error}
           </div>
         )}
@@ -223,7 +226,7 @@ function MyOrdersContent() {
         <div className="mb-6 flex gap-3 flex-wrap">
           <Link
             href="/place-order"
-            className="inline-flex items-center px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors font-medium"
+            className="inline-flex items-center px-4 py-2 bg-[#011c72] text-white rounded-lg hover:bg-[#01268c] transition-colors font-medium"
           >
             <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -235,8 +238,8 @@ function MyOrdersContent() {
             onClick={() => setActiveTab('custom')}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
               activeTab === 'custom'
-                ? 'bg-zinc-900 text-white dark:bg-zinc-200 dark:text-zinc-900'
-                : 'bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-800'
+                ? 'bg-white text-white'
+                : 'bg-white text-gray-700 border border-gray-200'
             }`}
           >
             Custom Orders ({customOrders.length})
@@ -245,8 +248,8 @@ function MyOrdersContent() {
             onClick={() => setActiveTab('premade')}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
               activeTab === 'premade'
-                ? 'bg-zinc-900 text-white dark:bg-zinc-200 dark:text-zinc-900'
-                : 'bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-800'
+                ? 'bg-white text-white'
+                : 'bg-white text-gray-700 border border-gray-200'
             }`}
           >
             Premade Purchases ({productOrders.length})
@@ -255,8 +258,8 @@ function MyOrdersContent() {
             onClick={() => setActiveTab('appointments')}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
               activeTab === 'appointments'
-                ? 'bg-zinc-900 text-white dark:bg-zinc-200 dark:text-zinc-900'
-                : 'bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-800'
+                ? 'bg-white text-white'
+                : 'bg-white text-gray-700 border border-gray-200'
             }`}
           >
             Appointments ({appointments.length})
@@ -266,20 +269,20 @@ function MyOrdersContent() {
         {activeTab === 'custom' && (
           <>
             {customOrders.length === 0 ? (
-              <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-12 text-center">
-                <p className="text-zinc-600 dark:text-zinc-400 mb-4">You have no custom service orders yet</p>
+              <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
+                <p className="text-gray-600 mb-4">You have no custom service orders yet</p>
               </div>
             ) : (
               <div className="space-y-4">
                 {customOrders.map((order) => (
                   <div
                     key={order.id}
-                    className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-6 hover:shadow-md transition-shadow"
+                    className="bg-white rounded-xl border border-gray-200 p-6 hover:shadow-md transition-shadow"
                   >
                     <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-4">
                       <div className="flex-1">
                         <div className="flex items-center gap-3 flex-wrap">
-                          <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">{order.orderNumber}</h3>
+                          <h3 className="text-lg font-semibold text-gray-900">{order.orderNumber}</h3>
                           <span className={`text-xs px-2 py-1 rounded-full font-medium ${getStatusColor(order.status)}`}>
                             {order.status.replace(/_/g, ' ').toUpperCase()}
                           </span>
@@ -289,7 +292,7 @@ function MyOrdersContent() {
                             </span>
                           )}
                         </div>
-                        <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+                        <p className="text-sm text-gray-600 mt-1">
                           {new Date(order.createdAt).toLocaleDateString('en-PH', {
                             year: 'numeric',
                             month: 'short',
@@ -298,14 +301,14 @@ function MyOrdersContent() {
                             minute: '2-digit'
                           })}
                         </p>
-                        <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+                        <p className="text-sm text-gray-500 mt-1">
                           Branch: {order.branchName || 'N/A'}
                         </p>
                       </div>
 
                       <Link
                         href={`/my-orders/${order.id}`}
-                        className="inline-flex items-center px-4 py-2 bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors font-medium text-sm"
+                        className="inline-flex items-center px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium text-sm"
                       >
                         View Details
                       </Link>
@@ -315,7 +318,7 @@ function MyOrdersContent() {
                       {order.services?.map((service, index) => (
                         <span
                           key={index}
-                          className="text-xs px-2 py-1 bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 rounded-md"
+                          className="text-xs px-2 py-1 bg-gray-100 text-gray-700 rounded-md"
                         >
                           {getServiceLabel(service.type)}
                         </span>
@@ -331,20 +334,20 @@ function MyOrdersContent() {
         {activeTab === 'premade' && (
           <>
             {productOrders.length === 0 ? (
-              <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-12 text-center">
-                <p className="text-zinc-600 dark:text-zinc-400 mb-4">You have no premade product purchases yet</p>
+              <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
+                <p className="text-gray-600 mb-4">You have no premade product purchases yet</p>
               </div>
             ) : (
               <div className="space-y-4">
                 {productOrders.map((order) => (
                   <div
                     key={order.id}
-                    className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-6"
+                    className="bg-white rounded-xl border border-gray-200 p-6"
                   >
                     <div className="flex items-start justify-between gap-4 mb-4">
                       <div>
                         <div className="flex items-center gap-3 flex-wrap">
-                          <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">{order.orderNumber}</h3>
+                          <h3 className="text-lg font-semibold text-gray-900">{order.orderNumber}</h3>
                           <span className={`text-xs px-2 py-1 rounded-full font-medium ${getStatusColor(order.status)}`}>
                             {order.status.toUpperCase()}
                           </span>
@@ -352,12 +355,12 @@ function MyOrdersContent() {
                             PAYMENT: {order.paymentStatus.toUpperCase()}
                           </span>
                           {order.groupId && (
-                            <span className="text-xs px-2 py-1 rounded-full font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">
+                            <span className="text-xs px-2 py-1 rounded-full font-medium bg-purple-100 text-purple-700">
                               Multi-branch
                             </span>
                           )}
                         </div>
-                        <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+                        <p className="text-sm text-gray-600 mt-1">
                           {new Date(order.createdAt).toLocaleDateString('en-PH', {
                             year: 'numeric',
                             month: 'short',
@@ -366,14 +369,14 @@ function MyOrdersContent() {
                             minute: '2-digit'
                           })}
                         </p>
-                        <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+                        <p className="text-sm text-gray-500 mt-1">
                           Source Branch: {order.branchName || 'N/A'}
                         </p>
                         {order.pickupBranchName && (
                           <p className={`text-sm font-medium mt-1 ${
                             order.pickupBranchId !== order.branchId
-                              ? 'text-orange-600 dark:text-orange-400'
-                              : 'text-zinc-500 dark:text-zinc-400'
+                              ? 'text-orange-600'
+                              : 'text-gray-500'
                           }`}>
                             {order.pickupBranchId !== order.branchId ? 'Pickup at: ' : 'Pickup Branch: '}
                             {order.pickupBranchName}
@@ -381,16 +384,16 @@ function MyOrdersContent() {
                         )}
                       </div>
 
-                      <p className="text-lg font-semibold text-amber-600">₱{order.totalAmount.toLocaleString()}</p>
+                      <p className="text-lg font-semibold text-[#011c72]">₱{order.totalAmount.toLocaleString()}</p>
                     </div>
 
                     <div className="space-y-2">
                       {order.items.map((item, index) => (
                         <div key={index} className="flex items-center justify-between text-sm">
-                          <span className="text-zinc-800 dark:text-zinc-200">
+                          <span className="text-gray-800">
                             {item.quantity}x {item.name}
                           </span>
-                          <span className="text-zinc-600 dark:text-zinc-400">₱{item.total.toLocaleString()}</span>
+                          <span className="text-gray-600">₱{item.total.toLocaleString()}</span>
                         </div>
                       ))}
                     </div>
@@ -404,11 +407,11 @@ function MyOrdersContent() {
         {activeTab === 'appointments' && (
           <>
             {appointments.length === 0 ? (
-              <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-12 text-center">
-                <p className="text-zinc-600 dark:text-zinc-400 mb-4">You have no appointment requests yet</p>
+              <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
+                <p className="text-gray-600 mb-4">You have no appointment requests yet</p>
                 <Link
                   href="/place-order"
-                  className="inline-flex items-center px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors font-medium"
+                  className="inline-flex items-center px-4 py-2 bg-[#011c72] text-white rounded-lg hover:bg-[#01268c] transition-colors font-medium"
                 >
                   Book Appointment
                 </Link>
@@ -421,17 +424,17 @@ function MyOrdersContent() {
                   return (
                     <div
                       key={appointment.id}
-                      className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 p-6"
+                      className="bg-white rounded-xl border border-gray-200 p-6"
                     >
                       <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-4">
                         <div>
                           <div className="flex items-center gap-3 flex-wrap">
-                            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">{appointment.appointmentNumber}</h3>
+                            <h3 className="text-lg font-semibold text-gray-900">{appointment.appointmentNumber}</h3>
                             <span className={`text-xs px-2 py-1 rounded-full font-medium ${getStatusColor(appointment.status)}`}>
                               {appointment.status.toUpperCase()}
                             </span>
                           </div>
-                          <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+                          <p className="text-sm text-gray-600 mt-1">
                             Preferred: {new Date(appointment.preferredDate).toLocaleDateString('en-PH', {
                               year: 'numeric',
                               month: 'short',
@@ -440,23 +443,23 @@ function MyOrdersContent() {
                             {appointment.preferredTime ? ` • ${appointment.preferredTime}` : ''}
                           </p>
                           {appointment.confirmedTime && (
-                            <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800">
-                              <svg className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 border border-blue-200">
+                              <svg className="w-4 h-4 text-blue-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                               </svg>
-                              <span className="text-sm font-semibold text-blue-700 dark:text-blue-300">
+                              <span className="text-sm font-semibold text-blue-700">
                                 Your appointment is set at {appointment.confirmedTime}
                               </span>
                             </div>
                           )}
                           {appointment.branchName && (
-                            <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+                            <p className="text-sm text-gray-500 mt-1">
                               Branch: {appointment.branchName}
                             </p>
                           )}
                         </div>
 
-                        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                        <p className="text-sm text-gray-500">
                           Requested on {new Date(appointment.createdAt).toLocaleDateString('en-PH', {
                             year: 'numeric',
                             month: 'short',
@@ -467,23 +470,23 @@ function MyOrdersContent() {
                         </p>
                       </div>
 
-                      <div className="mb-2 flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
+                      <div className="mb-2 flex items-center justify-between text-xs text-gray-500">
                         <span>Request Sent</span>
                         <span>Confirmed</span>
                         <span>Completed</span>
                       </div>
-                      <div className="h-2 w-full bg-zinc-200 dark:bg-zinc-700 rounded-full overflow-hidden">
+                      <div className="h-2 w-full bg-gray-200 rounded-full overflow-hidden">
                         <div
                           className={`h-full ${tracker.progressClass} transition-all duration-500`}
                           style={{ width: `${tracker.progress}%` }}
                         />
                       </div>
-                      <p className="mt-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">{tracker.label}</p>
+                      <p className="mt-2 text-sm font-medium text-gray-700">{tracker.label}</p>
 
                       {appointment.adminNotes && (
-                        <div className="mt-4 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-                          <p className="text-xs font-medium text-blue-600 dark:text-blue-400 uppercase">Admin Notes</p>
-                          <p className="text-sm text-blue-700 dark:text-blue-300 mt-1">{appointment.adminNotes}</p>
+                        <div className="mt-4 p-3 bg-blue-50 rounded-lg">
+                          <p className="text-xs font-medium text-blue-600 uppercase">Admin Notes</p>
+                          <p className="text-sm text-blue-700 mt-1">{appointment.adminNotes}</p>
                         </div>
                       )}
                     </div>
