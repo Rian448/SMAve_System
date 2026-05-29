@@ -36,6 +36,7 @@ export default function AppointmentsPage() {
   const [adminNotes, setAdminNotes] = useState('');
   const [confirmedTime, setConfirmedTime] = useState('');
   const [updating, setUpdating] = useState(false);
+  const [modalError, setModalError] = useState('');
 
   useEffect(() => {
     if (!authLoading && !isAuthenticated) {
@@ -74,6 +75,7 @@ export default function AppointmentsPage() {
   const handleStatusUpdate = async (appointmentId: number, newStatus: string, time?: string) => {
     setUpdating(true);
     setError('');
+    setModalError('');
     try {
       await api.appointments.update(appointmentId, {
         status: newStatus,
@@ -88,8 +90,14 @@ export default function AppointmentsPage() {
       setSelectedAppointment(null);
       setAdminNotes('');
       setConfirmedTime('');
+      setModalError('');
     } catch (err: any) {
-      setError(err.message || 'Failed to update appointment');
+      // Double-booking and confirmation errors show inside the modal, not on the page
+      if (selectedAppointment) {
+        setModalError(err.message || 'Failed to confirm appointment');
+      } else {
+        setError(err.message || 'Failed to update appointment');
+      }
     } finally {
       setUpdating(false);
     }
@@ -99,6 +107,7 @@ export default function AppointmentsPage() {
     setSelectedAppointment(appointment);
     setAdminNotes('');
     setConfirmedTime('');
+    setModalError('');
   };
 
   const getStatusColor = (status: string) => {
@@ -455,7 +464,7 @@ export default function AppointmentsPage() {
                 </label>
                 <select
                   value={confirmedTime}
-                  onChange={(e) => setConfirmedTime(e.target.value)}
+                  onChange={(e) => { setConfirmedTime(e.target.value); setModalError(''); }}
                   className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                 >
                   <option value="">-- Select a time --</option>
@@ -479,12 +488,22 @@ export default function AppointmentsPage() {
                 />
               </div>
 
+              {modalError && (
+                <div className="mb-4 flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                  <svg className="w-4 h-4 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                  </svg>
+                  <span>{modalError}</span>
+                </div>
+              )}
+
               <div className="flex gap-3">
                 <button
                   onClick={() => {
                     setSelectedAppointment(null);
                     setAdminNotes('');
                     setConfirmedTime('');
+                    setModalError('');
                   }}
                   className="flex-1 px-4 py-2 rounded-lg border border-gray-200 text-gray-700 text-sm font-medium hover:bg-gray-50 transition-colors"
                 >
