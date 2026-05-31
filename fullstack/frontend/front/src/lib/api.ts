@@ -105,6 +105,16 @@ export interface WorkTaskInput {
   notes?: string;
 }
 
+export interface PhoneBlacklistRecord {
+  id: number;
+  phoneNumber: string;
+  strikeCount: number;
+  isBlocked: boolean;
+  reason?: string;
+  blockedAt?: string;
+  createdAt: string;
+}
+
 export interface Appointment {
   id: number;
   appointmentNumber: string;
@@ -139,6 +149,28 @@ export interface ProductOrderItem {
   sourceBranchName?: string;
 }
 
+export interface AppNotification {
+  id: number;
+  type: 'transfer_request' | 'transfer_dispatched' | 'order_ready' | string;
+  title: string;
+  message: string;
+  data?: Record<string, unknown>;
+  isRead: boolean;
+  createdAt: string;
+}
+
+export interface TransferSummary {
+  pending: number;
+  inTransit: number;
+  received: number;
+  overdue: number;
+}
+
+export interface TransferDashboardItem extends ProductOrderTransfer {
+  agingHours: number;
+  isOverdue: boolean;
+}
+
 export interface ProductOrderTransfer {
   id: number;
   productOrderId: number;
@@ -151,7 +183,12 @@ export interface ProductOrderTransfer {
   sourceBranchName?: string;
   items: ProductOrderItem[];
   status: 'pending' | 'transferred' | 'received';
+  transferredByName?: string;
+  transferredAt?: string;
+  receivedByName?: string;
+  receivedAt?: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface ProductOrder {
@@ -1266,6 +1303,15 @@ export const api = {
       }),
 
     getMyAppointments: () => fetchApi<Appointment[]>('/api/appointments/my-appointments'),
+    markNoShow: (id: number) =>
+      fetchApi<{ strikeCount: number; isBlocked: boolean }>(`/api/admin/appointments/${id}/no-show`, { method: 'POST' }),
+  },
+
+  spamControl: {
+    getBlacklist: () => fetchApi<PhoneBlacklistRecord[]>('/api/admin/phone-blacklist'),
+    unblock: (id: number) => fetchApi<null>(`/api/admin/phone-blacklist/${id}/unblock`, { method: 'POST' }),
+    deleteRecord: (id: number) => fetchApi<null>(`/api/admin/phone-blacklist/${id}`, { method: 'DELETE' }),
+    flagOrderSpam: (id: number) => fetchApi<{ strikeCount: number; isBlocked: boolean }>(`/api/admin/product-orders/${id}/flag-spam`, { method: 'POST' }),
   },
 
   // ==================
@@ -1311,7 +1357,7 @@ export const api = {
       pickupBranchId: number;
       notes?: string;
     }) =>
-      fetchApi<ProductOrder>('/api/product-orders/multi', {
+      fetchApi<ProductOrder>('/api/product-orders/multi-branch', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
@@ -1334,6 +1380,27 @@ export const api = {
 
     confirmReceipt: (id: number) =>
       fetchApi<ProductOrderTransfer>(`/api/product-order-transfers/${id}/confirm-receipt`, { method: 'POST' }),
+
+    getDashboard: (params?: { status?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.status) q.append('status', params.status);
+      return fetchApi<{ data: TransferDashboardItem[]; summary: TransferSummary }>(`/api/product-orders/transfer-dashboard${q.toString() ? '?' + q : ''}`);
+    },
+
+    bulkAction: (action: 'mark-sent' | 'confirm-receipt', transferIds: number[]) =>
+      fetchApi<{ succeeded: number[]; failed: { id: number; reason: string }[] }>(
+        '/api/product-order-transfers/bulk-action',
+        { method: 'POST', body: JSON.stringify({ action, transferIds }) }
+      ),
+  },
+
+  // ==================
+  // NOTIFICATIONS
+  // ==================
+  notifications: {
+    getAll: (limit = 30) => fetchApi<{ data: AppNotification[]; unreadCount: number }>(`/api/notifications?limit=${limit}`),
+    markRead: (id: number) => fetchApi<void>(`/api/notifications/${id}/read`, { method: 'POST' }),
+    markAllRead: () => fetchApi<void>('/api/notifications/read-all', { method: 'POST' }),
   },
 
   // ==================

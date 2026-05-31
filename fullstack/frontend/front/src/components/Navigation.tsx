@@ -2,6 +2,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth, hasAccess } from '@/context/AuthContext';
+import { useNotifications } from '@/context/NotificationContext';
 import { useState } from 'react';
 
 interface NavigationProps {
@@ -90,8 +91,10 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { user, isAuthenticated, logout, isLoading } = useAuth();
+  const { notifications, unreadCount, markRead, markAllRead } = useNotifications();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
 
   const publicRoutes = ['/', '/login', '/register', '/place-order'];
 
@@ -265,6 +268,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
           const isActive =
             pathname === item.path ||
             (item.path !== '/' && pathname.startsWith(item.path));
+          const isDelivery = item.path === '/delivery';
           return (
             <Link
               key={item.path}
@@ -278,8 +282,22 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
                   : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
               }`}
             >
-              <Icon />
-              {!collapsed && <span className="truncate">{item.name}</span>}
+              <span className="relative shrink-0">
+                <Icon />
+                {isDelivery && unreadCount > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-0.5 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </span>
+                )}
+              </span>
+              {!collapsed && (
+                <span className="truncate flex-1">{item.name}</span>
+              )}
+              {!collapsed && isDelivery && unreadCount > 0 && (
+                <span className="ml-auto shrink-0 min-w-[20px] h-5 px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">
+                  {unreadCount > 9 ? '9+' : unreadCount}
+                </span>
+              )}
             </Link>
           );
         })}
@@ -289,49 +307,96 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
       <div className="border-t border-gray-200 p-3 shrink-0">
         {collapsed ? (
           <div className="flex flex-col items-center gap-2">
-            <div
-              className="w-8 h-8 bg-[#011c72] rounded-full flex items-center justify-center"
-              title={user?.fullName}
-            >
-              <span className="text-white text-sm font-semibold">
-                {user?.fullName?.charAt(0).toUpperCase()}
-              </span>
+            <div className="w-8 h-8 bg-[#011c72] rounded-full flex items-center justify-center" title={user?.fullName}>
+              <span className="text-white text-sm font-semibold">{user?.fullName?.charAt(0).toUpperCase()}</span>
             </div>
-            <button
-              onClick={handleLogout}
-              disabled={isLoggingOut}
-              title="Sign Out"
-              className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50"
-            >
+            <button onClick={() => setNotifOpen(o => !o)} title="Notifications"
+              className="relative p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 transition-colors">
+              <BellIcon />
+              {unreadCount > 0 && (
+                <span className="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-red-500" />
+              )}
+            </button>
+            <button onClick={handleLogout} disabled={isLoggingOut} title="Sign Out"
+              className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50">
               <LogoutIcon />
             </button>
           </div>
         ) : (
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-[#011c72] rounded-full flex items-center justify-center shrink-0">
-              <span className="text-white text-sm font-semibold">
-                {user?.fullName?.charAt(0).toUpperCase()}
-              </span>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 bg-[#011c72] rounded-full flex items-center justify-center shrink-0">
+                <span className="text-white text-sm font-semibold">{user?.fullName?.charAt(0).toUpperCase()}</span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-gray-900 truncate">{user?.fullName}</p>
+                <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${getRoleBadgeColor(user?.role || '')}`}>
+                  {user?.role?.replace('_', ' ').toUpperCase()}
+                </span>
+              </div>
+              <button onClick={() => setNotifOpen(o => !o)} title="Notifications"
+                className="relative p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 transition-colors shrink-0">
+                <BellIcon />
+                {unreadCount > 0 && (
+                  <span className="absolute top-0.5 right-0.5 min-w-[14px] h-3.5 px-0.5 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </span>
+                )}
+              </button>
+              <button onClick={handleLogout} disabled={isLoggingOut} title="Sign Out"
+                className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50 shrink-0">
+                <LogoutIcon />
+              </button>
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-gray-900 truncate">
-                {user?.fullName}
-              </p>
-              <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${getRoleBadgeColor(user?.role || '')}`}>
-                {user?.role?.replace('_', ' ').toUpperCase()}
-              </span>
-            </div>
-            <button
-              onClick={handleLogout}
-              disabled={isLoggingOut}
-              title="Sign Out"
-              className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50 shrink-0"
-            >
-              <LogoutIcon />
-            </button>
           </div>
         )}
       </div>
+
+      {/* Notification Panel */}
+      {notifOpen && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setNotifOpen(false)} />
+          <div className={`fixed bottom-20 z-40 w-80 bg-white rounded-xl shadow-xl border border-gray-200 overflow-hidden ${collapsed ? 'left-20' : 'left-68'}`}
+            style={{ left: collapsed ? '4.5rem' : '16.5rem' }}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+              <p className="text-sm font-bold text-gray-900">Notifications</p>
+              {unreadCount > 0 && (
+                <button onClick={markAllRead} className="text-xs text-[#011c72] hover:underline font-medium">
+                  Mark all read
+                </button>
+              )}
+            </div>
+            <div className="max-h-80 overflow-y-auto divide-y divide-gray-50">
+              {notifications.length === 0 ? (
+                <p className="text-center text-gray-400 text-sm py-8">No notifications</p>
+              ) : notifications.map(n => (
+                <button key={n.id} onClick={() => { markRead(n.id); setNotifOpen(false); }}
+                  className={`w-full text-left px-4 py-3 hover:bg-gray-50 transition-colors ${n.isRead ? '' : 'bg-blue-50'}`}>
+                  <div className="flex items-start gap-2">
+                    <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${n.isRead ? 'bg-transparent' : 'bg-blue-500'}`} />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-semibold text-gray-800 truncate">{n.title}</p>
+                      <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{n.message}</p>
+                      <p className="text-[10px] text-gray-400 mt-1">
+                        {new Date(n.createdAt).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                      </p>
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
     </aside>
+  );
+}
+
+function BellIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+        d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+    </svg>
   );
 }
