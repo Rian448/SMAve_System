@@ -195,6 +195,17 @@ class Appointment(db.Model):
     customer_user = db.relationship('User', foreign_keys=[user_id])
     confirmer = db.relationship('User', foreign_keys=[confirmed_by])
 
+class PhoneBlacklist(db.Model):
+    __tablename__ = 'phone_blacklist'
+    id = db.Column(db.Integer, primary_key=True)
+    phone_number = db.Column(db.String(50), unique=True, nullable=False, index=True)
+    strike_count = db.Column(db.Integer, default=0, nullable=False)
+    is_blocked = db.Column(db.Boolean, default=False, nullable=False)
+    reason = db.Column(db.Text, nullable=True)
+    blocked_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 class ProductOrder(db.Model):
     __tablename__ = 'product_orders'
     id = db.Column(db.Integer, primary_key=True)
@@ -230,11 +241,29 @@ class ProductOrderTransfer(db.Model):
     source_branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
     items = db.Column(db.JSON, nullable=False)  # [{productId, name, sku, quantity, unitPrice, total, sourceBranchId}]
     status = db.Column(db.String(20), default='pending')  # pending, transferred, received
+    transferred_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    transferred_at = db.Column(db.DateTime, nullable=True)
+    received_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    received_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     order = db.relationship('ProductOrder', backref=db.backref('transfers', lazy=True))
     source_branch = db.relationship('Branch')
+    transferred_by = db.relationship('User', foreign_keys=[transferred_by_id])
+    received_by = db.relationship('User', foreign_keys=[received_by_id])
+
+class Notification(db.Model):
+    __tablename__ = 'notifications'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    type = db.Column(db.String(50), nullable=False)
+    title = db.Column(db.String(255), nullable=False)
+    message = db.Column(db.Text, nullable=False)
+    data = db.Column(db.JSON, nullable=True)
+    is_read = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    user = db.relationship('User', backref='notifications')
 
 class InventoryMaterial(db.Model):
     __tablename__ = 'inventory_materials'
@@ -814,6 +843,11 @@ def run_migrations():
         "ALTER TABLE users ADD COLUMN lockout_until TIMESTAMP",
         # Expand password column for salted hashes (SQLite ignores length; PostgreSQL enforces it)
         "ALTER TABLE users ALTER COLUMN password TYPE VARCHAR(255)",
+        # Transfer trackability: who sent, who received, and when
+        "ALTER TABLE product_order_transfers ADD COLUMN transferred_by_id INTEGER REFERENCES users(id)",
+        "ALTER TABLE product_order_transfers ADD COLUMN transferred_at TIMESTAMP",
+        "ALTER TABLE product_order_transfers ADD COLUMN received_by_id INTEGER REFERENCES users(id)",
+        "ALTER TABLE product_order_transfers ADD COLUMN received_at TIMESTAMP",
     ]
     for sql in migrations:
         try:
@@ -954,6 +988,71 @@ def to_pht(dt):
 def now_pht():
     """Current Philippine Time as a formatted string for audit logs."""
     return (datetime.utcnow() + PH_OFFSET).strftime('%Y-%m-%d %H:%M:%S PHT')
+
+MAX_ACTIVE_APPOINTMENTS = 2   # per phone number
+MAX_ACTIVE_ORDERS = 3         # per phone number
+MAX_STRIKES_BEFORE_BLOCK = 3  # no-shows / fake orders before auto-block
+
+def check_spam_protection(phone: str, check_type: str = 'appointment'):
+    """Return (allowed: bool, error_message: str | None).
+    check_type: 'appointment' or 'order'
+    Checks:
+      1. Phone is on the blocklist.
+      2. Too many active records for this phone.
+      3. Duplicate booking on same branch+date within 24 h (appointments only).
+    """
+    if not phone:
+        return True, None
+
+    record = PhoneBlacklist.query.filter_by(phone_number=phone).first()
+    if record and record.is_blocked:
+        return False, (
+            'This phone number has been blocked due to repeated no-shows or fake orders. '
+            'Please contact the branch to resolve this.'
+        )
+
+    if check_type == 'appointment':
+        active_count = Appointment.query.filter(
+            Appointment.customer_phone == phone,
+            Appointment.status.in_(['pending', 'confirmed'])
+        ).count()
+        if active_count >= MAX_ACTIVE_APPOINTMENTS:
+            return False, (
+                f'You already have {active_count} active appointment request(s). '
+                f'Please wait for them to be completed before booking a new one.'
+            )
+    else:
+        active_count = ProductOrder.query.filter(
+            ProductOrder.customer_phone == phone,
+            ProductOrder.status.in_(['pending', 'processing', 'ready'])
+        ).count()
+        if active_count >= MAX_ACTIVE_ORDERS:
+            return False, (
+                f'You already have {active_count} active order(s). '
+                f'Please wait for them to be completed before placing a new one.'
+            )
+
+    return True, None
+
+
+def add_strike(phone: str, reason: str):
+    """Add a strike to a phone number. Auto-blocks at MAX_STRIKES_BEFORE_BLOCK."""
+    record = PhoneBlacklist.query.filter_by(phone_number=phone).first()
+    if not record:
+        record = PhoneBlacklist(phone_number=phone, strike_count=0, is_blocked=False)
+        db.session.add(record)
+
+    record.strike_count = (record.strike_count or 0) + 1
+    record.reason = reason
+    record.updated_at = datetime.utcnow()
+
+    if record.strike_count >= MAX_STRIKES_BEFORE_BLOCK:
+        record.is_blocked = True
+        record.blocked_at = datetime.utcnow()
+
+    db.session.commit()
+    return record
+
 
 def log_action(user_id, user_name, action, module, details, ip_address='0.0.0.0'):
     """Log user action to audit trail"""
@@ -2988,15 +3087,21 @@ def appointment_to_dict(appointment):
 def create_appointment():
     """Create a new appointment request - public endpoint"""
     data = request.get_json()
-    
+
     required = ['customerName', 'customerPhone', 'contactMethod', 'preferredDate']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
-    
+
     contact_method = data['contactMethod']
     if contact_method not in ['branch_visit', 'phone_call']:
         return jsonify({'status': 'error', 'message': 'Invalid contact method'}), 400
-    
+
+    # Spam / abuse protection
+    phone = data.get('customerPhone', '').strip()
+    allowed, spam_msg = check_spam_protection(phone, 'appointment')
+    if not allowed:
+        return jsonify({'status': 'error', 'message': spam_msg}), 429
+
     # Branch is always required so appointments are routed to the selected branch.
     branch_id = data.get('branchId')
     if not branch_id:
@@ -3151,6 +3256,142 @@ def get_my_appointments():
     return jsonify({'status': 'success', 'data': [appointment_to_dict(a) for a in appointments]})
 
 # ============================================
+# SPAM / ABUSE PROTECTION ADMIN ENDPOINTS
+# ============================================
+
+@app.route('/api/admin/appointments/<int:appointment_id>/no-show', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def mark_appointment_no_show(appointment_id):
+    """Mark a confirmed appointment as no-show and add a strike to the phone number."""
+    appointment = Appointment.query.get(appointment_id)
+    if not appointment:
+        return jsonify({'status': 'error', 'message': 'Appointment not found'}), 404
+
+    user = request.current_user
+    if user['role'] == 'supervisor' and user.get('branchId') != appointment.branch_id:
+        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+
+    appointment.status = 'cancelled'
+    appointment.admin_notes = (appointment.admin_notes or '') + ' [No-Show]'
+    db.session.flush()
+
+    record = add_strike(
+        appointment.customer_phone,
+        f'No-show for appointment {appointment.appointment_number}'
+    )
+
+    log_action(user['id'], user['fullName'], 'NO_SHOW', 'Appointments',
+               f'Marked {appointment.appointment_number} as no-show. '
+               f'Strikes for {appointment.customer_phone}: {record.strike_count}/{MAX_STRIKES_BEFORE_BLOCK}',
+               request.remote_addr or '0.0.0.0')
+
+    return jsonify({
+        'status': 'success',
+        'message': 'Appointment marked as no-show.',
+        'strikeCount': record.strike_count,
+        'isBlocked': record.is_blocked
+    })
+
+
+@app.route('/api/admin/product-orders/<int:order_id>/flag-spam', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def flag_order_spam(order_id):
+    """Flag a product order as fake/spam and add a strike to the phone number."""
+    order = ProductOrder.query.get(order_id)
+    if not order:
+        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
+
+    user = request.current_user
+    order.status = 'cancelled'
+    db.session.flush()
+
+    record = add_strike(
+        order.customer_phone,
+        f'Fake/spam order flagged: {order.order_number}'
+    )
+
+    log_action(user['id'], user['fullName'], 'FLAG_SPAM', 'Product Orders',
+               f'Flagged order {order.order_number} as spam. '
+               f'Strikes for {order.customer_phone}: {record.strike_count}/{MAX_STRIKES_BEFORE_BLOCK}',
+               request.remote_addr or '0.0.0.0')
+
+    return jsonify({
+        'status': 'success',
+        'message': 'Order flagged as spam.',
+        'strikeCount': record.strike_count,
+        'isBlocked': record.is_blocked
+    })
+
+
+@app.route('/api/admin/phone-blacklist', methods=['GET'])
+@require_auth
+@require_roles('administrator')
+def get_phone_blacklist():
+    """Get all phone numbers with strikes or blocks."""
+    records = PhoneBlacklist.query.order_by(
+        PhoneBlacklist.is_blocked.desc(),
+        PhoneBlacklist.strike_count.desc()
+    ).all()
+    return jsonify({'status': 'success', 'data': [
+        {
+            'id': r.id,
+            'phoneNumber': r.phone_number,
+            'strikeCount': r.strike_count,
+            'isBlocked': r.is_blocked,
+            'reason': r.reason,
+            'blockedAt': to_pht(r.blocked_at),
+            'createdAt': to_pht(r.created_at),
+        } for r in records
+    ]})
+
+
+@app.route('/api/admin/phone-blacklist/<int:record_id>/unblock', methods=['POST'])
+@require_auth
+@require_roles('administrator')
+def unblock_phone(record_id):
+    """Admin unblocks a phone number and resets its strike count."""
+    record = PhoneBlacklist.query.get(record_id)
+    if not record:
+        return jsonify({'status': 'error', 'message': 'Record not found'}), 404
+
+    record.is_blocked = False
+    record.strike_count = 0
+    record.blocked_at = None
+    record.reason = None
+    db.session.commit()
+
+    user = request.current_user
+    log_action(user['id'], user['fullName'], 'UNBLOCK', 'Spam Control',
+               f'Unblocked phone {record.phone_number}',
+               request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'message': f'{record.phone_number} has been unblocked.'})
+
+
+@app.route('/api/admin/phone-blacklist/<int:record_id>', methods=['DELETE'])
+@require_auth
+@require_roles('administrator')
+def delete_phone_record(record_id):
+    """Completely remove a phone record from the list."""
+    record = PhoneBlacklist.query.get(record_id)
+    if not record:
+        return jsonify({'status': 'error', 'message': 'Record not found'}), 404
+
+    phone = record.phone_number
+    db.session.delete(record)
+    db.session.commit()
+
+    user = request.current_user
+    log_action(user['id'], user['fullName'], 'DELETE_RECORD', 'Spam Control',
+               f'Deleted phone record for {phone}',
+               request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'message': 'Record deleted.'})
+
+
+# ============================================
 # PRODUCT ORDERS MODULE (Premade Products)
 # ============================================
 
@@ -3164,6 +3405,25 @@ def generate_product_order_number():
         offset += 1
         candidate = f"PO-{max_id + offset:04d}"
     return candidate
+
+def notify_branch_users(branch_id, notif_type, title, message, data=None):
+    """Push an in-app notification to all active supervisors of a branch + all admins."""
+    if branch_id is None:
+        return
+    targets = (User.query
+               .join(Role, User.role_id == Role.id)
+               .filter(Role.key.in_(['administrator', 'supervisor']),
+                       User.is_active == True)
+               .all())
+    for u in targets:
+        if u.role.key == 'administrator' or u.branch_id == branch_id:
+            db.session.add(Notification(
+                user_id=u.id,
+                type=notif_type,
+                title=title,
+                message=message,
+                data=data or {},
+            ))
 
 def transfer_to_dict(transfer):
     order = transfer.order
@@ -3179,7 +3439,12 @@ def transfer_to_dict(transfer):
         'sourceBranchName': transfer.source_branch.name if transfer.source_branch else None,
         'items': transfer.items,
         'status': transfer.status,
+        'transferredByName': transfer.transferred_by.full_name if transfer.transferred_by else None,
+        'transferredAt': transfer.transferred_at.isoformat() if transfer.transferred_at else None,
+        'receivedByName': transfer.received_by.full_name if transfer.received_by else None,
+        'receivedAt': transfer.received_at.isoformat() if transfer.received_at else None,
         'createdAt': transfer.created_at.isoformat() if transfer.created_at else None,
+        'updatedAt': transfer.updated_at.isoformat() if transfer.updated_at else None,
     }
 
 def product_order_to_dict(order):
@@ -3278,7 +3543,7 @@ def build_product_order_timeline(order):
     events.sort(key=lambda e: e.get('timestamp') or '', reverse=True)
     return events
 
-@app.route('/api/product-orders/multi', methods=['POST'])
+@app.route('/api/product-orders/multi-branch', methods=['POST'])
 def create_multi_branch_product_order():
     """Create a single order at the pickup branch. Items from other branches
     generate transfer requests notifying those branches to send the items over."""
@@ -3289,6 +3554,12 @@ def create_multi_branch_product_order():
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
     if not data['items']:
         return jsonify({'status': 'error', 'message': 'At least one item is required'}), 400
+
+    # Spam / abuse protection
+    phone = data.get('customerPhone', '').strip()
+    allowed, spam_msg = check_spam_protection(phone, 'order')
+    if not allowed:
+        return jsonify({'status': 'error', 'message': spam_msg}), 429
 
     pickup_branch_id = int(data['pickupBranchId'])
     pickup_branch = Branch.query.get(pickup_branch_id)
@@ -3302,10 +3573,10 @@ def create_multi_branch_product_order():
         if u:
             user_id = u['id']
 
-    # Validate all items and enrich with source branch info
+    # Validate all items, enrich with source branch info, and reserve inventory
     all_items = []
     items_by_source = {}
-    same_branch_deductions = []  # items already at pickup branch — deduct immediately
+    all_deductions = []  # every item deducted at allocation time (requirement: source branch deducts on selection)
     for item_data in data['items']:
         product_id = item_data.get('productId')
         quantity = int(item_data.get('quantity', 1))
@@ -3326,12 +3597,11 @@ def create_multi_branch_product_order():
             'sourceBranchName': product.branch.name if product.branch else None,
         }
         all_items.append(item_dict)
+        all_deductions.append((product, quantity))
 
         src = int(product.branch_id)
         if src != pickup_branch_id:
             items_by_source.setdefault(src, []).append(item_dict)
-        else:
-            same_branch_deductions.append((product, quantity))
 
     needs_transfers = len(items_by_source) > 0
     group_id = str(uuid.uuid4()) if needs_transfers else None
@@ -3357,8 +3627,8 @@ def create_multi_branch_product_order():
     db.session.add(order)
     db.session.flush()  # get order.id
 
-    # Deduct inventory immediately for items already at the pickup branch
-    for product, qty in same_branch_deductions:
+    # Deduct inventory at allocation time from every source branch (sales attribution stays with source)
+    for product, qty in all_deductions:
         product.quantity = float(product.quantity) - qty
 
     # Create a transfer request for each source branch ≠ pickup branch
@@ -3369,6 +3639,13 @@ def create_multi_branch_product_order():
             items=branch_items,
             status='pending'
         ))
+        notify_branch_users(
+            src_branch_id,
+            'transfer_request',
+            f'Transfer Request — {order.order_number}',
+            f'Items needed at {pickup_branch.name}. Please prepare and dispatch.',
+            {'orderId': order.id, 'orderNumber': order.order_number, 'pickupBranchName': pickup_branch.name},
+        )
 
     db.session.commit()
 
@@ -3454,30 +3731,24 @@ def mark_transfer_sent(transfer_id):
     if transfer.status != 'pending':
         return jsonify({'status': 'error', 'message': 'Transfer is not in pending status'}), 400
 
-    # Validate stock before deducting
-    deductions = []
-    for item in transfer.items:
-        product = PremadeProduct.query.get(item.get('productId')) if item.get('productId') else None
-        if not product or product.branch_id != transfer.source_branch_id:
-            # Fallback: find by SKU at source branch
-            product = PremadeProduct.query.filter_by(
-                sku=item.get('sku', ''), branch_id=transfer.source_branch_id
-            ).first()
-        if not product:
-            return jsonify({'status': 'error', 'message': f"Product '{item.get('name')}' not found in source branch inventory"}), 400
-        requested_qty = float(item.get('quantity', 0))
-        if float(product.quantity) < requested_qty:
-            return jsonify({'status': 'error', 'message': f"Insufficient stock for '{product.name}' at source branch. Available: {product.quantity:g}, required: {requested_qty:g}"}), 400
-        deductions.append((product, requested_qty))
-
-    for product, qty in deductions:
-        product.quantity = float(product.quantity) - qty
-
+    # Inventory was already deducted from the source branch at order creation (allocation).
+    # This step only records the physical dispatch.
     transfer.status = 'transferred'
+    transfer.transferred_by_id = user['id']
+    transfer.transferred_at = datetime.utcnow()
+    order = transfer.order
+    notify_branch_users(
+        order.branch_id if order else None,
+        'transfer_dispatched',
+        f'Items In Transit — {order.order_number if order else "?"}',
+        f'Transfer from {transfer.source_branch.name if transfer.source_branch else "source branch"} is on its way.',
+        {'transferId': transfer.id, 'orderId': order.id if order else None, 'orderNumber': order.order_number if order else None},
+    )
     db.session.commit()
 
+    is_override = user['role'] == 'administrator' and user.get('branchId') != transfer.source_branch_id
     log_action(user['id'], user['fullName'], 'TRANSFER', 'Product Orders',
-        f"Transfer {transfer_id} for order {transfer.order.order_number if transfer.order else '?'} marked as sent to {transfer.order.branch.name if (transfer.order and transfer.order.branch) else 'N/A'}. Inventory deducted from source branch.",
+        f"{'[ADMIN OVERRIDE] ' if is_override else ''}Transfer {transfer_id} for order {transfer.order.order_number if transfer.order else '?'} dispatched from {transfer.source_branch.name if transfer.source_branch else 'N/A'} to {transfer.order.branch.name if (transfer.order and transfer.order.branch) else 'N/A'}.",
         request.remote_addr or '0.0.0.0')
 
     return jsonify({'status': 'success', 'data': transfer_to_dict(transfer)})
@@ -3525,6 +3796,8 @@ def confirm_transfer_receipt(transfer_id):
             ))
 
     transfer.status = 'received'
+    transfer.received_by_id = user['id']
+    transfer.received_at = datetime.utcnow()
     db.session.flush()
 
     # Auto-advance the order when all transfers are received
@@ -3534,11 +3807,19 @@ def confirm_transfer_receipt(transfer_id):
             order.shipment_status = 'received'
             if order.status == 'pending':
                 order.status = 'ready'
+            notify_branch_users(
+                order.branch_id,
+                'order_ready',
+                f'Order Ready for Pickup — {order.order_number}',
+                'All items received. Order automatically marked Ready for Pickup.',
+                {'orderId': order.id, 'orderNumber': order.order_number},
+            )
 
     db.session.commit()
 
+    is_override = user['role'] == 'administrator' and user.get('branchId') != (order.branch_id if order else None)
     log_action(user['id'], user['fullName'], 'RECEIVE', 'Product Orders',
-        f"Transfer {transfer_id} received at {pickup_branch.name if pickup_branch else 'N/A'}. Items added to inventory.",
+        f"{'[ADMIN OVERRIDE] ' if is_override else ''}Transfer {transfer_id} received at {pickup_branch.name if pickup_branch else 'N/A'}. Items added to inventory.",
         request.remote_addr or '0.0.0.0')
 
     return jsonify({'status': 'success', 'data': transfer_to_dict(transfer)})
@@ -3548,11 +3829,17 @@ def confirm_transfer_receipt(transfer_id):
 def create_product_order():
     """Create a new product order - public endpoint for ordering premade products"""
     data = request.get_json()
-    
+
     required = ['customerName', 'customerPhone', 'items', 'branchId']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
-    
+
+    # Spam / abuse protection
+    phone = data.get('customerPhone', '').strip()
+    allowed, spam_msg = check_spam_protection(phone, 'order')
+    if not allowed:
+        return jsonify({'status': 'error', 'message': spam_msg}), 429
+
     if not data['items'] or len(data['items']) == 0:
         return jsonify({'status': 'error', 'message': 'At least one item is required'}), 400
     
@@ -3690,6 +3977,19 @@ def update_product_order(order_id):
 
         if incoming_status not in valid_statuses:
             return jsonify({'status': 'error', 'message': 'Invalid status'}), 400
+
+        # Completion rule: block ready/completed until all transferred items are physically at the pickup branch
+        if incoming_status in ('ready', 'completed'):
+            pending_transfers = [
+                t for t in (order.transfers or [])
+                if t.status != 'received'
+            ]
+            if pending_transfers:
+                return jsonify({
+                    'status': 'error',
+                    'message': f"Cannot mark as '{incoming_status}'. {len(pending_transfers)} transfer(s) are still in transit. All items must be received at the pickup branch first."
+                }), 400
+
         previous_status = order.status
         if previous_status != incoming_status:
             updated_fields.append(f"status: {previous_status} -> {incoming_status}")
@@ -3812,6 +4112,185 @@ def get_my_product_orders():
     user_id = request.current_user['id']
     orders = ProductOrder.query.filter_by(user_id=user_id).order_by(ProductOrder.created_at.desc()).all()
     return jsonify({'status': 'success', 'data': [product_order_to_dict(o) for o in orders]})
+
+# ============================================
+# NOTIFICATIONS
+# ============================================
+
+@app.route('/api/notifications', methods=['GET'])
+@require_auth
+def get_notifications():
+    uid = request.current_user['id']
+    limit = min(int(request.args.get('limit', 30)), 100)
+    notifs = (Notification.query
+              .filter_by(user_id=uid)
+              .order_by(Notification.created_at.desc())
+              .limit(limit).all())
+    unread = Notification.query.filter_by(user_id=uid, is_read=False).count()
+    return jsonify({
+        'status': 'success',
+        'data': [{
+            'id': n.id, 'type': n.type, 'title': n.title,
+            'message': n.message, 'data': n.data,
+            'isRead': n.is_read,
+            'createdAt': n.created_at.isoformat() if n.created_at else None,
+        } for n in notifs],
+        'unreadCount': unread,
+    })
+
+@app.route('/api/notifications/read-all', methods=['POST'])
+@require_auth
+def mark_all_notifications_read():
+    Notification.query.filter_by(user_id=request.current_user['id'], is_read=False).update({'is_read': True})
+    db.session.commit()
+    return jsonify({'status': 'success'})
+
+@app.route('/api/notifications/<int:notif_id>/read', methods=['POST'])
+@require_auth
+def mark_notification_read(notif_id):
+    n = Notification.query.filter_by(id=notif_id, user_id=request.current_user['id']).first()
+    if n:
+        n.is_read = True
+        db.session.commit()
+    return jsonify({'status': 'success'})
+
+# ============================================
+# TRANSFER DASHBOARD + BULK ACTIONS
+# ============================================
+
+@app.route('/api/product-orders/transfer-dashboard', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def get_transfer_dashboard():
+    user = request.current_user
+    now = datetime.utcnow()
+    status_filter = request.args.get('status')
+
+    if user['role'] == 'supervisor':
+        branch_id = user.get('branchId')
+        outgoing = ProductOrderTransfer.query.filter_by(source_branch_id=branch_id).all()
+        pickup_ids = [r[0] for r in db.session.query(ProductOrder.id).filter_by(branch_id=branch_id).all()]
+        incoming = ProductOrderTransfer.query.filter(
+            ProductOrderTransfer.product_order_id.in_(pickup_ids),
+            ProductOrderTransfer.source_branch_id != branch_id,
+        ).all() if pickup_ids else []
+        all_t = list({t.id: t for t in outgoing + incoming}.values())
+    else:
+        all_t = ProductOrderTransfer.query.all()
+
+    if status_filter:
+        all_t = [t for t in all_t if t.status == status_filter]
+
+    def enrich(t):
+        d = transfer_to_dict(t)
+        ref = (t.created_at if t.status == 'pending'
+               else t.transferred_at or t.updated_at or t.created_at if t.status == 'transferred'
+               else t.received_at or t.updated_at or t.created_at)
+        aging = (now - ref).total_seconds() / 3600 if ref else 0
+        d['agingHours'] = round(aging, 1)
+        d['isOverdue'] = aging > 24 and t.status != 'received'
+        return d
+
+    enriched = sorted([enrich(t) for t in all_t], key=lambda x: x['createdAt'] or '', reverse=True)
+    counts = {s: sum(1 for t in all_t if t.status == s) for s in ('pending', 'transferred', 'received')}
+    return jsonify({
+        'status': 'success',
+        'data': enriched,
+        'summary': {
+            'pending': counts['pending'],
+            'inTransit': counts['transferred'],
+            'received': counts['received'],
+            'overdue': sum(1 for e in enriched if e['isOverdue']),
+        },
+    })
+
+@app.route('/api/product-order-transfers/bulk-action', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def bulk_transfer_action():
+    user = request.current_user
+    data = request.get_json()
+    action = data.get('action')          # 'mark-sent' | 'confirm-receipt'
+    transfer_ids = data.get('transferIds', [])
+    if not action or not transfer_ids:
+        return jsonify({'status': 'error', 'message': 'action and transferIds required'}), 400
+
+    ok, failed = [], []
+    for tid in transfer_ids:
+        transfer = ProductOrderTransfer.query.get(int(tid))
+        if not transfer:
+            failed.append({'id': tid, 'reason': 'Not found'}); continue
+
+        if action == 'mark-sent':
+            if user['role'] == 'supervisor' and user.get('branchId') != transfer.source_branch_id:
+                failed.append({'id': tid, 'reason': 'Not your branch'}); continue
+            if transfer.status != 'pending':
+                failed.append({'id': tid, 'reason': f'Already {transfer.status}'}); continue
+            transfer.status = 'transferred'
+            transfer.transferred_by_id = user['id']
+            transfer.transferred_at = datetime.utcnow()
+            order = transfer.order
+            notify_branch_users(
+                order.branch_id if order else None,
+                'transfer_dispatched',
+                f'Items In Transit — {order.order_number if order else "?"}',
+                f'Transfer from {transfer.source_branch.name if transfer.source_branch else "source"} is on its way.',
+                {'transferId': transfer.id, 'orderId': order.id if order else None},
+            )
+            ok.append(tid)
+
+        elif action == 'confirm-receipt':
+            order = transfer.order
+            if user['role'] == 'supervisor' and user.get('branchId') != (order.branch_id if order else None):
+                failed.append({'id': tid, 'reason': 'Not your branch'}); continue
+            if transfer.status != 'transferred':
+                failed.append({'id': tid, 'reason': f'Status is {transfer.status}'}); continue
+
+            pickup_branch = order.branch if order else None
+            for item in transfer.items:
+                orig = PremadeProduct.query.get(item.get('productId')) if item.get('productId') else None
+                derived_sku = f"{item['sku']}-{pickup_branch.code}" if pickup_branch else item['sku']
+                existing = (
+                    PremadeProduct.query.filter_by(sku=item['sku'], branch_id=order.branch_id).first()
+                    or PremadeProduct.query.filter_by(sku=derived_sku, branch_id=order.branch_id).first()
+                )
+                if existing:
+                    existing.quantity = float(existing.quantity) + float(item['quantity'])
+                else:
+                    db.session.add(PremadeProduct(
+                        name=item['name'], sku=derived_sku,
+                        quantity=float(item['quantity']),
+                        unit=orig.unit if orig else 'pcs',
+                        category=orig.category if orig else 'General',
+                        price=float(item.get('unitPrice', 0)),
+                        cost=float(orig.cost) if orig else 0,
+                        branch_id=order.branch_id, is_archived=False,
+                    ))
+            transfer.status = 'received'
+            transfer.received_by_id = user['id']
+            transfer.received_at = datetime.utcnow()
+            db.session.flush()
+            if order:
+                all_t2 = ProductOrderTransfer.query.filter_by(product_order_id=order.id).all()
+                if all(t.status == 'received' for t in all_t2):
+                    order.shipment_status = 'received'
+                    if order.status == 'pending':
+                        order.status = 'ready'
+                    notify_branch_users(
+                        order.branch_id, 'order_ready',
+                        f'Order Ready — {order.order_number}',
+                        'All items received. Marked Ready for Pickup.',
+                        {'orderId': order.id, 'orderNumber': order.order_number},
+                    )
+            ok.append(tid)
+        else:
+            failed.append({'id': tid, 'reason': 'Unknown action'})
+
+    db.session.commit()
+    log_action(user['id'], user['fullName'], 'BULK_TRANSFER', 'Product Orders',
+               f"Bulk {action}: {len(ok)} succeeded, {len(failed)} failed",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': {'succeeded': ok, 'failed': failed}})
 
 # ============================================
 # CUSTOMER ORDERS MODULE
