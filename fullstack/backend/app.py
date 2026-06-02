@@ -425,19 +425,36 @@ class WorkerAssignment(db.Model):
     __tablename__ = 'worker_assignments'
     id = db.Column(db.Integer, primary_key=True)
     worker_id = db.Column(db.Integer, db.ForeignKey('managed_workers.id'), nullable=False)
-    job_order_ref = db.Column(db.String(50), nullable=False)  # job order number e.g. JO-BA-2026-0001
-    job_order_db_id = db.Column(db.Integer, nullable=True)    # numeric DB id for linking
-    description = db.Column(db.String(255), nullable=True)    # task description from labor line
+    job_order_ref = db.Column(db.String(50), nullable=False)
+    job_order_db_id = db.Column(db.Integer, nullable=True)
+    description = db.Column(db.String(255), nullable=True)
+    expected_hours = db.Column(db.Float, nullable=True)       # estimate from labor line quantity
     start_time = db.Column(db.DateTime, nullable=True)
     end_time = db.Column(db.DateTime, nullable=True)
-    hours_worked = db.Column(db.Float, nullable=True)         # computed or manually entered
-    pay = db.Column(db.Float, nullable=True)                  # hours_worked * rate_per_hour
+    hours_worked = db.Column(db.Float, nullable=True)
+    pay = db.Column(db.Float, nullable=True)
     status = db.Column(db.String(50), default='pending')      # pending, in_progress, completed
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     worker = db.relationship('ManagedWorker', backref='assignments')
+
+
+class WorkerAvailabilitySchedule(db.Model):
+    """Explicit availability overrides per worker per date.
+    Absence of a row = default working day.
+    A row with is_available=False = worker is off/unavailable that day."""
+    __tablename__ = 'worker_availability_schedules'
+    id = db.Column(db.Integer, primary_key=True)
+    managed_worker_id = db.Column(db.Integer, db.ForeignKey('managed_workers.id'), nullable=False)
+    date = db.Column(db.Date, nullable=False)
+    is_available = db.Column(db.Boolean, default=False, nullable=False)  # False = marked unavailable
+    note = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    worker = db.relationship('ManagedWorker', backref='schedule')
+    __table_args__ = (db.UniqueConstraint('managed_worker_id', 'date', name='uq_worker_date'),)
 
 # ============================================
 # SEED DATA
@@ -848,6 +865,7 @@ def run_migrations():
         "ALTER TABLE product_order_transfers ADD COLUMN transferred_at TIMESTAMP",
         "ALTER TABLE product_order_transfers ADD COLUMN received_by_id INTEGER REFERENCES users(id)",
         "ALTER TABLE product_order_transfers ADD COLUMN received_at TIMESTAMP",
+        "ALTER TABLE worker_assignments ADD COLUMN expected_hours REAL",
     ]
     for sql in migrations:
         try:
@@ -5520,49 +5538,26 @@ def get_worker_tasks():
         token = request.headers.get('Authorization', '').replace('Bearer ', '')
         if not token or token not in sessions:
             return jsonify({'error': 'Unauthorized'}), 401
-        
+
         user = sessions[token]
         status = request.args.get('status')
-        
+
         worker = Worker.query.filter_by(user_id=user['id']).first()
         if not worker:
             return jsonify({'error': 'Worker profile not found'}), 404
-        
+
         query = WorkTask.query.filter_by(worker_id=worker.id)
         if status:
             query = query.filter_by(status=status)
-        
-        tasks = query.order_by(WorkTask.due_date.asc(), WorkTask.priority.desc()).all()
-        
-        task_list = []
-        for task in tasks:
-            task_list.append({
-                'id': task.id,
-                'taskNumber': task.task_number,
-                'jobOrderId': task.job_order_id,
-                'title': task.title,
-                'description': task.description,
-                'taskType': task.task_type,
-                'priority': task.priority,
-                'status': task.status,
-                'estimatedHours': task.estimated_hours,
-                'actualHours': task.actual_hours,
-                'dueDate': fmt_dt(task.due_date),
-                'startedAt': fmt_dt(task.started_at),
-                'completedAt': fmt_dt(task.completed_at),
-                'createdAt': fmt_dt(task.created_at),
-                'notes': task.notes
-            })
-        
-        print(f"DEBUG: Returning {len(task_list)} tasks for worker {worker.id}")
-        return jsonify({
-            'status': 'success',
-            'data': {
-                'tasks': task_list
-            }
-        })
+
+        # in_progress first, then pending (by queue position / created_at), then rest
+        tasks = query.order_by(
+            db.case({'in_progress': 0, 'pending': 1}, value=WorkTask.status, else_=2),
+            WorkTask.created_at.asc()
+        ).all()
+
+        return jsonify({'status': 'success', 'data': {'tasks': [serialize_task(t) for t in tasks]}})
     except Exception as e:
-        print(f"Error in get_worker_tasks: {str(e)}")
         return jsonify({'error': f'Server error: {str(e)}'}), 500
 
 @app.route('/api/workers/tasks/<int:task_id>', methods=['GET'])
@@ -5570,85 +5565,130 @@ def get_worker_task_detail(task_id):
     token = request.headers.get('Authorization', '').replace('Bearer ', '')
     if not token or token not in sessions:
         return jsonify({'error': 'Unauthorized'}), 401
-    
+
     user = sessions[token]
-    
     worker = Worker.query.filter_by(user_id=user['id']).first()
     if not worker:
         return jsonify({'error': 'Worker profile not found'}), 404
-    
+
     task = WorkTask.query.filter_by(id=task_id, worker_id=worker.id).first()
     if not task:
         return jsonify({'error': 'Task not found'}), 404
-    
-    return jsonify({
-        'status': 'success',
-        'data': {
-            'task': {
-                'id': task.id,
-                'taskNumber': task.task_number,
-                'jobOrderId': task.job_order_id,
-                'title': task.title,
-                'description': task.description,
-                'taskType': task.task_type,
-                'priority': task.priority,
-                'status': task.status,
-                'estimatedHours': task.estimated_hours,
-                'actualHours': task.actual_hours,
-                'dueDate': fmt_dt(task.due_date),
-                'startedAt': fmt_dt(task.started_at),
-                'completedAt': fmt_dt(task.completed_at),
-                'createdAt': fmt_dt(task.created_at),
-                'notes': task.notes
-            }
-        }
-    })
+
+    return jsonify({'status': 'success', 'data': {'task': serialize_task(task)}})
 
 @app.route('/api/workers/tasks/<int:task_id>/status', methods=['POST'])
 def update_task_status(task_id):
     token = request.headers.get('Authorization', '').replace('Bearer ', '')
     if not token or token not in sessions:
         return jsonify({'error': 'Unauthorized'}), 401
-    
+
     user = sessions[token]
     data = request.json
-    
+
     worker = Worker.query.filter_by(user_id=user['id']).first()
     if not worker:
         return jsonify({'error': 'Worker profile not found'}), 404
-    
+
     task = WorkTask.query.filter_by(id=task_id, worker_id=worker.id).first()
     if not task:
         return jsonify({'error': 'Task not found'}), 404
-    
+
     new_status = data.get('status')
     if new_status:
-        task.status = new_status
-        if new_status == 'in_progress' and not task.started_at:
-            task.started_at = datetime.utcnow()
+        if new_status == 'in_progress':
+            # Queue rule: only one task may be in_progress at a time
+            existing = WorkTask.query.filter(
+                WorkTask.worker_id == worker.id,
+                WorkTask.status == 'in_progress',
+                WorkTask.id != task.id
+            ).first()
+            if existing:
+                return jsonify({
+                    'error': f'You already have an active task: "{existing.title}". '
+                             f'Complete it before starting another.'
+                }), 400
+            if not task.started_at:
+                task.started_at = datetime.utcnow()
+
         elif new_status == 'completed':
             task.completed_at = datetime.utcnow()
-    
+            # Auto-promote the next queued (pending) task for this worker
+            next_task = (WorkTask.query
+                         .filter_by(worker_id=worker.id, status='pending')
+                         .order_by(WorkTask.created_at.asc())
+                         .first())
+            if next_task:
+                next_task.status = 'in_progress'
+                next_task.started_at = datetime.utcnow()
+
+        task.status = new_status
+
     if 'actualHours' in data:
         task.actual_hours = data['actualHours']
-    
     if 'notes' in data:
         task.notes = data['notes']
-    
+
     db.session.commit()
-    
-    return jsonify({
-        'status': 'success',
-        'message': 'Task updated successfully',
-        'data': {
-            'task': {
-                'id': task.id,
-                'status': task.status,
-                'startedAt': fmt_dt(task.started_at),
-                'completedAt': fmt_dt(task.completed_at)
-            }
-        }
-    })
+    return jsonify({'status': 'success', 'message': 'Task updated successfully',
+                    'data': {'task': serialize_task(task)}})
+
+def _worker_queue_position(worker_id, task_id):
+    """Return 1-based queue position of a pending task among all pending tasks for this worker."""
+    if worker_id is None:
+        return None
+    pending = (WorkTask.query
+               .filter_by(worker_id=worker_id, status='pending')
+               .order_by(WorkTask.created_at.asc())
+               .all())
+    for i, t in enumerate(pending):
+        if t.id == task_id:
+            return i + 1
+    return None
+
+
+def serialize_task(task):
+    """Serialize a WorkTask with computed queuePosition, isOverdue, and overdueByHours."""
+    is_overdue = False
+    overdue_by_hours = 0.0
+    if task.status == 'in_progress' and task.started_at and task.estimated_hours:
+        elapsed = (datetime.utcnow() - task.started_at).total_seconds() / 3600.0
+        if elapsed > float(task.estimated_hours):
+            is_overdue = True
+            overdue_by_hours = round(elapsed - float(task.estimated_hours), 1)
+
+    queue_position = _worker_queue_position(task.worker_id, task.id) if task.status == 'pending' else None
+
+    worker_name = None
+    if task.worker_id:
+        w = Worker.query.get(task.worker_id)
+        if w:
+            u = User.query.get(w.user_id)
+            worker_name = u.full_name if u else 'Unknown'
+
+    return {
+        'id': task.id,
+        'taskNumber': task.task_number,
+        'jobOrderId': task.job_order_id,
+        'workerId': task.worker_id,
+        'workerName': worker_name,
+        'title': task.title,
+        'description': task.description,
+        'taskType': task.task_type,
+        'priority': task.priority,
+        'status': task.status,
+        'estimatedHours': task.estimated_hours,
+        'actualHours': task.actual_hours,
+        'dueDate': fmt_dt(task.due_date),
+        'startedAt': fmt_dt(task.started_at),
+        'completedAt': fmt_dt(task.completed_at),
+        'createdAt': fmt_dt(task.created_at),
+        'notes': task.notes,
+        'queuePosition': queue_position,
+        'isOverdue': is_overdue,
+        'overdueByHours': overdue_by_hours,
+    }
+
 
 @app.route('/api/workers/tasks', methods=['POST'])
 def create_work_task():
@@ -5692,23 +5732,24 @@ def create_work_task():
         estimated_hours=data.get('estimatedHours'),
         due_date=due_date
     )
-    
+
+    # Queue rule: auto-start if this worker has no current in_progress task
+    if task.worker_id:
+        has_active = WorkTask.query.filter_by(
+            worker_id=task.worker_id, status='in_progress'
+        ).first()
+        if not has_active:
+            task.status = 'in_progress'
+            task.started_at = datetime.utcnow()
+        # else: leave as 'pending' — it joins the queue
+
     db.session.add(task)
     db.session.commit()
-    
+
     return jsonify({
         'status': 'success',
         'message': 'Task created successfully',
-        'data': {
-            'task': {
-                'id': task.id,
-                'taskNumber': task.task_number,
-                'jobOrderId': task.job_order_id,
-                'workerId': task.worker_id,
-                'title': task.title,
-                'status': task.status
-            }
-        }
+        'data': {'task': serialize_task(task)}
     })
 
 @app.route('/api/workers/all-tasks', methods=['GET'])
@@ -5745,43 +5786,12 @@ def get_all_tasks_admin():
             if worker_ids:
                 query = query.filter(WorkTask.worker_id.in_(worker_ids))
     
-    tasks = query.order_by(WorkTask.created_at.desc()).all()
-    
-    task_list = []
-    for task in tasks:
-        worker_name = None
-        if task.worker_id:
-            worker = Worker.query.get(task.worker_id)
-            if worker:
-                user_data = User.query.get(worker.user_id)
-                worker_name = user_data.full_name if user_data else 'Unknown'
-        
-        task_list.append({
-            'id': task.id,
-            'taskNumber': task.task_number,
-            'jobOrderId': task.job_order_id,
-            'workerId': task.worker_id,
-            'workerName': worker_name,
-            'title': task.title,
-            'description': task.description,
-            'taskType': task.task_type,
-            'priority': task.priority,
-            'status': task.status,
-            'estimatedHours': task.estimated_hours,
-            'actualHours': task.actual_hours,
-            'dueDate': fmt_dt(task.due_date),
-            'startedAt': fmt_dt(task.started_at),
-            'completedAt': fmt_dt(task.completed_at),
-            'createdAt': fmt_dt(task.created_at),
-            'notes': task.notes
-        })
-    
-    return jsonify({
-        'status': 'success',
-        'data': {
-            'tasks': task_list
-        }
-    })
+    tasks = query.order_by(
+        db.case({'in_progress': 0, 'pending': 1}, value=WorkTask.status, else_=2),
+        WorkTask.created_at.asc()
+    ).all()
+
+    return jsonify({'status': 'success', 'data': {'tasks': [serialize_task(t) for t in tasks]}})
 
 @app.route('/api/workers/list', methods=['GET'])
 def get_all_workers():
@@ -5819,12 +5829,63 @@ def get_all_workers():
             'branchId': worker.branch_id
         })
     
-    return jsonify({
-        'status': 'success',
-        'data': {
-            'workers': worker_list
-        }
-    })
+    return jsonify({'status': 'success', 'data': {'workers': worker_list}})
+
+
+@app.route('/api/workers/workload', methods=['GET'])
+def get_workers_workload():
+    """Per-worker workload: active task, queued count, total remaining hours.
+    Used by supervisors when deciding who to assign next."""
+    token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not token or token not in sessions:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    user = sessions[token]
+    if user.get('role') not in ['administrator', 'supervisor', 'sales_manager']:
+        return jsonify({'error': 'Insufficient permissions'}), 403
+
+    if user.get('role') == 'administrator':
+        workers = Worker.query.all()
+    else:
+        user_branch_id = user.get('branchId')
+        workers = Worker.query.filter_by(branch_id=user_branch_id).all() if user_branch_id else []
+
+    result = []
+    for worker in workers:
+        user_data = User.query.get(worker.user_id)
+        worker_name = user_data.full_name if user_data else 'Unknown'
+
+        active_task = WorkTask.query.filter_by(worker_id=worker.id, status='in_progress').first()
+        queued_tasks = (WorkTask.query
+                        .filter_by(worker_id=worker.id, status='pending')
+                        .order_by(WorkTask.created_at.asc())
+                        .all())
+
+        # Remaining hours on the active task
+        active_remaining = 0.0
+        if active_task and active_task.estimated_hours:
+            if active_task.started_at:
+                elapsed = (datetime.utcnow() - active_task.started_at).total_seconds() / 3600.0
+                active_remaining = max(0.0, float(active_task.estimated_hours) - elapsed)
+            else:
+                active_remaining = float(active_task.estimated_hours)
+
+        queued_hours = sum(float(t.estimated_hours or 0) for t in queued_tasks)
+
+        result.append({
+            'workerId': worker.id,
+            'workerName': worker_name,
+            'workerType': worker.worker_type,
+            'isAvailable': worker.is_available,
+            'branchId': worker.branch_id,
+            'activeTask': serialize_task(active_task) if active_task else None,
+            'queuedCount': len(queued_tasks),
+            'queuedTasks': [serialize_task(t) for t in queued_tasks],
+            'totalRemainingHours': round(active_remaining + queued_hours, 1),
+        })
+
+    return jsonify({'status': 'success', 'data': {'workload': result}})
+
 
 @app.route('/api/workers/sync', methods=['POST'])
 @require_auth
@@ -6030,6 +6091,13 @@ def list_worker_assignments():
     assignments = query.order_by(WorkerAssignment.created_at.desc()).all()
     result = []
     for a in assignments:
+        is_overdue = False
+        overdue_by_hours = 0.0
+        if a.status == 'in_progress' and a.start_time and a.expected_hours:
+            elapsed = (datetime.utcnow() - a.start_time).total_seconds() / 3600.0
+            if elapsed > float(a.expected_hours):
+                is_overdue = True
+                overdue_by_hours = round(elapsed - float(a.expected_hours), 1)
         result.append({
             'id': a.id,
             'workerId': a.worker_id,
@@ -6039,6 +6107,7 @@ def list_worker_assignments():
             'jobOrderRef': a.job_order_ref,
             'jobOrderDbId': a.job_order_db_id,
             'description': a.description,
+            'expectedHours': a.expected_hours,
             'startTime': fmt_dt(a.start_time),
             'endTime': fmt_dt(a.end_time),
             'hoursWorked': a.hours_worked,
@@ -6046,6 +6115,8 @@ def list_worker_assignments():
             'status': a.status,
             'notes': a.notes,
             'createdAt': fmt_dt(a.created_at),
+            'isOverdue': is_overdue,
+            'overdueByHours': overdue_by_hours,
         })
     return jsonify({'status': 'success', 'data': {'assignments': result}})
 
@@ -6087,6 +6158,7 @@ def create_worker_assignment():
         job_order_ref=job_order_ref,
         job_order_db_id=data.get('jobOrderDbId'),
         description=description,
+        expected_hours=data.get('expectedHours'),
         status='pending',
         notes=data.get('notes', ''),
     )
@@ -6136,6 +6208,8 @@ def update_worker_assignment(assignment_id):
         assignment.notes = data['notes']
     if 'description' in data:
         assignment.description = data['description']
+    if 'expectedHours' in data and data['expectedHours'] is not None:
+        assignment.expected_hours = float(data['expectedHours'])
     assignment.updated_at = datetime.utcnow()
     db.session.commit()
     return jsonify({
@@ -6167,6 +6241,107 @@ def delete_worker_assignment(assignment_id):
     db.session.delete(assignment)
     db.session.commit()
     return jsonify({'status': 'success', 'message': 'Assignment deleted'})
+
+# ============================================
+# WORKER AVAILABILITY CALENDAR
+# ============================================
+
+@app.route('/api/worker-availability', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def get_worker_availability():
+    """Get availability schedule entries for a worker, optionally filtered by month (YYYY-MM)."""
+    worker_id = request.args.get('workerId', type=int)
+    month = request.args.get('month')  # e.g. '2026-06'
+
+    query = WorkerAvailabilitySchedule.query
+    if worker_id:
+        query = query.filter_by(managed_worker_id=worker_id)
+    if month:
+        try:
+            year, mon = int(month.split('-')[0]), int(month.split('-')[1])
+            from datetime import date as date_type
+            start = date_type(year, mon, 1)
+            # last day of month
+            import calendar as cal_mod
+            last_day = cal_mod.monthrange(year, mon)[1]
+            end = date_type(year, mon, last_day)
+            query = query.filter(WorkerAvailabilitySchedule.date >= start,
+                                 WorkerAvailabilitySchedule.date <= end)
+        except Exception:
+            pass
+
+    entries = query.order_by(WorkerAvailabilitySchedule.date.asc()).all()
+    return jsonify({'status': 'success', 'data': {'entries': [
+        {
+            'id': e.id,
+            'managedWorkerId': e.managed_worker_id,
+            'workerName': e.worker.name if e.worker else '',
+            'date': e.date.isoformat(),
+            'isAvailable': e.is_available,
+            'note': e.note,
+        }
+        for e in entries
+    ]}})
+
+
+@app.route('/api/worker-availability', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def set_worker_availability():
+    """Upsert an availability entry. Send isAvailable=null or omit to delete."""
+    data = request.get_json()
+    worker_id = data.get('managedWorkerId')
+    date_str = data.get('date')
+    if not worker_id or not date_str:
+        return jsonify({'error': 'managedWorkerId and date are required'}), 400
+
+    from datetime import date as date_type
+    try:
+        entry_date = date_type.fromisoformat(date_str)
+    except ValueError:
+        return jsonify({'error': 'Invalid date format'}), 400
+
+    worker = ManagedWorker.query.get(worker_id)
+    if not worker:
+        return jsonify({'error': 'Worker not found'}), 404
+
+    is_available = data.get('isAvailable')
+
+    # If isAvailable is None/not sent, delete the entry (reset to default)
+    if is_available is None:
+        existing = WorkerAvailabilitySchedule.query.filter_by(
+            managed_worker_id=worker_id, date=entry_date
+        ).first()
+        if existing:
+            db.session.delete(existing)
+            db.session.commit()
+        return jsonify({'status': 'success', 'data': None})
+
+    existing = WorkerAvailabilitySchedule.query.filter_by(
+        managed_worker_id=worker_id, date=entry_date
+    ).first()
+    if existing:
+        existing.is_available = bool(is_available)
+        existing.note = data.get('note', existing.note)
+    else:
+        existing = WorkerAvailabilitySchedule(
+            managed_worker_id=worker_id,
+            date=entry_date,
+            is_available=bool(is_available),
+            note=data.get('note'),
+        )
+        db.session.add(existing)
+
+    db.session.commit()
+    return jsonify({'status': 'success', 'data': {
+        'id': existing.id,
+        'managedWorkerId': existing.managed_worker_id,
+        'date': existing.date.isoformat(),
+        'isAvailable': existing.is_available,
+        'note': existing.note,
+    }})
+
 
 # ============================================
 # HEALTH CHECK

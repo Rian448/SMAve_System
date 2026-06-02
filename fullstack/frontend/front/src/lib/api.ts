@@ -79,6 +79,7 @@ export interface WorkTask {
   taskNumber: string;
   jobOrderId: string;
   workerId?: number;
+  workerName?: string;
   title: string;
   description?: string;
   taskType: string;
@@ -91,6 +92,21 @@ export interface WorkTask {
   completedAt?: string;
   createdAt: string;
   notes?: string;
+  queuePosition?: number | null;
+  isOverdue?: boolean;
+  overdueByHours?: number;
+}
+
+export interface WorkerWorkload {
+  workerId: number;
+  workerName: string;
+  workerType: string;
+  isAvailable: boolean;
+  branchId?: number;
+  activeTask: WorkTask | null;
+  queuedCount: number;
+  queuedTasks: WorkTask[];
+  totalRemainingHours: number;
 }
 
 export interface WorkTaskInput {
@@ -474,6 +490,7 @@ export interface WorkerAssignment {
   jobOrderRef: string;
   jobOrderDbId?: number;
   description?: string;
+  expectedHours?: number;
   startTime?: string;
   endTime?: string;
   hoursWorked?: number;
@@ -481,6 +498,17 @@ export interface WorkerAssignment {
   status: 'pending' | 'in_progress' | 'completed';
   notes?: string;
   createdAt: string;
+  isOverdue?: boolean;
+  overdueByHours?: number;
+}
+
+export interface WorkerAvailabilityEntry {
+  id: number;
+  managedWorkerId: number;
+  workerName: string;
+  date: string;          // 'YYYY-MM-DD'
+  isAvailable: boolean;  // false = marked unavailable/off
+  note?: string;
 }
 
 export interface VehicleInfo {
@@ -1600,6 +1628,9 @@ export const api = {
     
     getWorkersList: () =>
       fetchApi<{ workers: WorkerProfile[] }>('/api/workers/list'),
+
+    getWorkload: () =>
+      fetchApi<{ workload: WorkerWorkload[] }>('/api/workers/workload'),
     
     syncWorkerProfiles: () =>
       fetchApi<{ status: string; message: string; created: number }>('/api/workers/sync', {
@@ -1629,18 +1660,32 @@ export const api = {
       const query = workerId ? `?workerId=${workerId}` : '';
       return fetchApi<{ assignments: WorkerAssignment[] }>(`/api/worker-assignments${query}`);
     },
-    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; notes?: string }) =>
+    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string }) =>
       fetchApi<{ assignment: WorkerAssignment }>('/api/worker-assignments', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: number, data: Partial<{ status: string; hoursWorked: number; notes: string; description: string }>) =>
+    update: (id: number, data: Partial<{ status: string; hoursWorked: number; expectedHours: number; notes: string; description: string }>) =>
       fetchApi<{ assignment: WorkerAssignment }>(`/api/worker-assignments/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
     delete: (id: number) =>
       fetchApi<{ message: string }>(`/api/worker-assignments/${id}`, { method: 'DELETE' }),
+  },
+
+  workerAvailability: {
+    get: (params?: { workerId?: number; month?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.workerId) q.append('workerId', String(params.workerId));
+      if (params?.month) q.append('month', params.month);
+      return fetchApi<{ entries: WorkerAvailabilityEntry[] }>(`/api/worker-availability?${q}`);
+    },
+    set: (data: { managedWorkerId: number; date: string; isAvailable: boolean | null; note?: string }) =>
+      fetchApi<{ id?: number; date?: string; isAvailable?: boolean }>('/api/worker-availability', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
   },
 };
 

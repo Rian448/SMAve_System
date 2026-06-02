@@ -2,7 +2,7 @@
 import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord, ManagedWorker } from '@/lib/api';
+import { api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord, ManagedWorker, WorkerWorkload, WorkTask } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 
 type EditableJobOrderItem = JobOrderItem & {
@@ -36,18 +36,72 @@ export default function JobOrderDetailPage() {
   const [showRevertConfirm, setShowRevertConfirm] = useState(false);
   const [managedWorkers, setManagedWorkers] = useState<ManagedWorker[]>([]);
 
+  // Task assignment state
+  const [workerWorkload, setWorkerWorkload] = useState<WorkerWorkload[]>([]);
+  const [jobTasks, setJobTasks] = useState<WorkTask[]>([]);
+  const [showTaskForm, setShowTaskForm] = useState(false);
+  const [taskForm, setTaskForm] = useState({ title: '', taskType: 'assembly', priority: 'normal', estimatedHours: '', workerId: '', description: '' });
+  const [savingTask, setSavingTask] = useState(false);
+  const [taskError, setTaskError] = useState('');
+
+  const TASK_TYPES = ['cutting', 'sewing', 'assembly', 'installation', 'finishing', 'other'];
+
+  const canManageTasks = user && ['administrator', 'supervisor', 'sales_manager'].includes(user.role);
+
   useEffect(() => {
     api.managedWorkers.list().then(res => {
       setManagedWorkers((res.data?.workers || []).filter(w => w.isActive));
     }).catch(() => {});
   }, []);
 
+  const fetchJobTasks = async (jobOrderId: string) => {
+    try {
+      const res = await api.workers.getAllTasks({ jobOrderId });
+      setJobTasks(res.data?.tasks || []);
+    } catch { /* non-critical */ }
+  };
+
+  const fetchWorkload = async () => {
+    try {
+      const res = await api.workers.getWorkload();
+      setWorkerWorkload(res.data?.workload || []);
+    } catch { /* non-critical */ }
+  };
+
+  const submitTask = async () => {
+    if (!jobOrder || !taskForm.title.trim() || !taskForm.taskType) return;
+    setSavingTask(true); setTaskError('');
+    try {
+      await api.workers.createTask({
+        jobOrderId: jobOrder.jobOrderId,
+        title: taskForm.title.trim(),
+        taskType: taskForm.taskType,
+        priority: taskForm.priority as 'low' | 'normal' | 'high' | 'urgent',
+        estimatedHours: taskForm.estimatedHours ? parseFloat(taskForm.estimatedHours) : undefined,
+        workerId: taskForm.workerId ? parseInt(taskForm.workerId) : undefined,
+        description: taskForm.description.trim() || undefined,
+      });
+      setTaskForm({ title: '', taskType: 'assembly', priority: 'normal', estimatedHours: '', workerId: '', description: '' });
+      setShowTaskForm(false);
+      await Promise.all([fetchJobTasks(jobOrder.jobOrderId), fetchWorkload()]);
+    } catch (err: unknown) {
+      setTaskError(err instanceof Error ? err.message : 'Failed to create task');
+    } finally {
+      setSavingTask(false);
+    }
+  };
+
   useEffect(() => {
     if (params.id) {
       api.sales.getJobOrder(parseInt(params.id as string))
         .then(response => {
-          setJobOrder(response.data || null);
+          const order = response.data || null;
+          setJobOrder(order);
           setLoading(false);
+          if (order?.jobOrderId) {
+            fetchJobTasks(order.jobOrderId);
+            fetchWorkload();
+          }
         })
         .catch(err => {
           console.error(err);
@@ -653,42 +707,157 @@ export default function JobOrderDetailPage() {
           </div>
         </div>
 
-        {/* Assigned Workers */}
-        {canEditParts && (jobOrder as any).tasks && (jobOrder as any).tasks.length > 0 && (
+        {/* Work Task Queue */}
+        {canManageTasks && (
           <div className="no-print mb-5 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-4 flex items-center gap-2">
-              <svg className="w-4 h-4 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-              </svg>
-              Assigned Workers
-            </h2>
-            <div className="space-y-2">
-              {(jobOrder as any).tasks.map((task: any) => (
-                <div key={task.id} className="flex items-center justify-between py-3 px-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-2">
+                <svg className="w-4 h-4 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                </svg>
+                Work Tasks
+              </h2>
+              <button onClick={() => { setShowTaskForm(v => !v); setTaskError(''); fetchWorkload(); }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#011c72] text-white text-xs font-semibold hover:bg-[#01268c] transition-colors">
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                Assign Task
+              </button>
+            </div>
+
+            {/* Task assignment form */}
+            {showTaskForm && (
+              <div className="mb-4 p-4 bg-gray-50 rounded-xl border border-gray-200 space-y-3">
+                <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">New Work Task</p>
+                {taskError && <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1">{taskError}</p>}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <p className="text-sm font-medium text-gray-900">{task.title}</p>
-                    <p className="text-xs text-gray-500 mt-0.5">Task #{task.taskNumber}</p>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">Title *</label>
+                    <input type="text" value={taskForm.title} onChange={e => setTaskForm(f => ({ ...f, title: e.target.value }))}
+                      placeholder="e.g. Cut seat fabric"
+                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
                   </div>
-                  <div className="flex items-center gap-3">
-                    {task.worker ? (
-                      <div className="text-right">
-                        <p className="text-sm font-medium text-gray-900">{task.worker.name}</p>
-                        <p className="text-xs text-gray-500">{task.worker.specialization}</p>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">Task Type *</label>
+                    <select value={taskForm.taskType} onChange={e => setTaskForm(f => ({ ...f, taskType: e.target.value }))}
+                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900">
+                      {TASK_TYPES.map(t => <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">Priority</label>
+                    <select value={taskForm.priority} onChange={e => setTaskForm(f => ({ ...f, priority: e.target.value }))}
+                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900">
+                      {['low','normal','high','urgent'].map(p => <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">Estimated Hours</label>
+                    <input type="number" min="0.5" step="0.5" value={taskForm.estimatedHours}
+                      onChange={e => setTaskForm(f => ({ ...f, estimatedHours: e.target.value }))}
+                      placeholder="e.g. 2"
+                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+                  </div>
+                </div>
+
+                {/* Worker selector with workload */}
+                <div>
+                  <label className="text-xs font-medium text-gray-500 mb-1 block">Assign to Worker</label>
+                  <select value={taskForm.workerId} onChange={e => setTaskForm(f => ({ ...f, workerId: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900">
+                    <option value="">— Unassigned —</option>
+                    {workerWorkload.map(w => (
+                      <option key={w.workerId} value={String(w.workerId)}>
+                        {w.workerName} ({w.workerType}) — {w.activeTask ? `BUSY · ${w.queuedCount} queued · ~${w.totalRemainingHours}h left` : w.queuedCount > 0 ? `${w.queuedCount} queued · ~${w.totalRemainingHours}h` : 'available'}
+                      </option>
+                    ))}
+                  </select>
+                  {taskForm.workerId && (() => {
+                    const wl = workerWorkload.find(w => String(w.workerId) === taskForm.workerId);
+                    if (!wl) return null;
+                    return (
+                      <div className={`mt-2 p-2.5 rounded-lg border text-xs ${wl.activeTask ? 'bg-yellow-50 border-yellow-200' : 'bg-green-50 border-green-200'}`}>
+                        {wl.activeTask ? (
+                          <span className="text-yellow-700">
+                            Currently working on: <strong>{wl.activeTask.title}</strong>
+                            {wl.activeTask.isOverdue && <span className="ml-2 text-red-600 font-bold">⚠ OVERDUE +{wl.activeTask.overdueByHours}h</span>}
+                            {wl.queuedCount > 0 && ` · ${wl.queuedCount} task${wl.queuedCount > 1 ? 's' : ''} already queued`}
+                            . New task will enter as <strong>#{wl.queuedCount + 1} in queue</strong>.
+                          </span>
+                        ) : (
+                          <span className="text-green-700">
+                            Worker is <strong>available</strong> — this task will start immediately as in_progress.
+                          </span>
+                        )}
                       </div>
-                    ) : (
-                      <p className="text-sm text-gray-400 italic">Unassigned</p>
-                    )}
-                    <span className={`px-2 py-0.5 text-xs rounded-full font-medium ${
+                    );
+                  })()}
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-gray-500 mb-1 block">Notes</label>
+                  <input type="text" value={taskForm.description} onChange={e => setTaskForm(f => ({ ...f, description: e.target.value }))}
+                    placeholder="Optional instructions"
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+                </div>
+
+                <div className="flex gap-2 justify-end pt-1">
+                  <button onClick={() => setShowTaskForm(false)} className="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition-colors">
+                    Cancel
+                  </button>
+                  <button onClick={submitTask} disabled={savingTask || !taskForm.title.trim()}
+                    className="px-4 py-2 rounded-lg bg-[#011c72] text-white text-sm font-semibold hover:bg-[#01268c] disabled:opacity-50 transition-colors">
+                    {savingTask ? 'Assigning…' : 'Assign Task'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Task list */}
+            {jobTasks.length === 0 ? (
+              <p className="text-sm text-gray-400 italic text-center py-4">No work tasks assigned to this order yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {jobTasks.map(task => (
+                  <div key={task.id} className={`flex items-center justify-between py-3 px-4 rounded-lg border ${
+                    task.isOverdue ? 'bg-red-50 border-red-200' :
+                    task.status === 'in_progress' ? 'bg-blue-50 border-blue-100' : 'bg-gray-50 border-gray-200'
+                  }`}>
+                    <div className="flex items-center gap-3 min-w-0">
+                      {task.status === 'pending' && task.queuePosition != null && (
+                        <span className="shrink-0 inline-flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold bg-[#dde6ff] text-[#011c72] border border-[#011c72]/20">
+                          {task.queuePosition}
+                        </span>
+                      )}
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="text-sm font-medium text-gray-900">{task.title}</p>
+                          {task.isOverdue && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700 border border-red-200">
+                              ⚠ Overdue +{task.overdueByHours}h
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                          <p className="text-xs text-gray-500">#{task.taskNumber}</p>
+                          {task.workerName && <p className="text-xs text-gray-500">· {task.workerName}</p>}
+                          {task.estimatedHours && <p className="text-xs text-gray-400">· {task.estimatedHours}h est.</p>}
+                        </div>
+                      </div>
+                    </div>
+                    <span className={`shrink-0 px-2 py-0.5 text-xs rounded-full font-medium ${
                       task.status === 'completed' ? 'bg-green-100 text-green-700' :
                       task.status === 'in_progress' ? 'bg-blue-100 text-blue-700' :
                       'bg-yellow-100 text-yellow-700'
                     }`}>
-                      {task.status.replace(/_/g, ' ')}
+                      {task.status === 'pending' ? 'Queued' : task.status.replace(/_/g, ' ')}
                     </span>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
