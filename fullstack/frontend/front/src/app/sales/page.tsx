@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { api, JobOrder, CustomerOrder, ProductOrder, ProductOrderTransfer } from '@/lib/api';
+import { formatDate as _fmtDate } from '@/lib/dateUtils';
 import Link from 'next/link';
 
 type SalesTab = 'all' | 'custom-jobs' | 'premade-purchase' | 'premade-sales' | 'pickup-queue';
@@ -20,8 +21,9 @@ export default function SalesPage() {
   const [filter, setFilter] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState('');
 
-  // Premade Sales tab (source branch transfers)
+  // Premade Sales tab (source branch transfers + direct sales)
   const [transferRequests, setTransferRequests] = useState<ProductOrderTransfer[]>([]);
+  const [directSales, setDirectSales] = useState<ProductOrder[]>([]);
   // Pickup Queue tab
   const [pickupQueue, setPickupQueue] = useState<ProductOrder[]>([]);
   const [tabLoading, setTabLoading] = useState(false);
@@ -64,12 +66,14 @@ export default function SalesPage() {
     if (!canSeePremadeFeatures) return;
     setTabLoading(true);
     try {
-      const [transferRes, pickupRes] = await Promise.all([
+      const [transferRes, pickupRes, directRes] = await Promise.all([
         api.productOrderTransfers.getMyRequests(),
         api.productOrders.getPickupQueue(),
+        api.productOrders.getDirectSales(),
       ]);
       setTransferRequests(transferRes.data || []);
       setPickupQueue(pickupRes.data || []);
+      setDirectSales(directRes.data || []);
     } catch (err) {
       console.error('Failed to load tab data', err);
     } finally {
@@ -100,8 +104,7 @@ export default function SalesPage() {
     } finally { setSavingId(null); }
   };
 
-  const formatDate = (dateString: string) =>
-    new Date(dateString).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' });
+  const formatDate = (dateString: string) => _fmtDate(dateString);
 
   const getStatusBadge = (status: string) => {
     const statusStyles: Record<string, string> = {
@@ -171,6 +174,31 @@ export default function SalesPage() {
     }
     return true;
   });
+
+  const filteredDirectSales = directSales.filter(order => {
+    if (transferDateFilter === 'all') return true;
+    const now = new Date();
+    const d = new Date(order.createdAt);
+    if (transferDateFilter === 'day') return d.toDateString() === now.toDateString();
+    if (transferDateFilter === 'week') {
+      const startOfWeek = new Date(now);
+      startOfWeek.setDate(now.getDate() - now.getDay());
+      startOfWeek.setHours(0, 0, 0, 0);
+      return d >= startOfWeek;
+    }
+    if (transferDateFilter === 'month') return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+    if (transferDateFilter === 'year') return d.getFullYear() === now.getFullYear();
+    return true;
+  });
+
+  const transferTotal = filteredTransferRequests.reduce((sum, t) =>
+    sum + t.items.reduce((s, i) => s + (i.total || i.unitPrice * i.quantity), 0), 0);
+  const directTotal = filteredDirectSales.reduce((sum, o) => sum + o.totalAmount, 0);
+  const premadeGrandTotal = transferTotal + directTotal;
+  const completedDirectTotal = filteredDirectSales.filter(o => o.status === 'completed').reduce((sum, o) => sum + o.totalAmount, 0);
+  const receivedTransferTotal = filteredTransferRequests.filter(t => t.status === 'received').reduce((sum, t) =>
+    sum + t.items.reduce((s, i) => s + (i.total || i.unitPrice * i.quantity), 0), 0);
+  const premadeTotalRecords = filteredTransferRequests.length + filteredDirectSales.length;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -531,12 +559,38 @@ export default function SalesPage() {
         {/* ── PREMADE SALES TAB ── */}
         {activeTab === 'premade-sales' && (
           <div className="space-y-4">
+            {/* Summary banner */}
+            {!tabLoading && premadeTotalRecords > 0 && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+                  <p className="text-xs font-medium text-gray-500 mb-1">Total Sale Value</p>
+                  <p className="text-xl font-bold text-gray-900">₱{premadeGrandTotal.toLocaleString()}</p>
+                  <p className="text-xs text-gray-400 mt-1">{premadeTotalRecords} record{premadeTotalRecords !== 1 ? 's' : ''}</p>
+                </div>
+                <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+                  <p className="text-xs font-medium text-gray-500 mb-1">Realized Revenue</p>
+                  <p className="text-xl font-bold text-green-600">₱{(completedDirectTotal + receivedTransferTotal).toLocaleString()}</p>
+                  <p className="text-xs text-gray-400 mt-1">completed + received</p>
+                </div>
+                <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+                  <p className="text-xs font-medium text-gray-500 mb-1">Cross-Branch Sales</p>
+                  <p className="text-xl font-bold text-blue-600">₱{transferTotal.toLocaleString()}</p>
+                  <p className="text-xs text-gray-400 mt-1">{filteredTransferRequests.length} transfer record{filteredTransferRequests.length !== 1 ? 's' : ''}</p>
+                </div>
+                <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+                  <p className="text-xs font-medium text-gray-500 mb-1">Direct Sales</p>
+                  <p className="text-xl font-bold text-teal-600">₱{directTotal.toLocaleString()}</p>
+                  <p className="text-xs text-gray-400 mt-1">{filteredDirectSales.length} local order{filteredDirectSales.length !== 1 ? 's' : ''}</p>
+                </div>
+              </div>
+            )}
+
             <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-start gap-3">
               <svg className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               <p className="text-sm text-blue-700">
-                These are premade product items that customers ordered <strong>from your branch's inventory</strong> and need to be transferred to their chosen pickup branch.
+                All premade items sold from your branch — both <strong>direct sales</strong> (same-branch pickup) and <strong>cross-branch sales</strong> (items transferred to another pickup branch).
               </p>
             </div>
 
@@ -551,7 +605,7 @@ export default function SalesPage() {
               ))}
               {transferDateFilter !== 'all' && (
                 <span className="ml-auto text-xs text-gray-400">
-                  {filteredTransferRequests.length} of {transferRequests.length} records
+                  {premadeTotalRecords} of {transferRequests.length + directSales.length} records
                 </span>
               )}
             </div>
@@ -560,106 +614,175 @@ export default function SalesPage() {
               <div className="p-8 text-center bg-white rounded-xl border border-gray-200">
                 <div className="animate-spin w-8 h-8 border-4 border-[#011c72] border-t-transparent rounded-full mx-auto"></div>
               </div>
-            ) : filteredTransferRequests.length === 0 ? (
+            ) : premadeTotalRecords === 0 ? (
               <div className="p-10 text-center bg-white rounded-xl border border-gray-200">
                 <svg className="w-14 h-14 mx-auto text-gray-300 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
                 </svg>
                 <p className="text-gray-500">
-                  {transferDateFilter === 'all' ? 'No premade sales found for this branch.' : `No premade sales found for the selected period.`}
+                  {transferDateFilter === 'all' ? 'No premade sales found for this branch.' : 'No premade sales found for the selected period.'}
                 </p>
               </div>
             ) : (
               <div className="space-y-4">
+                {/* Cross-branch transfer records */}
                 {filteredTransferRequests.map(transfer => {
                   const itemsTotal = transfer.items.reduce((s, i) => s + (i.total || i.unitPrice * i.quantity), 0);
                   return (
-                    <div key={transfer.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-                      {/* Header */}
+                    <div key={`tr-${transfer.id}`} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
                       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-5 py-4 border-b border-gray-100 bg-gray-50">
-                        <div className="flex items-center gap-3">
-                          <Link href={`/product-orders/${transfer.productOrderId}`}
-                            className="text-base font-bold text-[#011c72] hover:underline">
+                        <div className="flex items-center gap-3 flex-wrap">
+                          <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 uppercase tracking-wide">Cross-Branch Sale</span>
+                          <Link href={`/product-orders/${transfer.productOrderId}`} className="text-base font-bold text-[#011c72] hover:underline">
                             {transfer.orderNumber || `Order #${transfer.productOrderId}`}
                           </Link>
-                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getStatusBadge(transfer.status)}`}>
-                            {getTransferStatusLabel(transfer.status)}
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                            transfer.status === 'received' ? 'bg-green-100 text-green-700' :
+                            transfer.status === 'transferred' ? 'bg-blue-100 text-blue-700' :
+                            'bg-yellow-100 text-yellow-700'
+                          }`}>
+                            {transfer.status === 'pending' ? 'Transfer Pending' :
+                             transfer.status === 'transferred' ? 'In Transit' : 'Transfer Confirmed'}
                           </span>
                         </div>
                         <div className="flex items-center gap-4">
-                          <span className="text-sm text-gray-500">
-                            To: <span className="font-semibold text-gray-700">{transfer.pickupBranchName}</span>
-                          </span>
-                          <span className="text-sm font-bold text-gray-900">₱{itemsTotal.toLocaleString()}</span>
+                          <span className="text-sm text-gray-500">Pickup: <span className="font-semibold text-gray-700">{transfer.pickupBranchName}</span></span>
+                          <div className="text-right">
+                            <p className="text-lg font-bold text-gray-900">₱{itemsTotal.toLocaleString()}</p>
+                            <p className="text-xs text-gray-400">sale amount</p>
+                          </div>
                         </div>
                       </div>
-
                       <div className="px-5 py-4 space-y-3">
-                        {/* Customer */}
                         <div className="flex items-center gap-2 text-sm text-gray-600">
-                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                          </svg>
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
                           <span className="font-medium text-gray-800">{transfer.customerName}</span>
                           {transfer.customerPhone && <span>· {transfer.customerPhone}</span>}
                         </div>
-
-                        {/* Items */}
                         <div className="rounded-lg border border-gray-100 overflow-hidden">
                           <table className="w-full text-sm">
-                            <thead>
-                              <tr className="bg-gray-50">
-                                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
-                                <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">Qty</th>
-                                <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Price</th>
-                                <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Subtotal</th>
-                              </tr>
-                            </thead>
+                            <thead><tr className="bg-gray-50">
+                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
+                              <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">Qty</th>
+                              <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Price</th>
+                              <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Subtotal</th>
+                            </tr></thead>
                             <tbody className="divide-y divide-gray-100">
                               {transfer.items.map((item, idx) => (
                                 <tr key={idx}>
-                                  <td className="px-3 py-2 text-gray-800">
-                                    <p className="font-medium">{item.name}</p>
-                                    <p className="text-xs text-gray-400">{item.sku}</p>
-                                  </td>
+                                  <td className="px-3 py-2"><p className="font-medium text-gray-800">{item.name}</p><p className="text-xs text-gray-400">{item.sku}</p></td>
                                   <td className="px-3 py-2 text-center text-gray-700">{item.quantity}</td>
                                   <td className="px-3 py-2 text-right text-gray-700">₱{item.unitPrice.toLocaleString()}</td>
                                   <td className="px-3 py-2 text-right font-medium text-gray-900">₱{(item.total || item.unitPrice * item.quantity).toLocaleString()}</td>
                                 </tr>
                               ))}
                             </tbody>
+                            <tfoot><tr className="bg-gray-50">
+                              <td colSpan={3} className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase">Sale Total</td>
+                              <td className="px-3 py-2 text-right font-bold text-gray-900">₱{itemsTotal.toLocaleString()}</td>
+                            </tr></tfoot>
                           </table>
                         </div>
-
-                        {/* Action */}
+                        <div className={`rounded-lg border p-3 flex items-center justify-between gap-3 ${
+                          transfer.status === 'received' ? 'bg-green-50 border-green-200' :
+                          transfer.status === 'transferred' ? 'bg-blue-50 border-blue-200' : 'bg-yellow-50 border-yellow-200'
+                        }`}>
+                          <div className="flex items-center gap-2 text-sm">
+                            <svg className="w-4 h-4 shrink-0 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4" /></svg>
+                            <span className="font-medium text-gray-700">Transfer Record:</span>
+                            <span className="text-gray-600">
+                              {transfer.status === 'pending' && 'Items not yet dispatched to pickup branch'}
+                              {transfer.status === 'transferred' && `In transit to ${transfer.pickupBranchName}`}
+                              {transfer.status === 'received' && `Confirmed received at ${transfer.pickupBranchName}`}
+                            </span>
+                          </div>
+                          {transfer.transferredAt && (
+                            <span className="text-xs text-gray-400 whitespace-nowrap">
+                              {transfer.status === 'received' ? `Received: ${formatDate(transfer.receivedAt || transfer.transferredAt)}` : `Sent: ${formatDate(transfer.transferredAt)}`}
+                            </span>
+                          )}
+                        </div>
                         {transfer.status === 'pending' && (
                           <div className="flex justify-end pt-1">
-                            <button
-                              onClick={() => markTransferred(transfer.id)}
-                              disabled={savingId === transfer.id}
+                            <button onClick={() => markTransferred(transfer.id)} disabled={savingId === transfer.id}
                               className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition-colors flex items-center gap-2">
-                              {savingId === transfer.id ? (
-                                <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> Processing...</>
-                              ) : (
-                                <><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4" /></svg> Mark as Transferred</>
-                              )}
+                              {savingId === transfer.id
+                                ? <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> Processing...</>
+                                : <><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4" /></svg> Mark as Transferred</>}
                             </button>
                           </div>
                         )}
-                        {transfer.status === 'transferred' && (
-                          <p className="text-sm text-blue-600 text-right pt-1">Items in transit to {transfer.pickupBranchName} — waiting for receipt confirmation.</p>
-                        )}
-                        {transfer.status === 'received' && (
-                          <p className="text-sm text-green-600 text-right pt-1">Items received at {transfer.pickupBranchName}.</p>
-                        )}
                       </div>
-
-                      <div className="px-5 py-2 border-t border-gray-100 bg-gray-50">
+                      <div className="px-5 py-2 border-t border-gray-100 bg-gray-50 flex items-center justify-between">
                         <p className="text-xs text-gray-400">{formatDate(transfer.createdAt)}</p>
+                        <Link href={`/product-orders/${transfer.productOrderId}`} className="text-xs text-[#011c72] hover:underline font-medium">View Full Order →</Link>
                       </div>
                     </div>
                   );
                 })}
+
+                {/* Direct sales (single-branch orders where this branch is both supplier and pickup) */}
+                {filteredDirectSales.map(order => (
+                  <div key={`ds-${order.id}`} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-5 py-4 border-b border-gray-100 bg-gray-50">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-teal-100 text-teal-700 uppercase tracking-wide">Direct Sale</span>
+                        <Link href={`/product-orders/${order.id}`} className="text-base font-bold text-[#011c72] hover:underline">{order.orderNumber}</Link>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getStatusBadge(order.status)}`}>
+                          {order.status.replace('_', ' ').toUpperCase()}
+                        </span>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getStatusBadge(order.paymentStatus)}`}>
+                          {order.paymentStatus.toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-lg font-bold text-gray-900">₱{order.totalAmount.toLocaleString()}</p>
+                        <p className="text-xs text-gray-400">sale amount</p>
+                      </div>
+                    </div>
+                    <div className="px-5 py-4 space-y-3">
+                      <div className="flex flex-wrap gap-4 text-sm">
+                        <div>
+                          <p className="text-xs text-gray-400">Customer</p>
+                          <p className="font-semibold text-gray-900">{order.customerName}</p>
+                        </div>
+                        {order.customerPhone && <div><p className="text-xs text-gray-400">Phone</p><p className="font-semibold text-gray-900">{order.customerPhone}</p></div>}
+                      </div>
+                      <div className="rounded-lg border border-gray-100 overflow-hidden">
+                        <table className="w-full text-sm">
+                          <thead><tr className="bg-gray-50">
+                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
+                            <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">Qty</th>
+                            <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Price</th>
+                            <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Subtotal</th>
+                          </tr></thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {order.items.map((item, idx) => (
+                              <tr key={idx}>
+                                <td className="px-3 py-2"><p className="font-medium text-gray-800">{item.name}</p><p className="text-xs text-gray-400">{item.sku}</p></td>
+                                <td className="px-3 py-2 text-center text-gray-700">{item.quantity}</td>
+                                <td className="px-3 py-2 text-right text-gray-700">₱{item.unitPrice.toLocaleString()}</td>
+                                <td className="px-3 py-2 text-right font-medium text-gray-900">₱{(item.total || item.unitPrice * item.quantity).toLocaleString()}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                          <tfoot><tr className="bg-gray-50">
+                            <td colSpan={3} className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase">Order Total</td>
+                            <td className="px-3 py-2 text-right font-bold text-gray-900">₱{order.totalAmount.toLocaleString()}</td>
+                          </tr></tfoot>
+                        </table>
+                      </div>
+                      <div className="bg-teal-50 border border-teal-200 rounded-lg p-3 text-sm text-teal-700 flex items-center gap-2">
+                        <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                        Direct sale — customer picks up from this branch. No transfer needed.
+                      </div>
+                    </div>
+                    <div className="px-5 py-2 border-t border-gray-100 bg-gray-50 flex items-center justify-between">
+                      <p className="text-xs text-gray-400">{formatDate(order.createdAt)}</p>
+                      <Link href={`/product-orders/${order.id}`} className="text-xs text-[#011c72] hover:underline font-medium">View Order →</Link>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -749,15 +872,72 @@ export default function SalesPage() {
                           )}
                         </div>
 
-                        {/* All items this customer needs */}
+                        {/* ── YOUR BRANCH'S SALE ── */}
+                        {(() => {
+                          const myItems = order.items.filter(item => {
+                            const inTransfer = order.transfers?.some(t =>
+                              t.items.some(ti => ti.productId === item.productId || ti.sku === item.sku)
+                            );
+                            return !inTransfer; // items NOT in any transfer came from this (pickup) branch
+                          });
+                          const myTotal = myItems.reduce((s, i) => s + (i.total || i.unitPrice * i.quantity), 0);
+                          if (myItems.length === 0) return null;
+                          return (
+                            <div>
+                              <div className="flex items-center justify-between mb-1.5">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs font-semibold text-teal-700 uppercase tracking-wide">Your Branch's Sale</span>
+                                  <span className="text-xs px-2 py-0.5 rounded-full bg-teal-100 text-teal-700 font-medium">From Your Stock</span>
+                                </div>
+                                <span className="text-sm font-bold text-teal-700">₱{myTotal.toLocaleString()}</span>
+                              </div>
+                              <div className="rounded-lg border border-teal-200 overflow-hidden">
+                                <table className="w-full text-sm">
+                                  <thead>
+                                    <tr className="bg-teal-50">
+                                      <th className="px-3 py-2 text-left text-xs font-medium text-teal-600 uppercase">Item</th>
+                                      <th className="px-3 py-2 text-center text-xs font-medium text-teal-600 uppercase">Qty</th>
+                                      <th className="px-3 py-2 text-right text-xs font-medium text-teal-600 uppercase">Price</th>
+                                      <th className="px-3 py-2 text-right text-xs font-medium text-teal-600 uppercase">Subtotal</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-teal-100">
+                                    {myItems.map((item, idx) => (
+                                      <tr key={idx} className="hover:bg-teal-50/50">
+                                        <td className="px-3 py-2">
+                                          <p className="font-medium text-gray-800">{item.name}</p>
+                                          <p className="text-xs text-gray-400">{item.sku}</p>
+                                        </td>
+                                        <td className="px-3 py-2 text-center text-gray-700">{item.quantity}</td>
+                                        <td className="px-3 py-2 text-right text-gray-700">₱{item.unitPrice.toLocaleString()}</td>
+                                        <td className="px-3 py-2 text-right font-medium text-gray-900">₱{(item.total || item.unitPrice * item.quantity).toLocaleString()}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                  <tfoot>
+                                    <tr className="bg-teal-50">
+                                      <td colSpan={3} className="px-3 py-2 text-right text-xs font-semibold text-teal-700 uppercase">Your Sale Total</td>
+                                      <td className="px-3 py-2 text-right font-bold text-teal-700">₱{myTotal.toLocaleString()}</td>
+                                    </tr>
+                                  </tfoot>
+                                </table>
+                              </div>
+                            </div>
+                          );
+                        })()}
+
+                        {/* ── COMPLETE CUSTOMER ORDER ── */}
                         <div>
-                          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">All Items for This Customer</h4>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Complete Customer Order</span>
+                            <span className="text-sm font-bold text-gray-900">₱{order.totalAmount.toLocaleString()}</span>
+                          </div>
                           <div className="rounded-lg border border-gray-100 overflow-hidden">
                             <table className="w-full text-sm">
                               <thead>
                                 <tr className="bg-gray-50">
                                   <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
-                                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">From</th>
+                                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
                                   <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">Qty</th>
                                   <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Price</th>
                                   <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Status</th>
@@ -765,11 +945,10 @@ export default function SalesPage() {
                               </thead>
                               <tbody className="divide-y divide-gray-100">
                                 {order.items.map((item, idx) => {
-                                  // Find transfer status for this item
                                   const sourceTransfer = order.transfers?.find(t =>
                                     t.items.some(ti => ti.productId === item.productId || ti.sku === item.sku)
                                   );
-                                  const isLocal = !sourceTransfer; // Item comes from pickup branch itself
+                                  const isLocal = !sourceTransfer;
                                   const transferStatus = sourceTransfer?.status;
                                   return (
                                     <tr key={idx} className="hover:bg-gray-50">
@@ -777,22 +956,24 @@ export default function SalesPage() {
                                         <p className="font-medium text-gray-800">{item.name}</p>
                                         <p className="text-xs text-gray-400">{item.sku}</p>
                                       </td>
-                                      <td className="px-3 py-2 text-xs text-gray-500">
+                                      <td className="px-3 py-2 text-xs">
                                         {isLocal ? (
-                                          <span className="text-green-600 font-medium">This Branch</span>
-                                        ) : sourceTransfer?.sourceBranchName || `Branch ${item.sourceBranchId}`}
+                                          <span className="text-teal-600 font-medium">This Branch</span>
+                                        ) : (
+                                          <span className="text-gray-500">{sourceTransfer?.sourceBranchName || `Branch ${item.sourceBranchId}`}</span>
+                                        )}
                                       </td>
                                       <td className="px-3 py-2 text-center text-gray-700">{item.quantity}</td>
                                       <td className="px-3 py-2 text-right text-gray-700">₱{item.unitPrice.toLocaleString()}</td>
                                       <td className="px-3 py-2 text-right">
                                         {isLocal ? (
-                                          <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">Available</span>
+                                          <span className="text-xs px-2 py-0.5 rounded-full bg-teal-100 text-teal-700 font-medium">Available</span>
                                         ) : transferStatus === 'received' ? (
                                           <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">Received</span>
                                         ) : transferStatus === 'transferred' ? (
                                           <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">In Transit</span>
                                         ) : (
-                                          <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-700 font-medium">Pending Transfer</span>
+                                          <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-700 font-medium">Pending</span>
                                         )}
                                       </td>
                                     </tr>

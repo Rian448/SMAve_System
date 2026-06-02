@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
@@ -1212,7 +1213,7 @@ export default function NewJobOrderPage() {
               </div>
               {estimatedCompletionDate && (
                 <p className="text-xs text-[#011c72] mt-2">
-                  Est. completion: {new Date(estimatedCompletionDate).toLocaleDateString('en-PH', { month: 'long', day: 'numeric', year: 'numeric' })}
+                  Est. completion: {formatDate(estimatedCompletionDate)}
                 </p>
               )}
             </div>

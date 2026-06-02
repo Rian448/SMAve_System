@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
@@ -248,7 +249,7 @@ export default function CustomerOrderDetailPage() {
                 </span>
               </div>
               <p className="text-gray-500 mt-1">
-                {order.createdAt ? new Date(order.createdAt).toLocaleString('en-PH') : 'N/A'}
+                {order.createdAt ? formatDateTime(order.createdAt) : 'N/A'}
               </p>
             </div>
 
@@ -372,7 +373,7 @@ export default function CustomerOrderDetailPage() {
 
             {order.quotedAt && (
               <p className="text-xs text-gray-500 mt-4">
-                Sent on {new Date(order.quotedAt).toLocaleString('en-PH')}
+                Sent on {formatDateTime(order.quotedAt)}
               </p>
             )}
 
@@ -380,7 +381,7 @@ export default function CustomerOrderDetailPage() {
             {order.quotationStatus === 'accepted' && order.respondedAt && (
               <div className="mt-4 p-4 bg-green-50 rounded-lg">
                 <p className="text-sm font-medium text-green-800">
-                  Customer accepted on {new Date(order.respondedAt).toLocaleString('en-PH')}
+                  Customer accepted on {formatDateTime(order.respondedAt)}
                 </p>
                 {order.customerResponseNotes && (
                   <p className="text-sm text-green-700 mt-1">{order.customerResponseNotes}</p>
@@ -391,7 +392,7 @@ export default function CustomerOrderDetailPage() {
             {order.quotationStatus === 'rejected' && order.respondedAt && (
               <div className="mt-4 p-4 bg-red-50 rounded-lg">
                 <p className="text-sm font-medium text-red-800">
-                  Customer rejected on {new Date(order.respondedAt).toLocaleString('en-PH')}
+                  Customer rejected on {formatDateTime(order.respondedAt)}
                 </p>
                 {order.customerResponseNotes && (
                   <p className="text-sm text-red-700 mt-1">Reason: {order.customerResponseNotes}</p>

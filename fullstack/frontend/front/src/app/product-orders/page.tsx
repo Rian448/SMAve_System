@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth, hasAccess } from '@/context/AuthContext';
 import { api, ProductOrder, ProductOrderTransfer } from '@/lib/api';
@@ -236,10 +237,7 @@ export default function ProductOrdersPage() {
                       Branch: {order.branchName || 'N/A'}
                     </p>
                     <p className="text-sm text-gray-500">
-                      {new Date(order.createdAt).toLocaleDateString('en-PH', {
-                        year: 'numeric', month: 'short', day: 'numeric',
-                        hour: '2-digit', minute: '2-digit',
-                      })}
+                      {formatDate(order.createdAt)}
                     </p>
                   </div>
 
@@ -369,7 +367,7 @@ export default function ProductOrdersPage() {
                       </p>
                     </div>
                     <p className="text-xs text-gray-400 shrink-0">
-                      {new Date(transfer.createdAt).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' })}
+                      {formatDate(transfer.createdAt)}
                     </p>
                   </div>
 
@@ -434,7 +432,7 @@ export default function ProductOrdersPage() {
                       </p>
                     </div>
                     <p className="text-xs text-gray-400 shrink-0">
-                      {new Date(transfer.createdAt).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' })}
+                      {formatDate(transfer.createdAt)}
                     </p>
                   </div>
 

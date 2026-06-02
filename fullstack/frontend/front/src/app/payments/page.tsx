@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useEffect, useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, PaymentRecord, PaymentSummary } from '@/lib/api';
@@ -155,7 +156,7 @@ export default function PaymentsPage() {
                       onClick={() => router.push(`/sales/${record.jobOrderId}`)}
                     >
                       <td className="px-5 py-3.5 text-sm text-gray-600 whitespace-nowrap">
-                        {new Date(record.createdAt).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' })}
+                        {formatDate(record.createdAt)}
                       </td>
                       <td className="px-5 py-3.5">
                         <span className="text-sm font-medium text-[#011c72]">

@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus } from '@/lib/api';
@@ -1028,7 +1029,7 @@ export default function InventoryPage() {
                 </p>
                 {aiStatus?.lastUploadedAt && (
                   <p className="text-xs text-gray-400 mt-1">
-                    Last upload: {new Date(aiStatus.lastUploadedAt).toLocaleString('en-PH')} — {aiStatus.uploadRows} rows, {aiStatus.uploadItems} items
+                    Last upload: {formatDateTime(aiStatus.lastUploadedAt)} — {aiStatus.uploadRows} rows, {aiStatus.uploadItems} items
                   </p>
                 )}
               </div>
@@ -1462,9 +1463,7 @@ export default function InventoryPage() {
                       .map((log) => (
                         <tr key={log.id} className="hover:bg-gray-50 transition-colors">
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                            {new Date(log.usedAt).toLocaleString('en-PH', {
-                              year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
-                            })}
+                            {formatDateTime(log.usedAt)}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                             {log.materialName || 'N/A'}
@@ -1671,7 +1670,7 @@ export default function InventoryPage() {
                       <div className="flex flex-wrap items-center gap-3 mb-3">
                         <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
                           {aiStatus.predictions.length} items analyzed
-                          {aiStatus.computedAt && ` · Updated ${new Date(aiStatus.computedAt).toLocaleString('en-PH')}`}
+                          {aiStatus.computedAt && ` · Updated ${formatDateTime(aiStatus.computedAt)}`}
                         </span>
                         <span className="text-xs font-medium text-gray-500">·</span>
                         <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-medium">{urgent} urgent (&le;7 days)</span>
@@ -1750,7 +1749,7 @@ export default function InventoryPage() {
                                   {p.restockByDate ? (
                                     <div>
                                       <div className={`text-sm font-medium ${isUrgent ? 'text-red-600' : 'text-gray-700'}`}>
-                                        {new Date(p.restockByDate).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' })}
+                                        {formatDate(p.restockByDate)}
                                       </div>
                                       <div className="text-xs text-gray-400">{p.avgLeadTimeDays}d lead time</div>
                                     </div>
@@ -1811,7 +1810,7 @@ export default function InventoryPage() {
                     }).map(l => (
                       <tr key={l.id} className="hover:bg-gray-50 transition-colors">
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                          {new Date(l.createdAt).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' })}
+                          {formatDate(l.createdAt)}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <span className="text-sm font-medium text-gray-900">{l.materialName || 'N/A'}</span>

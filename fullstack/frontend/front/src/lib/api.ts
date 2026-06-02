@@ -715,6 +715,12 @@ export interface SalesReport {
   };
   statusBreakdown: Array<{ status: string; count: number; value: number }>;
   dailySales: Array<{ date: string; orders: number; revenue: number }>;
+  premadeSummary: {
+    totalOrders: number;
+    completedRevenue: number;
+    pendingRevenue: number;
+  };
+  premadeDailySales: Array<{ date: string; orders: number; revenue: number }>;
 }
 
 export interface InventoryReport {
@@ -735,6 +741,39 @@ export interface InventoryReport {
     unit: string;
   }>;
   categoryBreakdown: Array<{ category: string; count: number; value: number }>;
+}
+
+export interface BranchSettlementEntry {
+  orderId: number;
+  orderNumber: string;
+  orderStatus: string;
+  orderDate: string;
+  sourceBranchId: number;
+  sourceBranchName: string;
+  pickupBranchId: number;
+  pickupBranchName: string;
+  itemsValue: number;
+  transferStatus: string;
+  isSettled: boolean;
+  customerName: string;
+}
+
+export interface BranchSettlementSummary {
+  sourceBranchId: number;
+  sourceBranchName: string;
+  pickupBranchId: number;
+  pickupBranchName: string;
+  totalOwed: number;
+  totalSettled: number;
+  outstandingBalance: number;
+  pendingOrders: number;
+  completedOrders: number;
+}
+
+export interface BranchSettlementReport {
+  period: { startDate: string; endDate: string };
+  summary: BranchSettlementSummary[];
+  entries: BranchSettlementEntry[];
 }
 
 export interface AuditLog {
@@ -1367,6 +1406,8 @@ export const api = {
     getMyOrders: () => fetchApi<ProductOrder[]>('/api/product-orders/my-orders'),
 
     getPickupQueue: () => fetchApi<ProductOrder[]>('/api/product-orders/pickup-queue'),
+
+    getDirectSales: () => fetchApi<ProductOrder[]>('/api/product-orders/direct-sales'),
   },
 
   // ==================
@@ -1439,6 +1480,13 @@ export const api = {
       if (params?.userId) query.append('userId', params.userId.toString());
       if (params?.module) query.append('module', params.module);
       return fetchApi<AuditLog[]>(`/api/reports/audit-trail?${query}`);
+    },
+
+    getSettlementReport: (params?: { startDate?: string; endDate?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.startDate) query.append('startDate', params.startDate);
+      if (params?.endDate) query.append('endDate', params.endDate);
+      return fetchApi<BranchSettlementReport>(`/api/reports/branch-settlement?${query}`);
     },
   },
 

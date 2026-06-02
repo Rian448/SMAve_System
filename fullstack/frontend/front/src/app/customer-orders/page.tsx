@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect } from 'react';
 import { useAuth, hasAccess } from '@/context/AuthContext';
 import { api, CustomerOrder } from '@/lib/api';
@@ -149,13 +150,7 @@ export default function CustomerOrdersPage() {
                       </span>
                     </div>
                     <p className="text-sm text-gray-600 mt-1">
-                      {new Date(order.createdAt).toLocaleDateString('en-PH', {
-                        year: 'numeric',
-                        month: 'short',
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit'
-                      })}
+                      {formatDate(order.createdAt)}
                     </p>
                   </div>
                   <Link

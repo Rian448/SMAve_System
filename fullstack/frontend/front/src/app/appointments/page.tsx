@@ -1,6 +1,7 @@
 ﻿'use client';
 import { useState, useEffect } from 'react';
 import { api, Appointment } from '@/lib/api';
+import { formatDate as fmtDate, formatDateTime } from '@/lib/dateUtils';
 import { useAuth, hasAccess } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 
@@ -37,6 +38,8 @@ export default function AppointmentsPage() {
   const [confirmedTime, setConfirmedTime] = useState('');
   const [updating, setUpdating] = useState(false);
   const [modalError, setModalError] = useState('');
+  const [noShowId, setNoShowId] = useState<number | null>(null);
+  const [noShowLoading, setNoShowLoading] = useState(false);
 
   useEffect(() => {
     if (!authLoading && !isAuthenticated) {
@@ -110,6 +113,24 @@ export default function AppointmentsPage() {
     setModalError('');
   };
 
+  const handleNoShow = async (appointmentId: number) => {
+    setNoShowLoading(true);
+    setError('');
+    try {
+      const res = await api.appointments.markNoShow(appointmentId);
+      const fresh = await api.appointments.getAll(statusFilter !== 'all' ? statusFilter : undefined);
+      if (fresh.status === 'success' && fresh.data) setAppointments(fresh.data);
+      setNoShowId(null);
+      if (res.data?.isBlocked) {
+        setError(`No-show recorded. This phone number has been automatically blocked after ${res.data.strikeCount} strikes.`);
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to mark no-show');
+    } finally {
+      setNoShowLoading(false);
+    }
+  };
+
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'pending':   return 'bg-yellow-100 text-yellow-800';
@@ -135,10 +156,7 @@ export default function AppointmentsPage() {
     );
   };
 
-  const formatDate = (dateStr: string) =>
-    new Date(dateStr).toLocaleDateString('en-US', {
-      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-    });
+  const formatDate = (dateStr: string) => fmtDate(dateStr);
 
   const applyDateFilter = (list: Appointment[]) => {
     if (dateFilter === 'all') return list;
@@ -382,7 +400,7 @@ export default function AppointmentsPage() {
                     )}
 
                     <div className="mt-3 text-xs text-gray-400">
-                      Created: {new Date(appointment.createdAt).toLocaleString()}
+                      Created: {formatDateTime(appointment.createdAt)}
                     </div>
                   </div>
 
@@ -415,13 +433,42 @@ export default function AppointmentsPage() {
                       </>
                     )}
                     {appointment.status === 'confirmed' && (
-                      <button
-                        onClick={() => handleStatusUpdate(appointment.id, 'completed')}
-                        disabled={updating}
-                        className="px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-medium hover:bg-green-700 transition-colors disabled:opacity-50"
-                      >
-                        Mark Completed
-                      </button>
+                      <>
+                        <button
+                          onClick={() => handleStatusUpdate(appointment.id, 'completed')}
+                          disabled={updating}
+                          className="px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-medium hover:bg-green-700 transition-colors disabled:opacity-50"
+                        >
+                          Mark Completed
+                        </button>
+                        {noShowId === appointment.id ? (
+                          <div className="flex flex-col gap-1 p-2 bg-red-50 border border-red-200 rounded-lg">
+                            <p className="text-xs text-red-700 font-medium text-center">Customer didn&apos;t show up?</p>
+                            <div className="flex gap-1">
+                              <button
+                                onClick={() => handleNoShow(appointment.id)}
+                                disabled={noShowLoading}
+                                className="flex-1 px-2 py-1 rounded bg-red-600 text-white text-xs font-medium hover:bg-red-700 disabled:opacity-50"
+                              >
+                                {noShowLoading ? '...' : 'Yes, No-Show'}
+                              </button>
+                              <button
+                                onClick={() => setNoShowId(null)}
+                                className="flex-1 px-2 py-1 rounded bg-gray-100 text-gray-600 text-xs font-medium hover:bg-gray-200"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setNoShowId(appointment.id)}
+                            className="px-4 py-2 rounded-lg bg-red-50 text-red-600 border border-red-200 text-sm font-medium hover:bg-red-100 transition-colors"
+                          >
+                            Mark No-Show
+                          </button>
+                        )}
+                      </>
                     )}
                     {(appointment.status === 'completed' || appointment.status === 'cancelled') && (
                       <span className="text-center text-sm text-gray-500">No actions available</span>
