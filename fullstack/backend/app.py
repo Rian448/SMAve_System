@@ -724,7 +724,7 @@ def customer_order_to_dict(order):
         'status': order.status,
         'branchId': order.branch_id,
         'branchName': order.branch.name if order.branch else None,
-        'createdAt': order.created_at.isoformat() if order.created_at else None,
+        'createdAt': fmt_dt(order.created_at),
         # Quotation fields
         'userId': order.user_id,
         'quotationItems': order.quotation_items,
@@ -732,8 +732,8 @@ def customer_order_to_dict(order):
         'quotationStatus': order.quotation_status,
         'quotationNotes': order.quotation_notes,
         'customerResponseNotes': order.customer_response_notes,
-        'quotedAt': order.quoted_at.isoformat() if order.quoted_at else None,
-        'respondedAt': order.responded_at.isoformat() if order.responded_at else None
+        'quotedAt': fmt_dt(order.quoted_at),
+        'respondedAt': fmt_dt(order.responded_at)
     }
 
 def branch_to_dict(branch):
@@ -744,7 +744,7 @@ def branch_to_dict(branch):
         'address': branch.address,
         'isWarehouse': branch.is_warehouse,
         'isActive': branch.is_active,
-        'createdAt': branch.created_at.isoformat() if branch.created_at else None
+        'createdAt': fmt_dt(branch.created_at)
     }
 
 def seed_default_users():
@@ -1202,7 +1202,7 @@ def login():
         'branch': user.branch,
         'branchId': user.branch_id,
         'isActive': user.is_active,
-        'createdAt': datetime.utcnow().isoformat()
+        'createdAt': fmt_dt(datetime.utcnow())
     }
 
     db.session.commit()
@@ -1446,7 +1446,7 @@ def material_usage_to_dict(log):
         'usedBy': log.used_by,
         'usedByName': log.used_by_user.full_name if log.used_by_user else None,
         'notes': log.notes,
-        'usedAt': log.created_at.isoformat() if log.created_at else None
+        'usedAt': fmt_dt(log.created_at)
     }
 
 @app.route('/api/inventory/raw-materials', methods=['GET'])
@@ -1974,7 +1974,7 @@ def waste_log_to_dict(log):
         'branchName': log.branch.name if log.branch else None,
         'loggedBy': log.logged_by,
         'loggedByName': log.logged_by_user.full_name if log.logged_by_user else None,
-        'createdAt': log.created_at.isoformat() if log.created_at else None,
+        'createdAt': fmt_dt(log.created_at),
     }
 
 @app.route('/api/inventory/waste-logs', methods=['GET'])
@@ -2031,7 +2031,7 @@ def payment_record_to_dict(p):
         'notes': p.notes,
         'recordedBy': p.recorded_by,
         'recordedByName': p.recorder.full_name if p.recorder else None,
-        'createdAt': p.created_at.isoformat() if p.created_at else None,
+        'createdAt': fmt_dt(p.created_at),
     }
 
 @app.route('/api/payments', methods=['GET'])
@@ -3069,7 +3069,7 @@ def appointment_to_dict(appointment):
         'contactMethod': appointment.contact_method,
         'branchId': appointment.branch_id,
         'branchName': branch_name,
-        'preferredDate': appointment.preferred_date.isoformat() if appointment.preferred_date else None,
+        'preferredDate': fmt_dt(appointment.preferred_date),
         'preferredTime': appointment.preferred_time,
         'description': appointment.description,
         'vehicleInfo': appointment.vehicle_info,
@@ -3406,6 +3406,18 @@ def generate_product_order_number():
         candidate = f"PO-{max_id + offset:04d}"
     return candidate
 
+def fmt_dt(dt):
+    """Serialize a datetime (or date) to ISO-8601 string.
+    Datetime objects get a 'Z' suffix so the browser knows it's UTC and
+    converts to local time (Asia/Manila = UTC+8) automatically.
+    Plain date objects are returned as 'YYYY-MM-DD' with no suffix."""
+    if dt is None:
+        return None
+    if hasattr(dt, 'hour'):   # datetime — append Z
+        return dt.isoformat() + 'Z'
+    return dt.isoformat()     # date only
+
+
 def notify_branch_users(branch_id, notif_type, title, message, data=None):
     """Push an in-app notification to all active supervisors of a branch + all admins."""
     if branch_id is None:
@@ -3440,11 +3452,11 @@ def transfer_to_dict(transfer):
         'items': transfer.items,
         'status': transfer.status,
         'transferredByName': transfer.transferred_by.full_name if transfer.transferred_by else None,
-        'transferredAt': transfer.transferred_at.isoformat() if transfer.transferred_at else None,
+        'transferredAt': fmt_dt(transfer.transferred_at),
         'receivedByName': transfer.received_by.full_name if transfer.received_by else None,
-        'receivedAt': transfer.received_at.isoformat() if transfer.received_at else None,
-        'createdAt': transfer.created_at.isoformat() if transfer.created_at else None,
-        'updatedAt': transfer.updated_at.isoformat() if transfer.updated_at else None,
+        'receivedAt': fmt_dt(transfer.received_at),
+        'createdAt': fmt_dt(transfer.created_at),
+        'updatedAt': fmt_dt(transfer.updated_at),
     }
 
 def product_order_to_dict(order):
@@ -3477,8 +3489,8 @@ def product_order_to_dict(order):
         'amountPaid': order.amount_paid or 0.0,
         'remainingBalance': max(0.0, (order.total_amount or 0.0) - (order.amount_paid or 0.0)),
         'notes': order.notes,
-        'createdAt': order.created_at.isoformat() if order.created_at else None,
-        'updatedAt': order.updated_at.isoformat() if order.updated_at else None
+        'createdAt': fmt_dt(order.created_at),
+        'updatedAt': fmt_dt(order.updated_at)
     }
 
 def can_manage_product_order(user, order):
@@ -3504,7 +3516,7 @@ def build_product_order_timeline(order):
             'type': 'created',
             'title': 'Order Placed',
             'description': f"Customer placed order {order.order_number}",
-            'timestamp': order.created_at.isoformat(),
+            'timestamp': fmt_dt(order.created_at),
             'by': order.customer_name or 'Customer'
         })
 
@@ -3513,7 +3525,7 @@ def build_product_order_timeline(order):
             'type': 'status',
             'title': 'Status Updated',
             'description': f"Order status is now {order.status}",
-            'timestamp': order.updated_at.isoformat() if order.updated_at else order.created_at.isoformat(),
+            'timestamp': fmt_dt(order.updated_at) if order.updated_at else fmt_dt(order.created_at),
             'by': 'Branch Staff'
         })
 
@@ -3522,7 +3534,7 @@ def build_product_order_timeline(order):
             'type': 'payment',
             'title': 'Payment Updated',
             'description': f"Payment status is now {order.payment_status}",
-            'timestamp': order.updated_at.isoformat() if order.updated_at else order.created_at.isoformat(),
+            'timestamp': fmt_dt(order.updated_at) if order.updated_at else fmt_dt(order.created_at),
             'by': 'Branch Staff'
         })
 
@@ -3712,6 +3724,29 @@ def get_pickup_queue():
             .distinct()
             .order_by(ProductOrder.created_at.desc())
             .all())
+    return jsonify({'status': 'success', 'data': [product_order_to_dict(o) for o in orders]})
+
+
+@app.route('/api/product-orders/direct-sales', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def get_direct_sales():
+    """Single-branch premade orders where this branch is both the supplier and pickup.
+    These don't generate transfers — they're direct sales from the branch's own stock."""
+    user = request.current_user
+    if user['role'] == 'supervisor':
+        branch_id = user.get('branchId')
+        if not branch_id:
+            return jsonify({'status': 'success', 'data': []})
+        orders = (ProductOrder.query
+                  .filter_by(branch_id=branch_id, shipment_status='not_needed')
+                  .order_by(ProductOrder.created_at.desc())
+                  .all())
+    else:
+        orders = (ProductOrder.query
+                  .filter_by(shipment_status='not_needed')
+                  .order_by(ProductOrder.created_at.desc())
+                  .all())
     return jsonify({'status': 'success', 'data': [product_order_to_dict(o) for o in orders]})
 
 
@@ -4033,7 +4068,19 @@ def update_product_order(order_id):
 
             for product, requested_qty in stock_deductions:
                 product.quantity = float(product.quantity) - requested_qty
-    
+
+            # Notify every source branch that their sold items have been delivered
+            source_branch_ids = {t.source_branch_id for t in (order.transfers or [])}
+            for src_id in source_branch_ids:
+                notify_branch_users(
+                    src_id,
+                    'sale_completed',
+                    f'Sale Completed — {order.order_number}',
+                    f'Your items have been delivered to the customer at {order.branch.name if order.branch else "pickup branch"}.',
+                    {'orderId': order.id, 'orderNumber': order.order_number,
+                     'pickupBranchName': order.branch.name if order.branch else None},
+                )
+
     if 'paymentStatus' in data:
         if data['paymentStatus'] not in valid_payment_statuses:
             return jsonify({'status': 'error', 'message': 'Invalid payment status'}), 400
@@ -4133,7 +4180,7 @@ def get_notifications():
             'id': n.id, 'type': n.type, 'title': n.title,
             'message': n.message, 'data': n.data,
             'isRead': n.is_read,
-            'createdAt': n.created_at.isoformat() if n.created_at else None,
+            'createdAt': fmt_dt(n.created_at),
         } for n in notifs],
         'unreadCount': unread,
     })
@@ -4476,7 +4523,7 @@ def register_customer():
     token = secrets.token_hex(32)
     sessions[token] = {
         'userId': new_user.id,
-        'createdAt': datetime.utcnow().isoformat()
+        'createdAt': fmt_dt(datetime.utcnow())
     }
     
     log_action(new_user.id, new_user.full_name, 'REGISTER', 'Auth', 'New customer registered', request.remote_addr or '0.0.0.0')
@@ -4755,22 +4802,23 @@ def get_sales_report():
     except ValueError:
         return jsonify({'status': 'error', 'message': 'Invalid date format'}), 400
 
-    query = JobOrder.query.filter(
+    # ── Job Orders ──
+    jo_query = JobOrder.query.filter(
         JobOrder.created_at >= start_dt,
         JobOrder.created_at <= end_dt
     )
 
-    # Branch-level access control
+    user_branch = None
     if user['role'] != 'administrator':
         user_branch = Branch.query.filter_by(name=user['branch']).first()
         if user_branch:
-            query = query.filter(JobOrder.branch_id == user_branch.id)
+            jo_query = jo_query.filter(JobOrder.branch_id == user_branch.id)
         else:
-            query = query.filter(False)
+            jo_query = jo_query.filter(False)
     elif branch_id:
-        query = query.filter(JobOrder.branch_id == int(branch_id))
+        jo_query = jo_query.filter(JobOrder.branch_id == int(branch_id))
 
-    orders = query.all()
+    orders = jo_query.all()
 
     total_orders = len(orders)
     total_revenue = sum(float(o.total_price) for o in orders if o.status == 'completed')
@@ -4794,6 +4842,58 @@ def get_sales_report():
             if o.status == 'completed':
                 daily_sales[date]['revenue'] += float(o.total_price)
 
+    # ── Premade Product Orders ──
+    # Each branch gets revenue credit for items where sourceBranchId == their branch.
+    # This covers both single-branch orders (all items attributed to one branch) and
+    # multi-branch orders (each branch credited for items they supplied).
+    all_product_orders = ProductOrder.query.filter(
+        ProductOrder.created_at >= start_dt,
+        ProductOrder.created_at <= end_dt
+    ).all()
+
+    premade_revenue = 0.0
+    premade_pending = 0.0
+    premade_orders_seen = set()
+    premade_daily = {}
+
+    for po in all_product_orders:
+        # Determine how much of this order is attributed to the current branch
+        if user['role'] != 'administrator':
+            if not user_branch:
+                continue
+            attributed_total = sum(
+                float(item.get('total', 0))
+                for item in (po.items or [])
+                if item.get('sourceBranchId') == user_branch.id
+            )
+        elif branch_id:
+            bid = int(branch_id)
+            attributed_total = sum(
+                float(item.get('total', 0))
+                for item in (po.items or [])
+                if item.get('sourceBranchId') == bid
+            )
+        else:
+            # Admin with no branch filter: full order value
+            attributed_total = float(po.total_amount or 0)
+
+        if attributed_total <= 0:
+            continue
+
+        premade_orders_seen.add(po.id)
+        date = po.created_at.strftime('%Y-%m-%d') if po.created_at else ''
+        if date not in premade_daily:
+            premade_daily[date] = {'orders': 0, 'revenue': 0}
+        premade_daily[date]['orders'] += 1
+
+        if po.status == 'completed':
+            premade_revenue += attributed_total
+            if date:
+                premade_daily[date]['revenue'] += attributed_total
+        elif po.status not in ('cancelled',):
+            # pending / processing / ready all count as pending revenue
+            premade_pending += attributed_total
+
     report = {
         'period': {'startDate': start_date, 'endDate': end_date},
         'summary': {
@@ -4810,7 +4910,16 @@ def get_sales_report():
         'dailySales': [
             {'date': k, 'orders': v['orders'], 'revenue': v['revenue']}
             for k, v in sorted(daily_sales.items())
-        ]
+        ],
+        'premadeSummary': {
+            'totalOrders': len(premade_orders_seen),
+            'completedRevenue': round(premade_revenue, 2),
+            'pendingRevenue': round(premade_pending, 2),
+        },
+        'premadeDailySales': [
+            {'date': k, 'orders': v['orders'], 'revenue': v['revenue']}
+            for k, v in sorted(premade_daily.items())
+        ],
     }
 
     return jsonify({'status': 'success', 'data': report})
@@ -4885,6 +4994,108 @@ def get_inventory_report():
     }
 
     return jsonify({'status': 'success', 'data': report})
+
+
+@app.route('/api/reports/branch-settlement', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def get_branch_settlement():
+    """Inter-branch settlement ledger.
+    For every completed multi-branch order, records how much each source branch
+    is owed by the pickup branch for items they supplied.
+    Admins see all branches; supervisors see entries affecting their branch."""
+    user = request.current_user
+    start_date = request.args.get('startDate', (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
+    end_date = request.args.get('endDate', datetime.now().strftime('%Y-%m-%d'))
+
+    try:
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Invalid date format'}), 400
+
+    # Only multi-branch orders (have transfers) are relevant for settlement
+    orders = (ProductOrder.query
+              .filter(ProductOrder.created_at >= start_dt,
+                      ProductOrder.created_at <= end_dt)
+              .filter(ProductOrder.shipment_status != 'not_needed')
+              .all())
+
+    user_branch_id = user.get('branchId') if user['role'] != 'administrator' else None
+
+    entries = []
+    # branch_pair_totals: (source_branch_id, pickup_branch_id) -> {owed, settled}
+    branch_pair_totals = {}
+
+    for order in orders:
+        transfers = order.transfers or []
+        if not transfers:
+            continue
+        for transfer in transfers:
+            src_id = transfer.source_branch_id
+            pickup_id = order.branch_id
+            if src_id == pickup_id:
+                continue
+
+            # Supervisor filter: only show entries involving their branch
+            if user_branch_id and user_branch_id not in (src_id, pickup_id):
+                continue
+
+            items_value = sum(
+                float(item.get('total', 0)) for item in (transfer.items or [])
+            )
+            is_settled = order.status == 'completed'
+
+            entries.append({
+                'orderId': order.id,
+                'orderNumber': order.order_number,
+                'orderStatus': order.status,
+                'orderDate': fmt_dt(order.created_at),
+                'sourceBranchId': src_id,
+                'sourceBranchName': transfer.source_branch.name if transfer.source_branch else f'Branch {src_id}',
+                'pickupBranchId': pickup_id,
+                'pickupBranchName': order.branch.name if order.branch else f'Branch {pickup_id}',
+                'itemsValue': round(items_value, 2),
+                'transferStatus': transfer.status,
+                'isSettled': is_settled,
+                'customerName': order.customer_name,
+            })
+
+            key = (src_id, pickup_id)
+            if key not in branch_pair_totals:
+                branch_pair_totals[key] = {
+                    'sourceBranchId': src_id,
+                    'sourceBranchName': transfer.source_branch.name if transfer.source_branch else f'Branch {src_id}',
+                    'pickupBranchId': pickup_id,
+                    'pickupBranchName': order.branch.name if order.branch else f'Branch {pickup_id}',
+                    'totalOwed': 0.0,
+                    'totalSettled': 0.0,
+                    'pendingOrders': 0,
+                    'completedOrders': 0,
+                }
+            branch_pair_totals[key]['totalOwed'] += items_value
+            if is_settled:
+                branch_pair_totals[key]['totalSettled'] += items_value
+                branch_pair_totals[key]['completedOrders'] += 1
+            else:
+                branch_pair_totals[key]['pendingOrders'] += 1
+
+    summary = []
+    for v in branch_pair_totals.values():
+        v['totalOwed'] = round(v['totalOwed'], 2)
+        v['totalSettled'] = round(v['totalSettled'], 2)
+        v['outstandingBalance'] = round(v['totalOwed'] - v['totalSettled'], 2)
+        summary.append(v)
+
+    return jsonify({
+        'status': 'success',
+        'data': {
+            'period': {'startDate': start_date, 'endDate': end_date},
+            'summary': summary,
+            'entries': entries,
+        }
+    })
+
 
 @app.route('/api/reports/audit-trail', methods=['GET'])
 @require_auth
@@ -5336,10 +5547,10 @@ def get_worker_tasks():
                 'status': task.status,
                 'estimatedHours': task.estimated_hours,
                 'actualHours': task.actual_hours,
-                'dueDate': task.due_date.isoformat() if task.due_date else None,
-                'startedAt': task.started_at.isoformat() if task.started_at else None,
-                'completedAt': task.completed_at.isoformat() if task.completed_at else None,
-                'createdAt': task.created_at.isoformat(),
+                'dueDate': fmt_dt(task.due_date),
+                'startedAt': fmt_dt(task.started_at),
+                'completedAt': fmt_dt(task.completed_at),
+                'createdAt': fmt_dt(task.created_at),
                 'notes': task.notes
             })
         
@@ -5384,10 +5595,10 @@ def get_worker_task_detail(task_id):
                 'status': task.status,
                 'estimatedHours': task.estimated_hours,
                 'actualHours': task.actual_hours,
-                'dueDate': task.due_date.isoformat() if task.due_date else None,
-                'startedAt': task.started_at.isoformat() if task.started_at else None,
-                'completedAt': task.completed_at.isoformat() if task.completed_at else None,
-                'createdAt': task.created_at.isoformat(),
+                'dueDate': fmt_dt(task.due_date),
+                'startedAt': fmt_dt(task.started_at),
+                'completedAt': fmt_dt(task.completed_at),
+                'createdAt': fmt_dt(task.created_at),
                 'notes': task.notes
             }
         }
@@ -5433,8 +5644,8 @@ def update_task_status(task_id):
             'task': {
                 'id': task.id,
                 'status': task.status,
-                'startedAt': task.started_at.isoformat() if task.started_at else None,
-                'completedAt': task.completed_at.isoformat() if task.completed_at else None
+                'startedAt': fmt_dt(task.started_at),
+                'completedAt': fmt_dt(task.completed_at)
             }
         }
     })
@@ -5558,10 +5769,10 @@ def get_all_tasks_admin():
             'status': task.status,
             'estimatedHours': task.estimated_hours,
             'actualHours': task.actual_hours,
-            'dueDate': task.due_date.isoformat() if task.due_date else None,
-            'startedAt': task.started_at.isoformat() if task.started_at else None,
-            'completedAt': task.completed_at.isoformat() if task.completed_at else None,
-            'createdAt': task.created_at.isoformat(),
+            'dueDate': fmt_dt(task.due_date),
+            'startedAt': fmt_dt(task.started_at),
+            'completedAt': fmt_dt(task.completed_at),
+            'createdAt': fmt_dt(task.created_at),
             'notes': task.notes
         })
     
@@ -5734,7 +5945,7 @@ def list_managed_workers():
                     'workType': w.work_type,
                     'ratePerHour': w.rate_per_hour,
                     'isActive': w.is_active,
-                    'createdAt': w.created_at.isoformat(),
+                    'createdAt': fmt_dt(w.created_at),
                 }
                 for w in workers
             ]
@@ -5828,13 +6039,13 @@ def list_worker_assignments():
             'jobOrderRef': a.job_order_ref,
             'jobOrderDbId': a.job_order_db_id,
             'description': a.description,
-            'startTime': a.start_time.isoformat() if a.start_time else None,
-            'endTime': a.end_time.isoformat() if a.end_time else None,
+            'startTime': fmt_dt(a.start_time),
+            'endTime': fmt_dt(a.end_time),
             'hoursWorked': a.hours_worked,
             'pay': a.pay,
             'status': a.status,
             'notes': a.notes,
-            'createdAt': a.created_at.isoformat(),
+            'createdAt': fmt_dt(a.created_at),
         })
     return jsonify({'status': 'success', 'data': {'assignments': result}})
 
@@ -5936,8 +6147,8 @@ def update_worker_assignment(assignment_id):
                 'workerName': assignment.worker.name if assignment.worker else '',
                 'jobOrderRef': assignment.job_order_ref,
                 'description': assignment.description,
-                'startTime': assignment.start_time.isoformat() if assignment.start_time else None,
-                'endTime': assignment.end_time.isoformat() if assignment.end_time else None,
+                'startTime': fmt_dt(assignment.start_time),
+                'endTime': fmt_dt(assignment.end_time),
                 'hoursWorked': assignment.hours_worked,
                 'pay': assignment.pay,
                 'status': assignment.status,
@@ -5967,7 +6178,7 @@ def health_check():
         'status': 'success',
         'message': 'Seatmakers Avenue API is running!',
         'version': '1.0.0',
-        'timestamp': datetime.now().isoformat()
+        'timestamp': fmt_dt(datetime.utcnow())
     })
 
 @app.route('/api/debug/branches-and-orders', methods=['GET'])
@@ -6224,8 +6435,8 @@ def _compute_prediction_for_item(item_id):
         'currentStock': current_stock,
         'avgDailyUsage': round(avg_daily_usage, 3),
         'daysUntilStockout': days_until_stockout,
-        'stockoutDate': stockout_date.isoformat() if stockout_date else None,
-        'restockByDate': restock_by.isoformat() if restock_by else None,
+        'stockoutDate': fmt_dt(stockout_date),
+        'restockByDate': fmt_dt(restock_by),
         'suggestedRestockQty': int(suggested_qty),
         'avgLeadTimeDays': avg_lead_time,
         'confidence': confidence,
@@ -6413,8 +6624,8 @@ def get_ai_predictions():
         'processedItems': cache.processed_items,
         'uploadRows': cache.upload_rows,
         'uploadItems': cache.upload_items,
-        'lastUploadedAt': cache.last_uploaded_at.isoformat() if cache.last_uploaded_at else None,
-        'computedAt': cache.computed_at.isoformat() if cache.computed_at else None,
+        'lastUploadedAt': fmt_dt(cache.last_uploaded_at),
+        'computedAt': fmt_dt(cache.computed_at),
         'error': cache.error_message,
     }})
 

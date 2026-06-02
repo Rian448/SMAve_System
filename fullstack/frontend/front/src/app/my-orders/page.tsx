@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect, Suspense } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { api, Appointment, CustomerOrder, ProductOrder } from '@/lib/api';
@@ -293,13 +294,7 @@ function MyOrdersContent() {
                           )}
                         </div>
                         <p className="text-sm text-gray-600 mt-1">
-                          {new Date(order.createdAt).toLocaleDateString('en-PH', {
-                            year: 'numeric',
-                            month: 'short',
-                            day: 'numeric',
-                            hour: '2-digit',
-                            minute: '2-digit'
-                          })}
+                          {formatDate(order.createdAt)}
                         </p>
                         <p className="text-sm text-gray-500 mt-1">
                           Branch: {order.branchName || 'N/A'}
@@ -361,13 +356,7 @@ function MyOrdersContent() {
                           )}
                         </div>
                         <p className="text-sm text-gray-600 mt-1">
-                          {new Date(order.createdAt).toLocaleDateString('en-PH', {
-                            year: 'numeric',
-                            month: 'short',
-                            day: 'numeric',
-                            hour: '2-digit',
-                            minute: '2-digit'
-                          })}
+                          {formatDate(order.createdAt)}
                         </p>
                         <p className="text-sm text-gray-500 mt-1">
                           Source Branch: {order.branchName || 'N/A'}
@@ -435,11 +424,7 @@ function MyOrdersContent() {
                             </span>
                           </div>
                           <p className="text-sm text-gray-600 mt-1">
-                            Preferred: {new Date(appointment.preferredDate).toLocaleDateString('en-PH', {
-                              year: 'numeric',
-                              month: 'short',
-                              day: 'numeric'
-                            })}
+                            Preferred: {formatDate(appointment.preferredDate)}
                             {appointment.preferredTime ? ` • ${appointment.preferredTime}` : ''}
                           </p>
                           {appointment.confirmedTime && (
@@ -460,13 +445,7 @@ function MyOrdersContent() {
                         </div>
 
                         <p className="text-sm text-gray-500">
-                          Requested on {new Date(appointment.createdAt).toLocaleDateString('en-PH', {
-                            year: 'numeric',
-                            month: 'short',
-                            day: 'numeric',
-                            hour: '2-digit',
-                            minute: '2-digit'
-                          })}
+                          Requested on {formatDate(appointment.createdAt)}
                         </p>
                       </div>
 

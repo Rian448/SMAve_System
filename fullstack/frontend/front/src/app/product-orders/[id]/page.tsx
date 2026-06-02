@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
@@ -150,10 +151,7 @@ export default function ProductOrderDetailPage() {
   const printReceipt = () => {
     if (!order) return;
 
-    const dateTime = new Date(order.createdAt).toLocaleString('en-PH', {
-      year: 'numeric', month: 'long', day: 'numeric',
-      hour: '2-digit', minute: '2-digit', hour12: true,
-    });
+    const dateTime = formatDateTime(order.createdAt);
 
     const printedAt = new Date().toLocaleString('en-PH', {
       year: 'numeric', month: 'long', day: 'numeric',
@@ -367,9 +365,7 @@ export default function ProductOrderDetailPage() {
   const printInvoice = () => {
     if (!order) return;
 
-    const invoiceDate = new Date(order.createdAt).toLocaleDateString('en-PH', {
-      year: 'numeric', month: 'long', day: 'numeric',
-    });
+    const invoiceDate = formatDate(order.createdAt);
     const printedAt = new Date().toLocaleString('en-PH', {
       year: 'numeric', month: 'long', day: 'numeric',
       hour: '2-digit', minute: '2-digit', hour12: true,
@@ -843,7 +839,7 @@ export default function ProductOrderDetailPage() {
               <p className="text-gray-600"><span className="font-medium text-gray-800">Customer:</span> {order.customerName}</p>
               <p className="text-gray-600"><span className="font-medium text-gray-800">Phone:</span> {order.customerPhone}</p>
               <p className="text-gray-600"><span className="font-medium text-gray-800">Pickup Branch:</span> {order.branchName || 'N/A'}</p>
-              <p className="text-gray-600"><span className="font-medium text-gray-800">Created:</span> {new Date(order.createdAt).toLocaleString('en-PH')}</p>
+              <p className="text-gray-600"><span className="font-medium text-gray-800">Created:</span> {formatDateTime(order.createdAt)}</p>
               {isAdmin && order.groupId && (
                 <p className="text-gray-600"><span className="font-medium text-gray-800">Group ID:</span> <code className="font-mono text-xs bg-gray-100 px-1 py-0.5 rounded">{order.groupId}</code></p>
               )}
@@ -899,7 +895,7 @@ export default function ProductOrderDetailPage() {
                     <div>
                       <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Invoice Date</p>
                       <p className="text-sm font-medium text-gray-800 mt-0.5">
-                        {new Date(order.createdAt).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' })}
+                        {formatDate(order.createdAt)}
                       </p>
                     </div>
                     <div>
@@ -1027,7 +1023,7 @@ export default function ProductOrderDetailPage() {
                       </span>
                       <p className="text-sm font-medium text-gray-900">{event.title}</p>
                     </div>
-                    <span className="text-xs text-gray-500">{event.timestamp ? new Date(event.timestamp).toLocaleString('en-PH') : 'N/A'}</span>
+                    <span className="text-xs text-gray-500">{event.timestamp ? formatDateTime(event.timestamp) : 'N/A'}</span>
                   </div>
                   <p className="text-sm text-gray-600 mt-1">{event.description}</p>
                   {event.by && <p className="text-xs text-gray-500 mt-1">By: {event.by}</p>}

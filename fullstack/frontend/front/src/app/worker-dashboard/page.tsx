@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
@@ -156,7 +157,7 @@ export default function WorkerDashboard() {
 
   const formatDateTime = (s?: string) => {
     if (!s) return '—';
-    return new Date(s).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    return formatDateTime(s);
   };
 
   const statusBadge = (status: string) => {

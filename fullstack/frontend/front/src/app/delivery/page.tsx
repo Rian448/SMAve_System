@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useNotifications } from '@/context/NotificationContext';
 import { api, TransferDashboardItem, TransferSummary } from '@/lib/api';
+import { formatDateTime } from '@/lib/dateUtils';
 import Link from 'next/link';
 
 type StatusFilter = 'all' | 'pending' | 'transferred' | 'received';
@@ -117,8 +118,7 @@ export default function DeliveryPage() {
       .map(t => t.id)
   );
 
-  const fmt = (iso?: string) =>
-    iso ? new Date(iso).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+  const fmt = (iso?: string) => iso ? formatDateTime(iso) : '—';
 
   const selectedPending = [...selected].filter(id => transfers.find(t => t.id === id)?.status === 'pending');
   const selectedTransferred = [...selected].filter(id => transfers.find(t => t.id === id)?.status === 'transferred');

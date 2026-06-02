@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
@@ -175,21 +176,13 @@ export default function PurchaseOrderDetailPage() {
                 <div>
                   <label className="text-sm font-medium text-gray-500">Created Date</label>
                   <p className="mt-1 text-base font-medium text-gray-900">
-                    {new Date(purchaseOrder.createdAt).toLocaleDateString('en-PH', { 
-                      year: 'numeric', 
-                      month: 'long', 
-                      day: 'numeric' 
-                    })}
+                    {formatDate(purchaseOrder.createdAt)}
                   </p>
                 </div>
                 <div>
                   <label className="text-sm font-medium text-gray-500">Expected Delivery</label>
                   <p className="mt-1 text-base font-medium text-gray-900">
-                    {new Date(purchaseOrder.expectedDelivery).toLocaleDateString('en-PH', { 
-                      year: 'numeric', 
-                      month: 'long', 
-                      day: 'numeric' 
-                    })}
+                    {formatDate(purchaseOrder.expectedDelivery)}
                   </p>
                 </div>
               </div>
@@ -337,7 +330,7 @@ export default function PurchaseOrderDetailPage() {
                   <div>
                     <p className="text-sm font-medium text-gray-900">Order Created</p>
                     <p className="text-xs text-gray-500">
-                      {new Date(purchaseOrder.createdAt).toLocaleDateString('en-PH')}
+                      {formatDate(purchaseOrder.createdAt)}
                     </p>
                   </div>
                 </div>
@@ -351,7 +344,7 @@ export default function PurchaseOrderDetailPage() {
                     <div>
                       <p className="text-sm font-medium text-gray-900">Order Approved</p>
                       <p className="text-xs text-gray-500">
-                        {new Date(purchaseOrder.approvedAt).toLocaleDateString('en-PH')}
+                        {formatDate(purchaseOrder.approvedAt)}
                       </p>
                     </div>
                   </div>
@@ -365,7 +358,7 @@ export default function PurchaseOrderDetailPage() {
                     <div>
                       <p className="text-sm font-medium text-gray-900">Order Received</p>
                       <p className="text-xs text-gray-500">
-                        {new Date(purchaseOrder.createdAt).toLocaleDateString('en-PH')}
+                        {formatDate(purchaseOrder.createdAt)}
                       </p>
                     </div>
                   </div>

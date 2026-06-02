@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { api, CustomerOrder } from '@/lib/api';
@@ -174,13 +175,7 @@ export default function MyOrderDetailPage() {
             </span>
           </div>
           <p className="text-gray-600 mt-2">
-            Placed on {new Date(order.createdAt).toLocaleDateString('en-PH', {
-              year: 'numeric',
-              month: 'long',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit'
-            })}
+            Placed on {formatDate(order.createdAt)}
           </p>
         </div>
       </div>
@@ -295,7 +290,7 @@ export default function MyOrderDetailPage() {
             </div>
 
             <p className="text-green-700 mb-4">
-              You accepted this quotation on {order.respondedAt ? new Date(order.respondedAt).toLocaleDateString('en-PH') : 'N/A'}. 
+              You accepted this quotation on {order.respondedAt ? formatDate(order.respondedAt) : 'N/A'}. 
               Our team will begin working on your order.
             </p>
 

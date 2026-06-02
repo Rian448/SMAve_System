@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord, ManagedWorker } from '@/lib/api';
@@ -470,7 +471,7 @@ export default function JobOrderDetailPage() {
               Job Order <span className="text-[#011c72]">#{jobOrder.jobOrderId}</span>
             </h1>
             <p className="text-sm text-gray-500 mt-1">
-              Created {new Date(jobOrder.createdAt).toLocaleDateString('en-PH', { month: 'long', day: 'numeric', year: 'numeric' })}
+              Created {formatDate(jobOrder.createdAt)}
             </p>
           </div>
           <div className="no-print flex flex-wrap items-center gap-3">
@@ -641,7 +642,7 @@ export default function JobOrderDetailPage() {
               <div>
                 <p className="text-xs text-gray-400">Estimated Completion</p>
                 <p className="text-sm font-medium text-gray-700">
-                  {jobOrder.estimatedCompletion ? new Date(jobOrder.estimatedCompletion).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Not set'}
+                  {jobOrder.estimatedCompletion ? formatDate(jobOrder.estimatedCompletion) : 'Not set'}
                 </p>
               </div>
               <div>
@@ -1137,7 +1138,7 @@ export default function JobOrderDetailPage() {
                     {paymentRecords.map(record => (
                       <tr key={record.id} className="hover:bg-gray-50">
                         <td className="px-4 py-3 text-sm text-gray-600">
-                          {new Date(record.createdAt).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' })}
+                          {formatDate(record.createdAt)}
                         </td>
                         <td className="px-4 py-3 text-sm font-semibold text-green-700 text-right">
                           {formatCurrency(record.amount)}
@@ -1498,9 +1499,9 @@ export default function JobOrderDetailPage() {
             </div>
             <div style={{fontSize:'9pt', textAlign:'right', lineHeight:'1.7'}}>
               <div><strong style={{fontSize:'10pt'}}>{jobOrder.jobOrderId}</strong></div>
-              <div>Date: {new Date(jobOrder.createdAt).toLocaleDateString('en-PH',{month:'long',day:'numeric',year:'numeric'})}</div>
+              <div>Date: {formatDate(jobOrder.createdAt)}</div>
               {jobOrder.completedAt && (
-                <div>Completed: {new Date(jobOrder.completedAt).toLocaleDateString('en-PH',{month:'long',day:'numeric',year:'numeric'})}</div>
+                <div>Completed: {formatDate(jobOrder.completedAt)}</div>
               )}
             </div>
           </div>

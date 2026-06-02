@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth, hasAccess } from '@/context/AuthContext';
 import { api, DashboardStats, Alert, Activity } from '@/lib/api';
+import { formatDateTime as formatDate } from '@/lib/dateUtils';
 import Link from 'next/link';
 
 export default function Dashboard() {
@@ -61,14 +62,6 @@ export default function Dashboard() {
     }).format(amount);
   };
 
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString('en-PH', {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  };
 
   const getAlertIcon = (type: string) => {
     switch (type) {

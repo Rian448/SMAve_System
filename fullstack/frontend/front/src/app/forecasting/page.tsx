@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect } from 'react';
 import { api, InventoryForecastData } from '@/lib/api';
 import Link from 'next/link';
@@ -290,7 +291,7 @@ export default function ForecastingPage() {
                             </td>
                             <td className="px-5 py-3 text-sm text-gray-700">
                               {item.restockByDate
-                                ? new Date(item.restockByDate).toLocaleDateString('en-PH', { month: 'short', day: 'numeric' })
+                                ? formatDate(item.restockByDate)
                                 : '—'}
                             </td>
                             <td className="px-5 py-3 text-sm font-medium text-gray-900">{item.suggestedRestockQty} units</td>

@@ -1,4 +1,5 @@
 ﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -178,7 +179,7 @@ export default function PurchaseOrdersPage() {
                         {formatCurrency(po.totalAmount)}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                        {new Date(po.expectedDelivery).toLocaleDateString('en-PH')}
+                        {formatDate(po.expectedDelivery)}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <span className={`px-3 py-1 text-xs font-medium rounded-full ${getStatusColor(po.status)}`}>
@@ -186,7 +187,7 @@ export default function PurchaseOrdersPage() {
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                        {new Date(po.createdAt).toLocaleDateString('en-PH')}
+                        {formatDate(po.createdAt)}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <div className="flex items-center justify-end gap-2">

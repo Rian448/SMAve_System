@@ -1,7 +1,8 @@
 ﻿'use client';
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, SalesReport, InventoryReport, AuditLog } from '@/lib/api';
+import { api, SalesReport, InventoryReport, AuditLog, BranchSettlementReport } from '@/lib/api';
+import { formatShortDate, formatDayLabel, formatDateTime } from '@/lib/dateUtils';
 
 function getDateRange(range: string): { startDate: string; endDate: string } {
   const now = new Date();
@@ -19,8 +20,7 @@ function getDateRange(range: string): { startDate: string; endDate: string } {
 const formatCurrency = (amount: number) =>
   new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(amount);
 
-const formatDate = (dateStr: string) =>
-  new Date(dateStr + 'T00:00:00').toLocaleDateString('en-PH', { month: 'short', day: 'numeric' });
+const formatDate = (dateStr: string) => formatShortDate(dateStr);
 
 const STATUS_COLORS: Record<string, string> = {
   completed:   'bg-green-500',
@@ -62,10 +62,11 @@ export default function ReportsPage() {
   const [dateRange, setDateRange]       = useState('month');
   const [customStart, setCustomStart]   = useState('');
   const [customEnd, setCustomEnd]       = useState('');
-  const [salesData, setSalesData]       = useState<SalesReport | null>(null);
-  const [inventoryData, setInventoryData] = useState<InventoryReport | null>(null);
-  const [auditData, setAuditData]       = useState<AuditLog[] | null>(null);
-  const [auditModule, setAuditModule]   = useState('');
+  const [salesData, setSalesData]           = useState<SalesReport | null>(null);
+  const [inventoryData, setInventoryData]   = useState<InventoryReport | null>(null);
+  const [auditData, setAuditData]           = useState<AuditLog[] | null>(null);
+  const [settlementData, setSettlementData] = useState<BranchSettlementReport | null>(null);
+  const [auditModule, setAuditModule]       = useState('');
 
   const isAdmin        = user?.role === 'administrator';
   const canViewInventory = isAdmin || user?.role === 'supervisor';
@@ -87,6 +88,9 @@ export default function ReportsPage() {
       } else if (reportType === 'audit' && isAdmin) {
         const res = await api.reports.getAuditTrail({ ...dates, ...(auditModule ? { module: auditModule } : {}) });
         setAuditData(res.data || null);
+      } else if (reportType === 'settlement') {
+        const res = await api.reports.getSettlementReport(dates);
+        setSettlementData(res.data || null);
       }
     } catch {
       setError('Failed to load report data. Please try again.');
@@ -103,8 +107,9 @@ export default function ReportsPage() {
 
     if (reportType === 'sales' && salesData) {
       filename = 'sales-report.csv';
-      csv = 'Date,Orders,Revenue\n' +
-        salesData.dailySales.map(d => `${d.date},${d.orders},${d.revenue}`).join('\n');
+      const jobRows = salesData.dailySales.map(d => `"Job Order","${d.date}",${d.orders},${d.revenue}`);
+      const premadeRows = (salesData.premadeDailySales || []).map(d => `"Premade Sale","${d.date}",${d.orders},${d.revenue}`);
+      csv = 'Type,Date,Orders,Revenue\n' + [...jobRows, ...premadeRows].join('\n');
     } else if (reportType === 'inventory' && inventoryData) {
       filename = 'inventory-report.csv';
       csv = 'Category,Items,Value\n' +
@@ -113,6 +118,12 @@ export default function ReportsPage() {
       filename = 'audit-trail.csv';
       csv = 'Timestamp,User,Module,Action,Details\n' +
         auditData.map(l => `"${l.timestamp}","${l.userName}","${l.module}","${l.action}","${l.details}"`).join('\n');
+    } else if (reportType === 'settlement' && settlementData) {
+      filename = 'branch-settlement.csv';
+      csv = 'Order,Date,Source Branch,Pickup Branch,Items Value,Transfer Status,Settled,Customer\n' +
+        settlementData.entries.map(e =>
+          `"${e.orderNumber}","${e.orderDate?.slice(0,10) || ''}","${e.sourceBranchName}","${e.pickupBranchName}",${e.itemsValue},"${e.transferStatus}",${e.isSettled},"${e.customerName}"`
+        ).join('\n');
     }
 
     if (!csv) return;
@@ -148,9 +159,18 @@ export default function ReportsPage() {
         </svg>
       ),
     }] : []),
+    {
+      id: 'settlement', name: 'Branch Settlement',
+      icon: (
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+        </svg>
+      ),
+    },
   ];
 
   const showDateFilter = reportType !== 'inventory';
+  const isSettlement = reportType === 'settlement';
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -289,39 +309,75 @@ export default function ReportsPage() {
               </div>
             ) : salesData ? (
               <>
-                {/* Summary cards */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                  <SummaryCard
-                    label="Total Revenue"
-                    value={formatCurrency(salesData.summary.totalRevenue)}
-                    sub={`Period: ${formatDate(salesData.period.startDate)} – ${formatDate(salesData.period.endDate)}`}
-                    color="text-green-600"
-                  />
-                  <SummaryCard
-                    label="Total Orders"
-                    value={salesData.summary.totalOrders.toString()}
-                    sub={`${salesData.summary.completedOrders} completed`}
-                    color="text-blue-600"
-                  />
-                  <SummaryCard
-                    label="Avg. Order Value"
-                    value={formatCurrency(salesData.summary.averageOrderValue)}
-                    color="text-[#011c72]"
-                  />
-                  <SummaryCard
-                    label="Pending Revenue"
-                    value={formatCurrency(salesData.summary.pendingRevenue)}
-                    sub="Unpaid balances"
-                    color="text-red-600"
-                  />
+                {/* Custom Job Order Summary cards */}
+                <div className="mb-2">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Custom Job Orders</p>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <SummaryCard
+                      label="Job Order Revenue"
+                      value={formatCurrency(salesData.summary.totalRevenue)}
+                      sub={`Period: ${formatDate(salesData.period.startDate)} – ${formatDate(salesData.period.endDate)}`}
+                      color="text-green-600"
+                    />
+                    <SummaryCard
+                      label="Total Job Orders"
+                      value={salesData.summary.totalOrders.toString()}
+                      sub={`${salesData.summary.completedOrders} completed`}
+                      color="text-blue-600"
+                    />
+                    <SummaryCard
+                      label="Avg. Order Value"
+                      value={formatCurrency(salesData.summary.averageOrderValue)}
+                      color="text-[#011c72]"
+                    />
+                    <SummaryCard
+                      label="Pending Balances"
+                      value={formatCurrency(salesData.summary.pendingRevenue)}
+                      sub="Unpaid job orders"
+                      color="text-red-600"
+                    />
+                  </div>
                 </div>
+
+                {/* Premade Product Order Summary cards */}
+                {salesData.premadeSummary && (
+                  <div className="mb-6">
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3 mt-6">Premade Product Sales</p>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      <SummaryCard
+                        label="Premade Revenue"
+                        value={formatCurrency(salesData.premadeSummary.completedRevenue)}
+                        sub="Completed premade orders"
+                        color="text-teal-600"
+                      />
+                      <SummaryCard
+                        label="Premade Orders"
+                        value={salesData.premadeSummary.totalOrders.toString()}
+                        sub="Orders with your items"
+                        color="text-teal-600"
+                      />
+                      <SummaryCard
+                        label="Combined Revenue"
+                        value={formatCurrency(salesData.summary.totalRevenue + salesData.premadeSummary.completedRevenue)}
+                        sub="Job orders + premade"
+                        color="text-green-600"
+                      />
+                      <SummaryCard
+                        label="Premade Pending"
+                        value={formatCurrency(salesData.premadeSummary.pendingRevenue)}
+                        sub="In-progress premade"
+                        color="text-orange-600"
+                      />
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
                   {/* Daily Sales Trend */}
                   <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
                     <div className="px-6 py-4 border-b border-gray-200">
                       <h2 className="text-base font-semibold text-gray-900">Daily Sales Trend</h2>
-                      <p className="text-xs text-gray-500 mt-0.5">Revenue per day</p>
+                      <p className="text-xs text-gray-500 mt-0.5">Job order revenue per day</p>
                     </div>
                     <div className="p-6">
                       {salesData.dailySales.length === 0 ? (
@@ -332,10 +388,25 @@ export default function ReportsPage() {
                     </div>
                   </div>
 
-                  {/* Order Status Breakdown */}
+                  {/* Premade Daily Sales Trend */}
                   <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
                     <div className="px-6 py-4 border-b border-gray-200">
-                      <h2 className="text-base font-semibold text-gray-900">Order Status Breakdown</h2>
+                      <h2 className="text-base font-semibold text-gray-900">Premade Sales Trend</h2>
+                      <p className="text-xs text-gray-500 mt-0.5">Premade product revenue per day (your branch's items)</p>
+                    </div>
+                    <div className="p-6">
+                      {!salesData.premadeDailySales || salesData.premadeDailySales.length === 0 ? (
+                        <p className="text-center text-gray-400 py-12 text-sm">No premade sales data for this period</p>
+                      ) : (
+                        <DailyBarChart data={salesData.premadeDailySales} color="teal" />
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Order Status Breakdown */}
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden lg:col-span-2">
+                    <div className="px-6 py-4 border-b border-gray-200">
+                      <h2 className="text-base font-semibold text-gray-900">Job Order Status Breakdown</h2>
                       <p className="text-xs text-gray-500 mt-0.5">Distribution by current status</p>
                     </div>
                     <div className="p-6">
@@ -471,7 +542,7 @@ export default function ReportsPage() {
                       ) : auditData.map((log) => (
                         <tr key={log.id} className="hover:bg-gray-50 transition-colors">
                           <td className="px-5 py-3 whitespace-nowrap text-gray-500">
-                            {new Date(log.timestamp).toLocaleString('en-PH')}
+                            {formatDateTime(log.timestamp)}
                           </td>
                           <td className="px-5 py-3 whitespace-nowrap font-medium text-gray-900">{log.userName}</td>
                           <td className="px-5 py-3 whitespace-nowrap">
@@ -493,6 +564,118 @@ export default function ReportsPage() {
             )}
           </>
         )}
+
+        {/* ── BRANCH SETTLEMENT ── */}
+        {isSettlement && (
+          <>
+            {loading ? (
+              <div className="space-y-3">{[...Array(4)].map((_, i) => <div key={i} className="h-16 bg-gray-200 rounded-xl animate-pulse" />)}</div>
+            ) : settlementData ? (
+              <>
+                {/* Summary cards */}
+                {settlementData.summary.length === 0 ? (
+                  <EmptyState message="No inter-branch transfers found for this period." />
+                ) : (
+                  <>
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-4 text-sm text-amber-800">
+                      This ledger shows how much each <strong>pickup branch owes</strong> to each <strong>source branch</strong> for items supplied in multi-branch orders.
+                      A row is marked <strong>Settled</strong> once the order is completed.
+                    </div>
+                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden mb-6">
+                      <div className="px-6 py-4 border-b border-gray-200">
+                        <h2 className="text-base font-semibold text-gray-900">Settlement Summary by Branch Pair</h2>
+                        <p className="text-xs text-gray-500 mt-0.5">Outstanding balance = total owed minus already-completed orders</p>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
+                            <tr>
+                              <th className="px-5 py-3 text-left">Source Branch</th>
+                              <th className="px-5 py-3 text-left">Pickup Branch</th>
+                              <th className="px-5 py-3 text-right">Total Owed</th>
+                              <th className="px-5 py-3 text-right">Settled</th>
+                              <th className="px-5 py-3 text-right">Outstanding</th>
+                              <th className="px-5 py-3 text-center">Orders</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {settlementData.summary.map((row, i) => (
+                              <tr key={i} className="hover:bg-gray-50">
+                                <td className="px-5 py-3 font-medium text-gray-900">{row.sourceBranchName}</td>
+                                <td className="px-5 py-3 text-gray-700">{row.pickupBranchName}</td>
+                                <td className="px-5 py-3 text-right text-gray-900">₱{row.totalOwed.toLocaleString()}</td>
+                                <td className="px-5 py-3 text-right text-green-600">₱{row.totalSettled.toLocaleString()}</td>
+                                <td className="px-5 py-3 text-right">
+                                  <span className={`font-semibold ${row.outstandingBalance > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                    ₱{row.outstandingBalance.toLocaleString()}
+                                  </span>
+                                </td>
+                                <td className="px-5 py-3 text-center text-gray-500">
+                                  {row.completedOrders} done / {row.pendingOrders} pending
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* Per-order ledger */}
+                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                      <div className="px-6 py-4 border-b border-gray-200">
+                        <h2 className="text-base font-semibold text-gray-900">Order-Level Ledger</h2>
+                        <p className="text-xs text-gray-500 mt-0.5">{settlementData.entries.length} entries</p>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
+                            <tr>
+                              <th className="px-5 py-3 text-left">Order</th>
+                              <th className="px-5 py-3 text-left">Customer</th>
+                              <th className="px-5 py-3 text-left">Source Branch</th>
+                              <th className="px-5 py-3 text-left">Pickup Branch</th>
+                              <th className="px-5 py-3 text-right">Items Value</th>
+                              <th className="px-5 py-3 text-center">Transfer</th>
+                              <th className="px-5 py-3 text-center">Settled</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {settlementData.entries.map((e, i) => (
+                              <tr key={i} className="hover:bg-gray-50">
+                                <td className="px-5 py-3">
+                                  <p className="font-medium text-[#011c72]">{e.orderNumber}</p>
+                                  <p className="text-xs text-gray-400">{e.orderDate?.slice(0,10)}</p>
+                                </td>
+                                <td className="px-5 py-3 text-gray-700">{e.customerName}</td>
+                                <td className="px-5 py-3 text-gray-700">{e.sourceBranchName}</td>
+                                <td className="px-5 py-3 text-gray-700">{e.pickupBranchName}</td>
+                                <td className="px-5 py-3 text-right font-medium text-gray-900">₱{e.itemsValue.toLocaleString()}</td>
+                                <td className="px-5 py-3 text-center">
+                                  <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                                    e.transferStatus === 'received' ? 'bg-green-100 text-green-700' :
+                                    e.transferStatus === 'transferred' ? 'bg-blue-100 text-blue-700' :
+                                    'bg-yellow-100 text-yellow-700'
+                                  }`}>{e.transferStatus}</span>
+                                </td>
+                                <td className="px-5 py-3 text-center">
+                                  {e.isSettled
+                                    ? <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">Settled</span>
+                                    : <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500">Pending</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </>
+            ) : (
+              <EmptyState message="No settlement data available." />
+            )}
+          </>
+        )}
       </main>
     </div>
   );
@@ -511,10 +694,12 @@ function EmptyState({ message }: { message: string }) {
   );
 }
 
-function DailyBarChart({ data }: { data: Array<{ date: string; orders: number; revenue: number }> }) {
+function DailyBarChart({ data, color = 'amber' }: { data: Array<{ date: string; orders: number; revenue: number }>; color?: 'amber' | 'teal' }) {
   const maxRevenue = Math.max(...data.map(d => d.revenue), 1);
-  // Show at most 14 points to keep it readable
   const slice = data.length > 14 ? data.slice(data.length - 14) : data;
+  const barClass = color === 'teal'
+    ? 'bg-gradient-to-t from-teal-500 to-teal-400 hover:from-teal-400 hover:to-teal-300'
+    : 'bg-gradient-to-t from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300';
 
   return (
     <div className="h-48 flex items-end gap-1">
@@ -523,7 +708,7 @@ function DailyBarChart({ data }: { data: Array<{ date: string; orders: number; r
         return (
           <div key={i} className="flex-1 flex flex-col items-center group relative">
             <div
-              className="w-full bg-gradient-to-t from-amber-500 to-amber-400 rounded-t hover:from-amber-400 hover:to-amber-300 transition-colors cursor-pointer"
+              className={`w-full ${barClass} rounded-t transition-colors cursor-pointer`}
               style={{ height: `${h}%`, minHeight: d.revenue > 0 ? '4px' : '0' }}
             />
             {/* Tooltip */}
@@ -533,7 +718,7 @@ function DailyBarChart({ data }: { data: Array<{ date: string; orders: number; r
               <p>{d.orders} orders</p>
             </div>
             <span className="text-[9px] text-gray-400 mt-1 hidden sm:block">
-              {new Date(d.date + 'T00:00:00').getDate()}
+              {formatDayLabel(d.date)}
             </span>
           </div>
         );
