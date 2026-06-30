@@ -28,29 +28,27 @@ function formatDay(iso: string) {
 
 export default function ChatBubble() {
   const { user } = useAuth();
-  const [open, setOpen]       = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput]     = useState('');
-  const [sending, setSending] = useState(false);
-  const [unread, setUnread]   = useState(0);
-  const lastSeenId             = useRef<number>(0);
-  const latestTs               = useRef<string | null>(null);
-  const bottomRef              = useRef<HTMLDivElement>(null);
-  const inputRef               = useRef<HTMLTextAreaElement>(null);
-  const pollRef                = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Only admin + supervisor see the bubble
-  if (!user || (user.role !== 'administrator' && user.role !== 'supervisor')) return null;
+  // ── All hooks unconditionally at the top ──────────────────────────────────
+  const [open, setOpen]         = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput]       = useState('');
+  const [sending, setSending]   = useState(false);
+  const [unread, setUnread]     = useState(0);
+  const lastSeenId  = useRef<number>(0);
+  const latestTs    = useRef<string | null>(null);
+  const bottomRef   = useRef<HTMLDivElement>(null);
+  const inputRef    = useRef<HTMLTextAreaElement>(null);
+  const pollRef     = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchMessages = useCallback(async (sinceParam?: string) => {
+    if (!user) return;
     try {
       const res = await api.chat.list(sinceParam ?? undefined);
-      const msgs: ChatMessage[] = res.data ?? (res as any) ?? [];
-      if (!Array.isArray(msgs)) return;
-      if (msgs.length === 0) return;
+      const msgs: ChatMessage[] = (res as any).data ?? res ?? [];
+      if (!Array.isArray(msgs) || msgs.length === 0) return;
 
       if (sinceParam) {
-        // incremental — append
         setMessages(prev => {
           const existingIds = new Set(prev.map(m => m.id));
           const fresh = msgs.filter(m => !existingIds.has(m.id));
@@ -59,44 +57,46 @@ export default function ChatBubble() {
           return [...prev, ...fresh];
         });
       } else {
-        // initial load — replace
         setMessages(msgs);
         lastSeenId.current = msgs[msgs.length - 1]?.id ?? 0;
       }
-
       const last = msgs[msgs.length - 1];
       if (last) latestTs.current = last.createdAt;
     } catch { /* ignore */ }
-  }, [open, user.id]);
+  }, [open, user]);
 
   // Initial load
-  useEffect(() => { fetchMessages(); }, []);
+  useEffect(() => { fetchMessages(); }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // Polling: 3s when open, 15s when closed
   useEffect(() => {
     if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = setInterval(() => {
-      fetchMessages(latestTs.current ?? undefined);
-    }, open ? 3000 : 15000);
+    pollRef.current = setInterval(
+      () => fetchMessages(latestTs.current ?? undefined),
+      open ? 3000 : 15000,
+    );
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [open, fetchMessages]);
 
   // Scroll to bottom when messages change and panel is open
   useEffect(() => {
-    if (open) {
-      setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
-    }
+    if (open) setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
   }, [messages, open]);
 
-  // Clear unread when opening
+  // Clear unread and focus input when opening
   useEffect(() => {
     if (open) {
       setUnread(0);
       lastSeenId.current = messages[messages.length - 1]?.id ?? 0;
       setTimeout(() => inputRef.current?.focus(), 100);
     }
-  }, [open]);
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Early return AFTER all hooks ─────────────────────────────────────────
+  const allowed = user?.role === 'administrator' || user?.role === 'supervisor';
+  if (!allowed) return null;
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
   const send = async () => {
     const text = input.trim();
     if (!text || sending) return;
@@ -120,13 +120,14 @@ export default function ChatBubble() {
   const grouped: { day: string; msgs: ChatMessage[] }[] = [];
   for (const m of messages) {
     const day = formatDay(m.createdAt);
-    if (grouped.length === 0 || grouped[grouped.length - 1].day !== day) {
+    if (!grouped.length || grouped[grouped.length - 1].day !== day) {
       grouped.push({ day, msgs: [m] });
     } else {
       grouped[grouped.length - 1].msgs.push(m);
     }
   }
 
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="fixed bottom-5 right-5 z-50 flex flex-col items-end gap-3">
 
@@ -166,7 +167,6 @@ export default function ChatBubble() {
             )}
             {grouped.map(group => (
               <div key={group.day}>
-                {/* Day separator */}
                 <div className="flex items-center gap-2 my-2">
                   <div className="flex-1 h-px bg-gray-100" />
                   <span className="text-[10px] text-gray-400 font-medium px-1">{group.day}</span>
@@ -174,30 +174,26 @@ export default function ChatBubble() {
                 </div>
                 <div className="space-y-2">
                   {group.msgs.map((m, i) => {
-                    const isMe = m.senderId === user.id;
-                    const prevSame = i > 0 && group.msgs[i - 1].senderId === m.senderId;
-                    const avatarColor = ROLE_COLOR[m.senderRole] || 'bg-gray-500';
+                    const isMe      = m.senderId === user!.id;
+                    const prevSame  = i > 0 && group.msgs[i - 1].senderId === m.senderId;
+                    const avatarBg  = ROLE_COLOR[m.senderRole] || 'bg-gray-500';
                     return (
                       <div key={m.id} className={`flex items-end gap-2 ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
-                        {/* Avatar — only show on first of a run */}
                         <div className="w-7 shrink-0">
                           {!prevSame && !isMe && (
-                            <div className={`w-7 h-7 rounded-full ${avatarColor} flex items-center justify-center text-white text-[10px] font-bold`}>
+                            <div className={`w-7 h-7 rounded-full ${avatarBg} flex items-center justify-center text-white text-[10px] font-bold`}>
                               {initials(m.senderName)}
                             </div>
                           )}
                         </div>
-                        <div className={`flex flex-col max-w-[200px] ${isMe ? 'items-end' : 'items-start'}`}>
+                        <div className={`flex flex-col max-w-50 ${isMe ? 'items-end' : 'items-start'}`}>
                           {!prevSame && (
                             <span className="text-[10px] text-gray-400 mb-0.5 px-1">
                               {isMe ? 'You' : m.senderName}
                             </span>
                           )}
-                          <div className={`px-3 py-2 rounded-2xl text-sm leading-snug
-                            ${isMe
-                              ? 'bg-[#011c72] text-white rounded-br-sm'
-                              : 'bg-gray-100 text-gray-900 rounded-bl-sm'
-                            }`}>
+                          <div className={`px-3 py-2 rounded-2xl text-sm leading-snug whitespace-pre-wrap wrap-break-word
+                            ${isMe ? 'bg-[#011c72] text-white rounded-br-sm' : 'bg-gray-100 text-gray-900 rounded-bl-sm'}`}>
                             {m.content}
                           </div>
                           <span className="text-[10px] text-gray-400 mt-0.5 px-1">{formatTime(m.createdAt)}</span>
@@ -223,13 +219,10 @@ export default function ChatBubble() {
               className="flex-1 resize-none rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent outline-none max-h-24 overflow-y-auto"
               style={{ minHeight: '38px' }}
             />
-            <button
-              onClick={send}
-              disabled={sending || !input.trim()}
+            <button onClick={send} disabled={sending || !input.trim()}
               className="p-2 rounded-xl bg-[#011c72] text-white hover:bg-[#022a9e] disabled:opacity-40 transition-colors shrink-0">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
               </svg>
             </button>
           </div>
@@ -237,11 +230,9 @@ export default function ChatBubble() {
       )}
 
       {/* Bubble button */}
-      <button
-        onClick={() => setOpen(o => !o)}
+      <button onClick={() => setOpen(o => !o)}
         className="relative w-13 h-13 rounded-full bg-[#011c72] text-white shadow-lg hover:bg-[#022a9e] hover:scale-105 active:scale-95 transition-all flex items-center justify-center"
-        title="Team Chat"
-      >
+        title="Team Chat">
         {open ? (
           <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/>
@@ -253,7 +244,7 @@ export default function ChatBubble() {
           </svg>
         )}
         {!open && unread > 0 && (
-          <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+          <span className="absolute -top-1 -right-1 min-w-4.5 h-4.5 px-1 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
             {unread > 9 ? '9+' : unread}
           </span>
         )}
