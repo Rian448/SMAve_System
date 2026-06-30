@@ -11,6 +11,65 @@ const PRIORITY_STYLES: Record<string, { bar: string; badge: string; label: strin
 
 const BLANK_FORM = { title: '', body: '', priority: 'info', isPinned: false };
 
+const inputCls = 'w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm';
+
+function PostForm({ f, setF, onSubmit, onCancel, submitLabel, saving, formError }: {
+  f: typeof BLANK_FORM;
+  setF: (v: typeof BLANK_FORM) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+  submitLabel: string;
+  saving: boolean;
+  formError: string;
+}) {
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 p-6 space-y-4 shadow-sm">
+      {formError && (
+        <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-2 text-sm">{formError}</div>
+      )}
+      <div>
+        <label className="block text-xs font-medium text-gray-500 mb-1.5">Title <span className="text-red-500">*</span></label>
+        <input type="text" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })}
+          placeholder="Announcement title…" className={inputCls} />
+      </div>
+      <div>
+        <label className="block text-xs font-medium text-gray-500 mb-1.5">Message <span className="text-red-500">*</span></label>
+        <textarea rows={4} value={f.body} onChange={(e) => setF({ ...f, body: e.target.value })}
+          placeholder="Write the announcement here…"
+          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm resize-none" />
+      </div>
+      <div className="flex items-center gap-4 flex-wrap">
+        <div>
+          <label className="block text-xs font-medium text-gray-500 mb-1.5">Priority</label>
+          <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs">
+            {(['info', 'warning', 'urgent'] as const).map((p) => (
+              <button key={p} type="button" onClick={() => setF({ ...f, priority: p })}
+                className={`px-3 py-1.5 capitalize ${f.priority === p ? 'bg-[#011c72] text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}>
+                {PRIORITY_STYLES[p].label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <label className="flex items-center gap-2 cursor-pointer mt-4">
+          <input type="checkbox" checked={f.isPinned} onChange={(e) => setF({ ...f, isPinned: e.target.checked })}
+            className="w-4 h-4 rounded border-gray-300 text-[#011c72] focus:ring-[#011c72]" />
+          <span className="text-sm text-gray-700">Pin to top</span>
+        </label>
+      </div>
+      <div className="flex gap-3 pt-1">
+        <button onClick={onSubmit} disabled={saving}
+          className="px-5 py-2 rounded-xl bg-[#011c72] text-white text-sm font-medium hover:bg-[#022494] transition-colors disabled:opacity-60">
+          {saving ? 'Saving…' : submitLabel}
+        </button>
+        <button type="button" onClick={onCancel}
+          className="px-5 py-2 rounded-xl border border-gray-200 text-sm text-gray-600 hover:bg-gray-50 transition-colors">
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function AnnouncementsPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'administrator' || user?.role === 'supervisor';
@@ -94,61 +153,6 @@ export default function AnnouncementsPage() {
     load();
   };
 
-  const inputCls = 'w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm';
-
-  const PostForm = ({ f, setF, onSubmit, onCancel, submitLabel }: {
-    f: typeof BLANK_FORM;
-    setF: (v: typeof BLANK_FORM) => void;
-    onSubmit: () => void;
-    onCancel: () => void;
-    submitLabel: string;
-  }) => (
-    <div className="bg-white rounded-2xl border border-gray-200 p-6 space-y-4 shadow-sm">
-      {formError && (
-        <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-2 text-sm">{formError}</div>
-      )}
-      <div>
-        <label className="block text-xs font-medium text-gray-500 mb-1.5">Title <span className="text-red-500">*</span></label>
-        <input type="text" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })}
-          placeholder="Announcement title…" className={inputCls} />
-      </div>
-      <div>
-        <label className="block text-xs font-medium text-gray-500 mb-1.5">Message <span className="text-red-500">*</span></label>
-        <textarea rows={4} value={f.body} onChange={(e) => setF({ ...f, body: e.target.value })}
-          placeholder="Write the announcement here…"
-          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm resize-none" />
-      </div>
-      <div className="flex items-center gap-4 flex-wrap">
-        <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1.5">Priority</label>
-          <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs">
-            {(['info', 'warning', 'urgent'] as const).map((p) => (
-              <button key={p} type="button" onClick={() => setF({ ...f, priority: p })}
-                className={`px-3 py-1.5 capitalize ${f.priority === p ? 'bg-[#011c72] text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}>
-                {PRIORITY_STYLES[p].label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <label className="flex items-center gap-2 cursor-pointer mt-4">
-          <input type="checkbox" checked={f.isPinned} onChange={(e) => setF({ ...f, isPinned: e.target.checked })}
-            className="w-4 h-4 rounded border-gray-300 text-[#011c72] focus:ring-[#011c72]" />
-          <span className="text-sm text-gray-700">Pin to top</span>
-        </label>
-      </div>
-      <div className="flex gap-3 pt-1">
-        <button onClick={onSubmit} disabled={saving}
-          className="px-5 py-2 rounded-xl bg-[#011c72] text-white text-sm font-medium hover:bg-[#022494] transition-colors disabled:opacity-60">
-          {saving ? 'Saving…' : submitLabel}
-        </button>
-        <button type="button" onClick={onCancel}
-          className="px-5 py-2 rounded-xl border border-gray-200 text-sm text-gray-600 hover:bg-gray-50 transition-colors">
-          Cancel
-        </button>
-      </div>
-    </div>
-  );
-
   return (
     <div className="min-h-screen bg-gray-50">
       <main className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
@@ -183,6 +187,8 @@ export default function AnnouncementsPage() {
               onSubmit={handleCreate}
               onCancel={() => { setShowCreate(false); setForm({ ...BLANK_FORM }); setFormError(''); }}
               submitLabel="Post"
+              saving={saving}
+              formError={formError}
             />
           </div>
         )}
@@ -220,6 +226,8 @@ export default function AnnouncementsPage() {
                         onSubmit={handleEdit}
                         onCancel={() => { setEditingId(null); setFormError(''); }}
                         submitLabel="Save Changes"
+                        saving={saving}
+                        formError={formError}
                       />
                     </div>
                   ) : (
