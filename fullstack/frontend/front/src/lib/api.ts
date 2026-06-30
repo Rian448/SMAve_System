@@ -64,6 +64,32 @@ export interface Alert {
   itemId: number;
 }
 
+export interface Customer {
+  id: number;
+  name: string;
+  phone: string;
+  email: string;
+  address: string;
+  discountPercent?: number | null;
+  promoCode?: string | null;
+  promoDiscount?: number | null;
+  notes: string;
+  createdAt?: string;
+  orderHistory?: CustomerOrderSummary[];
+}
+
+export interface CustomerOrderSummary {
+  id: number;
+  jobOrderId: string;
+  totalPrice: number;
+  status: string;
+  paymentStatus: string;
+  downPayment: number;
+  balance: number;
+  createdAt: string;
+  estimatedCompletion?: string | null;
+}
+
 export interface WorkerProfile {
   id: number;
   userId: number;
@@ -79,6 +105,7 @@ export interface WorkTask {
   taskNumber: string;
   jobOrderId: string;
   workerId?: number;
+  workerName?: string;
   title: string;
   description?: string;
   taskType: string;
@@ -91,6 +118,21 @@ export interface WorkTask {
   completedAt?: string;
   createdAt: string;
   notes?: string;
+  queuePosition?: number | null;
+  isOverdue?: boolean;
+  overdueByHours?: number;
+}
+
+export interface WorkerWorkload {
+  workerId: number;
+  workerName: string;
+  workerType: string;
+  isAvailable: boolean;
+  branchId?: number;
+  activeTask: WorkTask | null;
+  queuedCount: number;
+  queuedTasks: WorkTask[];
+  totalRemainingHours: number;
 }
 
 export interface WorkTaskInput {
@@ -255,6 +297,12 @@ export interface RawMaterial {
   color: string;
   pattern: string;
   unitPrice: number;
+  /** Purchase cost we pay the supplier per unit */
+  costPerUnit?: number;
+  /** Markup % applied on cost to derive unitPrice (e.g. 25 = +25%) */
+  markupPercent?: number;
+  /** Supplier item code / SKU from the stock-in log */
+  sku?: string;
   stockQuantity: number;
   lowStockThreshold: number;
   supplierId?: number;
@@ -369,7 +417,11 @@ export interface RawMaterialInput {
   materialType: string;
   color?: string;
   pattern?: string;
-  unitPrice: number;
+  /** Selling price per unit. Optional when costPerUnit + markupPercent are given (server derives it). */
+  unitPrice?: number;
+  costPerUnit?: number;
+  markupPercent?: number;
+  sku?: string;
   stockQuantity: number;
   lowStockThreshold?: number;
   supplierId?: number | null;
@@ -474,6 +526,7 @@ export interface WorkerAssignment {
   jobOrderRef: string;
   jobOrderDbId?: number;
   description?: string;
+  expectedHours?: number;
   startTime?: string;
   endTime?: string;
   hoursWorked?: number;
@@ -481,6 +534,17 @@ export interface WorkerAssignment {
   status: 'pending' | 'in_progress' | 'completed';
   notes?: string;
   createdAt: string;
+  isOverdue?: boolean;
+  overdueByHours?: number;
+}
+
+export interface WorkerAvailabilityEntry {
+  id: number;
+  managedWorkerId: number;
+  workerName: string;
+  date: string;          // 'YYYY-MM-DD'
+  isAvailable: boolean;  // false = marked unavailable/off
+  note?: string;
 }
 
 export interface VehicleInfo {
@@ -503,6 +567,19 @@ export interface JobOrder {
   description: string;
   vehicleInfo?: VehicleInfo | null;
   items: JobOrderItem[];
+  slipData?: {
+    rows?: Array<{ description: string; hr: string }>;
+    materialCenter?: string;
+    materialSides?: string;
+    materialBack?: string;
+    dStitch?: string;
+    piping?: string;
+    pockets?: string;
+    logo?: string;
+    specification?: string;
+    cutterName?: string;
+    sewerName?: string;
+  } | null;
   estimatedCost: number;
   actualCost: number;
   totalPrice: number;
@@ -792,6 +869,7 @@ export interface Branch {
   name: string;
   code: string;
   address: string;
+  phone?: string;
   isWarehouse: boolean;
   isActive: boolean;
   createdAt?: string;
@@ -1600,6 +1678,9 @@ export const api = {
     
     getWorkersList: () =>
       fetchApi<{ workers: WorkerProfile[] }>('/api/workers/list'),
+
+    getWorkload: () =>
+      fetchApi<{ workload: WorkerWorkload[] }>('/api/workers/workload'),
     
     syncWorkerProfiles: () =>
       fetchApi<{ status: string; message: string; created: number }>('/api/workers/sync', {
@@ -1629,18 +1710,45 @@ export const api = {
       const query = workerId ? `?workerId=${workerId}` : '';
       return fetchApi<{ assignments: WorkerAssignment[] }>(`/api/worker-assignments${query}`);
     },
-    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; notes?: string }) =>
+    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string }) =>
       fetchApi<{ assignment: WorkerAssignment }>('/api/worker-assignments', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: number, data: Partial<{ status: string; hoursWorked: number; notes: string; description: string }>) =>
+    update: (id: number, data: Partial<{ status: string; hoursWorked: number; expectedHours: number; notes: string; description: string }>) =>
       fetchApi<{ assignment: WorkerAssignment }>(`/api/worker-assignments/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
     delete: (id: number) =>
       fetchApi<{ message: string }>(`/api/worker-assignments/${id}`, { method: 'DELETE' }),
+  },
+
+  customers: {
+    search: (q: string) =>
+      fetchApi<Customer[]>(`/api/customers/search?q=${encodeURIComponent(q)}`),
+    list: (q?: string) =>
+      fetchApi<Customer[]>(`/api/customers${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+    get: (id: number) =>
+      fetchApi<Customer>(`/api/customers/${id}`),
+    create: (data: Omit<Customer, 'id' | 'createdAt' | 'orderHistory'>) =>
+      fetchApi<Customer>('/api/customers', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<Omit<Customer, 'id' | 'createdAt' | 'orderHistory'>>) =>
+      fetchApi<Customer>(`/api/customers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  },
+
+  workerAvailability: {
+    get: (params?: { workerId?: number; month?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.workerId) q.append('workerId', String(params.workerId));
+      if (params?.month) q.append('month', params.month);
+      return fetchApi<{ entries: WorkerAvailabilityEntry[] }>(`/api/worker-availability?${q}`);
+    },
+    set: (data: { managedWorkerId: number; date: string; isAvailable: boolean | null; note?: string }) =>
+      fetchApi<{ id?: number; date?: string; isAvailable?: boolean }>('/api/worker-availability', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
   },
 };
 
