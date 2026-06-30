@@ -1,50 +1,57 @@
-'use client';
-import { useState, useEffect } from 'react';
+﻿'use client';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, JobOrder, CustomerOrder } from '@/lib/api';
+import { api, JobOrder, CustomerOrder, ProductOrder, ProductOrderTransfer } from '@/lib/api';
+import { formatDate as _fmtDate } from '@/lib/dateUtils';
 import Link from 'next/link';
 
-type UnifiedOrder = (JobOrder | CustomerOrder) & {
-  orderType: 'job' | 'customer';
+type SalesTab = 'all' | 'custom-jobs' | 'premade-purchase' | 'premade-sales' | 'pickup-queue';
+
+type UnifiedOrder = (JobOrder | CustomerOrder | ProductOrder) & {
+  orderType: 'job' | 'customer' | 'product';
   displayId: string;
   displayStatus: string;
 };
 
 export default function SalesPage() {
   const { user } = useAuth();
+  const [activeTab, setActiveTab] = useState<SalesTab>('all');
   const [orders, setOrders] = useState<UnifiedOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState('');
 
-  useEffect(() => {
-    fetchOrders();
-  }, []);
+  // Premade Sales tab (source branch transfers + direct sales)
+  const [transferRequests, setTransferRequests] = useState<ProductOrderTransfer[]>([]);
+  const [directSales, setDirectSales] = useState<ProductOrder[]>([]);
+  // Pickup Queue tab
+  const [pickupQueue, setPickupQueue] = useState<ProductOrder[]>([]);
+  const [tabLoading, setTabLoading] = useState(false);
+  const [actionError, setActionError] = useState('');
+  const [savingId, setSavingId] = useState<number | null>(null);
 
-  const fetchOrders = async () => {
+  const [transferDateFilter, setTransferDateFilter] = useState<'all' | 'day' | 'week' | 'month' | 'year'>('all');
+
+  const canSeePremadeFeatures = user && ['administrator', 'supervisor'].includes(user.role);
+
+  const fetchOrders = useCallback(async () => {
     try {
       const response = await api.sales.getAllOrders();
+      const productResponse = canSeePremadeFeatures ? await api.productOrders.getAll() : null;
+
       if (response.status === 'success' && response.data) {
-        // Combine and mark order types
         const jobOrders: UnifiedOrder[] = response.data.jobOrders.map(jo => ({
-          ...jo,
-          orderType: 'job' as const,
-          displayId: jo.jobOrderId,
-          displayStatus: jo.status
+          ...jo, orderType: 'job' as const, displayId: jo.jobOrderId, displayStatus: jo.status
         }));
-        
         const customerOrders: UnifiedOrder[] = response.data.customerOrders.map(co => ({
-          ...co,
-          orderType: 'customer' as const,
-          displayId: co.orderNumber,
-          displayStatus: co.status
+          ...co, orderType: 'customer' as const, displayId: co.orderNumber, displayStatus: co.status
         }));
-        
-        // Merge and sort by date
-        const allOrders = [...jobOrders, ...customerOrders].sort((a, b) => 
+        const productOrders: UnifiedOrder[] = (productResponse?.data || []).map(po => ({
+          ...po, orderType: 'product' as const, displayId: po.orderNumber, displayStatus: po.status
+        }));
+        const allOrders = [...jobOrders, ...customerOrders, ...productOrders].sort((a, b) =>
           new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
         );
-        
         setOrders(allOrders);
       }
     } catch (error) {
@@ -53,94 +60,157 @@ export default function SalesPage() {
     } finally {
       setLoading(false);
     }
+  }, [canSeePremadeFeatures]);
+
+  const fetchTabData = useCallback(async () => {
+    if (!canSeePremadeFeatures) return;
+    setTabLoading(true);
+    try {
+      const [transferRes, pickupRes, directRes] = await Promise.all([
+        api.productOrderTransfers.getMyRequests(),
+        api.productOrders.getPickupQueue(),
+        api.productOrders.getDirectSales(),
+      ]);
+      setTransferRequests(transferRes.data || []);
+      setPickupQueue(pickupRes.data || []);
+      setDirectSales(directRes.data || []);
+    } catch (err) {
+      console.error('Failed to load tab data', err);
+    } finally {
+      setTabLoading(false);
+    }
+  }, [canSeePremadeFeatures]);
+
+  useEffect(() => { fetchOrders(); }, [fetchOrders]);
+  useEffect(() => { fetchTabData(); }, [fetchTabData]);
+
+  const markTransferred = async (transferId: number) => {
+    setSavingId(transferId); setActionError('');
+    try {
+      await api.productOrderTransfers.markTransferred(transferId);
+      await fetchTabData();
+    } catch (err: any) {
+      setActionError(err.message || 'Failed to mark as transferred');
+    } finally { setSavingId(null); }
   };
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-PH', {
-      style: 'currency',
-      currency: 'PHP',
-      minimumFractionDigits: 0
-    }).format(amount);
+  const confirmReceipt = async (transferId: number) => {
+    setSavingId(transferId); setActionError('');
+    try {
+      await api.productOrderTransfers.confirmReceipt(transferId);
+      await fetchTabData();
+    } catch (err: any) {
+      setActionError(err.message || 'Failed to confirm receipt');
+    } finally { setSavingId(null); }
   };
 
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString('en-PH', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric'
-    });
-  };
+  const formatDate = (dateString: string) => _fmtDate(dateString);
 
   const getStatusBadge = (status: string) => {
     const statusStyles: Record<string, string> = {
-      pending: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400',
-      processing: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
-      in_progress: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
-      ready_for_installation: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
-      completed: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400',
-      cancelled: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
-      voided: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
-      delivered: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
+      pending: 'bg-yellow-100 text-yellow-700',
+      processing: 'bg-blue-100 text-blue-700',
+      in_progress: 'bg-blue-100 text-blue-700',
+      ready_for_installation: 'bg-orange-100 text-orange-700',
+      ready: 'bg-orange-100 text-orange-700',
+      completed: 'bg-green-100 text-green-700',
+      cancelled: 'bg-red-100 text-red-700',
+      voided: 'bg-red-100 text-red-700',
+      delivered: 'bg-purple-100 text-purple-700',
+      transferred: 'bg-blue-100 text-blue-700',
+      received: 'bg-green-100 text-green-700',
     };
-    return statusStyles[status] || 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400';
+    return statusStyles[status] || 'bg-gray-100 text-gray-700';
   };
 
-  const getOrderDescription = (order: UnifiedOrder) => {
-    if (order.orderType === 'job') {
-      return (order as JobOrder).description || 'N/A';
-    } else {
-      const co = order as CustomerOrder;
-      return co.services.map(s => s.type).join(', ') || 'N/A';
-    }
+  const getTransferStatusLabel = (status: string) => {
+    if (status === 'pending') return 'Awaiting Transfer';
+    if (status === 'transferred') return 'In Transit';
+    if (status === 'received') return 'Received';
+    return status;
   };
+
 
   const getOrderAmount = (order: UnifiedOrder) => {
-    if (order.orderType === 'job') {
-      return (order as JobOrder).totalPrice || 0;
-    } else {
-      return 0; // Customer orders don't have pricing yet
-    }
+    if (order.orderType === 'job') return (order as JobOrder).totalPrice || 0;
+    if (order.orderType === 'product') return (order as ProductOrder).totalAmount || 0;
+    return 0;
   };
 
   const filteredOrders = orders.filter(order => {
-    // Status filter
-    if (filter !== 'all' && order.displayStatus !== filter && 
-        !(filter === 'in_progress' && order.displayStatus === 'processing')) {
-      return false;
-    }
-    
-    // Search filter
+    if (filter !== 'all' && order.displayStatus !== filter &&
+      !(filter === 'in_progress' && order.displayStatus === 'processing')) return false;
     if (searchTerm) {
-      const searchLower = searchTerm.toLowerCase();
-      const customerName = order.customerName.toLowerCase();
-      const orderId = order.displayId.toLowerCase();
-      const vehicleStr = order.vehicleInfo 
-        ? `${order.vehicleInfo.year} ${order.vehicleInfo.make} ${order.vehicleInfo.model}`.toLowerCase()
-        : '';
-      
-      return customerName.includes(searchLower) || 
-             orderId.includes(searchLower) || 
-             vehicleStr.includes(searchLower);
+      const s = searchTerm.toLowerCase();
+      const vi = (order as any).vehicleInfo;
+      return order.customerName.toLowerCase().includes(s) ||
+        order.displayId.toLowerCase().includes(s) ||
+        (vi ? `${vi.year} ${vi.make} ${vi.model}`.toLowerCase().includes(s) : false);
     }
-    
     return true;
   });
 
+  const filteredCustomJobOrders = filteredOrders.filter(o => o.orderType === 'job' || o.orderType === 'customer');
+  const filteredPremadePurchaseOrders = filteredOrders.filter(o => o.orderType === 'product');
+
+  const filteredTransferRequests = transferRequests.filter(t => {
+    if (transferDateFilter === 'all') return true;
+    const now = new Date();
+    const d = new Date(t.createdAt);
+    if (transferDateFilter === 'day') {
+      return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+    }
+    if (transferDateFilter === 'week') {
+      const startOfWeek = new Date(now);
+      startOfWeek.setDate(now.getDate() - now.getDay());
+      startOfWeek.setHours(0, 0, 0, 0);
+      return d >= startOfWeek;
+    }
+    if (transferDateFilter === 'month') {
+      return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+    }
+    if (transferDateFilter === 'year') {
+      return d.getFullYear() === now.getFullYear();
+    }
+    return true;
+  });
+
+  const filteredDirectSales = directSales.filter(order => {
+    if (transferDateFilter === 'all') return true;
+    const now = new Date();
+    const d = new Date(order.createdAt);
+    if (transferDateFilter === 'day') return d.toDateString() === now.toDateString();
+    if (transferDateFilter === 'week') {
+      const startOfWeek = new Date(now);
+      startOfWeek.setDate(now.getDate() - now.getDay());
+      startOfWeek.setHours(0, 0, 0, 0);
+      return d >= startOfWeek;
+    }
+    if (transferDateFilter === 'month') return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+    if (transferDateFilter === 'year') return d.getFullYear() === now.getFullYear();
+    return true;
+  });
+
+  const transferTotal = filteredTransferRequests.reduce((sum, t) =>
+    sum + t.items.reduce((s, i) => s + (i.total || i.unitPrice * i.quantity), 0), 0);
+  const directTotal = filteredDirectSales.reduce((sum, o) => sum + o.totalAmount, 0);
+  const premadeGrandTotal = transferTotal + directTotal;
+  const completedDirectTotal = filteredDirectSales.filter(o => o.status === 'completed').reduce((sum, o) => sum + o.totalAmount, 0);
+  const receivedTransferTotal = filteredTransferRequests.filter(t => t.status === 'received').reduce((sum, t) =>
+    sum + t.items.reduce((s, i) => s + (i.total || i.unitPrice * i.quantity), 0), 0);
+  const premadeTotalRecords = filteredTransferRequests.length + filteredDirectSales.length;
+
   return (
-    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
+    <div className="min-h-screen bg-gray-50">
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-8">
           <div>
-            <h1 className="text-2xl font-bold text-zinc-900 dark:text-white">Sales & Job Orders</h1>
-            <p className="text-zinc-500 dark:text-zinc-400 mt-1">
-              Manage job orders and lineup slips
-            </p>
+            <h1 className="text-2xl font-bold text-gray-900">Sales & Orders</h1>
+            <p className="text-gray-500 mt-1">Manage job orders, premade sales, and pickup queue</p>
           </div>
-          <Link
-            href="/sales/new"
-            className="mt-4 sm:mt-0 inline-flex items-center px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium transition-colors"
-          >
+          <Link href="/sales/new"
+            className="mt-4 sm:mt-0 inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors">
             <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
@@ -148,128 +218,827 @@ export default function SalesPage() {
           </Link>
         </div>
 
-        {/* Filters */}
-        <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 p-4 mb-6">
-          <div className="flex flex-col sm:flex-row gap-4">
-            {/* Search */}
-            <div className="flex-1 relative">
-              <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+        {/* Tabs */}
+        {canSeePremadeFeatures && (
+          <div className="flex mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-1.5 gap-1 flex-wrap">
+            <button onClick={() => setActiveTab('all')}
+              className={`flex-1 py-2.5 px-4 text-sm font-semibold rounded-lg transition-colors ${activeTab === 'all' ? 'bg-[#011c72] text-white' : 'text-gray-600 hover:bg-gray-100'}`}>
+              All Orders
+            </button>
+
+            {/* separator */}
+            <div className="w-px bg-gray-200 self-stretch my-1" />
+
+            <button onClick={() => setActiveTab('custom-jobs')}
+              className={`flex-1 py-2.5 px-4 text-sm font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 ${activeTab === 'custom-jobs' ? 'bg-[#011c72] text-white' : 'text-gray-600 hover:bg-gray-100'}`}>
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
               </svg>
-              <input
-                type="text"
-                placeholder="Search orders, customers, vehicles..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-900 dark:text-white focus:ring-2 focus:ring-amber-500 focus:border-transparent"
-              />
+              Custom Job Orders
+            </button>
+            <button onClick={() => setActiveTab('premade-purchase')}
+              className={`flex-1 py-2.5 px-4 text-sm font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 ${activeTab === 'premade-purchase' ? 'bg-[#011c72] text-white' : 'text-gray-600 hover:bg-gray-100'}`}>
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
+              </svg>
+              Premade Purchase
+            </button>
+
+            {/* separator */}
+            <div className="w-px bg-gray-200 self-stretch my-1" />
+
+            <button onClick={() => setActiveTab('premade-sales')}
+              className={`flex-1 py-2.5 px-4 text-sm font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 ${activeTab === 'premade-sales' ? 'bg-[#011c72] text-white' : 'text-gray-600 hover:bg-gray-100'}`}>
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4" />
+              </svg>
+              Premade Sales
+              {transferRequests.length > 0 && (
+                <span className={`text-xs px-1.5 py-0.5 rounded-full font-bold ${activeTab === 'premade-sales' ? 'bg-white/30 text-white' : 'bg-[#dde6ff] text-[#011c72]'}`}>
+                  {transferRequests.filter(t => t.status === 'pending').length > 0
+                    ? transferRequests.filter(t => t.status === 'pending').length
+                    : transferRequests.length}
+                </span>
+              )}
+            </button>
+            <button onClick={() => setActiveTab('pickup-queue')}
+              className={`flex-1 py-2.5 px-4 text-sm font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 ${activeTab === 'pickup-queue' ? 'bg-[#011c72] text-white' : 'text-gray-600 hover:bg-gray-100'}`}>
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+              </svg>
+              Pickup Queue
+              {pickupQueue.length > 0 && (
+                <span className={`text-xs px-1.5 py-0.5 rounded-full font-bold ${activeTab === 'pickup-queue' ? 'bg-white/30 text-white' : 'bg-purple-100 text-purple-700'}`}>
+                  {pickupQueue.length}
+                </span>
+              )}
+            </button>
+          </div>
+        )}
+
+        {actionError && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+            {actionError}
+          </div>
+        )}
+
+        {/* ── ALL ORDERS TAB ── */}
+        {activeTab === 'all' && (
+          <>
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
+              <div className="flex flex-col sm:flex-row gap-4">
+                <div className="flex-1 relative">
+                  <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                  <input type="text" placeholder="Search orders, customers, vehicles..." value={searchTerm}
+                    onChange={e => setSearchTerm(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                </div>
+                <div className="flex gap-2 flex-wrap">
+                  {['all', 'pending', 'in_progress', 'completed', 'cancelled'].map(status => (
+                    <button key={status} onClick={() => setFilter(status)}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${filter === status ? 'bg-[#011c72] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                      {status === 'all' ? 'All' : status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
-            {/* Status Filter */}
-            <div className="flex gap-2 flex-wrap">
-              {['all', 'pending', 'in_progress', 'completed', 'cancelled'].map((status) => (
-                <button
-                  key={status}
-                  onClick={() => setFilter(status)}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                    filter === status
-                      ? 'bg-amber-600 text-white'
-                      : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700'
-                  }`}
-                >
-                  {status === 'all' ? 'All' : status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              {loading ? (
+                <div className="p-8 text-center">
+                  <div className="animate-spin w-8 h-8 border-4 border-[#011c72] border-t-transparent rounded-full mx-auto"></div>
+                  <p className="mt-4 text-gray-500">Loading orders...</p>
+                </div>
+              ) : filteredOrders.length === 0 ? (
+                <div className="p-8 text-center">
+                  <svg className="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                  </svg>
+                  <h3 className="text-lg font-medium text-gray-900 mb-2">No orders found</h3>
+                  <p className="text-gray-500">Create a new job order to get started.</p>
+                </div>
+              ) : (
+                <div>
+                  <table className="w-full">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        {['Order #', 'Type', 'Customer', 'Vehicle', 'Branch', 'Amount', 'Date', 'Status', ''].map(h => (
+                          <th key={h} className={`px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wider ${h === '' ? 'text-right' : 'text-left'}`}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200">
+                      {filteredOrders.map(order => (
+                        <tr key={`${order.orderType}-${order.id}`} className="hover:bg-gray-50 transition-colors">
+                          <td className="px-4 py-3">
+                            <span className="text-sm font-medium text-[#011c72]">{order.displayId}</span>
+                          </td>
+                          <td className="px-4 py-3 w-px">
+                            <span className={`px-2 py-1 text-xs font-medium rounded-full whitespace-nowrap ${order.orderType === 'job' ? 'bg-blue-100 text-blue-700' : order.orderType === 'customer' ? 'bg-purple-100 text-purple-700' : 'bg-teal-100 text-teal-700'}`}>
+                              {order.orderType === 'job' ? 'JOB ORDER' : order.orderType === 'customer' ? 'CUSTOMER ORDER' : 'PREMADE'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <p className="text-sm font-medium text-gray-900">{order.customerName}</p>
+                            <p className="text-xs text-gray-500">{order.customerPhone}</p>
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-600 max-w-[130px] truncate">
+                            {(() => { const vi = (order as any).vehicleInfo; return vi ? `${vi.year} ${vi.make} ${vi.model}` : 'N/A'; })()}
+                          </td>
+
+                          <td className="px-4 py-3 text-sm text-gray-600">
+                            {order.orderType === 'job' ? (order as JobOrder).branchName : order.orderType === 'customer' ? (order as CustomerOrder).branchName || 'N/A' : (order as ProductOrder).branchName || 'N/A'}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-600">
+                            {getOrderAmount(order) > 0 ? `₱${getOrderAmount(order).toLocaleString()}` : 'N/A'}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-600">{formatDate(order.createdAt)}</td>
+                          <td className="px-4 py-3">
+                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadge(order.displayStatus)}`}>
+                              {order.displayStatus.replace('_', ' ').toUpperCase()}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <Link href={order.orderType === 'job' ? `/sales/${order.id}` : order.orderType === 'customer' ? `/customer-orders/${order.id}` : `/product-orders/${order.id}`}
+                              className="text-[#011c72] hover:text-[#011c72] text-sm font-medium">
+                              View Details
+                            </Link>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* ── CUSTOM JOB ORDERS TAB ── */}
+        {activeTab === 'custom-jobs' && (
+          <>
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
+              <div className="flex flex-col sm:flex-row gap-4">
+                <div className="flex-1 relative">
+                  <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                  <input type="text" placeholder="Search orders, customers, vehicles..." value={searchTerm}
+                    onChange={e => setSearchTerm(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                </div>
+                <div className="flex gap-2 flex-wrap">
+                  {['all', 'pending', 'in_progress', 'completed', 'cancelled'].map(status => (
+                    <button key={status} onClick={() => setFilter(status)}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${filter === status ? 'bg-[#011c72] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                      {status === 'all' ? 'All' : status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              {loading ? (
+                <div className="p-8 text-center">
+                  <div className="animate-spin w-8 h-8 border-4 border-[#011c72] border-t-transparent rounded-full mx-auto"></div>
+                  <p className="mt-4 text-gray-500">Loading orders...</p>
+                </div>
+              ) : filteredCustomJobOrders.length === 0 ? (
+                <div className="p-8 text-center">
+                  <svg className="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                  </svg>
+                  <h3 className="text-lg font-medium text-gray-900 mb-2">No custom job orders found</h3>
+                  <p className="text-gray-500">Create a new job order to get started.</p>
+                </div>
+              ) : (
+                <div>
+                  <table className="w-full">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        {['Order #', 'Type', 'Customer', 'Vehicle', 'Branch', 'Amount', 'Date', 'Status', ''].map(h => (
+                          <th key={h} className={`px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wider ${h === '' ? 'text-right' : 'text-left'}`}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200">
+                      {filteredCustomJobOrders.map(order => (
+                        <tr key={`${order.orderType}-${order.id}`} className="hover:bg-gray-50 transition-colors">
+                          <td className="px-4 py-3">
+                            <span className="text-sm font-medium text-[#011c72]">{order.displayId}</span>
+                          </td>
+                          <td className="px-4 py-3 w-px">
+                            <span className={`px-2 py-1 text-xs font-medium rounded-full whitespace-nowrap ${order.orderType === 'job' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'}`}>
+                              {order.orderType === 'job' ? 'JOB ORDER' : 'CUSTOMER ORDER'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <p className="text-sm font-medium text-gray-900">{order.customerName}</p>
+                            <p className="text-xs text-gray-500">{order.customerPhone}</p>
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-600 max-w-[130px] truncate">
+                            {(() => { const vi = (order as any).vehicleInfo; return vi ? `${vi.year} ${vi.make} ${vi.model}` : 'N/A'; })()}
+                          </td>
+
+                          <td className="px-4 py-3 text-sm text-gray-600">
+                            {order.orderType === 'job' ? (order as JobOrder).branchName : (order as CustomerOrder).branchName || 'N/A'}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-600">
+                            {getOrderAmount(order) > 0 ? `₱${getOrderAmount(order).toLocaleString()}` : 'N/A'}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-600">{formatDate(order.createdAt)}</td>
+                          <td className="px-4 py-3">
+                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadge(order.displayStatus)}`}>
+                              {order.displayStatus.replace('_', ' ').toUpperCase()}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <Link href={order.orderType === 'job' ? `/sales/${order.id}` : `/customer-orders/${order.id}`}
+                              className="text-[#011c72] hover:text-[#011c72] text-sm font-medium">
+                              View Details
+                            </Link>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* ── PREMADE PURCHASE TAB ── */}
+        {activeTab === 'premade-purchase' && (
+          <>
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
+              <div className="flex flex-col sm:flex-row gap-4">
+                <div className="flex-1 relative">
+                  <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                  <input type="text" placeholder="Search orders or customers..." value={searchTerm}
+                    onChange={e => setSearchTerm(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                </div>
+                <div className="flex gap-2 flex-wrap">
+                  {['all', 'pending', 'in_progress', 'completed', 'cancelled'].map(status => (
+                    <button key={status} onClick={() => setFilter(status)}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${filter === status ? 'bg-[#011c72] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                      {status === 'all' ? 'All' : status.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              {loading ? (
+                <div className="p-8 text-center">
+                  <div className="animate-spin w-8 h-8 border-4 border-[#011c72] border-t-transparent rounded-full mx-auto"></div>
+                  <p className="mt-4 text-gray-500">Loading orders...</p>
+                </div>
+              ) : filteredPremadePurchaseOrders.length === 0 ? (
+                <div className="p-8 text-center">
+                  <svg className="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
+                  </svg>
+                  <h3 className="text-lg font-medium text-gray-900 mb-2">No premade purchases found</h3>
+                  <p className="text-gray-500">No customers have purchased premade products yet.</p>
+                </div>
+              ) : (
+                <div>
+                  <table className="w-full">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        {['Order #', 'Customer', 'Branch', 'Amount', 'Date', 'Status', ''].map(h => (
+                          <th key={h} className={`px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wider ${h === '' ? 'text-right' : 'text-left'}`}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200">
+                      {filteredPremadePurchaseOrders.map(order => (
+                        <tr key={`product-${order.id}`} className="hover:bg-gray-50 transition-colors">
+                          <td className="px-4 py-3">
+                            <span className="text-sm font-medium text-[#011c72]">{order.displayId}</span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <p className="text-sm font-medium text-gray-900">{order.customerName}</p>
+                            <p className="text-xs text-gray-500">{order.customerPhone}</p>
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-600">
+                            {(order as ProductOrder).branchName || 'N/A'}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-600">
+                            {getOrderAmount(order) > 0 ? `₱${getOrderAmount(order).toLocaleString()}` : 'N/A'}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-600">{formatDate(order.createdAt)}</td>
+                          <td className="px-4 py-3">
+                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadge(order.displayStatus)}`}>
+                              {order.displayStatus.replace('_', ' ').toUpperCase()}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <Link href={`/product-orders/${order.id}`}
+                              className="text-[#011c72] hover:text-[#011c72] text-sm font-medium">
+                              View Details
+                            </Link>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* ── PREMADE SALES TAB ── */}
+        {activeTab === 'premade-sales' && (
+          <div className="space-y-4">
+            {/* Summary banner */}
+            {!tabLoading && premadeTotalRecords > 0 && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+                  <p className="text-xs font-medium text-gray-500 mb-1">Total Sale Value</p>
+                  <p className="text-xl font-bold text-gray-900">₱{premadeGrandTotal.toLocaleString()}</p>
+                  <p className="text-xs text-gray-400 mt-1">{premadeTotalRecords} record{premadeTotalRecords !== 1 ? 's' : ''}</p>
+                </div>
+                <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+                  <p className="text-xs font-medium text-gray-500 mb-1">Realized Revenue</p>
+                  <p className="text-xl font-bold text-green-600">₱{(completedDirectTotal + receivedTransferTotal).toLocaleString()}</p>
+                  <p className="text-xs text-gray-400 mt-1">completed + received</p>
+                </div>
+                <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+                  <p className="text-xs font-medium text-gray-500 mb-1">Cross-Branch Sales</p>
+                  <p className="text-xl font-bold text-blue-600">₱{transferTotal.toLocaleString()}</p>
+                  <p className="text-xs text-gray-400 mt-1">{filteredTransferRequests.length} transfer record{filteredTransferRequests.length !== 1 ? 's' : ''}</p>
+                </div>
+                <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+                  <p className="text-xs font-medium text-gray-500 mb-1">Direct Sales</p>
+                  <p className="text-xl font-bold text-teal-600">₱{directTotal.toLocaleString()}</p>
+                  <p className="text-xs text-gray-400 mt-1">{filteredDirectSales.length} local order{filteredDirectSales.length !== 1 ? 's' : ''}</p>
+                </div>
+              </div>
+            )}
+
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-start gap-3">
+              <svg className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <p className="text-sm text-blue-700">
+                All premade items sold from your branch — both <strong>direct sales</strong> (same-branch pickup) and <strong>cross-branch sales</strong> (items transferred to another pickup branch).
+              </p>
+            </div>
+
+            {/* Date filter */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-3 flex items-center gap-2 flex-wrap">
+              <span className="text-xs font-medium text-gray-500 mr-1">Filter by:</span>
+              {(['all', 'day', 'week', 'month', 'year'] as const).map(f => (
+                <button key={f} onClick={() => setTransferDateFilter(f)}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${transferDateFilter === f ? 'bg-[#011c72] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                  {f === 'all' ? 'All Time' : f === 'day' ? 'Today' : f === 'week' ? 'This Week' : f === 'month' ? 'This Month' : 'This Year'}
                 </button>
               ))}
+              {transferDateFilter !== 'all' && (
+                <span className="ml-auto text-xs text-gray-400">
+                  {premadeTotalRecords} of {transferRequests.length + directSales.length} records
+                </span>
+              )}
             </div>
-          </div>
-        </div>
 
-        {/* Orders Table */}
-        <div className="bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-          {loading ? (
-            <div className="p-8 text-center">
-              <div className="animate-spin w-8 h-8 border-4 border-amber-600 border-t-transparent rounded-full mx-auto"></div>
-              <p className="mt-4 text-zinc-500 dark:text-zinc-400">Loading orders...</p>
-            </div>
-          ) : filteredOrders.length === 0 ? (
-            <div className="p-8 text-center">
-              <svg className="w-16 h-16 mx-auto text-zinc-300 dark:text-zinc-600 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-              </svg>
-              <h3 className="text-lg font-medium text-zinc-900 dark:text-white mb-2">No orders found</h3>
-              <p className="text-zinc-500 dark:text-zinc-400">Create a new job order to get started.</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-zinc-50 dark:bg-zinc-800/50">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Order #</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Type</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Customer</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Vehicle</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Service</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Branch</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Date</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Status</th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                  {filteredOrders.map((order) => (
-                    <tr key={`${order.orderType}-${order.id}`} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="text-sm font-medium text-amber-600 dark:text-amber-400">{order.displayId}</span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className={`px-2 py-1 text-xs font-medium rounded-full ${
-                          order.orderType === 'job' 
-                            ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
-                            : 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
-                        }`}>
-                          {order.orderType === 'job' ? 'JOB ORDER' : 'CUSTOMER ORDER'}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div>
-                          <p className="text-sm font-medium text-zinc-900 dark:text-white">{order.customerName}</p>
-                          <p className="text-xs text-zinc-500 dark:text-zinc-400">{order.customerPhone}</p>
+            {tabLoading ? (
+              <div className="p-8 text-center bg-white rounded-xl border border-gray-200">
+                <div className="animate-spin w-8 h-8 border-4 border-[#011c72] border-t-transparent rounded-full mx-auto"></div>
+              </div>
+            ) : premadeTotalRecords === 0 ? (
+              <div className="p-10 text-center bg-white rounded-xl border border-gray-200">
+                <svg className="w-14 h-14 mx-auto text-gray-300 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                </svg>
+                <p className="text-gray-500">
+                  {transferDateFilter === 'all' ? 'No premade sales found for this branch.' : 'No premade sales found for the selected period.'}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {/* Cross-branch transfer records */}
+                {filteredTransferRequests.map(transfer => {
+                  const itemsTotal = transfer.items.reduce((s, i) => s + (i.total || i.unitPrice * i.quantity), 0);
+                  return (
+                    <div key={`tr-${transfer.id}`} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-5 py-4 border-b border-gray-100 bg-gray-50">
+                        <div className="flex items-center gap-3 flex-wrap">
+                          <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 uppercase tracking-wide">Cross-Branch Sale</span>
+                          <Link href={`/product-orders/${transfer.productOrderId}`} className="text-base font-bold text-[#011c72] hover:underline">
+                            {transfer.orderNumber || `Order #${transfer.productOrderId}`}
+                          </Link>
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                            transfer.status === 'received' ? 'bg-green-100 text-green-700' :
+                            transfer.status === 'transferred' ? 'bg-blue-100 text-blue-700' :
+                            'bg-yellow-100 text-yellow-700'
+                          }`}>
+                            {transfer.status === 'pending' ? 'Transfer Pending' :
+                             transfer.status === 'transferred' ? 'In Transit' : 'Transfer Confirmed'}
+                          </span>
                         </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
-                        {order.vehicleInfo ? `${order.vehicleInfo.year} ${order.vehicleInfo.make} ${order.vehicleInfo.model}` : 'N/A'}
-                      </td>
-                      <td className="px-6 py-4 text-sm text-zinc-600 dark:text-zinc-300 max-w-xs truncate">
-                        {getOrderDescription(order)}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
-                        {order.orderType === 'job' ? (order as JobOrder).branchName : (order as CustomerOrder).branchName || 'N/A'}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-600 dark:text-zinc-300">
-                        {formatDate(order.createdAt)}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadge(order.displayStatus)}`}>
-                          {order.displayStatus.replace('_', ' ').toUpperCase()}
+                        <div className="flex items-center gap-4">
+                          <span className="text-sm text-gray-500">Pickup: <span className="font-semibold text-gray-700">{transfer.pickupBranchName}</span></span>
+                          <div className="text-right">
+                            <p className="text-lg font-bold text-gray-900">₱{itemsTotal.toLocaleString()}</p>
+                            <p className="text-xs text-gray-400">sale amount</p>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="px-5 py-4 space-y-3">
+                        <div className="flex items-center gap-2 text-sm text-gray-600">
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
+                          <span className="font-medium text-gray-800">{transfer.customerName}</span>
+                          {transfer.customerPhone && <span>· {transfer.customerPhone}</span>}
+                        </div>
+                        <div className="rounded-lg border border-gray-100 overflow-hidden">
+                          <table className="w-full text-sm">
+                            <thead><tr className="bg-gray-50">
+                              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
+                              <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">Qty</th>
+                              <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Price</th>
+                              <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Subtotal</th>
+                            </tr></thead>
+                            <tbody className="divide-y divide-gray-100">
+                              {transfer.items.map((item, idx) => (
+                                <tr key={idx}>
+                                  <td className="px-3 py-2"><p className="font-medium text-gray-800">{item.name}</p><p className="text-xs text-gray-400">{item.sku}</p></td>
+                                  <td className="px-3 py-2 text-center text-gray-700">{item.quantity}</td>
+                                  <td className="px-3 py-2 text-right text-gray-700">₱{item.unitPrice.toLocaleString()}</td>
+                                  <td className="px-3 py-2 text-right font-medium text-gray-900">₱{(item.total || item.unitPrice * item.quantity).toLocaleString()}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                            <tfoot><tr className="bg-gray-50">
+                              <td colSpan={3} className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase">Sale Total</td>
+                              <td className="px-3 py-2 text-right font-bold text-gray-900">₱{itemsTotal.toLocaleString()}</td>
+                            </tr></tfoot>
+                          </table>
+                        </div>
+                        <div className={`rounded-lg border p-3 flex items-center justify-between gap-3 ${
+                          transfer.status === 'received' ? 'bg-green-50 border-green-200' :
+                          transfer.status === 'transferred' ? 'bg-blue-50 border-blue-200' : 'bg-yellow-50 border-yellow-200'
+                        }`}>
+                          <div className="flex items-center gap-2 text-sm">
+                            <svg className="w-4 h-4 shrink-0 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4" /></svg>
+                            <span className="font-medium text-gray-700">Transfer Record:</span>
+                            <span className="text-gray-600">
+                              {transfer.status === 'pending' && 'Items not yet dispatched to pickup branch'}
+                              {transfer.status === 'transferred' && `In transit to ${transfer.pickupBranchName}`}
+                              {transfer.status === 'received' && `Confirmed received at ${transfer.pickupBranchName}`}
+                            </span>
+                          </div>
+                          {transfer.transferredAt && (
+                            <span className="text-xs text-gray-400 whitespace-nowrap">
+                              {transfer.status === 'received' ? `Received: ${formatDate(transfer.receivedAt || transfer.transferredAt)}` : `Sent: ${formatDate(transfer.transferredAt)}`}
+                            </span>
+                          )}
+                        </div>
+                        {transfer.status === 'pending' && (
+                          <div className="flex justify-end pt-1">
+                            <button onClick={() => markTransferred(transfer.id)} disabled={savingId === transfer.id}
+                              className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition-colors flex items-center gap-2">
+                              {savingId === transfer.id
+                                ? <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> Processing...</>
+                                : <><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4" /></svg> Mark as Transferred</>}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      <div className="px-5 py-2 border-t border-gray-100 bg-gray-50 flex items-center justify-between">
+                        <p className="text-xs text-gray-400">{formatDate(transfer.createdAt)}</p>
+                        <Link href={`/product-orders/${transfer.productOrderId}`} className="text-xs text-[#011c72] hover:underline font-medium">View Full Order →</Link>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Direct sales (single-branch orders where this branch is both supplier and pickup) */}
+                {filteredDirectSales.map(order => (
+                  <div key={`ds-${order.id}`} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-5 py-4 border-b border-gray-100 bg-gray-50">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-teal-100 text-teal-700 uppercase tracking-wide">Direct Sale</span>
+                        <Link href={`/product-orders/${order.id}`} className="text-base font-bold text-[#011c72] hover:underline">{order.orderNumber}</Link>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getStatusBadge(order.status)}`}>
+                          {order.status.replace('_', ' ').toUpperCase()}
                         </span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-right">
-                        <Link
-                          href={order.orderType === 'job' ? `/sales/${order.id}` : `/customer-orders/${order.id}`}
-                          className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 text-sm font-medium"
-                        >
-                          View Details
-                        </Link>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getStatusBadge(order.paymentStatus)}`}>
+                          {order.paymentStatus.toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-lg font-bold text-gray-900">₱{order.totalAmount.toLocaleString()}</p>
+                        <p className="text-xs text-gray-400">sale amount</p>
+                      </div>
+                    </div>
+                    <div className="px-5 py-4 space-y-3">
+                      <div className="flex flex-wrap gap-4 text-sm">
+                        <div>
+                          <p className="text-xs text-gray-400">Customer</p>
+                          <p className="font-semibold text-gray-900">{order.customerName}</p>
+                        </div>
+                        {order.customerPhone && <div><p className="text-xs text-gray-400">Phone</p><p className="font-semibold text-gray-900">{order.customerPhone}</p></div>}
+                      </div>
+                      <div className="rounded-lg border border-gray-100 overflow-hidden">
+                        <table className="w-full text-sm">
+                          <thead><tr className="bg-gray-50">
+                            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
+                            <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">Qty</th>
+                            <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Price</th>
+                            <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Subtotal</th>
+                          </tr></thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {order.items.map((item, idx) => (
+                              <tr key={idx}>
+                                <td className="px-3 py-2"><p className="font-medium text-gray-800">{item.name}</p><p className="text-xs text-gray-400">{item.sku}</p></td>
+                                <td className="px-3 py-2 text-center text-gray-700">{item.quantity}</td>
+                                <td className="px-3 py-2 text-right text-gray-700">₱{item.unitPrice.toLocaleString()}</td>
+                                <td className="px-3 py-2 text-right font-medium text-gray-900">₱{(item.total || item.unitPrice * item.quantity).toLocaleString()}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                          <tfoot><tr className="bg-gray-50">
+                            <td colSpan={3} className="px-3 py-2 text-right text-xs font-semibold text-gray-600 uppercase">Order Total</td>
+                            <td className="px-3 py-2 text-right font-bold text-gray-900">₱{order.totalAmount.toLocaleString()}</td>
+                          </tr></tfoot>
+                        </table>
+                      </div>
+                      <div className="bg-teal-50 border border-teal-200 rounded-lg p-3 text-sm text-teal-700 flex items-center gap-2">
+                        <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                        Direct sale — customer picks up from this branch. No transfer needed.
+                      </div>
+                    </div>
+                    <div className="px-5 py-2 border-t border-gray-100 bg-gray-50 flex items-center justify-between">
+                      <p className="text-xs text-gray-400">{formatDate(order.createdAt)}</p>
+                      <Link href={`/product-orders/${order.id}`} className="text-xs text-[#011c72] hover:underline font-medium">View Order →</Link>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── PICKUP QUEUE TAB ── */}
+        {activeTab === 'pickup-queue' && (
+          <div className="space-y-4">
+            <div className="bg-purple-50 border border-purple-200 rounded-xl p-4 flex items-start gap-3">
+              <svg className="w-5 h-5 text-purple-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+              </svg>
+              <p className="text-sm text-purple-700">
+                Customer orders where <strong>your branch is the pickup location</strong>. Track which items are in transit or already received so you can complete the order.
+              </p>
             </div>
-          )}
-        </div>
+
+            {tabLoading ? (
+              <div className="p-8 text-center bg-white rounded-xl border border-gray-200">
+                <div className="animate-spin w-8 h-8 border-4 border-[#011c72] border-t-transparent rounded-full mx-auto"></div>
+              </div>
+            ) : pickupQueue.length === 0 ? (
+              <div className="p-10 text-center bg-white rounded-xl border border-gray-200">
+                <svg className="w-14 h-14 mx-auto text-gray-300 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+                </svg>
+                <p className="text-gray-500">No pickup orders for this branch.</p>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {pickupQueue.map(order => {
+                  const allReceived = order.transfers?.every(t => t.status === 'received');
+                  const anyPending = order.transfers?.some(t => t.status === 'pending');
+                  return (
+                    <div key={order.id} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                      {/* Order header */}
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-5 py-4 bg-gray-50 border-b border-gray-100">
+                        <div className="flex items-center gap-3 flex-wrap">
+                          <Link href={`/product-orders/${order.id}`}
+                            className="text-base font-bold text-[#011c72] hover:underline">
+                            {order.orderNumber}
+                          </Link>
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getStatusBadge(order.status)}`}>
+                            {order.status.toUpperCase()}
+                          </span>
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getStatusBadge(order.paymentStatus)}`}>
+                            {order.paymentStatus.toUpperCase()}
+                          </span>
+                          {allReceived ? (
+                            <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-green-100 text-green-700">All Items Received</span>
+                          ) : anyPending ? (
+                            <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-yellow-100 text-yellow-700">Awaiting Transfer</span>
+                          ) : (
+                            <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-blue-100 text-blue-700">Items In Transit</span>
+                          )}
+                        </div>
+                        <div className="text-right">
+                          <p className="text-xl font-bold text-gray-900">₱{order.totalAmount.toLocaleString()}</p>
+                          <p className="text-xs text-gray-400">{formatDate(order.createdAt)}</p>
+                        </div>
+                      </div>
+
+                      <div className="px-5 py-4 space-y-5">
+                        {/* Customer info */}
+                        <div className="flex flex-wrap gap-4 text-sm">
+                          <div>
+                            <p className="text-xs text-gray-400 mb-0.5">Customer</p>
+                            <p className="font-semibold text-gray-900">{order.customerName}</p>
+                          </div>
+                          {order.customerPhone && (
+                            <div>
+                              <p className="text-xs text-gray-400 mb-0.5">Phone</p>
+                              <p className="font-semibold text-gray-900">{order.customerPhone}</p>
+                            </div>
+                          )}
+                          {order.customerAddress && (
+                            <div>
+                              <p className="text-xs text-gray-400 mb-0.5">Address</p>
+                              <p className="font-semibold text-gray-900">{order.customerAddress}</p>
+                            </div>
+                          )}
+                          {order.notes && (
+                            <div className="w-full">
+                              <p className="text-xs text-gray-400 mb-0.5">Notes</p>
+                              <p className="text-gray-700">{order.notes}</p>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* ── YOUR BRANCH'S SALE ── */}
+                        {(() => {
+                          const myItems = order.items.filter(item => {
+                            const inTransfer = order.transfers?.some(t =>
+                              t.items.some(ti => ti.productId === item.productId || ti.sku === item.sku)
+                            );
+                            return !inTransfer; // items NOT in any transfer came from this (pickup) branch
+                          });
+                          const myTotal = myItems.reduce((s, i) => s + (i.total || i.unitPrice * i.quantity), 0);
+                          if (myItems.length === 0) return null;
+                          return (
+                            <div>
+                              <div className="flex items-center justify-between mb-1.5">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs font-semibold text-teal-700 uppercase tracking-wide">Your Branch's Sale</span>
+                                  <span className="text-xs px-2 py-0.5 rounded-full bg-teal-100 text-teal-700 font-medium">From Your Stock</span>
+                                </div>
+                                <span className="text-sm font-bold text-teal-700">₱{myTotal.toLocaleString()}</span>
+                              </div>
+                              <div className="rounded-lg border border-teal-200 overflow-hidden">
+                                <table className="w-full text-sm">
+                                  <thead>
+                                    <tr className="bg-teal-50">
+                                      <th className="px-3 py-2 text-left text-xs font-medium text-teal-600 uppercase">Item</th>
+                                      <th className="px-3 py-2 text-center text-xs font-medium text-teal-600 uppercase">Qty</th>
+                                      <th className="px-3 py-2 text-right text-xs font-medium text-teal-600 uppercase">Price</th>
+                                      <th className="px-3 py-2 text-right text-xs font-medium text-teal-600 uppercase">Subtotal</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-teal-100">
+                                    {myItems.map((item, idx) => (
+                                      <tr key={idx} className="hover:bg-teal-50/50">
+                                        <td className="px-3 py-2">
+                                          <p className="font-medium text-gray-800">{item.name}</p>
+                                          <p className="text-xs text-gray-400">{item.sku}</p>
+                                        </td>
+                                        <td className="px-3 py-2 text-center text-gray-700">{item.quantity}</td>
+                                        <td className="px-3 py-2 text-right text-gray-700">₱{item.unitPrice.toLocaleString()}</td>
+                                        <td className="px-3 py-2 text-right font-medium text-gray-900">₱{(item.total || item.unitPrice * item.quantity).toLocaleString()}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                  <tfoot>
+                                    <tr className="bg-teal-50">
+                                      <td colSpan={3} className="px-3 py-2 text-right text-xs font-semibold text-teal-700 uppercase">Your Sale Total</td>
+                                      <td className="px-3 py-2 text-right font-bold text-teal-700">₱{myTotal.toLocaleString()}</td>
+                                    </tr>
+                                  </tfoot>
+                                </table>
+                              </div>
+                            </div>
+                          );
+                        })()}
+
+                        {/* ── COMPLETE CUSTOMER ORDER ── */}
+                        <div>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Complete Customer Order</span>
+                            <span className="text-sm font-bold text-gray-900">₱{order.totalAmount.toLocaleString()}</span>
+                          </div>
+                          <div className="rounded-lg border border-gray-100 overflow-hidden">
+                            <table className="w-full text-sm">
+                              <thead>
+                                <tr className="bg-gray-50">
+                                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
+                                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
+                                  <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase">Qty</th>
+                                  <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Price</th>
+                                  <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Status</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-100">
+                                {order.items.map((item, idx) => {
+                                  const sourceTransfer = order.transfers?.find(t =>
+                                    t.items.some(ti => ti.productId === item.productId || ti.sku === item.sku)
+                                  );
+                                  const isLocal = !sourceTransfer;
+                                  const transferStatus = sourceTransfer?.status;
+                                  return (
+                                    <tr key={idx} className="hover:bg-gray-50">
+                                      <td className="px-3 py-2">
+                                        <p className="font-medium text-gray-800">{item.name}</p>
+                                        <p className="text-xs text-gray-400">{item.sku}</p>
+                                      </td>
+                                      <td className="px-3 py-2 text-xs">
+                                        {isLocal ? (
+                                          <span className="text-teal-600 font-medium">This Branch</span>
+                                        ) : (
+                                          <span className="text-gray-500">{sourceTransfer?.sourceBranchName || `Branch ${item.sourceBranchId}`}</span>
+                                        )}
+                                      </td>
+                                      <td className="px-3 py-2 text-center text-gray-700">{item.quantity}</td>
+                                      <td className="px-3 py-2 text-right text-gray-700">₱{item.unitPrice.toLocaleString()}</td>
+                                      <td className="px-3 py-2 text-right">
+                                        {isLocal ? (
+                                          <span className="text-xs px-2 py-0.5 rounded-full bg-teal-100 text-teal-700 font-medium">Available</span>
+                                        ) : transferStatus === 'received' ? (
+                                          <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">Received</span>
+                                        ) : transferStatus === 'transferred' ? (
+                                          <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">In Transit</span>
+                                        ) : (
+                                          <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-700 font-medium">Pending</span>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+
+                        {/* Transfer details + confirm receipt actions */}
+                        {order.transfers && order.transfers.length > 0 && (
+                          <div>
+                            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Incoming Transfers</h4>
+                            <div className="space-y-3">
+                              {order.transfers.map(transfer => (
+                                <div key={transfer.id} className={`rounded-lg border p-4 ${transfer.status === 'received' ? 'border-green-200 bg-green-50' : transfer.status === 'transferred' ? 'border-blue-200 bg-blue-50' : 'border-yellow-200 bg-yellow-50'}`}>
+                                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                                    <div>
+                                      <p className="text-sm font-semibold text-gray-800">
+                                        From: {transfer.sourceBranchName}
+                                      </p>
+                                      <p className="text-xs text-gray-500 mt-1">
+                                        {transfer.items.map(i => `${i.name} ×${i.quantity}`).join(', ')}
+                                      </p>
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getStatusBadge(transfer.status)}`}>
+                                        {getTransferStatusLabel(transfer.status)}
+                                      </span>
+                                      {transfer.status === 'transferred' && (
+                                        <button
+                                          onClick={() => confirmReceipt(transfer.id)}
+                                          disabled={savingId === transfer.id}
+                                          className="px-3 py-1.5 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700 disabled:opacity-50 transition-colors flex items-center gap-1.5">
+                                          {savingId === transfer.id ? (
+                                            <><div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> Confirming...</>
+                                          ) : (
+                                            <><svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg> Confirm Receipt & Add to Inventory</>
+                                          )}
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="flex justify-end pt-1">
+                          <Link href={`/product-orders/${order.id}`}
+                            className="text-sm text-[#011c72] hover:underline font-medium">
+                            View Full Order Details →
+                          </Link>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </main>
     </div>
   );
 }
-
-
