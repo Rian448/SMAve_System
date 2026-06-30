@@ -7266,6 +7266,55 @@ def delete_announcement(ann_id):
                f"Deleted announcement: {a.title}", request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'message': 'Deleted'})
 
+# ── Chat ─────────────────────────────────────────────────────────────────────
+
+class ChatMessage(db.Model):
+    __tablename__ = 'chat_messages'
+    id = db.Column(db.Integer, primary_key=True)
+    sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    sender = db.relationship('User', foreign_keys=[sender_id])
+
+def chat_message_to_dict(m):
+    return {
+        'id': m.id,
+        'senderId': m.sender_id,
+        'senderName': m.sender.full_name if m.sender else 'Unknown',
+        'senderRole': m.sender.role if m.sender else '',
+        'content': m.content,
+        'createdAt': m.created_at.strftime('%Y-%m-%dT%H:%M:%S') if m.created_at else None,
+    }
+
+@app.route('/api/chat/messages', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def get_chat_messages():
+    since = request.args.get('since')
+    query = ChatMessage.query
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace('Z', ''))
+            query = query.filter(ChatMessage.created_at > since_dt)
+        except ValueError:
+            pass
+    messages = query.order_by(ChatMessage.created_at.asc()).limit(200).all()
+    return jsonify({'status': 'success', 'data': [chat_message_to_dict(m) for m in messages]})
+
+@app.route('/api/chat/messages', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def send_chat_message():
+    data = request.get_json()
+    content = (data.get('content') or '').strip()
+    if not content:
+        return jsonify({'status': 'error', 'message': 'Content is required'}), 400
+    msg = ChatMessage(sender_id=request.current_user['id'], content=content)
+    db.session.add(msg)
+    db.session.commit()
+    return jsonify({'status': 'success', 'data': chat_message_to_dict(msg)}), 201
+
 if __name__ == '__main__':
     with app.app_context():
         # Ensure tables and seed data exist before startup diagnostics.

@@ -487,6 +487,15 @@ export interface PremadeMaterialUsageInput {
   quantityUsed: number;
 }
 
+export interface ChatMessage {
+  id: number;
+  senderId: number;
+  senderName: string;
+  senderRole: string;
+  content: string;
+  createdAt: string;
+}
+
 export interface MaterialUsageLog {
   id: number;
   materialId: number;
@@ -1785,6 +1794,18 @@ export const api = {
       fetchApi<{ id?: number; date?: string; isAvailable?: boolean }>('/api/worker-availability', {
         method: 'POST',
         body: JSON.stringify(data),
+      }),
+  },
+
+  chat: {
+    list: (since?: string) => {
+      const q = since ? `?since=${encodeURIComponent(since)}` : '';
+      return fetchApi<ChatMessage[]>(`/api/chat/messages${q}`);
+    },
+    send: (content: string) =>
+      fetchApi<ChatMessage>('/api/chat/messages', {
+        method: 'POST',
+        body: JSON.stringify({ content }),
       }),
   },
 };
