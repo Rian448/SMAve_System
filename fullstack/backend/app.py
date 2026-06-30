@@ -7025,6 +7025,109 @@ def update_customer(customer_id):
     db.session.commit()
     return jsonify({'status': 'success', 'data': customer_to_dict(customer)})
 
+# ============================================
+# ANNOUNCEMENTS
+# ============================================
+
+class Announcement(db.Model):
+    __tablename__ = 'announcements'
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(255), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+    # 'info' | 'warning' | 'urgent'
+    priority = db.Column(db.String(20), default='info')
+    is_pinned = db.Column(db.Boolean, default=False)
+    is_active = db.Column(db.Boolean, default=True)
+    created_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    created_by = db.relationship('User', foreign_keys=[created_by_id])
+
+def announcement_to_dict(a):
+    return {
+        'id': a.id,
+        'title': a.title,
+        'body': a.body,
+        'priority': a.priority or 'info',
+        'isPinned': a.is_pinned,
+        'isActive': a.is_active,
+        'createdById': a.created_by_id,
+        'createdByName': a.created_by.full_name if a.created_by else 'System',
+        'createdAt': fmt_dt(a.created_at),
+        'updatedAt': fmt_dt(a.updated_at),
+    }
+
+@app.route('/api/announcements', methods=['GET'])
+@require_auth
+def get_announcements():
+    # Only staff can see announcements — customers are excluded via require_auth + role check
+    if request.current_user.get('role') == 'customer':
+        return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+    items = (Announcement.query
+             .filter_by(is_active=True)
+             .order_by(Announcement.is_pinned.desc(), Announcement.created_at.desc())
+             .all())
+    return jsonify({'status': 'success', 'data': [announcement_to_dict(a) for a in items]})
+
+@app.route('/api/announcements', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def create_announcement():
+    data = request.get_json()
+    if not data.get('title', '').strip():
+        return jsonify({'status': 'error', 'message': 'Title is required'}), 400
+    if not data.get('body', '').strip():
+        return jsonify({'status': 'error', 'message': 'Body is required'}), 400
+    priority = data.get('priority', 'info')
+    if priority not in ('info', 'warning', 'urgent'):
+        priority = 'info'
+    a = Announcement(
+        title=data['title'].strip(),
+        body=data['body'].strip(),
+        priority=priority,
+        is_pinned=bool(data.get('isPinned', False)),
+        is_active=True,
+        created_by_id=request.current_user['id'],
+    )
+    db.session.add(a)
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Announcements',
+               f"Created announcement: {a.title}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': announcement_to_dict(a)}), 201
+
+@app.route('/api/announcements/<int:ann_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def update_announcement(ann_id):
+    a = Announcement.query.get(ann_id)
+    if not a:
+        return jsonify({'status': 'error', 'message': 'Announcement not found'}), 404
+    data = request.get_json()
+    if 'title' in data: a.title = data['title'].strip()
+    if 'body' in data: a.body = data['body'].strip()
+    if 'priority' in data and data['priority'] in ('info', 'warning', 'urgent'):
+        a.priority = data['priority']
+    if 'isPinned' in data: a.is_pinned = bool(data['isPinned'])
+    if 'isActive' in data: a.is_active = bool(data['isActive'])
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Announcements',
+               f"Updated announcement: {a.title}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': announcement_to_dict(a)})
+
+@app.route('/api/announcements/<int:ann_id>', methods=['DELETE'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def delete_announcement(ann_id):
+    a = Announcement.query.get(ann_id)
+    if not a:
+        return jsonify({'status': 'error', 'message': 'Announcement not found'}), 404
+    db.session.delete(a)
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'DELETE', 'Announcements',
+               f"Deleted announcement: {a.title}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'message': 'Deleted'})
+
 if __name__ == '__main__':
     with app.app_context():
         # Ensure tables and seed data exist before startup diagnostics.

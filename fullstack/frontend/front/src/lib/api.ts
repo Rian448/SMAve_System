@@ -64,6 +64,19 @@ export interface Alert {
   itemId: number;
 }
 
+export interface Announcement {
+  id: number;
+  title: string;
+  body: string;
+  priority: 'info' | 'warning' | 'urgent';
+  isPinned: boolean;
+  isActive: boolean;
+  createdById?: number;
+  createdByName?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Customer {
   id: number;
   name: string;
@@ -1735,6 +1748,16 @@ export const api = {
       fetchApi<Customer>('/api/customers', { method: 'POST', body: JSON.stringify(data) }),
     update: (id: number, data: Partial<Omit<Customer, 'id' | 'createdAt' | 'orderHistory'>>) =>
       fetchApi<Customer>(`/api/customers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  },
+
+  announcements: {
+    list: () => fetchApi<Announcement[]>('/api/announcements'),
+    create: (data: { title: string; body: string; priority?: string; isPinned?: boolean }) =>
+      fetchApi<Announcement>('/api/announcements', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{ title: string; body: string; priority: string; isPinned: boolean; isActive: boolean }>) =>
+      fetchApi<Announcement>(`/api/announcements/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (id: number) =>
+      fetchApi<{ message: string }>(`/api/announcements/${id}`, { method: 'DELETE' }),
   },
 
   workerAvailability: {
