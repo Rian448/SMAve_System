@@ -64,6 +64,19 @@ export interface Alert {
   itemId: number;
 }
 
+export interface Announcement {
+  id: number;
+  title: string;
+  body: string;
+  priority: 'info' | 'warning' | 'urgent';
+  isPinned: boolean;
+  isActive: boolean;
+  createdById?: number;
+  createdByName?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Customer {
   id: number;
   name: string;
@@ -474,6 +487,15 @@ export interface PremadeMaterialUsageInput {
   quantityUsed: number;
 }
 
+export interface ChatMessage {
+  id: number;
+  senderId: number;
+  senderName: string;
+  senderRole: string;
+  content: string;
+  createdAt: string;
+}
+
 export interface MaterialUsageLog {
   id: number;
   materialId: number;
@@ -488,6 +510,8 @@ export interface MaterialUsageLog {
   branchName?: string;
   usedBy?: number;
   usedByName?: string;
+  managedWorkerId?: number;
+  workerName?: string;
   notes?: string;
   usedAt: string;
 }
@@ -513,6 +537,8 @@ export interface ManagedWorker {
   name: string;
   workType: string;
   ratePerHour: number;
+  /** per_hour | per_day | per_piece */
+  payMode: 'per_hour' | 'per_day' | 'per_piece';
   isActive: boolean;
   createdAt?: string;
 }
@@ -523,6 +549,7 @@ export interface WorkerAssignment {
   workerName: string;
   workType: string;
   ratePerHour: number;
+  payMode: 'per_hour' | 'per_day' | 'per_piece';
   jobOrderRef: string;
   jobOrderDbId?: number;
   description?: string;
@@ -531,6 +558,11 @@ export interface WorkerAssignment {
   endTime?: string;
   hoursWorked?: number;
   pay?: number;
+  payOverride?: number;
+  materialsUsed?: Array<{ name: string; qty: number; unit?: string }> | null;
+  scheduledDate?: string;
+  assignmentType: 'job_order' | 'special_task';
+  specialTaskTitle?: string;
   status: 'pending' | 'in_progress' | 'completed';
   notes?: string;
   createdAt: string;
@@ -1691,12 +1723,12 @@ export const api = {
   managedWorkers: {
     list: () =>
       fetchApi<{ workers: ManagedWorker[] }>('/api/managed-workers'),
-    create: (data: { name: string; workType: string; ratePerHour: number }) =>
+    create: (data: { name: string; workType: string; ratePerHour: number; payMode?: string }) =>
       fetchApi<{ worker: ManagedWorker }>('/api/managed-workers', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: number, data: Partial<{ name: string; workType: string; ratePerHour: number; isActive: boolean }>) =>
+    update: (id: number, data: Partial<{ name: string; workType: string; ratePerHour: number; payMode: string; isActive: boolean }>) =>
       fetchApi<{ worker: ManagedWorker }>(`/api/managed-workers/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -1710,12 +1742,16 @@ export const api = {
       const query = workerId ? `?workerId=${workerId}` : '';
       return fetchApi<{ assignments: WorkerAssignment[] }>(`/api/worker-assignments${query}`);
     },
-    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string }) =>
+    getCalendar: (params: { workerId: number; month: string }) =>
+      fetchApi<Record<string, Array<{ id: number; jobOrderRef: string; assignmentType: string; specialTaskTitle?: string; workerName: string; status: string; description?: string }>>>(
+        `/api/worker-assignments/calendar?workerId=${params.workerId}&month=${params.month}`
+      ),
+    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string; scheduledDate?: string; assignmentType?: string; specialTaskTitle?: string }) =>
       fetchApi<{ assignment: WorkerAssignment }>('/api/worker-assignments', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: number, data: Partial<{ status: string; hoursWorked: number; expectedHours: number; notes: string; description: string }>) =>
+    update: (id: number, data: Partial<{ status: string; hoursWorked: number; unitsWorked: number; payOverride: number; materialsUsed: object[]; expectedHours: number; notes: string; description: string; scheduledDate: string }>) =>
       fetchApi<{ assignment: WorkerAssignment }>(`/api/worker-assignments/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -1737,6 +1773,16 @@ export const api = {
       fetchApi<Customer>(`/api/customers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   },
 
+  announcements: {
+    list: () => fetchApi<Announcement[]>('/api/announcements'),
+    create: (data: { title: string; body: string; priority?: string; isPinned?: boolean }) =>
+      fetchApi<Announcement>('/api/announcements', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{ title: string; body: string; priority: string; isPinned: boolean; isActive: boolean }>) =>
+      fetchApi<Announcement>(`/api/announcements/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (id: number) =>
+      fetchApi<{ message: string }>(`/api/announcements/${id}`, { method: 'DELETE' }),
+  },
+
   workerAvailability: {
     get: (params?: { workerId?: number; month?: string }) => {
       const q = new URLSearchParams();
@@ -1748,6 +1794,18 @@ export const api = {
       fetchApi<{ id?: number; date?: string; isAvailable?: boolean }>('/api/worker-availability', {
         method: 'POST',
         body: JSON.stringify(data),
+      }),
+  },
+
+  chat: {
+    list: (since?: string) => {
+      const q = since ? `?since=${encodeURIComponent(since)}` : '';
+      return fetchApi<ChatMessage[]>(`/api/chat/messages${q}`);
+    },
+    send: (content: string) =>
+      fetchApi<ChatMessage>('/api/chat/messages', {
+        method: 'POST',
+        body: JSON.stringify({ content }),
       }),
   },
 };

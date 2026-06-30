@@ -1602,7 +1602,7 @@ export default function InventoryPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
                   <h3 className="text-lg font-medium text-gray-900 mb-2">No material usage yet</h3>
-                  <p className="text-gray-500">Material usage entries appear here when premade products are added.</p>
+                  <p className="text-gray-500">Material usage entries appear here when premade products are added or job orders are completed.</p>
                 </div>
               ) : (
                 <table className="w-full">
@@ -1623,7 +1623,8 @@ export default function InventoryPage() {
                         return (
                           (log.materialName || '').toLowerCase().includes(q) ||
                           (log.usedInReference || '').toLowerCase().includes(q) ||
-                          (log.usedByName || '').toLowerCase().includes(q)
+                          (log.usedByName || '').toLowerCase().includes(q) ||
+                          (log.workerName || '').toLowerCase().includes(q)
                         );
                       })
                       .map((log) => (
@@ -1641,7 +1642,14 @@ export default function InventoryPage() {
                             {log.quantityUsed}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                            {log.usedByName || 'System'}
+                            {log.workerName ? (
+                              <span className="inline-flex items-center gap-1.5">
+                                <span className="w-5 h-5 rounded-full bg-[#011c72]/10 text-[#011c72] flex items-center justify-center text-[10px] font-bold shrink-0">
+                                  {log.workerName.charAt(0)}
+                                </span>
+                                {log.workerName}
+                              </span>
+                            ) : (log.usedByName || 'System')}
                           </td>
                         </tr>
                       ))}
@@ -1691,7 +1699,7 @@ export default function InventoryPage() {
                           ) : (
                             <div>
                               <p className="text-sm font-medium text-gray-900">{s.name}</p>
-                              {s.address && <p className="text-xs text-gray-500 truncate max-w-[160px]">{s.address}</p>}
+                              {s.address && <p className="text-xs text-gray-500 truncate max-w-40">{s.address}</p>}
                             </div>
                           )}
                         </td>
@@ -1719,7 +1727,7 @@ export default function InventoryPage() {
                           {editingSupplierId === s.id ? (
                             <input type="text" value={editSupplier.materialsSupplied} onChange={e => setEditSupplier(p => ({ ...p, materialsSupplied: e.target.value }))} placeholder="Materials" className="w-36 px-2 py-1 rounded border border-gray-200 bg-white text-sm text-gray-900" />
                           ) : (
-                            <span className="text-sm text-gray-600 truncate max-w-[140px] block">{s.materialsSupplied || '—'}</span>
+                            <span className="text-sm text-gray-600 truncate max-w-35 block">{s.materialsSupplied || '—'}</span>
                           )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
@@ -1755,7 +1763,7 @@ export default function InventoryPage() {
                 <div className="p-6 border-b border-gray-200">
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
-                      <div className="animate-spin w-5 h-5 border-2 border-[#011c72] border-t-transparent rounded-full flex-shrink-0" />
+                      <div className="animate-spin w-5 h-5 border-2 border-[#011c72] border-t-transparent rounded-full shrink-0" />
                       <span className="text-sm font-semibold text-gray-800">Training AI models...</span>
                     </div>
                     <span className="text-lg font-bold text-[#011c72]">
