@@ -336,6 +336,7 @@ class MaterialUsageLog(db.Model):
     used_in_reference = db.Column(db.String(255), nullable=False)
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
     used_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    managed_worker_id = db.Column(db.Integer, db.ForeignKey('managed_workers.id'), nullable=True)
     notes = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -343,6 +344,7 @@ class MaterialUsageLog(db.Model):
     premade_product = db.relationship('PremadeProduct')
     branch = db.relationship('Branch')
     used_by_user = db.relationship('User', foreign_keys=[used_by])
+    managed_worker = db.relationship('ManagedWorker', foreign_keys=[managed_worker_id])
 
 class CatalogItem(db.Model):
     __tablename__ = 'catalog_items'
@@ -437,7 +439,8 @@ class ManagedWorker(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(255), nullable=False)
     work_type = db.Column(db.String(100), nullable=False)  # seat_maker, sewer, upholstery, installer
-    rate_per_hour = db.Column(db.Float, nullable=False, default=0)
+    rate_per_hour = db.Column(db.Float, nullable=False, default=0)  # rate value (unit depends on pay_mode)
+    pay_mode = db.Column(db.String(20), default='per_hour')  # per_hour | per_day | per_piece
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -449,12 +452,19 @@ class WorkerAssignment(db.Model):
     job_order_ref = db.Column(db.String(50), nullable=False)
     job_order_db_id = db.Column(db.Integer, nullable=True)
     description = db.Column(db.String(255), nullable=True)
-    expected_hours = db.Column(db.Float, nullable=True)       # estimate from labor line quantity
+    expected_hours = db.Column(db.Float, nullable=True)
     start_time = db.Column(db.DateTime, nullable=True)
     end_time = db.Column(db.DateTime, nullable=True)
     hours_worked = db.Column(db.Float, nullable=True)
     pay = db.Column(db.Float, nullable=True)
-    status = db.Column(db.String(50), default='pending')      # pending, in_progress, completed
+    pay_override = db.Column(db.Float, nullable=True)          # admin-set final pay amount
+    materials_used = db.Column(db.JSON, nullable=True)         # snapshot of materials on completion
+    status = db.Column(db.String(50), default='pending')       # pending, in_progress, completed
+    # Calendar: which date this assignment is scheduled for
+    scheduled_date = db.Column(db.Date, nullable=True)
+    # 'job_order' = normal work on a job order | 'special_task' = installer etc.
+    assignment_type = db.Column(db.String(20), default='job_order')
+    special_task_title = db.Column(db.String(255), nullable=True)
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -892,6 +902,17 @@ def run_migrations():
         "ALTER TABLE inventory_materials ADD COLUMN sku VARCHAR(100)",
         "ALTER TABLE inventory_materials ADD COLUMN cost_per_unit REAL DEFAULT 0",
         "ALTER TABLE inventory_materials ADD COLUMN markup_percent REAL DEFAULT 25",
+        # Worker pay mode: per_hour, per_day, per_piece
+        "ALTER TABLE managed_workers ADD COLUMN pay_mode VARCHAR(20) DEFAULT 'per_hour'",
+        # Worker assignment: calendar date, type (job_order | special_task), title for special tasks
+        "ALTER TABLE worker_assignments ADD COLUMN scheduled_date DATE",
+        "ALTER TABLE worker_assignments ADD COLUMN assignment_type VARCHAR(20) DEFAULT 'job_order'",
+        "ALTER TABLE worker_assignments ADD COLUMN special_task_title VARCHAR(255)",
+        # On completion: pay override + materials snapshot
+        "ALTER TABLE worker_assignments ADD COLUMN pay_override REAL",
+        "ALTER TABLE worker_assignments ADD COLUMN materials_used JSON",
+        # Track which managed worker used materials (FK to managed_workers)
+        "ALTER TABLE material_usage_logs ADD COLUMN managed_worker_id INTEGER REFERENCES managed_workers(id)",
     ]
     for sql in migrations:
         try:
@@ -1494,6 +1515,8 @@ def material_usage_to_dict(log):
         'branchName': log.branch.name if log.branch else None,
         'usedBy': log.used_by,
         'usedByName': log.used_by_user.full_name if log.used_by_user else None,
+        'managedWorkerId': log.managed_worker_id,
+        'workerName': log.managed_worker.name if log.managed_worker else None,
         'notes': log.notes,
         'usedAt': fmt_dt(log.created_at)
     }
@@ -6092,6 +6115,7 @@ def list_managed_workers():
                     'name': w.name,
                     'workType': w.work_type,
                     'ratePerHour': w.rate_per_hour,
+                    'payMode': w.pay_mode or 'per_hour',
                     'isActive': w.is_active,
                     'createdAt': fmt_dt(w.created_at),
                 }
@@ -6108,9 +6132,12 @@ def create_managed_worker():
     name = (data.get('name') or '').strip()
     work_type = (data.get('workType') or '').strip()
     rate = float(data.get('ratePerHour') or 0)
+    pay_mode = data.get('payMode', 'per_hour')
+    if pay_mode not in ('per_hour', 'per_day', 'per_piece'):
+        pay_mode = 'per_hour'
     if not name or not work_type:
         return jsonify({'error': 'name and workType are required'}), 400
-    worker = ManagedWorker(name=name, work_type=work_type, rate_per_hour=rate)
+    worker = ManagedWorker(name=name, work_type=work_type, rate_per_hour=rate, pay_mode=pay_mode)
     db.session.add(worker)
     db.session.commit()
     return jsonify({
@@ -6121,6 +6148,7 @@ def create_managed_worker():
                 'name': worker.name,
                 'workType': worker.work_type,
                 'ratePerHour': worker.rate_per_hour,
+                'payMode': worker.pay_mode or 'per_hour',
                 'isActive': worker.is_active,
             }
         }
@@ -6140,6 +6168,8 @@ def update_managed_worker(worker_id):
         worker.work_type = (data['workType'] or '').strip()
     if 'ratePerHour' in data:
         worker.rate_per_hour = float(data['ratePerHour'] or 0)
+    if 'payMode' in data and data['payMode'] in ('per_hour', 'per_day', 'per_piece'):
+        worker.pay_mode = data['payMode']
     if 'isActive' in data:
         worker.is_active = bool(data['isActive'])
     db.session.commit()
@@ -6151,6 +6181,7 @@ def update_managed_worker(worker_id):
                 'name': worker.name,
                 'workType': worker.work_type,
                 'ratePerHour': worker.rate_per_hour,
+                'payMode': worker.pay_mode or 'per_hour',
                 'isActive': worker.is_active,
             }
         }
@@ -6191,6 +6222,7 @@ def list_worker_assignments():
             'workerName': a.worker.name if a.worker else '',
             'workType': a.worker.work_type if a.worker else '',
             'ratePerHour': a.worker.rate_per_hour if a.worker else 0,
+            'payMode': (a.worker.pay_mode or 'per_hour') if a.worker else 'per_hour',
             'jobOrderRef': a.job_order_ref,
             'jobOrderDbId': a.job_order_db_id,
             'description': a.description,
@@ -6199,6 +6231,11 @@ def list_worker_assignments():
             'endTime': fmt_dt(a.end_time),
             'hoursWorked': a.hours_worked,
             'pay': a.pay,
+            'payOverride': a.pay_override,
+            'materialsUsed': a.materials_used,
+            'scheduledDate': a.scheduled_date.isoformat() if a.scheduled_date else None,
+            'assignmentType': a.assignment_type or 'job_order',
+            'specialTaskTitle': a.special_task_title,
             'status': a.status,
             'notes': a.notes,
             'createdAt': fmt_dt(a.created_at),
@@ -6240,12 +6277,26 @@ def create_worker_assignment():
                 }
             }
         })
+    assignment_type = data.get('assignmentType', 'job_order')
+    if assignment_type not in ('job_order', 'special_task'):
+        assignment_type = 'job_order'
+    special_task_title = (data.get('specialTaskTitle') or '').strip() or None
+    scheduled_date = None
+    if data.get('scheduledDate'):
+        try:
+            from datetime import date as _date
+            scheduled_date = _date.fromisoformat(data['scheduledDate'])
+        except Exception:
+            pass
     assignment = WorkerAssignment(
         worker_id=worker_id,
         job_order_ref=job_order_ref,
         job_order_db_id=data.get('jobOrderDbId'),
         description=description,
         expected_hours=data.get('expectedHours'),
+        assignment_type=assignment_type,
+        special_task_title=special_task_title,
+        scheduled_date=scheduled_date,
         status='pending',
         notes=data.get('notes', ''),
     )
@@ -6280,17 +6331,63 @@ def update_worker_assignment(assignment_id):
             assignment.start_time = datetime.utcnow()
         elif new_status == 'completed' and not assignment.end_time:
             assignment.end_time = datetime.utcnow()
-            if assignment.start_time:
+            if assignment.start_time and not data.get('hoursWorked'):
                 delta = assignment.end_time - assignment.start_time
                 assignment.hours_worked = round(delta.total_seconds() / 3600, 2)
             if data.get('hoursWorked') is not None:
                 assignment.hours_worked = float(data['hoursWorked'])
-            if assignment.hours_worked and assignment.worker:
-                assignment.pay = round(assignment.hours_worked * assignment.worker.rate_per_hour, 2)
+            # Materials snapshot
+            if data.get('materialsUsed') is not None:
+                assignment.materials_used = data['materialsUsed']
+            # Log material usage when a job order assignment is completed
+            if assignment.assignment_type != 'special_task' and assignment.job_order_db_id:
+                job_order = JobOrder.query.get(assignment.job_order_db_id)
+                if job_order and job_order.items:
+                    worker_name = assignment.worker.name if assignment.worker else 'Unknown'
+                    for item in job_order.items:
+                        material_id = item.get('materialId')
+                        qty = float(item.get('quantity') or 0)
+                        if not material_id or qty <= 0:
+                            continue
+                        material = InventoryMaterial.query.get(material_id)
+                        if not material:
+                            continue
+                        db.session.add(MaterialUsageLog(
+                            material_id=material.id,
+                            quantity_used=qty,
+                            used_in_type='job_order',
+                            used_in_reference=assignment.job_order_ref,
+                            branch_id=job_order.branch_id,
+                            managed_worker_id=assignment.worker_id,
+                            notes=f"Job order completed by {worker_name}",
+                        ))
+            # Pay: explicit override wins; otherwise compute from pay_mode
+            if data.get('payOverride') is not None:
+                assignment.pay = float(data['payOverride'])
+                assignment.pay_override = assignment.pay
+            elif assignment.worker:
+                w = assignment.worker
+                pay_mode = w.pay_mode or 'per_hour'
+                rate = w.rate_per_hour or 0
+                if pay_mode == 'per_hour':
+                    assignment.pay = round((assignment.hours_worked or 0) * rate, 2)
+                elif pay_mode == 'per_day':
+                    days = float(data.get('unitsWorked', 1) or 1)
+                    assignment.pay = round(days * rate, 2)
+                elif pay_mode == 'per_piece':
+                    pieces = float(data.get('unitsWorked', 1) or 1)
+                    assignment.pay = round(pieces * rate, 2)
     if 'hoursWorked' in data and data['hoursWorked'] is not None:
         assignment.hours_worked = float(data['hoursWorked'])
-        if assignment.worker:
-            assignment.pay = round(assignment.hours_worked * assignment.worker.rate_per_hour, 2)
+    if 'scheduledDate' in data:
+        if data['scheduledDate']:
+            try:
+                from datetime import date as _date
+                assignment.scheduled_date = _date.fromisoformat(data['scheduledDate'])
+            except Exception:
+                pass
+        else:
+            assignment.scheduled_date = None
     if 'notes' in data:
         assignment.notes = data['notes']
     if 'description' in data:
@@ -6308,15 +6405,56 @@ def update_worker_assignment(assignment_id):
                 'workerName': assignment.worker.name if assignment.worker else '',
                 'jobOrderRef': assignment.job_order_ref,
                 'description': assignment.description,
+                'scheduledDate': assignment.scheduled_date.isoformat() if assignment.scheduled_date else None,
+                'assignmentType': assignment.assignment_type or 'job_order',
+                'specialTaskTitle': assignment.special_task_title,
                 'startTime': fmt_dt(assignment.start_time),
                 'endTime': fmt_dt(assignment.end_time),
                 'hoursWorked': assignment.hours_worked,
                 'pay': assignment.pay,
+                'payOverride': assignment.pay_override,
+                'materialsUsed': assignment.materials_used,
                 'status': assignment.status,
                 'notes': assignment.notes,
             }
         }
     })
+
+@app.route('/api/worker-assignments/calendar', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def get_assignments_calendar():
+    """Return all assignments for a worker in a given month, keyed by date."""
+    worker_id = request.args.get('workerId', type=int)
+    month = request.args.get('month')  # YYYY-MM
+    query = WorkerAssignment.query.filter(WorkerAssignment.scheduled_date.isnot(None))
+    if worker_id:
+        query = query.filter_by(worker_id=worker_id)
+    if month:
+        try:
+            year, mon = int(month.split('-')[0]), int(month.split('-')[1])
+            from datetime import date as _date
+            import calendar as _cal
+            start = _date(year, mon, 1)
+            end = _date(year, mon, _cal.monthrange(year, mon)[1])
+            query = query.filter(WorkerAssignment.scheduled_date >= start,
+                                 WorkerAssignment.scheduled_date <= end)
+        except Exception:
+            pass
+    items = query.all()
+    result = {}
+    for a in items:
+        d = a.scheduled_date.isoformat()
+        result.setdefault(d, []).append({
+            'id': a.id,
+            'jobOrderRef': a.job_order_ref,
+            'assignmentType': a.assignment_type or 'job_order',
+            'specialTaskTitle': a.special_task_title,
+            'workerName': a.worker.name if a.worker else '',
+            'status': a.status,
+            'description': a.description,
+        })
+    return jsonify({'status': 'success', 'data': result})
 
 @app.route('/api/worker-assignments/<int:assignment_id>', methods=['DELETE'])
 @require_auth
