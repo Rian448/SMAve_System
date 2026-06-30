@@ -73,8 +73,22 @@ class Branch(db.Model):
     name = db.Column(db.String(255), nullable=False)
     code = db.Column(db.String(50), unique=True, nullable=False)
     address = db.Column(db.String(255), nullable=False)
+    phone = db.Column(db.String(50), nullable=True)
     is_warehouse = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Customer(db.Model):
+    __tablename__ = 'customers'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    phone = db.Column(db.String(50), nullable=True)
+    email = db.Column(db.String(255), nullable=True)
+    address = db.Column(db.String(255), nullable=True)
+    discount_percent = db.Column(db.Float, nullable=True)
+    promo_code = db.Column(db.String(100), nullable=True)
+    promo_discount = db.Column(db.Float, nullable=True)
+    notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class CustomerOrder(db.Model):
@@ -119,6 +133,7 @@ class JobOrder(db.Model):
     description = db.Column(db.Text, nullable=False)
     vehicle_info = db.Column(db.JSON)
     items = db.Column(db.JSON, nullable=False)
+    slip_data = db.Column(db.JSON, nullable=True)
     estimated_cost = db.Column(db.Float, default=0)
     actual_cost = db.Column(db.Float, default=0)
     total_price = db.Column(db.Float, nullable=False)
@@ -282,6 +297,12 @@ class InventoryMaterial(db.Model):
     status = db.Column(db.String(20), default='available')
     low_stock_threshold = db.Column(db.Float, default=0)
     supplier_id = db.Column(db.Integer, db.ForeignKey('suppliers.id'), nullable=True)
+    # Stock-keeping unit / item code from supplier purchase logs
+    sku = db.Column(db.String(100), nullable=True)
+    # What we paid the supplier per unit (purchase cost)
+    cost_per_unit = db.Column(db.Float, default=0)
+    # Markup applied on cost to derive the selling unit_price (e.g. 25 = +25%)
+    markup_percent = db.Column(db.Float, default=25)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -315,6 +336,7 @@ class MaterialUsageLog(db.Model):
     used_in_reference = db.Column(db.String(255), nullable=False)
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
     used_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    managed_worker_id = db.Column(db.Integer, db.ForeignKey('managed_workers.id'), nullable=True)
     notes = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -322,6 +344,7 @@ class MaterialUsageLog(db.Model):
     premade_product = db.relationship('PremadeProduct')
     branch = db.relationship('Branch')
     used_by_user = db.relationship('User', foreign_keys=[used_by])
+    managed_worker = db.relationship('ManagedWorker', foreign_keys=[managed_worker_id])
 
 class CatalogItem(db.Model):
     __tablename__ = 'catalog_items'
@@ -416,7 +439,8 @@ class ManagedWorker(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(255), nullable=False)
     work_type = db.Column(db.String(100), nullable=False)  # seat_maker, sewer, upholstery, installer
-    rate_per_hour = db.Column(db.Float, nullable=False, default=0)
+    rate_per_hour = db.Column(db.Float, nullable=False, default=0)  # rate value (unit depends on pay_mode)
+    pay_mode = db.Column(db.String(20), default='per_hour')  # per_hour | per_day | per_piece
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -428,12 +452,19 @@ class WorkerAssignment(db.Model):
     job_order_ref = db.Column(db.String(50), nullable=False)
     job_order_db_id = db.Column(db.Integer, nullable=True)
     description = db.Column(db.String(255), nullable=True)
-    expected_hours = db.Column(db.Float, nullable=True)       # estimate from labor line quantity
+    expected_hours = db.Column(db.Float, nullable=True)
     start_time = db.Column(db.DateTime, nullable=True)
     end_time = db.Column(db.DateTime, nullable=True)
     hours_worked = db.Column(db.Float, nullable=True)
     pay = db.Column(db.Float, nullable=True)
-    status = db.Column(db.String(50), default='pending')      # pending, in_progress, completed
+    pay_override = db.Column(db.Float, nullable=True)          # admin-set final pay amount
+    materials_used = db.Column(db.JSON, nullable=True)         # snapshot of materials on completion
+    status = db.Column(db.String(50), default='pending')       # pending, in_progress, completed
+    # Calendar: which date this assignment is scheduled for
+    scheduled_date = db.Column(db.Date, nullable=True)
+    # 'job_order' = normal work on a job order | 'special_task' = installer etc.
+    assignment_type = db.Column(db.String(20), default='job_order')
+    special_task_title = db.Column(db.String(255), nullable=True)
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -759,6 +790,7 @@ def branch_to_dict(branch):
         'name': branch.name,
         'code': branch.code,
         'address': branch.address,
+        'phone': branch.phone,
         'isWarehouse': branch.is_warehouse,
         'isActive': branch.is_active,
         'createdAt': fmt_dt(branch.created_at)
@@ -866,6 +898,21 @@ def run_migrations():
         "ALTER TABLE product_order_transfers ADD COLUMN received_by_id INTEGER REFERENCES users(id)",
         "ALTER TABLE product_order_transfers ADD COLUMN received_at TIMESTAMP",
         "ALTER TABLE worker_assignments ADD COLUMN expected_hours REAL",
+        # Material cost / markup-based selling price + supplier SKU
+        "ALTER TABLE inventory_materials ADD COLUMN sku VARCHAR(100)",
+        "ALTER TABLE inventory_materials ADD COLUMN cost_per_unit REAL DEFAULT 0",
+        "ALTER TABLE inventory_materials ADD COLUMN markup_percent REAL DEFAULT 25",
+        # Worker pay mode: per_hour, per_day, per_piece
+        "ALTER TABLE managed_workers ADD COLUMN pay_mode VARCHAR(20) DEFAULT 'per_hour'",
+        # Worker assignment: calendar date, type (job_order | special_task), title for special tasks
+        "ALTER TABLE worker_assignments ADD COLUMN scheduled_date DATE",
+        "ALTER TABLE worker_assignments ADD COLUMN assignment_type VARCHAR(20) DEFAULT 'job_order'",
+        "ALTER TABLE worker_assignments ADD COLUMN special_task_title VARCHAR(255)",
+        # On completion: pay override + materials snapshot
+        "ALTER TABLE worker_assignments ADD COLUMN pay_override REAL",
+        "ALTER TABLE worker_assignments ADD COLUMN materials_used JSON",
+        # Track which managed worker used materials (FK to managed_workers)
+        "ALTER TABLE material_usage_logs ADD COLUMN managed_worker_id INTEGER REFERENCES managed_workers(id)",
     ]
     for sql in migrations:
         try:
@@ -888,6 +935,8 @@ def init_db():
     # Seed default system settings
     default_settings = [
         ('inventory_low_stock_threshold', '0'),
+        # Default markup applied to a material's cost to derive its selling unit price
+        ('default_material_markup', '25'),
     ]
     for key, value in default_settings:
         if not SystemSetting.query.filter_by(key=key).first():
@@ -1403,6 +1452,9 @@ def material_to_dict(material):
         'color': material.color or '',
         'pattern': material.pattern or '',
         'unitPrice': float(material.unit_price),
+        'costPerUnit': float(material.cost_per_unit or 0),
+        'markupPercent': float(material.markup_percent if material.markup_percent is not None else 25),
+        'sku': material.sku or '',
         'stockQuantity': float(material.stock_quantity),
         'lowStockThreshold': float(material.low_stock_threshold or 0),
         'supplierId': material.supplier_id,
@@ -1463,6 +1515,8 @@ def material_usage_to_dict(log):
         'branchName': log.branch.name if log.branch else None,
         'usedBy': log.used_by,
         'usedByName': log.used_by_user.full_name if log.used_by_user else None,
+        'managedWorkerId': log.managed_worker_id,
+        'workerName': log.managed_worker.name if log.managed_worker else None,
         'notes': log.notes,
         'usedAt': fmt_dt(log.created_at)
     }
@@ -1560,9 +1614,12 @@ def get_raw_material(material_id):
 def create_raw_material():
     data = request.get_json()
 
-    required = ['materialType', 'stockQuantity', 'unitPrice', 'branchId']
+    required = ['materialType', 'stockQuantity', 'branchId']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    # Selling price may be given directly (unitPrice) or derived from cost + markup
+    if 'unitPrice' not in data and 'costPerUnit' not in data:
+        return jsonify({'status': 'error', 'message': 'Either unitPrice or costPerUnit is required'}), 400
 
     branch = Branch.query.get(data['branchId'])
     if not branch or not branch.is_active:
@@ -1580,12 +1637,24 @@ def create_raw_material():
         material_status = 'available'
 
     supplier_id = int(data['supplierId']) if data.get('supplierId') else None
+
+    cost_per_unit = float(data['costPerUnit']) if data.get('costPerUnit') not in (None, '') else 0.0
+    markup_percent = float(data['markupPercent']) if data.get('markupPercent') not in (None, '') else 25.0
+    # If a selling price is supplied use it; otherwise derive it from cost + markup
+    if data.get('unitPrice') not in (None, ''):
+        unit_price = float(data['unitPrice'])
+    else:
+        unit_price = round(cost_per_unit * (1 + markup_percent / 100), 2)
+
     material = InventoryMaterial(
         item_id=custom_item_id,
         material_type=data['materialType'].strip(),
         color=data.get('color', '').strip(),
         pattern=data.get('pattern', '').strip(),
-        unit_price=float(data['unitPrice']),
+        unit_price=unit_price,
+        cost_per_unit=cost_per_unit,
+        markup_percent=markup_percent,
+        sku=(data.get('sku', '').strip() or None),
         stock_quantity=float(data['stockQuantity']),
         low_stock_threshold=float(data.get('lowStockThreshold', 0) or 0),
         supplier_id=supplier_id,
@@ -1620,8 +1689,17 @@ def update_raw_material(material_id):
         material.color = data['color'].strip()
     if 'pattern' in data:
         material.pattern = data['pattern'].strip()
-    if 'unitPrice' in data:
+    if 'sku' in data:
+        material.sku = data['sku'].strip() or None
+    if 'costPerUnit' in data:
+        material.cost_per_unit = float(data['costPerUnit'] or 0)
+    if 'markupPercent' in data:
+        material.markup_percent = float(data['markupPercent'] if data['markupPercent'] not in (None, '') else 25)
+    # A directly-supplied unitPrice wins; otherwise recompute from cost + markup when either changed
+    if 'unitPrice' in data and data['unitPrice'] not in (None, ''):
         material.unit_price = float(data['unitPrice'])
+    elif 'costPerUnit' in data or 'markupPercent' in data:
+        material.unit_price = round((material.cost_per_unit or 0) * (1 + (material.markup_percent if material.markup_percent is not None else 25) / 100), 2)
     if 'stockQuantity' in data:
         material.stock_quantity = float(data['stockQuantity'])
     if 'lowStockThreshold' in data:
@@ -2180,6 +2258,7 @@ def get_job_orders():
             'description': jo.description,
             'vehicleInfo': jo.vehicle_info,
             'items': jo.items,
+            'slipData': jo.slip_data,
             'estimatedCost': jo.estimated_cost,
             'actualCost': jo.actual_cost,
             'totalPrice': jo.total_price,
@@ -2193,7 +2272,7 @@ def get_job_orders():
             'createdBy': jo.created_by,
             'updatedAt': jo.updated_at.strftime('%Y-%m-%d')
         }
-    
+
     return jsonify({'status': 'success', 'data': [job_order_to_dict(jo) for jo in orders]})
 
 @app.route('/api/sales/job-orders/<int:order_id>', methods=['GET'])
@@ -2254,6 +2333,7 @@ def get_job_order(order_id):
         'description': order.description,
         'vehicleInfo': order.vehicle_info,
         'items': order.items,
+        'slipData': order.slip_data,
         'estimatedCost': order.estimated_cost,
         'actualCost': order.actual_cost,
         'totalPrice': order.total_price,
@@ -2310,11 +2390,34 @@ def create_job_order():
     # Parse date
     from datetime import datetime as dt
     estimated_completion = dt.strptime(data['estimatedCompletion'], '%Y-%m-%d').date()
-    
+
+    # Find or create customer account
+    resolved_customer_id = data.get('customerId')
+    if resolved_customer_id and not Customer.query.get(resolved_customer_id):
+        resolved_customer_id = None
+    if not resolved_customer_id:
+        phone = data.get('customerPhone', '').strip()
+        email = data.get('customerEmail', '').strip()
+        customer = None
+        if phone:
+            customer = Customer.query.filter(Customer.phone == phone).first()
+        if not customer and email:
+            customer = Customer.query.filter(Customer.email == email).first()
+        if not customer:
+            customer = Customer(
+                name=data['customerName'],
+                phone=phone,
+                email=email,
+                address=data.get('customerAddress', ''),
+            )
+            db.session.add(customer)
+            db.session.flush()
+        resolved_customer_id = customer.id
+
     # Create database record
     new_order = JobOrder(
         job_order_id=job_order_id,
-        customer_id=data.get('customerId'),
+        customer_id=resolved_customer_id,
         customer_name=data['customerName'],
         customer_phone=data['customerPhone'],
         customer_email=data.get('customerEmail', ''),
@@ -2322,6 +2425,7 @@ def create_job_order():
         description=data['description'],
         vehicle_info=data.get('vehicleInfo'),
         items=items,
+        slip_data=data.get('slipData'),
         estimated_cost=estimated_cost,
         actual_cost=0,
         total_price=total_price,
@@ -2398,6 +2502,8 @@ def update_job_order(order_id):
             item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0))
             for item in data['items']
         )
+    if 'slipData' in data:
+        order.slip_data = data['slipData']
 
     # Recalculate balance
     if 'downPayment' in data or 'totalPrice' in data:
@@ -2563,6 +2669,7 @@ def get_all_orders():
             'description': jo.description,
             'vehicleInfo': jo.vehicle_info,
             'items': jo.items,
+            'slipData': jo.slip_data,
             'estimatedCost': jo.estimated_cost,
             'actualCost': jo.actual_cost,
             'totalPrice': jo.total_price,
@@ -2576,7 +2683,7 @@ def get_all_orders():
             'createdBy': jo.created_by,
             'updatedAt': jo.updated_at.strftime('%Y-%m-%d')
         }
-    
+
     job_orders_list = [job_order_to_dict(jo) for jo in job_orders_db]
     customer_orders_list = [customer_order_to_dict(o) for o in customer_orders_db]
     
@@ -5384,6 +5491,7 @@ def create_branch():
         name=data['name'],
         code=data['code'],
         address=data['address'],
+        phone=data.get('phone', None),
         is_warehouse=data.get('isWarehouse', False),
         is_active=True
     )
@@ -5420,7 +5528,9 @@ def update_branch(branch_id):
         branch.is_warehouse = data['isWarehouse']
     if 'isActive' in data:
         branch.is_active = data['isActive']
-    
+    if 'phone' in data:
+        branch.phone = data['phone'] or None
+
     db.session.commit()
     
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Settings', f"Updated branch: {branch.name}", request.remote_addr or '0.0.0.0')
@@ -6005,6 +6115,7 @@ def list_managed_workers():
                     'name': w.name,
                     'workType': w.work_type,
                     'ratePerHour': w.rate_per_hour,
+                    'payMode': w.pay_mode or 'per_hour',
                     'isActive': w.is_active,
                     'createdAt': fmt_dt(w.created_at),
                 }
@@ -6021,9 +6132,12 @@ def create_managed_worker():
     name = (data.get('name') or '').strip()
     work_type = (data.get('workType') or '').strip()
     rate = float(data.get('ratePerHour') or 0)
+    pay_mode = data.get('payMode', 'per_hour')
+    if pay_mode not in ('per_hour', 'per_day', 'per_piece'):
+        pay_mode = 'per_hour'
     if not name or not work_type:
         return jsonify({'error': 'name and workType are required'}), 400
-    worker = ManagedWorker(name=name, work_type=work_type, rate_per_hour=rate)
+    worker = ManagedWorker(name=name, work_type=work_type, rate_per_hour=rate, pay_mode=pay_mode)
     db.session.add(worker)
     db.session.commit()
     return jsonify({
@@ -6034,6 +6148,7 @@ def create_managed_worker():
                 'name': worker.name,
                 'workType': worker.work_type,
                 'ratePerHour': worker.rate_per_hour,
+                'payMode': worker.pay_mode or 'per_hour',
                 'isActive': worker.is_active,
             }
         }
@@ -6053,6 +6168,8 @@ def update_managed_worker(worker_id):
         worker.work_type = (data['workType'] or '').strip()
     if 'ratePerHour' in data:
         worker.rate_per_hour = float(data['ratePerHour'] or 0)
+    if 'payMode' in data and data['payMode'] in ('per_hour', 'per_day', 'per_piece'):
+        worker.pay_mode = data['payMode']
     if 'isActive' in data:
         worker.is_active = bool(data['isActive'])
     db.session.commit()
@@ -6064,6 +6181,7 @@ def update_managed_worker(worker_id):
                 'name': worker.name,
                 'workType': worker.work_type,
                 'ratePerHour': worker.rate_per_hour,
+                'payMode': worker.pay_mode or 'per_hour',
                 'isActive': worker.is_active,
             }
         }
@@ -6104,6 +6222,7 @@ def list_worker_assignments():
             'workerName': a.worker.name if a.worker else '',
             'workType': a.worker.work_type if a.worker else '',
             'ratePerHour': a.worker.rate_per_hour if a.worker else 0,
+            'payMode': (a.worker.pay_mode or 'per_hour') if a.worker else 'per_hour',
             'jobOrderRef': a.job_order_ref,
             'jobOrderDbId': a.job_order_db_id,
             'description': a.description,
@@ -6112,6 +6231,11 @@ def list_worker_assignments():
             'endTime': fmt_dt(a.end_time),
             'hoursWorked': a.hours_worked,
             'pay': a.pay,
+            'payOverride': a.pay_override,
+            'materialsUsed': a.materials_used,
+            'scheduledDate': a.scheduled_date.isoformat() if a.scheduled_date else None,
+            'assignmentType': a.assignment_type or 'job_order',
+            'specialTaskTitle': a.special_task_title,
             'status': a.status,
             'notes': a.notes,
             'createdAt': fmt_dt(a.created_at),
@@ -6153,12 +6277,26 @@ def create_worker_assignment():
                 }
             }
         })
+    assignment_type = data.get('assignmentType', 'job_order')
+    if assignment_type not in ('job_order', 'special_task'):
+        assignment_type = 'job_order'
+    special_task_title = (data.get('specialTaskTitle') or '').strip() or None
+    scheduled_date = None
+    if data.get('scheduledDate'):
+        try:
+            from datetime import date as _date
+            scheduled_date = _date.fromisoformat(data['scheduledDate'])
+        except Exception:
+            pass
     assignment = WorkerAssignment(
         worker_id=worker_id,
         job_order_ref=job_order_ref,
         job_order_db_id=data.get('jobOrderDbId'),
         description=description,
         expected_hours=data.get('expectedHours'),
+        assignment_type=assignment_type,
+        special_task_title=special_task_title,
+        scheduled_date=scheduled_date,
         status='pending',
         notes=data.get('notes', ''),
     )
@@ -6193,17 +6331,63 @@ def update_worker_assignment(assignment_id):
             assignment.start_time = datetime.utcnow()
         elif new_status == 'completed' and not assignment.end_time:
             assignment.end_time = datetime.utcnow()
-            if assignment.start_time:
+            if assignment.start_time and not data.get('hoursWorked'):
                 delta = assignment.end_time - assignment.start_time
                 assignment.hours_worked = round(delta.total_seconds() / 3600, 2)
             if data.get('hoursWorked') is not None:
                 assignment.hours_worked = float(data['hoursWorked'])
-            if assignment.hours_worked and assignment.worker:
-                assignment.pay = round(assignment.hours_worked * assignment.worker.rate_per_hour, 2)
+            # Materials snapshot
+            if data.get('materialsUsed') is not None:
+                assignment.materials_used = data['materialsUsed']
+            # Log material usage when a job order assignment is completed
+            if assignment.assignment_type != 'special_task' and assignment.job_order_db_id:
+                job_order = JobOrder.query.get(assignment.job_order_db_id)
+                if job_order and job_order.items:
+                    worker_name = assignment.worker.name if assignment.worker else 'Unknown'
+                    for item in job_order.items:
+                        material_id = item.get('materialId')
+                        qty = float(item.get('quantity') or 0)
+                        if not material_id or qty <= 0:
+                            continue
+                        material = InventoryMaterial.query.get(material_id)
+                        if not material:
+                            continue
+                        db.session.add(MaterialUsageLog(
+                            material_id=material.id,
+                            quantity_used=qty,
+                            used_in_type='job_order',
+                            used_in_reference=assignment.job_order_ref,
+                            branch_id=job_order.branch_id,
+                            managed_worker_id=assignment.worker_id,
+                            notes=f"Job order completed by {worker_name}",
+                        ))
+            # Pay: explicit override wins; otherwise compute from pay_mode
+            if data.get('payOverride') is not None:
+                assignment.pay = float(data['payOverride'])
+                assignment.pay_override = assignment.pay
+            elif assignment.worker:
+                w = assignment.worker
+                pay_mode = w.pay_mode or 'per_hour'
+                rate = w.rate_per_hour or 0
+                if pay_mode == 'per_hour':
+                    assignment.pay = round((assignment.hours_worked or 0) * rate, 2)
+                elif pay_mode == 'per_day':
+                    days = float(data.get('unitsWorked', 1) or 1)
+                    assignment.pay = round(days * rate, 2)
+                elif pay_mode == 'per_piece':
+                    pieces = float(data.get('unitsWorked', 1) or 1)
+                    assignment.pay = round(pieces * rate, 2)
     if 'hoursWorked' in data and data['hoursWorked'] is not None:
         assignment.hours_worked = float(data['hoursWorked'])
-        if assignment.worker:
-            assignment.pay = round(assignment.hours_worked * assignment.worker.rate_per_hour, 2)
+    if 'scheduledDate' in data:
+        if data['scheduledDate']:
+            try:
+                from datetime import date as _date
+                assignment.scheduled_date = _date.fromisoformat(data['scheduledDate'])
+            except Exception:
+                pass
+        else:
+            assignment.scheduled_date = None
     if 'notes' in data:
         assignment.notes = data['notes']
     if 'description' in data:
@@ -6221,15 +6405,56 @@ def update_worker_assignment(assignment_id):
                 'workerName': assignment.worker.name if assignment.worker else '',
                 'jobOrderRef': assignment.job_order_ref,
                 'description': assignment.description,
+                'scheduledDate': assignment.scheduled_date.isoformat() if assignment.scheduled_date else None,
+                'assignmentType': assignment.assignment_type or 'job_order',
+                'specialTaskTitle': assignment.special_task_title,
                 'startTime': fmt_dt(assignment.start_time),
                 'endTime': fmt_dt(assignment.end_time),
                 'hoursWorked': assignment.hours_worked,
                 'pay': assignment.pay,
+                'payOverride': assignment.pay_override,
+                'materialsUsed': assignment.materials_used,
                 'status': assignment.status,
                 'notes': assignment.notes,
             }
         }
     })
+
+@app.route('/api/worker-assignments/calendar', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def get_assignments_calendar():
+    """Return all assignments for a worker in a given month, keyed by date."""
+    worker_id = request.args.get('workerId', type=int)
+    month = request.args.get('month')  # YYYY-MM
+    query = WorkerAssignment.query.filter(WorkerAssignment.scheduled_date.isnot(None))
+    if worker_id:
+        query = query.filter_by(worker_id=worker_id)
+    if month:
+        try:
+            year, mon = int(month.split('-')[0]), int(month.split('-')[1])
+            from datetime import date as _date
+            import calendar as _cal
+            start = _date(year, mon, 1)
+            end = _date(year, mon, _cal.monthrange(year, mon)[1])
+            query = query.filter(WorkerAssignment.scheduled_date >= start,
+                                 WorkerAssignment.scheduled_date <= end)
+        except Exception:
+            pass
+    items = query.all()
+    result = {}
+    for a in items:
+        d = a.scheduled_date.isoformat()
+        result.setdefault(d, []).append({
+            'id': a.id,
+            'jobOrderRef': a.job_order_ref,
+            'assignmentType': a.assignment_type or 'job_order',
+            'specialTaskTitle': a.special_task_title,
+            'workerName': a.worker.name if a.worker else '',
+            'status': a.status,
+            'description': a.description,
+        })
+    return jsonify({'status': 'success', 'data': result})
 
 @app.route('/api/worker-assignments/<int:assignment_id>', methods=['DELETE'])
 @require_auth
@@ -6825,6 +7050,270 @@ def recompute_ai_predictions():
     t.start()
 
     return jsonify({'status': 'success', 'message': 'Recomputing predictions...'})
+
+# =========================================
+# CUSTOMER MANAGEMENT ROUTES
+# =========================================
+
+def customer_to_dict(c):
+    return {
+        'id': c.id,
+        'name': c.name,
+        'phone': c.phone or '',
+        'email': c.email or '',
+        'address': c.address or '',
+        'discountPercent': c.discount_percent,
+        'promoCode': c.promo_code,
+        'promoDiscount': c.promo_discount,
+        'notes': c.notes or '',
+        'createdAt': c.created_at.strftime('%Y-%m-%d') if c.created_at else None,
+    }
+
+@app.route('/api/customers/search', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def search_customers():
+    q = request.args.get('q', '').strip()
+    if len(q) < 2:
+        return jsonify({'status': 'success', 'data': []})
+    like = f'%{q}%'
+    results = Customer.query.filter(
+        db.or_(
+            Customer.name.ilike(like),
+            Customer.phone.ilike(like),
+            Customer.email.ilike(like)
+        )
+    ).limit(5).all()
+    return jsonify({'status': 'success', 'data': [customer_to_dict(c) for c in results]})
+
+@app.route('/api/customers', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def get_customers():
+    q = request.args.get('q', '').strip()
+    query = Customer.query
+    if q:
+        like = f'%{q}%'
+        query = query.filter(
+            db.or_(
+                Customer.name.ilike(like),
+                Customer.phone.ilike(like),
+                Customer.email.ilike(like)
+            )
+        )
+    customers = query.order_by(Customer.name.asc()).all()
+    return jsonify({'status': 'success', 'data': [customer_to_dict(c) for c in customers]})
+
+@app.route('/api/customers', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def create_customer():
+    data = request.get_json()
+    if not data.get('name'):
+        return jsonify({'status': 'error', 'message': 'Name is required'}), 400
+    customer = Customer(
+        name=data['name'],
+        phone=data.get('phone', ''),
+        email=data.get('email', ''),
+        address=data.get('address', ''),
+        discount_percent=data.get('discountPercent'),
+        promo_code=data.get('promoCode'),
+        promo_discount=data.get('promoDiscount'),
+        notes=data.get('notes', ''),
+    )
+    db.session.add(customer)
+    db.session.commit()
+    return jsonify({'status': 'success', 'data': customer_to_dict(customer)}), 201
+
+@app.route('/api/customers/<int:customer_id>', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def get_customer(customer_id):
+    customer = Customer.query.get_or_404(customer_id)
+    orders = JobOrder.query.filter_by(customer_id=customer_id).order_by(JobOrder.created_at.desc()).all()
+    order_history = [{
+        'id': o.id,
+        'jobOrderId': o.job_order_id,
+        'totalPrice': o.total_price,
+        'status': o.status,
+        'paymentStatus': o.payment_status,
+        'downPayment': o.down_payment,
+        'balance': o.balance,
+        'createdAt': o.created_at.strftime('%Y-%m-%d'),
+        'estimatedCompletion': o.estimated_completion.strftime('%Y-%m-%d') if o.estimated_completion else None,
+    } for o in orders]
+    result = customer_to_dict(customer)
+    result['orderHistory'] = order_history
+    return jsonify({'status': 'success', 'data': result})
+
+@app.route('/api/customers/<int:customer_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def update_customer(customer_id):
+    customer = Customer.query.get_or_404(customer_id)
+    data = request.get_json()
+    if 'name' in data: customer.name = data['name']
+    if 'phone' in data: customer.phone = data['phone']
+    if 'email' in data: customer.email = data['email']
+    if 'address' in data: customer.address = data['address']
+    if 'discountPercent' in data: customer.discount_percent = data['discountPercent']
+    if 'promoCode' in data: customer.promo_code = data['promoCode']
+    if 'promoDiscount' in data: customer.promo_discount = data['promoDiscount']
+    if 'notes' in data: customer.notes = data['notes']
+    db.session.commit()
+    return jsonify({'status': 'success', 'data': customer_to_dict(customer)})
+
+# ============================================
+# ANNOUNCEMENTS
+# ============================================
+
+class Announcement(db.Model):
+    __tablename__ = 'announcements'
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(255), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+    # 'info' | 'warning' | 'urgent'
+    priority = db.Column(db.String(20), default='info')
+    is_pinned = db.Column(db.Boolean, default=False)
+    is_active = db.Column(db.Boolean, default=True)
+    created_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    created_by = db.relationship('User', foreign_keys=[created_by_id])
+
+def announcement_to_dict(a):
+    return {
+        'id': a.id,
+        'title': a.title,
+        'body': a.body,
+        'priority': a.priority or 'info',
+        'isPinned': a.is_pinned,
+        'isActive': a.is_active,
+        'createdById': a.created_by_id,
+        'createdByName': a.created_by.full_name if a.created_by else 'System',
+        'createdAt': fmt_dt(a.created_at),
+        'updatedAt': fmt_dt(a.updated_at),
+    }
+
+@app.route('/api/announcements', methods=['GET'])
+@require_auth
+def get_announcements():
+    # Only staff can see announcements — customers are excluded via require_auth + role check
+    if request.current_user.get('role') == 'customer':
+        return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+    items = (Announcement.query
+             .filter_by(is_active=True)
+             .order_by(Announcement.is_pinned.desc(), Announcement.created_at.desc())
+             .all())
+    return jsonify({'status': 'success', 'data': [announcement_to_dict(a) for a in items]})
+
+@app.route('/api/announcements', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def create_announcement():
+    data = request.get_json()
+    if not data.get('title', '').strip():
+        return jsonify({'status': 'error', 'message': 'Title is required'}), 400
+    if not data.get('body', '').strip():
+        return jsonify({'status': 'error', 'message': 'Body is required'}), 400
+    priority = data.get('priority', 'info')
+    if priority not in ('info', 'warning', 'urgent'):
+        priority = 'info'
+    a = Announcement(
+        title=data['title'].strip(),
+        body=data['body'].strip(),
+        priority=priority,
+        is_pinned=bool(data.get('isPinned', False)),
+        is_active=True,
+        created_by_id=request.current_user['id'],
+    )
+    db.session.add(a)
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Announcements',
+               f"Created announcement: {a.title}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': announcement_to_dict(a)}), 201
+
+@app.route('/api/announcements/<int:ann_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def update_announcement(ann_id):
+    a = Announcement.query.get(ann_id)
+    if not a:
+        return jsonify({'status': 'error', 'message': 'Announcement not found'}), 404
+    data = request.get_json()
+    if 'title' in data: a.title = data['title'].strip()
+    if 'body' in data: a.body = data['body'].strip()
+    if 'priority' in data and data['priority'] in ('info', 'warning', 'urgent'):
+        a.priority = data['priority']
+    if 'isPinned' in data: a.is_pinned = bool(data['isPinned'])
+    if 'isActive' in data: a.is_active = bool(data['isActive'])
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Announcements',
+               f"Updated announcement: {a.title}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': announcement_to_dict(a)})
+
+@app.route('/api/announcements/<int:ann_id>', methods=['DELETE'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def delete_announcement(ann_id):
+    a = Announcement.query.get(ann_id)
+    if not a:
+        return jsonify({'status': 'error', 'message': 'Announcement not found'}), 404
+    db.session.delete(a)
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'DELETE', 'Announcements',
+               f"Deleted announcement: {a.title}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'message': 'Deleted'})
+
+# ── Chat ─────────────────────────────────────────────────────────────────────
+
+class ChatMessage(db.Model):
+    __tablename__ = 'chat_messages'
+    id = db.Column(db.Integer, primary_key=True)
+    sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    sender = db.relationship('User', foreign_keys=[sender_id])
+
+def chat_message_to_dict(m):
+    return {
+        'id': m.id,
+        'senderId': m.sender_id,
+        'senderName': m.sender.full_name if m.sender else 'Unknown',
+        'senderRole': m.sender.role.key if (m.sender and m.sender.role) else '',
+        'content': m.content,
+        'createdAt': m.created_at.strftime('%Y-%m-%dT%H:%M:%S') if m.created_at else None,
+    }
+
+@app.route('/api/chat/messages', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def get_chat_messages():
+    since = request.args.get('since')
+    query = ChatMessage.query
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace('Z', ''))
+            query = query.filter(ChatMessage.created_at > since_dt)
+        except ValueError:
+            pass
+    messages = query.order_by(ChatMessage.created_at.asc()).limit(200).all()
+    return jsonify({'status': 'success', 'data': [chat_message_to_dict(m) for m in messages]})
+
+@app.route('/api/chat/messages', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def send_chat_message():
+    data = request.get_json()
+    content = (data.get('content') or '').strip()
+    if not content:
+        return jsonify({'status': 'error', 'message': 'Content is required'}), 400
+    msg = ChatMessage(sender_id=request.current_user['id'], content=content)
+    db.session.add(msg)
+    db.session.commit()
+    return jsonify({'status': 'success', 'data': chat_message_to_dict(msg)}), 201
 
 if __name__ == '__main__':
     with app.app_context():

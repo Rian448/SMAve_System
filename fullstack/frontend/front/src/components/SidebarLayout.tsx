@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { usePathname } from 'next/navigation';
 import Navigation from './Navigation';
+import ChatBubble from './ChatBubble';
 
 export default function SidebarLayout({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -23,6 +24,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
       >
         {children}
       </div>
+      <ChatBubble />
     </div>
   );
 }

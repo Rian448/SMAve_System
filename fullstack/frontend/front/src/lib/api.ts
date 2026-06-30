@@ -64,6 +64,45 @@ export interface Alert {
   itemId: number;
 }
 
+export interface Announcement {
+  id: number;
+  title: string;
+  body: string;
+  priority: 'info' | 'warning' | 'urgent';
+  isPinned: boolean;
+  isActive: boolean;
+  createdById?: number;
+  createdByName?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Customer {
+  id: number;
+  name: string;
+  phone: string;
+  email: string;
+  address: string;
+  discountPercent?: number | null;
+  promoCode?: string | null;
+  promoDiscount?: number | null;
+  notes: string;
+  createdAt?: string;
+  orderHistory?: CustomerOrderSummary[];
+}
+
+export interface CustomerOrderSummary {
+  id: number;
+  jobOrderId: string;
+  totalPrice: number;
+  status: string;
+  paymentStatus: string;
+  downPayment: number;
+  balance: number;
+  createdAt: string;
+  estimatedCompletion?: string | null;
+}
+
 export interface WorkerProfile {
   id: number;
   userId: number;
@@ -271,6 +310,12 @@ export interface RawMaterial {
   color: string;
   pattern: string;
   unitPrice: number;
+  /** Purchase cost we pay the supplier per unit */
+  costPerUnit?: number;
+  /** Markup % applied on cost to derive unitPrice (e.g. 25 = +25%) */
+  markupPercent?: number;
+  /** Supplier item code / SKU from the stock-in log */
+  sku?: string;
   stockQuantity: number;
   lowStockThreshold: number;
   supplierId?: number;
@@ -385,7 +430,11 @@ export interface RawMaterialInput {
   materialType: string;
   color?: string;
   pattern?: string;
-  unitPrice: number;
+  /** Selling price per unit. Optional when costPerUnit + markupPercent are given (server derives it). */
+  unitPrice?: number;
+  costPerUnit?: number;
+  markupPercent?: number;
+  sku?: string;
   stockQuantity: number;
   lowStockThreshold?: number;
   supplierId?: number | null;
@@ -438,6 +487,15 @@ export interface PremadeMaterialUsageInput {
   quantityUsed: number;
 }
 
+export interface ChatMessage {
+  id: number;
+  senderId: number;
+  senderName: string;
+  senderRole: string;
+  content: string;
+  createdAt: string;
+}
+
 export interface MaterialUsageLog {
   id: number;
   materialId: number;
@@ -452,6 +510,8 @@ export interface MaterialUsageLog {
   branchName?: string;
   usedBy?: number;
   usedByName?: string;
+  managedWorkerId?: number;
+  workerName?: string;
   notes?: string;
   usedAt: string;
 }
@@ -477,6 +537,8 @@ export interface ManagedWorker {
   name: string;
   workType: string;
   ratePerHour: number;
+  /** per_hour | per_day | per_piece */
+  payMode: 'per_hour' | 'per_day' | 'per_piece';
   isActive: boolean;
   createdAt?: string;
 }
@@ -487,6 +549,7 @@ export interface WorkerAssignment {
   workerName: string;
   workType: string;
   ratePerHour: number;
+  payMode: 'per_hour' | 'per_day' | 'per_piece';
   jobOrderRef: string;
   jobOrderDbId?: number;
   description?: string;
@@ -495,6 +558,11 @@ export interface WorkerAssignment {
   endTime?: string;
   hoursWorked?: number;
   pay?: number;
+  payOverride?: number;
+  materialsUsed?: Array<{ name: string; qty: number; unit?: string }> | null;
+  scheduledDate?: string;
+  assignmentType: 'job_order' | 'special_task';
+  specialTaskTitle?: string;
   status: 'pending' | 'in_progress' | 'completed';
   notes?: string;
   createdAt: string;
@@ -531,6 +599,19 @@ export interface JobOrder {
   description: string;
   vehicleInfo?: VehicleInfo | null;
   items: JobOrderItem[];
+  slipData?: {
+    rows?: Array<{ description: string; hr: string }>;
+    materialCenter?: string;
+    materialSides?: string;
+    materialBack?: string;
+    dStitch?: string;
+    piping?: string;
+    pockets?: string;
+    logo?: string;
+    specification?: string;
+    cutterName?: string;
+    sewerName?: string;
+  } | null;
   estimatedCost: number;
   actualCost: number;
   totalPrice: number;
@@ -820,6 +901,7 @@ export interface Branch {
   name: string;
   code: string;
   address: string;
+  phone?: string;
   isWarehouse: boolean;
   isActive: boolean;
   createdAt?: string;
@@ -1641,12 +1723,12 @@ export const api = {
   managedWorkers: {
     list: () =>
       fetchApi<{ workers: ManagedWorker[] }>('/api/managed-workers'),
-    create: (data: { name: string; workType: string; ratePerHour: number }) =>
+    create: (data: { name: string; workType: string; ratePerHour: number; payMode?: string }) =>
       fetchApi<{ worker: ManagedWorker }>('/api/managed-workers', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: number, data: Partial<{ name: string; workType: string; ratePerHour: number; isActive: boolean }>) =>
+    update: (id: number, data: Partial<{ name: string; workType: string; ratePerHour: number; payMode: string; isActive: boolean }>) =>
       fetchApi<{ worker: ManagedWorker }>(`/api/managed-workers/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -1660,18 +1742,45 @@ export const api = {
       const query = workerId ? `?workerId=${workerId}` : '';
       return fetchApi<{ assignments: WorkerAssignment[] }>(`/api/worker-assignments${query}`);
     },
-    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string }) =>
+    getCalendar: (params: { workerId: number; month: string }) =>
+      fetchApi<Record<string, Array<{ id: number; jobOrderRef: string; assignmentType: string; specialTaskTitle?: string; workerName: string; status: string; description?: string }>>>(
+        `/api/worker-assignments/calendar?workerId=${params.workerId}&month=${params.month}`
+      ),
+    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string; scheduledDate?: string; assignmentType?: string; specialTaskTitle?: string }) =>
       fetchApi<{ assignment: WorkerAssignment }>('/api/worker-assignments', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: number, data: Partial<{ status: string; hoursWorked: number; expectedHours: number; notes: string; description: string }>) =>
+    update: (id: number, data: Partial<{ status: string; hoursWorked: number; unitsWorked: number; payOverride: number; materialsUsed: object[]; expectedHours: number; notes: string; description: string; scheduledDate: string }>) =>
       fetchApi<{ assignment: WorkerAssignment }>(`/api/worker-assignments/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
     delete: (id: number) =>
       fetchApi<{ message: string }>(`/api/worker-assignments/${id}`, { method: 'DELETE' }),
+  },
+
+  customers: {
+    search: (q: string) =>
+      fetchApi<Customer[]>(`/api/customers/search?q=${encodeURIComponent(q)}`),
+    list: (q?: string) =>
+      fetchApi<Customer[]>(`/api/customers${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+    get: (id: number) =>
+      fetchApi<Customer>(`/api/customers/${id}`),
+    create: (data: Omit<Customer, 'id' | 'createdAt' | 'orderHistory'>) =>
+      fetchApi<Customer>('/api/customers', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<Omit<Customer, 'id' | 'createdAt' | 'orderHistory'>>) =>
+      fetchApi<Customer>(`/api/customers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  },
+
+  announcements: {
+    list: () => fetchApi<Announcement[]>('/api/announcements'),
+    create: (data: { title: string; body: string; priority?: string; isPinned?: boolean }) =>
+      fetchApi<Announcement>('/api/announcements', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<{ title: string; body: string; priority: string; isPinned: boolean; isActive: boolean }>) =>
+      fetchApi<Announcement>(`/api/announcements/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (id: number) =>
+      fetchApi<{ message: string }>(`/api/announcements/${id}`, { method: 'DELETE' }),
   },
 
   workerAvailability: {
@@ -1685,6 +1794,18 @@ export const api = {
       fetchApi<{ id?: number; date?: string; isAvailable?: boolean }>('/api/worker-availability', {
         method: 'POST',
         body: JSON.stringify(data),
+      }),
+  },
+
+  chat: {
+    list: (since?: string) => {
+      const q = since ? `?since=${encodeURIComponent(since)}` : '';
+      return fetchApi<ChatMessage[]>(`/api/chat/messages${q}`);
+    },
+    send: (content: string) =>
+      fetchApi<ChatMessage>('/api/chat/messages', {
+        method: 'POST',
+        body: JSON.stringify({ content }),
       }),
   },
 };

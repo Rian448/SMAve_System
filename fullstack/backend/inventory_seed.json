@@ -1,0 +1,351 @@
+{
+  "suppliers": [
+    "BIFFANY",
+    "FMI",
+    "GRECO",
+    "JOAQUIN",
+    "SHOPEE",
+    "TRIGOLDEN",
+    "TYE=STAR STOCKIST",
+    "URATEX RGC",
+    "URATEX RNC"
+  ],
+  "products": [
+    {
+      "name": "FIBERCOTTON (per kg)",
+      "sku": "11101001",
+      "quantity": 45.0,
+      "costPerUnit": 118.0,
+      "supplier": "FMI"
+    },
+    {
+      "name": "FIBERFILL",
+      "sku": "10001111",
+      "quantity": 131.0,
+      "costPerUnit": 56.44,
+      "supplier": "FMI"
+    },
+    {
+      "name": "GRECO-PREMIUM",
+      "sku": "10111100",
+      "quantity": 36.0,
+      "costPerUnit": 680.0,
+      "supplier": "GRECO"
+    },
+    {
+      "name": "MAD003-LAM14",
+      "sku": "11010001",
+      "quantity": 58.0,
+      "costPerUnit": 285.73,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "MAD003-LAM18",
+      "sku": "11010101",
+      "quantity": 58.0,
+      "costPerUnit": 258.43,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "MAD004-LAM14",
+      "sku": "11010010",
+      "quantity": 95.0,
+      "costPerUnit": 285.73,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "MAD005-LAM14",
+      "sku": "11010011",
+      "quantity": 52.0,
+      "costPerUnit": 285.73,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "MAD005-LAM18",
+      "sku": "11010111",
+      "quantity": 53.5,
+      "costPerUnit": 258.43,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "MAD006-LAM18",
+      "sku": "11011000",
+      "quantity": 46.5,
+      "costPerUnit": 258.43,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "MAD006-PLAIN",
+      "sku": "00001001",
+      "quantity": 42.0,
+      "costPerUnit": 165.0,
+      "supplier": "BIFFANY"
+    },
+    {
+      "name": "MAD016-LAM14",
+      "sku": "11010101",
+      "quantity": 110.0,
+      "costPerUnit": 285.73,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "MAD016-LAM18",
+      "sku": "11011001",
+      "quantity": 57.0,
+      "costPerUnit": 258.43,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "MAD016-PLAIN",
+      "sku": "00001010",
+      "quantity": 120.0,
+      "costPerUnit": 165.0,
+      "supplier": "BIFFANY"
+    },
+    {
+      "name": "MAD017-PLAIN",
+      "sku": "00001011",
+      "quantity": 44.0,
+      "costPerUnit": 165.0,
+      "supplier": "BIFFANY"
+    },
+    {
+      "name": "MAD020-LAM14",
+      "sku": "11010000",
+      "quantity": 43.0,
+      "costPerUnit": 285.73,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "MAD020-PLAIN",
+      "sku": "00000101",
+      "quantity": 6.0,
+      "costPerUnit": 165.0,
+      "supplier": ""
+    },
+    {
+      "name": "MAGIC TAPE (lalaki)",
+      "sku": "10101010",
+      "quantity": 20.0,
+      "costPerUnit": 135.0,
+      "supplier": "JOAQUIN"
+    },
+    {
+      "name": "NOMAD MATTING BGE/BRWN",
+      "sku": "11111001",
+      "quantity": 10.0,
+      "costPerUnit": 500.0,
+      "supplier": "TYE=STAR STOCKIST"
+    },
+    {
+      "name": "NOMAD MATTING BLK",
+      "sku": "10011100",
+      "quantity": 20.0,
+      "costPerUnit": 500.0,
+      "supplier": "TYE=STAR STOCKIST"
+    },
+    {
+      "name": "NOMAD MATTING BLK/GRY",
+      "sku": "10111101",
+      "quantity": 10.0,
+      "costPerUnit": 500.0,
+      "supplier": "TYE=STAR STOCKIST"
+    },
+    {
+      "name": "NYLEXBLK-LAM18",
+      "sku": "11011001",
+      "quantity": 60.4,
+      "costPerUnit": 240.0,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "NYLEXBLK-PLAIN",
+      "sku": "00001010",
+      "quantity": 66.0,
+      "costPerUnit": 240.0,
+      "supplier": "BIFFANY"
+    },
+    {
+      "name": "NYLON BLK",
+      "sku": "10001001",
+      "quantity": 12.0,
+      "costPerUnit": 110.0,
+      "supplier": "JOAQUIN"
+    },
+    {
+      "name": "PERFO10312-LAM14",
+      "sku": "11011111",
+      "quantity": 50.0,
+      "costPerUnit": 315.73,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "PERFO10312-PLAIN",
+      "sku": "00010100",
+      "quantity": 100.0,
+      "costPerUnit": 195.0,
+      "supplier": "BIFFANY"
+    },
+    {
+      "name": "PERFO9714-LAM14",
+      "sku": "10111101",
+      "quantity": 52.0,
+      "costPerUnit": 315.73,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "PERFOBLK-LAM14",
+      "sku": "11000001",
+      "quantity": 202.0,
+      "costPerUnit": 288.73,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "PERFOSILVER-LAM14",
+      "sku": "10111101",
+      "quantity": 58.0,
+      "costPerUnit": 315.73,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "PERFOSILVER-PLAIN",
+      "sku": "11110010",
+      "quantity": 60.0,
+      "costPerUnit": 195.0,
+      "supplier": "BIFFANY"
+    },
+    {
+      "name": "PRES10312-LAM14",
+      "sku": "10011101",
+      "quantity": 55.0,
+      "costPerUnit": 315.73,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "PRES10312-LAM18",
+      "sku": "10100001",
+      "quantity": 57.0,
+      "costPerUnit": 288.43,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "PRES10312-PLAIN",
+      "sku": "11010010",
+      "quantity": 240.0,
+      "costPerUnit": 195.0,
+      "supplier": "BIFFANY"
+    },
+    {
+      "name": "PRES10313-LAM18",
+      "sku": "10100010",
+      "quantity": 62.0,
+      "costPerUnit": 288.43,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "PRES10313-PLAIN",
+      "sku": "11010011",
+      "quantity": 124.0,
+      "costPerUnit": 195.0,
+      "supplier": "BIFFANY"
+    },
+    {
+      "name": "PRESBLK-PLAIN",
+      "sku": "10110100",
+      "quantity": 120.0,
+      "costPerUnit": 195.0,
+      "supplier": "BIFFANY"
+    },
+    {
+      "name": "R.M 5MCS GRAY (PER SET)",
+      "sku": "10111100",
+      "quantity": 2.0,
+      "costPerUnit": 750.0,
+      "supplier": "TYE=STAR STOCKIST"
+    },
+    {
+      "name": "R.M 5PCS BEIGE/BRWN",
+      "sku": "11101100",
+      "quantity": 6.0,
+      "costPerUnit": 870.0,
+      "supplier": "TYE=STAR STOCKIST"
+    },
+    {
+      "name": "R.M 5PCS BLK (PER SET)",
+      "sku": "01100101",
+      "quantity": 6.0,
+      "costPerUnit": 750.0,
+      "supplier": "TYE=STAR STOCKIST"
+    },
+    {
+      "name": "R.M 5PCS BLK/GRY (PER SET)",
+      "sku": "10000110",
+      "quantity": 13.0,
+      "costPerUnit": 870.0,
+      "supplier": "TYE=STAR STOCKIST"
+    },
+    {
+      "name": "R.M 5PCS BLK/RED (PER SET)",
+      "sku": "01101111",
+      "quantity": 6.0,
+      "costPerUnit": 870.0,
+      "supplier": "TYE=STAR STOCKIST"
+    },
+    {
+      "name": "SHBLK-LAM14",
+      "sku": "11100000",
+      "quantity": 339.0,
+      "costPerUnit": 273.73,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "SHBLK-LAM18",
+      "sku": "11100100",
+      "quantity": 624.0,
+      "costPerUnit": 246.43,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "SHBLK-PLAIN",
+      "sku": "00010101",
+      "quantity": 825.0,
+      "costPerUnit": 160.0,
+      "supplier": "TRIGOLDEN"
+    },
+    {
+      "name": "SILVER SIGN PEN (drawing) per pc",
+      "sku": "11100000",
+      "quantity": 300.0,
+      "costPerUnit": 52.0,
+      "supplier": "SHOPEE"
+    },
+    {
+      "name": "SUPER-DIKIT-CEMENT",
+      "sku": "00011010",
+      "quantity": 6.0,
+      "costPerUnit": 435.0,
+      "supplier": "JOAQUIN"
+    },
+    {
+      "name": "TRICOT 40D/D17/1/4",
+      "sku": "00111011",
+      "quantity": 300.0,
+      "costPerUnit": 94.57,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "TRICOT 40D/D17/1/8",
+      "sku": "00111111",
+      "quantity": 240.0,
+      "costPerUnit": 67.22,
+      "supplier": "URATEX RNC"
+    },
+    {
+      "name": "URATEX 1/2X44x80",
+      "sku": "00101011",
+      "quantity": 25.0,
+      "costPerUnit": 259.96,
+      "supplier": "URATEX RGC"
+    }
+  ]
+}

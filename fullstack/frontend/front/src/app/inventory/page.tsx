@@ -25,7 +25,12 @@ export default function InventoryPage() {
     materialType: '',
     color: '',
     pattern: '',
+    sku: '',
+    costPerUnit: '',
+    markupPercent: '25',
     unitPrice: '',
+    priceMode: 'markup' as 'markup' | 'manual',
+    supplierId: '',
     stockQuantity: ''
   });
 
@@ -34,7 +39,12 @@ export default function InventoryPage() {
     materialType: '',
     color: '',
     pattern: '',
+    sku: '',
+    costPerUnit: '',
+    markupPercent: '25',
     unitPrice: '',
+    priceMode: 'markup' as 'markup' | 'manual',
+    supplierId: '',
     stockQuantity: ''
   });
 
@@ -196,11 +206,25 @@ export default function InventoryPage() {
       return;
     }
 
-    const unitPrice = Number(newMaterial.unitPrice);
+    const costPerUnit = Number(newMaterial.costPerUnit);
+    const markupPercent = Number(newMaterial.markupPercent);
     const stockQuantity = Number(newMaterial.stockQuantity);
 
-    if (Number.isNaN(unitPrice) || Number.isNaN(stockQuantity)) {
-      setFormError('Unit Price and Stock Quantity must be valid numbers.');
+    if (Number.isNaN(stockQuantity)) {
+      setFormError('Stock Quantity must be a valid number.');
+      return;
+    }
+    if (newMaterial.priceMode === 'markup') {
+      if (Number.isNaN(costPerUnit) || costPerUnit <= 0) {
+        setFormError('Enter a valid Cost per Unit.');
+        return;
+      }
+      if (Number.isNaN(markupPercent)) {
+        setFormError('Enter a valid markup %.');
+        return;
+      }
+    } else if (Number.isNaN(Number(newMaterial.unitPrice))) {
+      setFormError('Selling Price must be a valid number.');
       return;
     }
 
@@ -213,12 +237,16 @@ export default function InventoryPage() {
         materialType: newMaterial.materialType.trim(),
         color: newMaterial.color.trim(),
         pattern: newMaterial.pattern.trim(),
-        unitPrice,
+        sku: newMaterial.sku.trim() || undefined,
+        costPerUnit: Number.isNaN(costPerUnit) ? 0 : costPerUnit,
+        markupPercent: Number.isNaN(markupPercent) ? 25 : markupPercent,
+        ...(newMaterial.priceMode === 'manual' ? { unitPrice: Number(newMaterial.unitPrice) } : {}),
+        supplierId: newMaterial.supplierId ? Number(newMaterial.supplierId) : null,
         stockQuantity,
         branchId: user?.branchId || 1
       });
 
-      setNewMaterial({ itemId: '', materialType: '', color: '', pattern: '', unitPrice: '', stockQuantity: '' });
+      setNewMaterial({ itemId: '', materialType: '', color: '', pattern: '', sku: '', costPerUnit: '', markupPercent: '25', unitPrice: '', priceMode: 'markup', supplierId: '', stockQuantity: '' });
       await fetchInventory();
     } catch (error: any) {
       setFormError(error?.message || 'Failed to add item.');
@@ -233,7 +261,12 @@ export default function InventoryPage() {
       materialType: material.materialType,
       color: material.color,
       pattern: material.pattern,
+      sku: material.sku || '',
+      costPerUnit: material.costPerUnit != null ? String(material.costPerUnit) : '',
+      markupPercent: material.markupPercent != null ? String(material.markupPercent) : '25',
       unitPrice: String(material.unitPrice),
+      priceMode: 'markup',
+      supplierId: material.supplierId != null ? String(material.supplierId) : '',
       stockQuantity: String(material.stockQuantity)
     });
   };
@@ -241,11 +274,16 @@ export default function InventoryPage() {
   const handleSaveMaterial = async (materialId: number) => {
     setFormError('');
 
-    const unitPrice = Number(editMaterial.unitPrice);
+    const costPerUnit = Number(editMaterial.costPerUnit);
+    const markupPercent = Number(editMaterial.markupPercent);
     const stockQuantity = Number(editMaterial.stockQuantity);
 
-    if (Number.isNaN(unitPrice) || Number.isNaN(stockQuantity)) {
-      setFormError('Unit Price and Stock Quantity must be valid numbers.');
+    if (Number.isNaN(stockQuantity)) {
+      setFormError('Stock Quantity must be a valid number.');
+      return;
+    }
+    if (editMaterial.priceMode === 'manual' && Number.isNaN(Number(editMaterial.unitPrice))) {
+      setFormError('Selling Price must be a valid number.');
       return;
     }
 
@@ -255,7 +293,11 @@ export default function InventoryPage() {
         materialType: editMaterial.materialType.trim(),
         color: editMaterial.color.trim(),
         pattern: editMaterial.pattern.trim(),
-        unitPrice,
+        sku: editMaterial.sku.trim(),
+        costPerUnit: Number.isNaN(costPerUnit) ? 0 : costPerUnit,
+        markupPercent: Number.isNaN(markupPercent) ? 25 : markupPercent,
+        ...(editMaterial.priceMode === 'manual' ? { unitPrice: Number(editMaterial.unitPrice) } : {}),
+        supplierId: editMaterial.supplierId ? Number(editMaterial.supplierId) : null,
         stockQuantity
       });
 
@@ -778,30 +820,38 @@ export default function InventoryPage() {
                 type="text"
                 value={newMaterial.materialType}
                 onChange={(e) => setNewMaterial((prev) => ({ ...prev, materialType: e.target.value }))}
-                placeholder="Material Type"
+                placeholder="Material Name"
+                className="md:col-span-2 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
+              />
+              <input
+                type="text"
+                value={newMaterial.sku}
+                onChange={(e) => setNewMaterial((prev) => ({ ...prev, sku: e.target.value }))}
+                placeholder="SKU"
                 className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
               />
+              <select
+                value={newMaterial.supplierId}
+                onChange={(e) => setNewMaterial((prev) => ({ ...prev, supplierId: e.target.value }))}
+                className="md:col-span-2 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
+              >
+                <option value="">— Supplier —</option>
+                {suppliers.map((s) => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
               <input
                 type="text"
                 value={newMaterial.color}
                 onChange={(e) => setNewMaterial((prev) => ({ ...prev, color: e.target.value }))}
-                placeholder="Color"
+                placeholder="Color (optional)"
                 className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
               />
               <input
                 type="text"
                 value={newMaterial.pattern}
                 onChange={(e) => setNewMaterial((prev) => ({ ...prev, pattern: e.target.value }))}
-                placeholder="Pattern"
-                className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
-              />
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={newMaterial.unitPrice}
-                onChange={(e) => setNewMaterial((prev) => ({ ...prev, unitPrice: e.target.value }))}
-                placeholder="Unit Price"
+                placeholder="Pattern (optional)"
                 className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
               />
               <input
@@ -813,6 +863,58 @@ export default function InventoryPage() {
                 placeholder="Stock Quantity"
                 className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
               />
+            </div>
+
+            {/* Pricing: cost -> selling price via markup, or manual override */}
+            <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-4">
+              <div className="flex items-center gap-4 mb-3">
+                <span className="text-sm font-medium text-gray-700">Selling Price</span>
+                <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs">
+                  <button type="button"
+                    onClick={() => setNewMaterial((prev) => ({ ...prev, priceMode: 'markup' }))}
+                    className={`px-3 py-1.5 ${newMaterial.priceMode === 'markup' ? 'bg-[#011c72] text-white' : 'bg-white text-gray-600'}`}>
+                    From cost + markup
+                  </button>
+                  <button type="button"
+                    onClick={() => setNewMaterial((prev) => ({ ...prev, priceMode: 'manual' }))}
+                    className={`px-3 py-1.5 ${newMaterial.priceMode === 'manual' ? 'bg-[#011c72] text-white' : 'bg-white text-gray-600'}`}>
+                    Set manually
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Cost per Unit (₱)</label>
+                  <input type="number" min="0" step="0.01" value={newMaterial.costPerUnit}
+                    onChange={(e) => setNewMaterial((prev) => ({ ...prev, costPerUnit: e.target.value }))}
+                    placeholder="0.00"
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Markup %</label>
+                  <input type="number" min="0" step="0.01" value={newMaterial.markupPercent}
+                    disabled={newMaterial.priceMode === 'manual'}
+                    onChange={(e) => setNewMaterial((prev) => ({ ...prev, markupPercent: e.target.value }))}
+                    placeholder="25"
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 disabled:bg-gray-100 disabled:text-gray-400" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Selling Price (₱)</label>
+                  {newMaterial.priceMode === 'manual' ? (
+                    <input type="number" min="0" step="0.01" value={newMaterial.unitPrice}
+                      onChange={(e) => setNewMaterial((prev) => ({ ...prev, unitPrice: e.target.value }))}
+                      placeholder="0.00"
+                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
+                  ) : (
+                    <div className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 font-semibold">
+                      {formatCurrency(Number(newMaterial.costPerUnit || 0) * (1 + Number(newMaterial.markupPercent || 0) / 100))}
+                    </div>
+                  )}
+                </div>
+                <p className="text-xs text-gray-400 pb-2">
+                  This selling price is used when picking materials for products and job orders.
+                </p>
+              </div>
             </div>
             <div className="mt-4">
               <button
@@ -1216,7 +1318,33 @@ export default function InventoryPage() {
                               type="text"
                               value={editMaterial.materialType}
                               onChange={(e) => setEditMaterial((prev) => ({ ...prev, materialType: e.target.value }))}
-                              placeholder="Material Type"
+                              placeholder="Material Name"
+                              className="md:col-span-2 px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
+                            />
+                            <input
+                              type="text"
+                              value={editMaterial.sku}
+                              onChange={(e) => setEditMaterial((prev) => ({ ...prev, sku: e.target.value }))}
+                              placeholder="SKU"
+                              className="px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
+                            />
+                            <select
+                              value={editMaterial.supplierId}
+                              onChange={(e) => setEditMaterial((prev) => ({ ...prev, supplierId: e.target.value }))}
+                              className="md:col-span-2 px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
+                            >
+                              <option value="">— Supplier —</option>
+                              {suppliers.map((s) => (
+                                <option key={s.id} value={s.id}>{s.name}</option>
+                              ))}
+                            </select>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={editMaterial.stockQuantity}
+                              onChange={(e) => setEditMaterial((prev) => ({ ...prev, stockQuantity: e.target.value }))}
+                              placeholder="Stock Qty"
                               className="px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
                             />
                             <input
@@ -1233,24 +1361,54 @@ export default function InventoryPage() {
                               placeholder="Pattern"
                               className="px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
                             />
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              value={editMaterial.unitPrice}
-                              onChange={(e) => setEditMaterial((prev) => ({ ...prev, unitPrice: e.target.value }))}
-                              placeholder="Unit Price"
-                              className="px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
-                            />
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              value={editMaterial.stockQuantity}
-                              onChange={(e) => setEditMaterial((prev) => ({ ...prev, stockQuantity: e.target.value }))}
-                              placeholder="Stock Qty"
-                              className="px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
-                            />
+                          </div>
+                          {/* Pricing */}
+                          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                            <div className="flex items-center gap-3 mb-2">
+                              <span className="text-xs font-medium text-gray-700">Selling Price</span>
+                              <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs">
+                                <button type="button"
+                                  onClick={() => setEditMaterial((prev) => ({ ...prev, priceMode: 'markup' }))}
+                                  className={`px-2.5 py-1 ${editMaterial.priceMode === 'markup' ? 'bg-[#011c72] text-white' : 'bg-white text-gray-600'}`}>
+                                  Cost + markup
+                                </button>
+                                <button type="button"
+                                  onClick={() => setEditMaterial((prev) => ({ ...prev, priceMode: 'manual' }))}
+                                  className={`px-2.5 py-1 ${editMaterial.priceMode === 'manual' ? 'bg-[#011c72] text-white' : 'bg-white text-gray-600'}`}>
+                                  Manual
+                                </button>
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-3 gap-2 items-end">
+                              <div>
+                                <label className="block text-xs text-gray-500 mb-1">Cost/Unit (₱)</label>
+                                <input type="number" min="0" step="0.01" value={editMaterial.costPerUnit}
+                                  onChange={(e) => setEditMaterial((prev) => ({ ...prev, costPerUnit: e.target.value }))}
+                                  placeholder="0.00"
+                                  className="w-full px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+                              </div>
+                              <div>
+                                <label className="block text-xs text-gray-500 mb-1">Markup %</label>
+                                <input type="number" min="0" step="0.01" value={editMaterial.markupPercent}
+                                  disabled={editMaterial.priceMode === 'manual'}
+                                  onChange={(e) => setEditMaterial((prev) => ({ ...prev, markupPercent: e.target.value }))}
+                                  placeholder="25"
+                                  className="w-full px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 disabled:bg-gray-100 disabled:text-gray-400" />
+                              </div>
+                              <div>
+                                <label className="block text-xs text-gray-500 mb-1">Selling (₱)</label>
+                                {editMaterial.priceMode === 'manual' ? (
+                                  <input type="number" min="0" step="0.01" value={editMaterial.unitPrice}
+                                    onChange={(e) => setEditMaterial((prev) => ({ ...prev, unitPrice: e.target.value }))}
+                                    placeholder="0.00"
+                                    className="w-full px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+                                ) : (
+                                  <div className="px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm font-semibold text-gray-900">
+                                    {formatCurrency(Number(editMaterial.costPerUnit || 0) * (1 + Number(editMaterial.markupPercent || 0) / 100))}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
                           </div>
                           <div className="flex items-center gap-3">
                             <button
@@ -1286,12 +1444,20 @@ export default function InventoryPage() {
                               {material.pattern && (
                                 <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{material.pattern}</span>
                               )}
-                              {material.itemId && (
-                                <span className="text-xs font-mono text-gray-400">{material.itemId}</span>
+                              {material.sku && (
+                                <span className="text-xs font-mono text-gray-400">{material.sku}</span>
+                              )}
+                              {material.supplierName && (
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700">{material.supplierName}</span>
                               )}
                             </div>
-                            <div className="mt-1 flex items-center gap-4 text-xs text-gray-500">
-                              <span>Unit Price: <span className="font-medium text-gray-700">{formatCurrency(material.unitPrice)}</span></span>
+                            <div className="mt-1 flex items-center gap-4 text-xs text-gray-500 flex-wrap">
+                              {material.costPerUnit != null && material.costPerUnit > 0 && (
+                                <span>Cost: <span className="font-medium text-gray-700">{formatCurrency(material.costPerUnit)}</span>
+                                  {material.markupPercent != null && <span className="text-gray-400"> +{material.markupPercent}%</span>}
+                                </span>
+                              )}
+                              <span>Selling: <span className="font-medium text-gray-700">{formatCurrency(material.unitPrice)}</span></span>
                               <span>Stock: <span className="font-medium text-gray-700">{material.stockQuantity}</span></span>
                             </div>
                           </div>
@@ -1436,7 +1602,7 @@ export default function InventoryPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
                   <h3 className="text-lg font-medium text-gray-900 mb-2">No material usage yet</h3>
-                  <p className="text-gray-500">Material usage entries appear here when premade products are added.</p>
+                  <p className="text-gray-500">Material usage entries appear here when premade products are added or job orders are completed.</p>
                 </div>
               ) : (
                 <table className="w-full">
@@ -1457,7 +1623,8 @@ export default function InventoryPage() {
                         return (
                           (log.materialName || '').toLowerCase().includes(q) ||
                           (log.usedInReference || '').toLowerCase().includes(q) ||
-                          (log.usedByName || '').toLowerCase().includes(q)
+                          (log.usedByName || '').toLowerCase().includes(q) ||
+                          (log.workerName || '').toLowerCase().includes(q)
                         );
                       })
                       .map((log) => (
@@ -1475,7 +1642,14 @@ export default function InventoryPage() {
                             {log.quantityUsed}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                            {log.usedByName || 'System'}
+                            {log.workerName ? (
+                              <span className="inline-flex items-center gap-1.5">
+                                <span className="w-5 h-5 rounded-full bg-[#011c72]/10 text-[#011c72] flex items-center justify-center text-[10px] font-bold shrink-0">
+                                  {log.workerName.charAt(0)}
+                                </span>
+                                {log.workerName}
+                              </span>
+                            ) : (log.usedByName || 'System')}
                           </td>
                         </tr>
                       ))}
@@ -1525,7 +1699,7 @@ export default function InventoryPage() {
                           ) : (
                             <div>
                               <p className="text-sm font-medium text-gray-900">{s.name}</p>
-                              {s.address && <p className="text-xs text-gray-500 truncate max-w-[160px]">{s.address}</p>}
+                              {s.address && <p className="text-xs text-gray-500 truncate max-w-40">{s.address}</p>}
                             </div>
                           )}
                         </td>
@@ -1553,7 +1727,7 @@ export default function InventoryPage() {
                           {editingSupplierId === s.id ? (
                             <input type="text" value={editSupplier.materialsSupplied} onChange={e => setEditSupplier(p => ({ ...p, materialsSupplied: e.target.value }))} placeholder="Materials" className="w-36 px-2 py-1 rounded border border-gray-200 bg-white text-sm text-gray-900" />
                           ) : (
-                            <span className="text-sm text-gray-600 truncate max-w-[140px] block">{s.materialsSupplied || '—'}</span>
+                            <span className="text-sm text-gray-600 truncate max-w-35 block">{s.materialsSupplied || '—'}</span>
                           )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
@@ -1589,7 +1763,7 @@ export default function InventoryPage() {
                 <div className="p-6 border-b border-gray-200">
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
-                      <div className="animate-spin w-5 h-5 border-2 border-[#011c72] border-t-transparent rounded-full flex-shrink-0" />
+                      <div className="animate-spin w-5 h-5 border-2 border-[#011c72] border-t-transparent rounded-full shrink-0" />
                       <span className="text-sm font-semibold text-gray-800">Training AI models...</span>
                     </div>
                     <span className="text-lg font-bold text-[#011c72]">
