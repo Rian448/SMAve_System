@@ -1,5 +1,5 @@
 ﻿'use client';
-import { formatDate, formatDateTime } from '@/lib/dateUtils';
+import { formatDate } from '@/lib/dateUtils';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord, ManagedWorker, WorkerWorkload, WorkTask } from '@/lib/api';
@@ -143,6 +143,74 @@ export default function JobOrderDetailPage() {
     setEditingParts(items);
     setEditedTotalPrice(String(jobOrder.totalPrice || 0));
   }, [jobOrder]);
+
+  // Slip editing state
+  const [slipRows, setSlipRows] = useState([
+    { description: '', hr: '' },
+    { description: '', hr: '' },
+    { description: '', hr: '' },
+    { description: '', hr: '' },
+  ]);
+  const [slipCenter, setSlipCenter] = useState('');
+  const [slipSides, setSlipSides] = useState('');
+  const [slipBack, setSlipBack] = useState('');
+  const [slipDStitch, setSlipDStitch] = useState('');
+  const [slipPiping, setSlipPiping] = useState('');
+  const [slipPockets, setSlipPockets] = useState('');
+  const [slipLogo, setSlipLogo] = useState('');
+  const [slipSpec, setSlipSpec] = useState('');
+  const [slipCutter, setSlipCutter] = useState('');
+  const [slipSewer, setSlipSewer] = useState('');
+  const [savingSlip, setSavingSlip] = useState(false);
+
+  useEffect(() => {
+    const sd = jobOrder?.slipData;
+    if (!sd) return;
+    if (sd.rows) {
+      setSlipRows([
+        { description: sd.rows[0]?.description || '', hr: sd.rows[0]?.hr || '' },
+        { description: sd.rows[1]?.description || '', hr: sd.rows[1]?.hr || '' },
+        { description: sd.rows[2]?.description || '', hr: sd.rows[2]?.hr || '' },
+        { description: sd.rows[3]?.description || '', hr: sd.rows[3]?.hr || '' },
+      ]);
+    }
+    setSlipCenter(sd.materialCenter || '');
+    setSlipSides(sd.materialSides || '');
+    setSlipBack(sd.materialBack || '');
+    setSlipDStitch(sd.dStitch || '');
+    setSlipPiping(sd.piping || '');
+    setSlipPockets(sd.pockets || '');
+    setSlipLogo(sd.logo || '');
+    setSlipSpec(sd.specification || '');
+    setSlipCutter(sd.cutterName || '');
+    setSlipSewer(sd.sewerName || '');
+  }, [jobOrder?.slipData]);
+
+  const saveSlip = async () => {
+    if (!jobOrder) return;
+    setSavingSlip(true);
+    try {
+      await api.sales.updateJobOrder(jobOrder.id, {
+        slipData: {
+          rows: slipRows,
+          materialCenter: slipCenter,
+          materialSides: slipSides,
+          materialBack: slipBack,
+          dStitch: slipDStitch,
+          piping: slipPiping,
+          pockets: slipPockets,
+          logo: slipLogo,
+          specification: slipSpec,
+          cutterName: slipCutter,
+          sewerName: slipSewer,
+        }
+      } as any);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSavingSlip(false);
+    }
+  };
 
   const canEditParts = ['administrator', 'supervisor'].includes(user?.role || '');
   const canUpdatePaymentStatus = ['administrator', 'supervisor', 'sales_manager'].includes(user?.role || '');
@@ -703,6 +771,149 @@ export default function JobOrderDetailPage() {
                 <p className="text-xs text-gray-400">Line Items</p>
                 <p className="text-sm font-medium text-gray-700">{jobOrder.items.length} item(s)</p>
               </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ── Job Order Slip ── */}
+        <div className="mb-5 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+              <svg className="w-5 h-5 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              Job Order Slip
+            </h2>
+            <button
+              type="button"
+              onClick={saveSlip}
+              disabled={savingSlip}
+              className="px-4 py-1.5 bg-[#011c72] hover:bg-[#01268c] text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+            >
+              {savingSlip ? 'Saving...' : 'Save Slip'}
+            </button>
+          </div>
+
+          {/* Auto-filled header info (read-only) */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-5 p-4 bg-gray-50 rounded-xl border border-gray-200 text-sm">
+            <div>
+              <p className="text-xs font-semibold text-gray-400 uppercase">BRANCH</p>
+              <p className="font-medium text-gray-900 mt-0.5">{jobOrder.branchName || '—'}</p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-400 uppercase">CAR</p>
+              <p className="font-medium text-gray-900 mt-0.5">
+                {jobOrder.vehicleInfo ? `${jobOrder.vehicleInfo.make} ${jobOrder.vehicleInfo.model}`.trim() : '—'}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-400 uppercase">YR</p>
+              <p className="font-medium text-gray-900 mt-0.5">{jobOrder.vehicleInfo?.year || '—'}</p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-400 uppercase">J.O#</p>
+              <p className="font-medium text-[#011c72] mt-0.5">{jobOrder.jobOrderId}</p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-400 uppercase">DUE</p>
+              <p className="font-medium text-gray-900 mt-0.5">
+                {jobOrder.estimatedCompletion ? formatDate(jobOrder.estimatedCompletion) : '—'}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-400 uppercase">STATUS</p>
+              <p className="font-medium text-gray-900 mt-0.5 capitalize">{jobOrder.status.replace(/_/g, ' ')}</p>
+            </div>
+          </div>
+
+          {/* DES: Row descriptions */}
+          <div className="mb-5">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">DES — Seat Row Descriptions</p>
+            <div className="space-y-2">
+              {slipRows.map((row, i) => (
+                <div key={i} className="flex items-center gap-3">
+                  <span className="text-xs font-semibold text-gray-500 w-14 shrink-0">{['1st', '2nd', '3rd', '4th'][i]} ROW</span>
+                  <input
+                    type="text"
+                    value={row.description}
+                    onChange={(e) => setSlipRows((prev) => prev.map((r, idx) => idx === i ? { ...r, description: e.target.value } : r))}
+                    placeholder="Description"
+                    className="flex-1 px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                  />
+                  <span className="text-xs text-gray-400 shrink-0">HR</span>
+                  <input
+                    type="text"
+                    value={row.hr}
+                    onChange={(e) => setSlipRows((prev) => prev.map((r, idx) => idx === i ? { ...r, hr: e.target.value } : r))}
+                    placeholder="0"
+                    className="w-16 px-2 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 text-center focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Material Descriptions */}
+          <div className="mb-5">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Material Description</p>
+            <div className="grid grid-cols-3 gap-3">
+              {[
+                { label: 'CENTER', value: slipCenter, set: setSlipCenter },
+                { label: 'SIDES', value: slipSides, set: setSlipSides },
+                { label: 'BACK', value: slipBack, set: setSlipBack },
+              ].map(({ label, value, set }) => (
+                <div key={label}>
+                  <label className="block text-xs text-gray-500 mb-1">{label}</label>
+                  <input type="text" value={value} onChange={(e) => set(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Detail fields */}
+          <div className="mb-5">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {[
+                { label: 'D.STITCH', value: slipDStitch, set: setSlipDStitch },
+                { label: 'PIPING', value: slipPiping, set: setSlipPiping },
+                { label: 'POCKETS', value: slipPockets, set: setSlipPockets },
+                { label: 'LOGO', value: slipLogo, set: setSlipLogo },
+              ].map(({ label, value, set }) => (
+                <div key={label}>
+                  <label className="block text-xs text-gray-500 mb-1">{label}</label>
+                  <input type="text" value={value} onChange={(e) => set(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Specification */}
+          <div className="mb-5">
+            <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Specification</label>
+            <textarea
+              value={slipSpec}
+              onChange={(e) => setSlipSpec(e.target.value)}
+              rows={2}
+              placeholder="Additional specifications..."
+              className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent resize-none"
+            />
+          </div>
+
+          {/* Cutter & Sewer */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">CUTTER</label>
+              <input type="text" value={slipCutter} onChange={(e) => setSlipCutter(e.target.value)}
+                placeholder="Cutter name"
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">SEWER</label>
+              <input type="text" value={slipSewer} onChange={(e) => setSlipSewer(e.target.value)}
+                placeholder="Sewer name"
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
             </div>
           </div>
         </div>

@@ -35,6 +35,7 @@ export default function SettingsPage() {
     name: '',
     code: '',
     address: '',
+    phone: '',
     isWarehouse: false
   });
   const [branchError, setBranchError] = useState('');
@@ -185,7 +186,7 @@ export default function SettingsPage() {
     };
 
   const handleAddBranch = () => {
-    setBranchFormData({ name: '', code: '', address: '', isWarehouse: false });
+    setBranchFormData({ name: '', code: '', address: '', phone: '', isWarehouse: false });
     setEditingBranch(null);
     setBranchError('');
     setShowBranchModal(true);
@@ -196,6 +197,7 @@ export default function SettingsPage() {
       name: branch.name,
       code: branch.code,
       address: branch.address,
+      phone: branch.phone || '',
       isWarehouse: branch.isWarehouse
     });
     setEditingBranch(branch);
@@ -796,6 +798,20 @@ export default function SettingsPage() {
                   placeholder="Full address"
                   rows={3}
                 />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Contact Number
+                </label>
+                <input
+                  type="tel"
+                  value={branchFormData.phone}
+                  onChange={(e) => setBranchFormData({ ...branchFormData, phone: e.target.value })}
+                  className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                  placeholder="e.g., 0917-123-4567"
+                />
+                <p className="text-xs text-gray-500 mt-1">Displayed to customers when booking appointments</p>
               </div>
 
               <div className="flex items-center">

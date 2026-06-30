@@ -64,6 +64,32 @@ export interface Alert {
   itemId: number;
 }
 
+export interface Customer {
+  id: number;
+  name: string;
+  phone: string;
+  email: string;
+  address: string;
+  discountPercent?: number | null;
+  promoCode?: string | null;
+  promoDiscount?: number | null;
+  notes: string;
+  createdAt?: string;
+  orderHistory?: CustomerOrderSummary[];
+}
+
+export interface CustomerOrderSummary {
+  id: number;
+  jobOrderId: string;
+  totalPrice: number;
+  status: string;
+  paymentStatus: string;
+  downPayment: number;
+  balance: number;
+  createdAt: string;
+  estimatedCompletion?: string | null;
+}
+
 export interface WorkerProfile {
   id: number;
   userId: number;
@@ -271,6 +297,12 @@ export interface RawMaterial {
   color: string;
   pattern: string;
   unitPrice: number;
+  /** Purchase cost we pay the supplier per unit */
+  costPerUnit?: number;
+  /** Markup % applied on cost to derive unitPrice (e.g. 25 = +25%) */
+  markupPercent?: number;
+  /** Supplier item code / SKU from the stock-in log */
+  sku?: string;
   stockQuantity: number;
   lowStockThreshold: number;
   supplierId?: number;
@@ -385,7 +417,11 @@ export interface RawMaterialInput {
   materialType: string;
   color?: string;
   pattern?: string;
-  unitPrice: number;
+  /** Selling price per unit. Optional when costPerUnit + markupPercent are given (server derives it). */
+  unitPrice?: number;
+  costPerUnit?: number;
+  markupPercent?: number;
+  sku?: string;
   stockQuantity: number;
   lowStockThreshold?: number;
   supplierId?: number | null;
@@ -531,6 +567,19 @@ export interface JobOrder {
   description: string;
   vehicleInfo?: VehicleInfo | null;
   items: JobOrderItem[];
+  slipData?: {
+    rows?: Array<{ description: string; hr: string }>;
+    materialCenter?: string;
+    materialSides?: string;
+    materialBack?: string;
+    dStitch?: string;
+    piping?: string;
+    pockets?: string;
+    logo?: string;
+    specification?: string;
+    cutterName?: string;
+    sewerName?: string;
+  } | null;
   estimatedCost: number;
   actualCost: number;
   totalPrice: number;
@@ -820,6 +869,7 @@ export interface Branch {
   name: string;
   code: string;
   address: string;
+  phone?: string;
   isWarehouse: boolean;
   isActive: boolean;
   createdAt?: string;
@@ -1672,6 +1722,19 @@ export const api = {
       }),
     delete: (id: number) =>
       fetchApi<{ message: string }>(`/api/worker-assignments/${id}`, { method: 'DELETE' }),
+  },
+
+  customers: {
+    search: (q: string) =>
+      fetchApi<Customer[]>(`/api/customers/search?q=${encodeURIComponent(q)}`),
+    list: (q?: string) =>
+      fetchApi<Customer[]>(`/api/customers${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+    get: (id: number) =>
+      fetchApi<Customer>(`/api/customers/${id}`),
+    create: (data: Omit<Customer, 'id' | 'createdAt' | 'orderHistory'>) =>
+      fetchApi<Customer>('/api/customers', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: number, data: Partial<Omit<Customer, 'id' | 'createdAt' | 'orderHistory'>>) =>
+      fetchApi<Customer>(`/api/customers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   },
 
   workerAvailability: {

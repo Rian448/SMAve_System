@@ -73,8 +73,22 @@ class Branch(db.Model):
     name = db.Column(db.String(255), nullable=False)
     code = db.Column(db.String(50), unique=True, nullable=False)
     address = db.Column(db.String(255), nullable=False)
+    phone = db.Column(db.String(50), nullable=True)
     is_warehouse = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Customer(db.Model):
+    __tablename__ = 'customers'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    phone = db.Column(db.String(50), nullable=True)
+    email = db.Column(db.String(255), nullable=True)
+    address = db.Column(db.String(255), nullable=True)
+    discount_percent = db.Column(db.Float, nullable=True)
+    promo_code = db.Column(db.String(100), nullable=True)
+    promo_discount = db.Column(db.Float, nullable=True)
+    notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class CustomerOrder(db.Model):
@@ -119,6 +133,7 @@ class JobOrder(db.Model):
     description = db.Column(db.Text, nullable=False)
     vehicle_info = db.Column(db.JSON)
     items = db.Column(db.JSON, nullable=False)
+    slip_data = db.Column(db.JSON, nullable=True)
     estimated_cost = db.Column(db.Float, default=0)
     actual_cost = db.Column(db.Float, default=0)
     total_price = db.Column(db.Float, nullable=False)
@@ -282,6 +297,12 @@ class InventoryMaterial(db.Model):
     status = db.Column(db.String(20), default='available')
     low_stock_threshold = db.Column(db.Float, default=0)
     supplier_id = db.Column(db.Integer, db.ForeignKey('suppliers.id'), nullable=True)
+    # Stock-keeping unit / item code from supplier purchase logs
+    sku = db.Column(db.String(100), nullable=True)
+    # What we paid the supplier per unit (purchase cost)
+    cost_per_unit = db.Column(db.Float, default=0)
+    # Markup applied on cost to derive the selling unit_price (e.g. 25 = +25%)
+    markup_percent = db.Column(db.Float, default=25)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -759,6 +780,7 @@ def branch_to_dict(branch):
         'name': branch.name,
         'code': branch.code,
         'address': branch.address,
+        'phone': branch.phone,
         'isWarehouse': branch.is_warehouse,
         'isActive': branch.is_active,
         'createdAt': fmt_dt(branch.created_at)
@@ -866,6 +888,10 @@ def run_migrations():
         "ALTER TABLE product_order_transfers ADD COLUMN received_by_id INTEGER REFERENCES users(id)",
         "ALTER TABLE product_order_transfers ADD COLUMN received_at TIMESTAMP",
         "ALTER TABLE worker_assignments ADD COLUMN expected_hours REAL",
+        # Material cost / markup-based selling price + supplier SKU
+        "ALTER TABLE inventory_materials ADD COLUMN sku VARCHAR(100)",
+        "ALTER TABLE inventory_materials ADD COLUMN cost_per_unit REAL DEFAULT 0",
+        "ALTER TABLE inventory_materials ADD COLUMN markup_percent REAL DEFAULT 25",
     ]
     for sql in migrations:
         try:
@@ -888,6 +914,8 @@ def init_db():
     # Seed default system settings
     default_settings = [
         ('inventory_low_stock_threshold', '0'),
+        # Default markup applied to a material's cost to derive its selling unit price
+        ('default_material_markup', '25'),
     ]
     for key, value in default_settings:
         if not SystemSetting.query.filter_by(key=key).first():
@@ -1403,6 +1431,9 @@ def material_to_dict(material):
         'color': material.color or '',
         'pattern': material.pattern or '',
         'unitPrice': float(material.unit_price),
+        'costPerUnit': float(material.cost_per_unit or 0),
+        'markupPercent': float(material.markup_percent if material.markup_percent is not None else 25),
+        'sku': material.sku or '',
         'stockQuantity': float(material.stock_quantity),
         'lowStockThreshold': float(material.low_stock_threshold or 0),
         'supplierId': material.supplier_id,
@@ -1560,9 +1591,12 @@ def get_raw_material(material_id):
 def create_raw_material():
     data = request.get_json()
 
-    required = ['materialType', 'stockQuantity', 'unitPrice', 'branchId']
+    required = ['materialType', 'stockQuantity', 'branchId']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    # Selling price may be given directly (unitPrice) or derived from cost + markup
+    if 'unitPrice' not in data and 'costPerUnit' not in data:
+        return jsonify({'status': 'error', 'message': 'Either unitPrice or costPerUnit is required'}), 400
 
     branch = Branch.query.get(data['branchId'])
     if not branch or not branch.is_active:
@@ -1580,12 +1614,24 @@ def create_raw_material():
         material_status = 'available'
 
     supplier_id = int(data['supplierId']) if data.get('supplierId') else None
+
+    cost_per_unit = float(data['costPerUnit']) if data.get('costPerUnit') not in (None, '') else 0.0
+    markup_percent = float(data['markupPercent']) if data.get('markupPercent') not in (None, '') else 25.0
+    # If a selling price is supplied use it; otherwise derive it from cost + markup
+    if data.get('unitPrice') not in (None, ''):
+        unit_price = float(data['unitPrice'])
+    else:
+        unit_price = round(cost_per_unit * (1 + markup_percent / 100), 2)
+
     material = InventoryMaterial(
         item_id=custom_item_id,
         material_type=data['materialType'].strip(),
         color=data.get('color', '').strip(),
         pattern=data.get('pattern', '').strip(),
-        unit_price=float(data['unitPrice']),
+        unit_price=unit_price,
+        cost_per_unit=cost_per_unit,
+        markup_percent=markup_percent,
+        sku=(data.get('sku', '').strip() or None),
         stock_quantity=float(data['stockQuantity']),
         low_stock_threshold=float(data.get('lowStockThreshold', 0) or 0),
         supplier_id=supplier_id,
@@ -1620,8 +1666,17 @@ def update_raw_material(material_id):
         material.color = data['color'].strip()
     if 'pattern' in data:
         material.pattern = data['pattern'].strip()
-    if 'unitPrice' in data:
+    if 'sku' in data:
+        material.sku = data['sku'].strip() or None
+    if 'costPerUnit' in data:
+        material.cost_per_unit = float(data['costPerUnit'] or 0)
+    if 'markupPercent' in data:
+        material.markup_percent = float(data['markupPercent'] if data['markupPercent'] not in (None, '') else 25)
+    # A directly-supplied unitPrice wins; otherwise recompute from cost + markup when either changed
+    if 'unitPrice' in data and data['unitPrice'] not in (None, ''):
         material.unit_price = float(data['unitPrice'])
+    elif 'costPerUnit' in data or 'markupPercent' in data:
+        material.unit_price = round((material.cost_per_unit or 0) * (1 + (material.markup_percent if material.markup_percent is not None else 25) / 100), 2)
     if 'stockQuantity' in data:
         material.stock_quantity = float(data['stockQuantity'])
     if 'lowStockThreshold' in data:
@@ -2180,6 +2235,7 @@ def get_job_orders():
             'description': jo.description,
             'vehicleInfo': jo.vehicle_info,
             'items': jo.items,
+            'slipData': jo.slip_data,
             'estimatedCost': jo.estimated_cost,
             'actualCost': jo.actual_cost,
             'totalPrice': jo.total_price,
@@ -2193,7 +2249,7 @@ def get_job_orders():
             'createdBy': jo.created_by,
             'updatedAt': jo.updated_at.strftime('%Y-%m-%d')
         }
-    
+
     return jsonify({'status': 'success', 'data': [job_order_to_dict(jo) for jo in orders]})
 
 @app.route('/api/sales/job-orders/<int:order_id>', methods=['GET'])
@@ -2254,6 +2310,7 @@ def get_job_order(order_id):
         'description': order.description,
         'vehicleInfo': order.vehicle_info,
         'items': order.items,
+        'slipData': order.slip_data,
         'estimatedCost': order.estimated_cost,
         'actualCost': order.actual_cost,
         'totalPrice': order.total_price,
@@ -2310,11 +2367,34 @@ def create_job_order():
     # Parse date
     from datetime import datetime as dt
     estimated_completion = dt.strptime(data['estimatedCompletion'], '%Y-%m-%d').date()
-    
+
+    # Find or create customer account
+    resolved_customer_id = data.get('customerId')
+    if resolved_customer_id and not Customer.query.get(resolved_customer_id):
+        resolved_customer_id = None
+    if not resolved_customer_id:
+        phone = data.get('customerPhone', '').strip()
+        email = data.get('customerEmail', '').strip()
+        customer = None
+        if phone:
+            customer = Customer.query.filter(Customer.phone == phone).first()
+        if not customer and email:
+            customer = Customer.query.filter(Customer.email == email).first()
+        if not customer:
+            customer = Customer(
+                name=data['customerName'],
+                phone=phone,
+                email=email,
+                address=data.get('customerAddress', ''),
+            )
+            db.session.add(customer)
+            db.session.flush()
+        resolved_customer_id = customer.id
+
     # Create database record
     new_order = JobOrder(
         job_order_id=job_order_id,
-        customer_id=data.get('customerId'),
+        customer_id=resolved_customer_id,
         customer_name=data['customerName'],
         customer_phone=data['customerPhone'],
         customer_email=data.get('customerEmail', ''),
@@ -2322,6 +2402,7 @@ def create_job_order():
         description=data['description'],
         vehicle_info=data.get('vehicleInfo'),
         items=items,
+        slip_data=data.get('slipData'),
         estimated_cost=estimated_cost,
         actual_cost=0,
         total_price=total_price,
@@ -2398,6 +2479,8 @@ def update_job_order(order_id):
             item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0))
             for item in data['items']
         )
+    if 'slipData' in data:
+        order.slip_data = data['slipData']
 
     # Recalculate balance
     if 'downPayment' in data or 'totalPrice' in data:
@@ -2563,6 +2646,7 @@ def get_all_orders():
             'description': jo.description,
             'vehicleInfo': jo.vehicle_info,
             'items': jo.items,
+            'slipData': jo.slip_data,
             'estimatedCost': jo.estimated_cost,
             'actualCost': jo.actual_cost,
             'totalPrice': jo.total_price,
@@ -2576,7 +2660,7 @@ def get_all_orders():
             'createdBy': jo.created_by,
             'updatedAt': jo.updated_at.strftime('%Y-%m-%d')
         }
-    
+
     job_orders_list = [job_order_to_dict(jo) for jo in job_orders_db]
     customer_orders_list = [customer_order_to_dict(o) for o in customer_orders_db]
     
@@ -5384,6 +5468,7 @@ def create_branch():
         name=data['name'],
         code=data['code'],
         address=data['address'],
+        phone=data.get('phone', None),
         is_warehouse=data.get('isWarehouse', False),
         is_active=True
     )
@@ -5420,7 +5505,9 @@ def update_branch(branch_id):
         branch.is_warehouse = data['isWarehouse']
     if 'isActive' in data:
         branch.is_active = data['isActive']
-    
+    if 'phone' in data:
+        branch.phone = data['phone'] or None
+
     db.session.commit()
     
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Settings', f"Updated branch: {branch.name}", request.remote_addr or '0.0.0.0')
@@ -6825,6 +6912,118 @@ def recompute_ai_predictions():
     t.start()
 
     return jsonify({'status': 'success', 'message': 'Recomputing predictions...'})
+
+# =========================================
+# CUSTOMER MANAGEMENT ROUTES
+# =========================================
+
+def customer_to_dict(c):
+    return {
+        'id': c.id,
+        'name': c.name,
+        'phone': c.phone or '',
+        'email': c.email or '',
+        'address': c.address or '',
+        'discountPercent': c.discount_percent,
+        'promoCode': c.promo_code,
+        'promoDiscount': c.promo_discount,
+        'notes': c.notes or '',
+        'createdAt': c.created_at.strftime('%Y-%m-%d') if c.created_at else None,
+    }
+
+@app.route('/api/customers/search', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def search_customers():
+    q = request.args.get('q', '').strip()
+    if len(q) < 2:
+        return jsonify({'status': 'success', 'data': []})
+    like = f'%{q}%'
+    results = Customer.query.filter(
+        db.or_(
+            Customer.name.ilike(like),
+            Customer.phone.ilike(like),
+            Customer.email.ilike(like)
+        )
+    ).limit(5).all()
+    return jsonify({'status': 'success', 'data': [customer_to_dict(c) for c in results]})
+
+@app.route('/api/customers', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def get_customers():
+    q = request.args.get('q', '').strip()
+    query = Customer.query
+    if q:
+        like = f'%{q}%'
+        query = query.filter(
+            db.or_(
+                Customer.name.ilike(like),
+                Customer.phone.ilike(like),
+                Customer.email.ilike(like)
+            )
+        )
+    customers = query.order_by(Customer.name.asc()).all()
+    return jsonify({'status': 'success', 'data': [customer_to_dict(c) for c in customers]})
+
+@app.route('/api/customers', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def create_customer():
+    data = request.get_json()
+    if not data.get('name'):
+        return jsonify({'status': 'error', 'message': 'Name is required'}), 400
+    customer = Customer(
+        name=data['name'],
+        phone=data.get('phone', ''),
+        email=data.get('email', ''),
+        address=data.get('address', ''),
+        discount_percent=data.get('discountPercent'),
+        promo_code=data.get('promoCode'),
+        promo_discount=data.get('promoDiscount'),
+        notes=data.get('notes', ''),
+    )
+    db.session.add(customer)
+    db.session.commit()
+    return jsonify({'status': 'success', 'data': customer_to_dict(customer)}), 201
+
+@app.route('/api/customers/<int:customer_id>', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def get_customer(customer_id):
+    customer = Customer.query.get_or_404(customer_id)
+    orders = JobOrder.query.filter_by(customer_id=customer_id).order_by(JobOrder.created_at.desc()).all()
+    order_history = [{
+        'id': o.id,
+        'jobOrderId': o.job_order_id,
+        'totalPrice': o.total_price,
+        'status': o.status,
+        'paymentStatus': o.payment_status,
+        'downPayment': o.down_payment,
+        'balance': o.balance,
+        'createdAt': o.created_at.strftime('%Y-%m-%d'),
+        'estimatedCompletion': o.estimated_completion.strftime('%Y-%m-%d') if o.estimated_completion else None,
+    } for o in orders]
+    result = customer_to_dict(customer)
+    result['orderHistory'] = order_history
+    return jsonify({'status': 'success', 'data': result})
+
+@app.route('/api/customers/<int:customer_id>', methods=['PUT'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def update_customer(customer_id):
+    customer = Customer.query.get_or_404(customer_id)
+    data = request.get_json()
+    if 'name' in data: customer.name = data['name']
+    if 'phone' in data: customer.phone = data['phone']
+    if 'email' in data: customer.email = data['email']
+    if 'address' in data: customer.address = data['address']
+    if 'discountPercent' in data: customer.discount_percent = data['discountPercent']
+    if 'promoCode' in data: customer.promo_code = data['promoCode']
+    if 'promoDiscount' in data: customer.promo_discount = data['promoDiscount']
+    if 'notes' in data: customer.notes = data['notes']
+    db.session.commit()
+    return jsonify({'status': 'success', 'data': customer_to_dict(customer)})
 
 if __name__ == '__main__':
     with app.app_context():
