@@ -881,38 +881,38 @@ def run_migrations():
     """
     from sqlalchemy import text
     migrations = [
-        "ALTER TABLE inventory_materials ADD COLUMN source_job_order_id VARCHAR(50)",
-        "ALTER TABLE inventory_materials ADD COLUMN status VARCHAR(20) DEFAULT 'available'",
-        "ALTER TABLE material_usage_logs ADD COLUMN job_order_db_id INTEGER",
-        "ALTER TABLE inventory_materials ADD COLUMN low_stock_threshold REAL DEFAULT 0",
-        "ALTER TABLE inventory_materials ADD COLUMN supplier_id INTEGER REFERENCES suppliers(id)",
-        "ALTER TABLE product_orders ADD COLUMN amount_paid REAL DEFAULT 0.0",
-        "ALTER TABLE appointments ADD COLUMN confirmed_by INTEGER REFERENCES users(id)",
-        "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN lockout_until TIMESTAMP",
+        "ALTER TABLE inventory_materials ADD COLUMN IF NOT EXISTS source_job_order_id VARCHAR(50)",
+        "ALTER TABLE inventory_materials ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'available'",
+        "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS job_order_db_id INTEGER",
+        "ALTER TABLE inventory_materials ADD COLUMN IF NOT EXISTS low_stock_threshold REAL DEFAULT 0",
+        "ALTER TABLE inventory_materials ADD COLUMN IF NOT EXISTS supplier_id INTEGER REFERENCES suppliers(id)",
+        "ALTER TABLE product_orders ADD COLUMN IF NOT EXISTS amount_paid REAL DEFAULT 0.0",
+        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS confirmed_by INTEGER REFERENCES users(id)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS lockout_until TIMESTAMP",
         # Expand password column for salted hashes (SQLite ignores length; PostgreSQL enforces it)
         "ALTER TABLE users ALTER COLUMN password TYPE VARCHAR(255)",
         # Transfer trackability: who sent, who received, and when
-        "ALTER TABLE product_order_transfers ADD COLUMN transferred_by_id INTEGER REFERENCES users(id)",
-        "ALTER TABLE product_order_transfers ADD COLUMN transferred_at TIMESTAMP",
-        "ALTER TABLE product_order_transfers ADD COLUMN received_by_id INTEGER REFERENCES users(id)",
-        "ALTER TABLE product_order_transfers ADD COLUMN received_at TIMESTAMP",
-        "ALTER TABLE worker_assignments ADD COLUMN expected_hours REAL",
+        "ALTER TABLE product_order_transfers ADD COLUMN IF NOT EXISTS transferred_by_id INTEGER REFERENCES users(id)",
+        "ALTER TABLE product_order_transfers ADD COLUMN IF NOT EXISTS transferred_at TIMESTAMP",
+        "ALTER TABLE product_order_transfers ADD COLUMN IF NOT EXISTS received_by_id INTEGER REFERENCES users(id)",
+        "ALTER TABLE product_order_transfers ADD COLUMN IF NOT EXISTS received_at TIMESTAMP",
+        "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS expected_hours REAL",
         # Material cost / markup-based selling price + supplier SKU
-        "ALTER TABLE inventory_materials ADD COLUMN sku VARCHAR(100)",
-        "ALTER TABLE inventory_materials ADD COLUMN cost_per_unit REAL DEFAULT 0",
-        "ALTER TABLE inventory_materials ADD COLUMN markup_percent REAL DEFAULT 25",
+        "ALTER TABLE inventory_materials ADD COLUMN IF NOT EXISTS sku VARCHAR(100)",
+        "ALTER TABLE inventory_materials ADD COLUMN IF NOT EXISTS cost_per_unit REAL DEFAULT 0",
+        "ALTER TABLE inventory_materials ADD COLUMN IF NOT EXISTS markup_percent REAL DEFAULT 25",
         # Worker pay mode: per_hour, per_day, per_piece
-        "ALTER TABLE managed_workers ADD COLUMN pay_mode VARCHAR(20) DEFAULT 'per_hour'",
+        "ALTER TABLE managed_workers ADD COLUMN IF NOT EXISTS pay_mode VARCHAR(20) DEFAULT 'per_hour'",
         # Worker assignment: calendar date, type (job_order | special_task), title for special tasks
-        "ALTER TABLE worker_assignments ADD COLUMN scheduled_date DATE",
-        "ALTER TABLE worker_assignments ADD COLUMN assignment_type VARCHAR(20) DEFAULT 'job_order'",
-        "ALTER TABLE worker_assignments ADD COLUMN special_task_title VARCHAR(255)",
+        "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS scheduled_date DATE",
+        "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS assignment_type VARCHAR(20) DEFAULT 'job_order'",
+        "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS special_task_title VARCHAR(255)",
         # On completion: pay override + materials snapshot
-        "ALTER TABLE worker_assignments ADD COLUMN pay_override REAL",
-        "ALTER TABLE worker_assignments ADD COLUMN materials_used JSON",
+        "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS pay_override REAL",
+        "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS materials_used JSON",
         # Track which managed worker used materials (FK to managed_workers)
-        "ALTER TABLE material_usage_logs ADD COLUMN managed_worker_id INTEGER REFERENCES managed_workers(id)",
+        "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS managed_worker_id INTEGER REFERENCES managed_workers(id)",
     ]
     for sql in migrations:
         try:
