@@ -7282,7 +7282,7 @@ def chat_message_to_dict(m):
         'id': m.id,
         'senderId': m.sender_id,
         'senderName': m.sender.full_name if m.sender else 'Unknown',
-        'senderRole': m.sender.role if m.sender else '',
+        'senderRole': m.sender.role.key if (m.sender and m.sender.role) else '',
         'content': m.content,
         'createdAt': m.created_at.strftime('%Y-%m-%dT%H:%M:%S') if m.created_at else None,
     }
