@@ -3,7 +3,6 @@ from flask_cors import CORS
 from datetime import datetime, timedelta
 from functools import wraps
 from flask_sqlalchemy import SQLAlchemy
-from flask_migrate import Migrate
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 import os
@@ -37,7 +36,6 @@ os.makedirs(CATALOG_UPLOAD_FOLDER, exist_ok=True)
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 
 db = SQLAlchemy(app)
-migrate = Migrate(app, db)
 
 # ============================================
 # DATABASE MODELS
@@ -925,6 +923,8 @@ def run_migrations():
         "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS managed_worker_id INTEGER REFERENCES managed_workers(id)",
         # Per-order discount override on job orders
         "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS discount_percent REAL",
+        # Branch contact phone number
+        "ALTER TABLE branches ADD COLUMN IF NOT EXISTS phone VARCHAR(50)",
     ]
     for sql in migrations:
         try:
