@@ -141,6 +141,7 @@ class JobOrder(db.Model):
     payment_status = db.Column(db.String(50), default='unpaid')  # unpaid, partial, paid
     down_payment = db.Column(db.Float, default=0)
     balance = db.Column(db.Float, default=0)
+    discount_percent = db.Column(db.Float, nullable=True)  # per-order discount override
     estimated_completion = db.Column(db.Date, nullable=False)
     completed_at = db.Column(db.Date)
     voided_at = db.Column(db.Date)
@@ -922,6 +923,8 @@ def run_migrations():
         "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS materials_used JSON",
         # Track which managed worker used materials (FK to managed_workers)
         "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS managed_worker_id INTEGER REFERENCES managed_workers(id)",
+        # Per-order discount override on job orders
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS discount_percent REAL",
     ]
     for sql in migrations:
         try:
@@ -2268,6 +2271,7 @@ def get_job_orders():
             'estimatedCost': jo.estimated_cost,
             'actualCost': jo.actual_cost,
             'totalPrice': jo.total_price,
+            'discountPercent': jo.discount_percent,
             'status': jo.status,
             'paymentStatus': jo.payment_status,
             'downPayment': jo.down_payment,
@@ -2343,6 +2347,7 @@ def get_job_order(order_id):
         'estimatedCost': order.estimated_cost,
         'actualCost': order.actual_cost,
         'totalPrice': order.total_price,
+        'discountPercent': order.discount_percent,
         'status': order.status,
         'paymentStatus': order.payment_status,
         'downPayment': order.down_payment,
@@ -2439,6 +2444,7 @@ def create_job_order():
         payment_status=payment_status,
         down_payment=down_payment,
         balance=balance,
+        discount_percent=data.get('discountPercent'),
         estimated_completion=estimated_completion,
         created_by=request.current_user['id']
     )
@@ -2502,6 +2508,8 @@ def update_job_order(order_id):
         order.actual_cost = data['actualCost']
     if 'totalPrice' in data:
         order.total_price = data['totalPrice']
+    if 'discountPercent' in data:
+        order.discount_percent = data['discountPercent']
     if 'items' in data:
         order.items = data['items']
         order.estimated_cost = sum(
@@ -2679,6 +2687,7 @@ def get_all_orders():
             'estimatedCost': jo.estimated_cost,
             'actualCost': jo.actual_cost,
             'totalPrice': jo.total_price,
+            'discountPercent': jo.discount_percent,
             'status': jo.status,
             'paymentStatus': jo.payment_status,
             'downPayment': jo.down_payment,

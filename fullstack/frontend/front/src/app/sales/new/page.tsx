@@ -89,6 +89,7 @@ export default function NewJobOrderPage() {
   const [customerAddress, setCustomerAddress] = useState('');
   const [linkedCustomerId, setLinkedCustomerId] = useState<number | null>(null);
   const [linkedCustomerDiscount, setLinkedCustomerDiscount] = useState<number | null>(null);
+  const [orderDiscount, setOrderDiscount] = useState<string>('');  // editable per-order discount %
   const [customerSuggestions, setCustomerSuggestions] = useState<Customer[]>([]);
   const [searchingCustomer, setSearchingCustomer] = useState(false);
   const customerSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -196,6 +197,8 @@ export default function NewJobOrderPage() {
   const linkCustomer = (c: Customer) => {
     setLinkedCustomerId(c.id);
     setLinkedCustomerDiscount(c.discountPercent ?? null);
+    // Pre-fill the order discount from the customer's loyalty discount (still editable).
+    if (c.discountPercent != null) setOrderDiscount(String(c.discountPercent));
     setCustomerName(c.name);
     setCustomerPhone(c.phone);
     setCustomerEmail(c.email);
@@ -273,6 +276,11 @@ export default function NewJobOrderPage() {
     0
   );
   const suggestedPrice = materialTotal > 0 ? materialTotal * (profitMargin / 100) : 0;
+
+  // Per-order discount: clamp 0–100, derive the discounted total and savings.
+  const orderDiscountPct = Math.min(Math.max(Number(orderDiscount) || 0, 0), 100);
+  const discountAmount = estimatedTotal > 0 ? Math.round(estimatedTotal * (orderDiscountPct / 100) * 100) / 100 : 0;
+  const discountedTotal = estimatedTotal > 0 ? Math.round((estimatedTotal - discountAmount) * 100) / 100 : 0;
 
   const goNext = () => {
     setError('');
@@ -458,8 +466,11 @@ export default function NewJobOrderPage() {
     } : undefined;
 
     const computedTotal = materialTotal > 0 ? materialTotal : (estimatedTotal > 0 ? estimatedTotal : 0);
-    const finalTotal = estimatedTotal > 0 ? estimatedTotal : computedTotal;
-    const finalDown = estimatedTotal > 0 ? downPayment : 0;
+    const grossTotal = estimatedTotal > 0 ? estimatedTotal : computedTotal;
+    const finalTotal = orderDiscountPct > 0
+      ? Math.round(grossTotal * (1 - orderDiscountPct / 100) * 100) / 100
+      : grossTotal;
+    const finalDown = estimatedTotal > 0 ? Math.round((finalTotal / 2) * 100) / 100 : 0;
 
     try {
       const jobOrderData: any = {
@@ -473,8 +484,9 @@ export default function NewJobOrderPage() {
         downPayment: finalDown,
         paymentMethod,
         notes,
+        ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
         ...(slipData ? { slipData } : {}),
-        ...(finalTotal > 0 ? { estimatedCost: finalTotal, totalPrice: finalTotal } : {}),
+        ...(finalTotal > 0 ? { estimatedCost: grossTotal, totalPrice: finalTotal } : {}),
       };
 
       const createResponse = await api.sales.createJobOrder(jobOrderData);
@@ -693,10 +705,23 @@ export default function NewJobOrderPage() {
           <label className="block text-sm font-medium text-gray-700 mb-2">Payment Method</label>
           <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}
             className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
-            <option value="cash">Cash</option>
-            <option value="gcash">GCash</option>
-            <option value="bank_transfer">Bank Transfer</option>
-            <option value="credit_card">Credit Card</option>
+            <optgroup label="Cash">
+              <option value="cash">Cash</option>
+            </optgroup>
+            <optgroup label="E-Wallet">
+              <option value="gcash">GCash</option>
+              <option value="maya">Maya</option>
+            </optgroup>
+            <optgroup label="Bank Transfer">
+              <option value="bank_transfer">Bank Transfer</option>
+            </optgroup>
+            <optgroup label="Card">
+              <option value="credit_card">Credit Card</option>
+              <option value="debit_card">Debit Card</option>
+            </optgroup>
+            <optgroup label="Cheque">
+              <option value="check">Cheque</option>
+            </optgroup>
           </select>
         </div>
 
@@ -1358,14 +1383,48 @@ export default function NewJobOrderPage() {
                     placeholder="0.00" />
                 </div>
               </div>
+
+              {/* Discount (editable per-order; pre-filled from the customer's loyalty discount) */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Discount
+                  {linkedCustomerDiscount != null && (
+                    <span className="ml-1 text-xs font-normal text-gray-400">
+                      (customer loyalty: {linkedCustomerDiscount}%)
+                    </span>
+                  )}
+                </label>
+                <div className="relative">
+                  <input type="number" min="0" max="100" step="0.5"
+                    value={orderDiscount}
+                    onChange={(e) => setOrderDiscount(e.target.value)}
+                    className="w-full pr-8 pl-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                    placeholder="0" />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">%</span>
+                </div>
+              </div>
+
+              {estimatedTotal > 0 && orderDiscountPct > 0 && (
+                <div className="bg-green-50 border border-green-200 rounded-xl p-4 space-y-1">
+                  <div className="flex items-center justify-between text-sm text-green-800">
+                    <span>Discount ({orderDiscountPct}%)</span>
+                    <span>− ₱{discountAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm font-semibold text-green-900">
+                    <span>Total after discount</span>
+                    <span>₱{discountedTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                </div>
+              )}
+
               {estimatedTotal > 0 && (
                 <div className="bg-[#eef1fb] border border-[#c7d2f5] rounded-xl p-4 flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-[#011c72]">Down Payment (50%)</p>
-                    <p className="text-xs text-[#011c72] mt-0.5">Half of total</p>
+                    <p className="text-xs text-[#011c72] mt-0.5">{orderDiscountPct > 0 ? 'Half of total after discount' : 'Half of total'}</p>
                   </div>
                   <span className="text-xl font-bold text-[#011c72]">
-                    ₱{downPayment.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    ₱{(discountedTotal / 2).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </span>
                 </div>
               )}
@@ -1374,10 +1433,23 @@ export default function NewJobOrderPage() {
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Payment Method</label>
               <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} className={inputCls}>
-                <option value="cash">Cash</option>
-                <option value="gcash">GCash</option>
-                <option value="bank_transfer">Bank Transfer</option>
-                <option value="credit_card">Credit Card</option>
+                <optgroup label="Cash">
+                  <option value="cash">Cash</option>
+                </optgroup>
+                <optgroup label="E-Wallet">
+                  <option value="gcash">GCash</option>
+                  <option value="maya">Maya</option>
+                </optgroup>
+                <optgroup label="Bank Transfer">
+                  <option value="bank_transfer">Bank Transfer</option>
+                </optgroup>
+                <optgroup label="Card">
+                  <option value="credit_card">Credit Card</option>
+                  <option value="debit_card">Debit Card</option>
+                </optgroup>
+                <optgroup label="Cheque">
+                  <option value="check">Cheque</option>
+                </optgroup>
               </select>
             </div>
 

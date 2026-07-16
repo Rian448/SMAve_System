@@ -27,7 +27,16 @@ export default function PaymentsPage() {
   const formatCurrency = (amount: number) =>
     new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(amount || 0);
 
-  const methodLabel = (method: string) => method.replace(/_/g, ' ');
+  const METHOD_LABELS: Record<string, string> = {
+    cash: 'Cash',
+    gcash: 'GCash',
+    maya: 'Maya',
+    bank_transfer: 'Bank Transfer',
+    credit_card: 'Credit Card',
+    debit_card: 'Debit Card',
+    check: 'Cheque',
+  };
+  const methodLabel = (method: string) => METHOD_LABELS[method] || method.replace(/_/g, ' ');
 
   const filteredPayments = useMemo(() => {
     return payments.filter(p => {
@@ -110,11 +119,23 @@ export default function PaymentsPage() {
             className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
           >
             <option value="all">All Methods</option>
-            <option value="cash">Cash</option>
-            <option value="gcash">GCash</option>
-            <option value="bank_transfer">Bank Transfer</option>
-            <option value="check">Check</option>
-            <option value="credit_card">Credit Card</option>
+            <optgroup label="Cash">
+              <option value="cash">Cash</option>
+            </optgroup>
+            <optgroup label="E-Wallet">
+              <option value="gcash">GCash</option>
+              <option value="maya">Maya</option>
+            </optgroup>
+            <optgroup label="Bank Transfer">
+              <option value="bank_transfer">Bank Transfer</option>
+            </optgroup>
+            <optgroup label="Card">
+              <option value="credit_card">Credit Card</option>
+              <option value="debit_card">Debit Card</option>
+            </optgroup>
+            <optgroup label="Cheque">
+              <option value="check">Cheque</option>
+            </optgroup>
           </select>
         </div>
 

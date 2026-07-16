@@ -1586,11 +1586,23 @@ export default function JobOrderDetailPage() {
                         onChange={(e) => setNewPaymentMethod(e.target.value)}
                         className="w-full px-3 py-2.5 rounded-lg border border-gray-300 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm"
                       >
-                        <option value="cash">Cash</option>
-                        <option value="gcash">GCash</option>
-                        <option value="bank_transfer">Bank Transfer</option>
-                        <option value="check">Check</option>
-                        <option value="credit_card">Credit Card</option>
+                        <optgroup label="Cash">
+                          <option value="cash">Cash</option>
+                        </optgroup>
+                        <optgroup label="E-Wallet">
+                          <option value="gcash">GCash</option>
+                          <option value="maya">Maya</option>
+                        </optgroup>
+                        <optgroup label="Bank Transfer">
+                          <option value="bank_transfer">Bank Transfer</option>
+                        </optgroup>
+                        <optgroup label="Card">
+                          <option value="credit_card">Credit Card</option>
+                          <option value="debit_card">Debit Card</option>
+                        </optgroup>
+                        <optgroup label="Cheque">
+                          <option value="check">Cheque</option>
+                        </optgroup>
                       </select>
                     </div>
                     <div>
