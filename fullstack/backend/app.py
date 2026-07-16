@@ -139,6 +139,7 @@ class JobOrder(db.Model):
     payment_status = db.Column(db.String(50), default='unpaid')  # unpaid, partial, paid
     down_payment = db.Column(db.Float, default=0)
     balance = db.Column(db.Float, default=0)
+    discount_percent = db.Column(db.Float, nullable=True)  # per-order discount override
     estimated_completion = db.Column(db.Date, nullable=False)
     completed_at = db.Column(db.Date)
     voided_at = db.Column(db.Date)
@@ -844,7 +845,16 @@ def seed_inventory_items():
         pass  # No default seed data for the new inventory schema
 
     if PremadeProduct.query.count() == 0:
+        # Seed data references branches by hardcoded ids (e.g. branchId=2), but the
+        # real ids are auto-assigned and may differ after a re-seed (Postgres
+        # sequences don't roll back). Resolve each product's branch by its code so
+        # the foreign key always matches an existing branch.
+        code_by_seed_id = {b['id']: b['code'] for b in branches}
+        branch_by_code = {b.code: b for b in Branch.query.all()}
+        fallback_branch = Branch.query.first()
+
         for product in finished_goods:
+            branch = branch_by_code.get(code_by_seed_id.get(product.get('branchId', 1))) or fallback_branch
             db.session.add(PremadeProduct(
                 name=product['name'],
                 sku=product.get('sku') or f"FG-{product['id']:03d}",
@@ -853,7 +863,7 @@ def seed_inventory_items():
                 category=product.get('category', 'General'),
                 price=float(product.get('price', 0)),
                 cost=float(product.get('cost', 0)),
-                branch_id=product.get('branchId', 1),
+                branch_id=branch.id if branch else None,
                 is_archived=product.get('isArchived', False)
             ))
 
@@ -911,6 +921,8 @@ def run_migrations():
         "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS materials_used JSON",
         # Track which managed worker used materials (FK to managed_workers)
         "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS managed_worker_id INTEGER REFERENCES managed_workers(id)",
+        # Per-order discount override on job orders
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS discount_percent REAL",
         # Branch contact phone number
         "ALTER TABLE branches ADD COLUMN IF NOT EXISTS phone VARCHAR(50)",
     ]
@@ -1140,11 +1152,8 @@ def log_action(user_id, user_name, action, module, details, ip_address='0.0.0.0'
 def ensure_db_initialized():
     global db_initialized
     if not db_initialized:
-        init_db()
+        init_db()  # init_db() already seeds default users
         db_initialized = True
-    else:
-        # Ensure default users exist (safe no-op when already seeded)
-        seed_default_users()
 
 def generate_job_order_id(branch_code):
     """Generate unique job order ID"""
@@ -2262,6 +2271,7 @@ def get_job_orders():
             'estimatedCost': jo.estimated_cost,
             'actualCost': jo.actual_cost,
             'totalPrice': jo.total_price,
+            'discountPercent': jo.discount_percent,
             'status': jo.status,
             'paymentStatus': jo.payment_status,
             'downPayment': jo.down_payment,
@@ -2337,6 +2347,7 @@ def get_job_order(order_id):
         'estimatedCost': order.estimated_cost,
         'actualCost': order.actual_cost,
         'totalPrice': order.total_price,
+        'discountPercent': order.discount_percent,
         'status': order.status,
         'paymentStatus': order.payment_status,
         'downPayment': order.down_payment,
@@ -2433,6 +2444,7 @@ def create_job_order():
         payment_status=payment_status,
         down_payment=down_payment,
         balance=balance,
+        discount_percent=data.get('discountPercent'),
         estimated_completion=estimated_completion,
         created_by=request.current_user['id']
     )
@@ -2496,6 +2508,8 @@ def update_job_order(order_id):
         order.actual_cost = data['actualCost']
     if 'totalPrice' in data:
         order.total_price = data['totalPrice']
+    if 'discountPercent' in data:
+        order.discount_percent = data['discountPercent']
     if 'items' in data:
         order.items = data['items']
         order.estimated_cost = sum(
@@ -2673,6 +2687,7 @@ def get_all_orders():
             'estimatedCost': jo.estimated_cost,
             'actualCost': jo.actual_cost,
             'totalPrice': jo.total_price,
+            'discountPercent': jo.discount_percent,
             'status': jo.status,
             'paymentStatus': jo.payment_status,
             'downPayment': jo.down_payment,
