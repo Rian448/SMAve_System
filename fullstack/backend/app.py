@@ -1017,13 +1017,28 @@ def init_db():
         db.session.commit()
 
 def get_user_from_token(token):
-    """Get user from session token"""
-    if token in sessions:
-        user_id = sessions[token]['userId']
-        user = User.query.get(user_id)
-        if user:
-            return user_to_dict(user)
-    return None
+    """Get user from session token.
+
+    The resolved user dict is cached on the session for a short window (60s) so
+    a burst of API calls (e.g. a page loading several endpoints at once) doesn't
+    re-query the database on every single request. The 60s bound means role or
+    branch changes still take effect quickly.
+    """
+    import time
+    s = sessions.get(token)
+    if not s:
+        return None
+    now = time.time()
+    cached = s.get('_userCache')
+    if cached and (now - s.get('_userCacheAt', 0)) < 60:
+        return cached
+    user = User.query.get(s['userId'])
+    if not user:
+        return None
+    resolved = user_to_dict(user)
+    s['_userCache'] = resolved
+    s['_userCacheAt'] = now
+    return resolved
 
 def require_auth(f):
     """Decorator for protected routes"""
@@ -1560,7 +1575,13 @@ def get_raw_materials():
     include_warehouse = request.args.get('includeWarehouse', 'false').lower() == 'true'
     category = request.args.get('category')
 
-    query = InventoryMaterial.query
+    from sqlalchemy.orm import joinedload
+    # Eager-load branch + supplier so the serializer doesn't fire an extra query
+    # per row (N+1) — one JOIN instead of ~2×N round-trips to the database.
+    query = InventoryMaterial.query.options(
+        joinedload(InventoryMaterial.branch),
+        joinedload(InventoryMaterial.supplier),
+    )
     if not include_archived:
         query = query.filter_by(is_archived=False)
     if branch_id:
@@ -1789,7 +1810,8 @@ def get_finished_goods():
     include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
     branch_id = request.args.get('branchId')
 
-    query = PremadeProduct.query
+    from sqlalchemy.orm import joinedload
+    query = PremadeProduct.query.options(joinedload(PremadeProduct.branch))
     if not include_archived:
         query = query.filter_by(is_archived=False)
     if branch_id:
@@ -2841,23 +2863,28 @@ def delete_job_order(order_id):
 def get_all_orders():
     """Get both job orders and customer orders - filtered by branch for non-admin users"""
     user = request.current_user
-    
+
+    from sqlalchemy.orm import joinedload
+    # Eager-load branch so the serializers don't fire a query per row (N+1)
+    jo_base = JobOrder.query.options(joinedload(JobOrder.branch))
+    co_base = CustomerOrder.query.options(joinedload(CustomerOrder.branch))
+
     # Get job orders from database
     if user['role'] == 'administrator':
         # Administrators can see all orders (drafts are excluded — they live in /api/sales/drafts)
-        job_orders_db = JobOrder.query.filter(JobOrder.status != 'draft').order_by(JobOrder.created_at.desc()).all()
-        customer_orders_db = CustomerOrder.query.order_by(CustomerOrder.created_at.desc()).all()
+        job_orders_db = jo_base.filter(JobOrder.status != 'draft').order_by(JobOrder.created_at.desc()).all()
+        customer_orders_db = co_base.order_by(CustomerOrder.created_at.desc()).all()
     else:
         # Other users can only see orders from their branch
         # Use branch_id directly from user if available, otherwise look up by name
         if user.get('branchId'):
-            job_orders_db = JobOrder.query.filter_by(branch_id=user['branchId']).filter(JobOrder.status != 'draft').order_by(JobOrder.created_at.desc()).all()
-            customer_orders_db = CustomerOrder.query.filter_by(branch_id=user['branchId']).order_by(CustomerOrder.created_at.desc()).all()
+            job_orders_db = jo_base.filter_by(branch_id=user['branchId']).filter(JobOrder.status != 'draft').order_by(JobOrder.created_at.desc()).all()
+            customer_orders_db = co_base.filter_by(branch_id=user['branchId']).order_by(CustomerOrder.created_at.desc()).all()
         elif user.get('branch'):
             user_branch = Branch.query.filter_by(name=user['branch']).first()
             if user_branch:
-                job_orders_db = JobOrder.query.filter_by(branch_id=user_branch.id).filter(JobOrder.status != 'draft').order_by(JobOrder.created_at.desc()).all()
-                customer_orders_db = CustomerOrder.query.filter_by(branch_id=user_branch.id).order_by(CustomerOrder.created_at.desc()).all()
+                job_orders_db = jo_base.filter_by(branch_id=user_branch.id).filter(JobOrder.status != 'draft').order_by(JobOrder.created_at.desc()).all()
+                customer_orders_db = co_base.filter_by(branch_id=user_branch.id).order_by(CustomerOrder.created_at.desc()).all()
             else:
                 job_orders_db = []
                 customer_orders_db = []
