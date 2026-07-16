@@ -425,6 +425,26 @@ export interface PaymentSummary {
   paidCount: number;
 }
 
+export interface PaymentOverride {
+  id: number;
+  jobOrderId: number;
+  jobOrderRef?: string;
+  customerName?: string;
+  currentPaymentStatus?: string;
+  currentBalance?: number;
+  newPaymentStatus?: string | null;
+  newBalance?: number | null;
+  newDownPayment?: number | null;
+  reason?: string | null;
+  status: 'pending' | 'approved' | 'rejected';
+  requestedBy: number;
+  requestedByName?: string;
+  reviewedByName?: string;
+  reviewNotes?: string | null;
+  createdAt: string;
+  reviewedAt?: string | null;
+}
+
 export interface RawMaterialInput {
   itemId?: string;
   materialType: string;
@@ -1173,6 +1193,25 @@ export const api = {
   },
 
   // ==================
+  // PAYMENT OVERRIDES (supervisor requests -> admin approval)
+  // ==================
+  paymentOverrides: {
+    list: (params?: { status?: string; jobOrderId?: number }) => {
+      const q = new URLSearchParams();
+      if (params?.status) q.append('status', params.status);
+      if (params?.jobOrderId) q.append('jobOrderId', String(params.jobOrderId));
+      const qs = q.toString();
+      return fetchApi<PaymentOverride[]>(`/api/payment-overrides${qs ? `?${qs}` : ''}`);
+    },
+    create: (data: { jobOrderId: number; paymentStatus?: string; balance?: number; downPayment?: number; reason?: string }) =>
+      fetchApi<PaymentOverride>('/api/payment-overrides', { method: 'POST', body: JSON.stringify(data) }),
+    approve: (id: number, notes?: string) =>
+      fetchApi<PaymentOverride>(`/api/payment-overrides/${id}/approve`, { method: 'POST', body: JSON.stringify({ notes }) }),
+    reject: (id: number, notes?: string) =>
+      fetchApi<PaymentOverride>(`/api/payment-overrides/${id}/reject`, { method: 'POST', body: JSON.stringify({ notes }) }),
+  },
+
+  // ==================
   // SALES
   // ==================
   sales: {
@@ -1203,21 +1242,29 @@ export const api = {
       estimatedCompletion: string;
       downPayment?: number;
       totalPrice?: number;
+      discountPercent?: number;
       notes?: string;
+      isDraft?: boolean;
     }) =>
       fetchApi<JobOrder>('/api/sales/job-orders', {
         method: 'POST',
         body: JSON.stringify(order),
       }),
-    
+
     updateJobOrder: (id: number, updates: Partial<JobOrder>) =>
       fetchApi<JobOrder>(`/api/sales/job-orders/${id}`, {
         method: 'PUT',
         body: JSON.stringify(updates),
       }),
-    
+
     voidJobOrder: (id: number) =>
       fetchApi<null>(`/api/sales/job-orders/${id}/void`, { method: 'POST' }),
+
+    // Draft job orders — saved but not confirmed; excluded from normal lists/counts
+    getDrafts: () => fetchApi<JobOrder[]>('/api/sales/drafts'),
+
+    deleteJobOrder: (id: number) =>
+      fetchApi<null>(`/api/sales/job-orders/${id}`, { method: 'DELETE' }),
     
     // Line-up Slips
     getLineupSlips: () => fetchApi<LineupSlip[]>('/api/sales/lineup-slips'),

@@ -1,27 +1,60 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, type Customer } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 
 export default function CustomersPage() {
   const router = useRouter();
+  const { user } = useAuth();
+  const canCreate = ['administrator', 'supervisor'].includes(user?.role || '');
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
+
+  // Manual customer creation
+  const [showCreate, setShowCreate] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [createError, setCreateError] = useState('');
+  const [form, setForm] = useState({ name: '', phone: '', email: '', address: '', discountPercent: '', notes: '' });
 
   useEffect(() => {
     const t = setTimeout(() => setQuery(search), 400);
     return () => clearTimeout(t);
   }, [search]);
 
-  useEffect(() => {
+  const loadCustomers = useCallback(() => {
     setLoading(true);
     api.customers.list(query || undefined)
       .then((res) => setCustomers(res.data || []))
       .catch(() => setCustomers([]))
       .finally(() => setLoading(false));
   }, [query]);
+
+  useEffect(() => { loadCustomers(); }, [loadCustomers]);
+
+  const handleCreate = async () => {
+    if (!form.name.trim()) { setCreateError('Customer name is required.'); return; }
+    setSaving(true); setCreateError('');
+    try {
+      await api.customers.create({
+        name: form.name.trim(),
+        phone: form.phone.trim(),
+        email: form.email.trim(),
+        address: form.address.trim(),
+        notes: form.notes.trim(),
+        discountPercent: form.discountPercent !== '' ? Number(form.discountPercent) : null,
+        promoCode: null,
+        promoDiscount: null,
+      });
+      setShowCreate(false);
+      setForm({ name: '', phone: '', email: '', address: '', discountPercent: '', notes: '' });
+      loadCustomers();
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : 'Failed to create customer.');
+    } finally { setSaving(false); }
+  };
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -32,6 +65,15 @@ export default function CustomersPage() {
             <h1 className="text-2xl font-bold text-gray-900">Customers</h1>
             <p className="text-sm text-gray-500 mt-1">All customer accounts</p>
           </div>
+          {canCreate && (
+            <button onClick={() => { setShowCreate(true); setCreateError(''); }}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#011c72] text-white text-sm font-medium hover:bg-[#022494] transition-colors">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              New Customer
+            </button>
+          )}
         </div>
 
         {/* Search */}
@@ -97,6 +139,69 @@ export default function CustomersPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* ── New Customer Modal ── */}
+        {showCreate && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            onClick={() => !saving && setShowCreate(false)}>
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto"
+              onClick={e => e.stopPropagation()}>
+              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                <h2 className="text-lg font-bold text-gray-900">New Customer</h2>
+                <button onClick={() => setShowCreate(false)} disabled={saving}
+                  className="text-gray-400 hover:text-gray-700 text-xl leading-none disabled:opacity-50">✕</button>
+              </div>
+              <div className="p-6 space-y-4">
+                {createError && (
+                  <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-2.5 text-sm">{createError}</div>
+                )}
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1.5">Full Name <span className="text-red-500">*</span></label>
+                  <input type="text" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                    className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm" />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1.5">Phone</label>
+                    <input type="tel" value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
+                      className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1.5">Email</label>
+                    <input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
+                      className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm" />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1.5">Address</label>
+                  <input type="text" value={form.address} onChange={e => setForm(f => ({ ...f, address: e.target.value }))}
+                    className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1.5">Loyalty Discount %</label>
+                  <input type="number" min="0" max="100" step="0.5" value={form.discountPercent}
+                    onChange={e => setForm(f => ({ ...f, discountPercent: e.target.value }))} placeholder="0"
+                    className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1.5">Notes</label>
+                  <textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} rows={2}
+                    className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm resize-none" />
+                </div>
+              </div>
+              <div className="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+                <button onClick={() => setShowCreate(false)} disabled={saving}
+                  className="px-5 py-2 rounded-xl bg-white border border-gray-200 text-gray-700 text-sm font-medium hover:bg-gray-50 disabled:opacity-50">
+                  Cancel
+                </button>
+                <button onClick={handleCreate} disabled={saving}
+                  className="px-5 py-2 rounded-xl bg-[#011c72] text-white text-sm font-medium hover:bg-[#022494] disabled:opacity-60">
+                  {saving ? 'Creating…' : 'Create Customer'}
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </main>

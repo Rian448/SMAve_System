@@ -287,6 +287,59 @@ export default function NewJobOrderPage() {
     setStep((s) => s + 1);
   };
 
+  // Save the current (possibly incomplete) job order as a draft so work isn't lost.
+  // Drafts stay out of sales/pending counts until confirmed.
+  const saveDraft = async () => {
+    if (!customerName.trim()) { setError('Enter a customer name to save a draft.'); return; }
+    setLoading(true); setError('');
+    try {
+      const branchId = user?.branchId || 1;
+
+      const selectedServices: string[] = [];
+      if (flooring.selected) selectedServices.push('flooring');
+      if (reupholstery.selected) selectedServices.push(reupholsteryItemType.trim() ? `reupholstery (${reupholsteryItemType.trim()})` : 'reupholstery');
+      if (ceiling.selected) selectedServices.push('ceiling');
+      if (sidings.selected) selectedServices.push('sidings');
+      if (seatCovers.selected) selectedServices.push('seat_covers');
+      if (otherServices.selected) selectedServices.push('other');
+      const description = selectedServices.join(', ') || 'Draft order';
+
+      const normalizedItems = materials
+        .filter((m) => m.name.trim())
+        .map((m) => ({
+          name: m.name.trim(),
+          materialId: m.materialId ? Number(m.materialId) : undefined,
+          quantity: Number(m.quantity) || 0,
+          unitPrice: Number(m.unitPrice) || 0,
+          materialCost: Number(m.unitPrice) || 0,
+          laborCost: 0,
+        }));
+
+      const vehicleInfo = reupholstery.selected
+        ? { make: 'Reupholstery', model: reupholsteryItemType.trim(), year: new Date().getFullYear(), plateNumber: '' }
+        : { make: vehicleMake || 'N/A', model: vehicleModel || 'N/A', year: Number(vehicleYear) || new Date().getFullYear(), plateNumber: vehiclePlate || '' };
+
+      const draftData: any = {
+        isDraft: true,
+        customerName, customerPhone, customerEmail,
+        ...(linkedCustomerId ? { customerId: linkedCustomerId } : {}),
+        branchId,
+        description,
+        vehicleInfo,
+        items: normalizedItems,
+        notes,
+        ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
+        ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, totalPrice: discountedTotal } : {}),
+      };
+
+      await api.sales.createJobOrder(draftData);
+      router.push('/sales');
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : 'Failed to save draft.');
+      setLoading(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -1550,7 +1603,7 @@ export default function NewJobOrderPage() {
 
           {/* Navigation Buttons */}
           {orderType === 'normal' ? (
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center gap-3">
               <button type="button" onClick={() => { setError(''); setStep(step - 1); }} disabled={step === 1}
                 className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors ${
                   step === 1 ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'
@@ -1560,6 +1613,15 @@ export default function NewJobOrderPage() {
                 </svg>
                 Previous
               </button>
+              <div className="flex items-center gap-3">
+                <button type="button" onClick={saveDraft} disabled={loading}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Save this order as a draft to finish later">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h8l4 4v10a2 2 0 01-2 2H7a2 2 0 01-2-2V5z M9 3v4h6" />
+                  </svg>
+                  Save as Draft
+                </button>
               {step < 5 ? (
                 <button key="next-btn" type="submit"
                   className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#011c72] hover:bg-[#01268c] text-white rounded-xl font-medium transition-colors shadow-sm">
@@ -1586,6 +1648,7 @@ export default function NewJobOrderPage() {
                   )}
                 </button>
               )}
+              </div>
             </div>
           ) : (
             <div className="flex justify-between gap-3">
