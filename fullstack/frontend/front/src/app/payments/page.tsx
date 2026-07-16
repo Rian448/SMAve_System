@@ -2,16 +2,51 @@
 import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useEffect, useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import { api, PaymentRecord, PaymentSummary } from '@/lib/api';
+import { api, PaymentRecord, PaymentSummary, PaymentOverride } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 
 export default function PaymentsPage() {
   const router = useRouter();
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'administrator';
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [summary, setSummary] = useState<PaymentSummary | null>(null);
   const [loading, setLoading] = useState(true);
 
   const [search, setSearch] = useState('');
   const [methodFilter, setMethodFilter] = useState('all');
+
+  // Pending payment overrides awaiting admin review
+  const [overrides, setOverrides] = useState<PaymentOverride[]>([]);
+  const [overrideBusyId, setOverrideBusyId] = useState<number | null>(null);
+
+  const loadOverrides = async () => {
+    try {
+      const res = await api.paymentOverrides.list({ status: 'pending' });
+      setOverrides(res.data || []);
+    } catch {
+      setOverrides([]);
+    }
+  };
+
+  const reloadPayments = async () => {
+    try {
+      const [paymentsRes, summaryRes] = await Promise.all([api.payments.getAll(), api.payments.getSummary()]);
+      setPayments(paymentsRes.data || []);
+      setSummary(summaryRes.data || null);
+    } catch (err) { console.error(err); }
+  };
+
+  const reviewOverride = async (id: number, action: 'approve' | 'reject') => {
+    setOverrideBusyId(id);
+    try {
+      if (action === 'approve') await api.paymentOverrides.approve(id);
+      else await api.paymentOverrides.reject(id);
+      await Promise.all([loadOverrides(), reloadPayments()]);
+    } catch (err) {
+      console.error(err);
+    } finally { setOverrideBusyId(null); }
+  };
 
   useEffect(() => {
     Promise.all([
@@ -22,6 +57,7 @@ export default function PaymentsPage() {
       setSummary(summaryRes.data || null);
     }).catch(err => console.error(err))
       .finally(() => setLoading(false));
+    loadOverrides();
   }, []);
 
   const formatCurrency = (amount: number) =>
@@ -95,6 +131,52 @@ export default function PaymentsPage() {
             <div className="bg-red-50 rounded-xl border border-red-100 p-4 text-center">
               <p className="text-xs font-medium text-red-600 uppercase tracking-wide mb-1">Unpaid</p>
               <p className="text-2xl font-bold text-red-700">{summary.unpaidCount}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Pending payment overrides — admin approval queue */}
+        {isAdmin && overrides.length > 0 && (
+          <div className="bg-white rounded-xl border border-amber-200 mb-6 overflow-hidden">
+            <div className="px-5 py-3 bg-amber-50 border-b border-amber-100 flex items-center gap-2">
+              <svg className="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.84-2.75L13.74 4a2 2 0 00-3.48 0L3.16 16.25A2 2 0 005 19z" />
+              </svg>
+              <h2 className="text-sm font-bold text-amber-800">Payment Overrides Awaiting Your Approval ({overrides.length})</h2>
+            </div>
+            <div className="divide-y divide-gray-100">
+              {overrides.map(o => (
+                <div key={o.id} className="px-5 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div className="min-w-0 text-sm">
+                    <p className="font-semibold text-gray-900">
+                      {o.jobOrderRef || `Order #${o.jobOrderId}`}
+                      <span className="text-gray-500 font-normal"> · {o.customerName || '—'}</span>
+                    </p>
+                    <p className="text-xs text-gray-600 mt-1">
+                      Requested by <span className="font-medium">{o.requestedByName || '—'}</span> · {formatDateTime(o.createdAt)}
+                    </p>
+                    <div className="text-xs text-gray-700 mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
+                      {o.newPaymentStatus && (
+                        <span>Status: <span className="line-through text-gray-400">{o.currentPaymentStatus}</span> → <span className="font-semibold text-amber-700">{o.newPaymentStatus}</span></span>
+                      )}
+                      {o.newBalance != null && (
+                        <span>Balance: <span className="line-through text-gray-400">{formatCurrency(o.currentBalance || 0)}</span> → <span className="font-semibold text-amber-700">{formatCurrency(o.newBalance)}</span></span>
+                      )}
+                    </div>
+                    {o.reason && <p className="text-xs text-gray-500 mt-1 italic">“{o.reason}”</p>}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button onClick={() => reviewOverride(o.id, 'approve')} disabled={overrideBusyId === o.id}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-green-600 text-white hover:bg-green-700 disabled:opacity-50">
+                      {overrideBusyId === o.id ? '…' : 'Approve'}
+                    </button>
+                    <button onClick={() => reviewOverride(o.id, 'reject')} disabled={overrideBusyId === o.id}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-50 text-red-600 hover:bg-red-100 disabled:opacity-50">
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}

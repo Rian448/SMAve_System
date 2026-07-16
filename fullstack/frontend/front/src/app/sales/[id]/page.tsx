@@ -2,7 +2,7 @@
 import { formatDate } from '@/lib/dateUtils';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord, ManagedWorker, WorkerWorkload, WorkTask } from '@/lib/api';
+import { api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord, ManagedWorker, WorkerWorkload, WorkTask, PaymentOverride } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 
 type EditableJobOrderItem = JobOrderItem & {
@@ -33,6 +33,16 @@ export default function JobOrderDetailPage() {
   const [newPaymentRef, setNewPaymentRef] = useState('');
   const [newPaymentNotes, setNewPaymentNotes] = useState('');
   const [savingPayment, setSavingPayment] = useState(false);
+
+  // Payment override request (supervisor -> needs admin approval)
+  const [pendingOverride, setPendingOverride] = useState<PaymentOverride | null>(null);
+  const [showOverrideForm, setShowOverrideForm] = useState(false);
+  const [overrideStatus, setOverrideStatus] = useState('');
+  const [overrideBalance, setOverrideBalance] = useState('');
+  const [overrideReason, setOverrideReason] = useState('');
+  const [submittingOverride, setSubmittingOverride] = useState(false);
+  const [overrideMsg, setOverrideMsg] = useState('');
+
   const [showRevertConfirm, setShowRevertConfirm] = useState(false);
   const [managedWorkers, setManagedWorkers] = useState<ManagedWorker[]>([]);
 
@@ -214,6 +224,8 @@ export default function JobOrderDetailPage() {
 
   const canEditParts = ['administrator', 'supervisor'].includes(user?.role || '');
   const canUpdatePaymentStatus = ['administrator', 'supervisor', 'sales_manager'].includes(user?.role || '');
+  // Supervisors/sales managers can request a payment override, but it needs admin approval
+  const canRequestOverride = ['supervisor', 'sales_manager'].includes(user?.role || '');
   const canCreateNewMaterial = ['administrator', 'supervisor'].includes(user?.role || '');
 
   useEffect(() => {
@@ -441,7 +453,33 @@ export default function JobOrderDetailPage() {
       .then(res => setPaymentRecords(res.data || []))
       .catch(err => console.error(err))
       .finally(() => setLoadingPayments(false));
+    api.paymentOverrides.list({ jobOrderId: jobOrder.id, status: 'pending' })
+      .then(res => setPendingOverride(res.data?.[0] || null))
+      .catch(() => setPendingOverride(null));
   }, [jobOrder?.id]);
+
+  const submitOverride = async () => {
+    if (!jobOrder) return;
+    if (!overrideStatus && overrideBalance === '') {
+      setOverrideMsg('Choose a new payment status or a new balance to override.');
+      return;
+    }
+    setSubmittingOverride(true); setOverrideMsg('');
+    try {
+      await api.paymentOverrides.create({
+        jobOrderId: jobOrder.id,
+        paymentStatus: overrideStatus || undefined,
+        balance: overrideBalance !== '' ? parseFloat(overrideBalance) : undefined,
+        reason: overrideReason || undefined,
+      });
+      setShowOverrideForm(false);
+      setOverrideStatus(''); setOverrideBalance(''); setOverrideReason('');
+      const res = await api.paymentOverrides.list({ jobOrderId: jobOrder.id, status: 'pending' });
+      setPendingOverride(res.data?.[0] || null);
+    } catch (err) {
+      setOverrideMsg(err instanceof Error ? err.message : 'Failed to submit override request.');
+    } finally { setSubmittingOverride(false); }
+  };
 
   const recordPayment = async () => {
     if (!jobOrder) return;
@@ -1665,6 +1703,75 @@ export default function JobOrderDetailPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               This order has been fully paid.
+            </div>
+          )}
+
+          {/* ── Payment Override (supervisor request -> admin approval) ── */}
+          {pendingOverride ? (
+            <div className="mt-4 flex items-start gap-2 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
+              <svg className="w-4 h-4 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div>
+                <p className="font-semibold">Payment override pending admin approval</p>
+                <p className="text-xs mt-0.5">
+                  {pendingOverride.newPaymentStatus && <>New status: <span className="font-medium">{pendingOverride.newPaymentStatus}</span>. </>}
+                  {pendingOverride.newBalance != null && <>New balance: <span className="font-medium">{formatCurrency(pendingOverride.newBalance)}</span>. </>}
+                  Requested {formatDate(pendingOverride.createdAt)}.
+                </p>
+              </div>
+            </div>
+          ) : canRequestOverride && (
+            <div className="mt-4">
+              {!showOverrideForm ? (
+                <button onClick={() => { setShowOverrideForm(true); setOverrideMsg(''); }}
+                  className="text-sm font-medium text-amber-700 hover:text-amber-900 inline-flex items-center gap-1.5">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                  </svg>
+                  Request payment override
+                </button>
+              ) : (
+                <div className="border border-amber-200 rounded-lg p-4 bg-amber-50/40 space-y-3">
+                  <p className="text-sm font-semibold text-amber-800">Request Payment Override</p>
+                  <p className="text-xs text-amber-700">This will be sent to an administrator for approval and won't take effect until approved.</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">New Payment Status</label>
+                      <select value={overrideStatus} onChange={e => setOverrideStatus(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-amber-400 focus:border-transparent">
+                        <option value="">— No change —</option>
+                        <option value="unpaid">Unpaid</option>
+                        <option value="partial">Partial</option>
+                        <option value="paid">Paid</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">New Balance (optional)</label>
+                      <input type="number" min="0" step="0.01" value={overrideBalance}
+                        onChange={e => setOverrideBalance(e.target.value)} placeholder="Leave blank to keep"
+                        className="w-full px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-amber-400 focus:border-transparent" />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Reason</label>
+                    <textarea value={overrideReason} onChange={e => setOverrideReason(e.target.value)} rows={2}
+                      placeholder="Why is this override needed?"
+                      className="w-full px-3 py-2 rounded-lg border border-gray-300 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-amber-400 focus:border-transparent resize-none" />
+                  </div>
+                  {overrideMsg && <p className="text-xs text-red-600">{overrideMsg}</p>}
+                  <div className="flex items-center gap-2">
+                    <button onClick={submitOverride} disabled={submittingOverride}
+                      className="px-4 py-2 rounded-lg text-sm font-semibold bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+                      {submittingOverride ? 'Submitting…' : 'Submit for Approval'}
+                    </button>
+                    <button onClick={() => { setShowOverrideForm(false); setOverrideMsg(''); }}
+                      className="px-4 py-2 rounded-lg text-sm font-medium bg-white border border-gray-300 text-gray-700 hover:bg-gray-50">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

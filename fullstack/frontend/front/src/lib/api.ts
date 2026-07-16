@@ -425,6 +425,26 @@ export interface PaymentSummary {
   paidCount: number;
 }
 
+export interface PaymentOverride {
+  id: number;
+  jobOrderId: number;
+  jobOrderRef?: string;
+  customerName?: string;
+  currentPaymentStatus?: string;
+  currentBalance?: number;
+  newPaymentStatus?: string | null;
+  newBalance?: number | null;
+  newDownPayment?: number | null;
+  reason?: string | null;
+  status: 'pending' | 'approved' | 'rejected';
+  requestedBy: number;
+  requestedByName?: string;
+  reviewedByName?: string;
+  reviewNotes?: string | null;
+  createdAt: string;
+  reviewedAt?: string | null;
+}
+
 export interface RawMaterialInput {
   itemId?: string;
   materialType: string;
@@ -1170,6 +1190,25 @@ export const api = {
     create: (data: { jobOrderId: number; amount: number; paymentMethod: string; referenceNumber?: string; notes?: string }) =>
       fetchApi<PaymentRecord>('/api/payments', { method: 'POST', body: JSON.stringify(data) }),
     getSummary: () => fetchApi<PaymentSummary>('/api/payments/summary'),
+  },
+
+  // ==================
+  // PAYMENT OVERRIDES (supervisor requests -> admin approval)
+  // ==================
+  paymentOverrides: {
+    list: (params?: { status?: string; jobOrderId?: number }) => {
+      const q = new URLSearchParams();
+      if (params?.status) q.append('status', params.status);
+      if (params?.jobOrderId) q.append('jobOrderId', String(params.jobOrderId));
+      const qs = q.toString();
+      return fetchApi<PaymentOverride[]>(`/api/payment-overrides${qs ? `?${qs}` : ''}`);
+    },
+    create: (data: { jobOrderId: number; paymentStatus?: string; balance?: number; downPayment?: number; reason?: string }) =>
+      fetchApi<PaymentOverride>('/api/payment-overrides', { method: 'POST', body: JSON.stringify(data) }),
+    approve: (id: number, notes?: string) =>
+      fetchApi<PaymentOverride>(`/api/payment-overrides/${id}/approve`, { method: 'POST', body: JSON.stringify({ notes }) }),
+    reject: (id: number, notes?: string) =>
+      fetchApi<PaymentOverride>(`/api/payment-overrides/${id}/reject`, { method: 'POST', body: JSON.stringify({ notes }) }),
   },
 
   // ==================

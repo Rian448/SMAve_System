@@ -433,6 +433,28 @@ class PaymentRecord(db.Model):
     job_order = db.relationship('JobOrder', backref='payment_records')
     recorder = db.relationship('User', foreign_keys=[recorded_by])
 
+class PaymentOverrideRequest(db.Model):
+    """A supervisor-initiated override of a job order's payment status/balance
+    that must be approved by an administrator before it is applied."""
+    __tablename__ = 'payment_override_requests'
+    id = db.Column(db.Integer, primary_key=True)
+    job_order_id = db.Column(db.Integer, db.ForeignKey('job_orders.id'), nullable=False)
+    requested_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    # Requested new values (any may be null = "leave unchanged")
+    new_payment_status = db.Column(db.String(50), nullable=True)  # unpaid, partial, paid
+    new_balance = db.Column(db.Float, nullable=True)
+    new_down_payment = db.Column(db.Float, nullable=True)
+    reason = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(20), default='pending')  # pending, approved, rejected
+    reviewed_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    review_notes = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    reviewed_at = db.Column(db.DateTime, nullable=True)
+
+    job_order = db.relationship('JobOrder')
+    requester = db.relationship('User', foreign_keys=[requested_by])
+    reviewer = db.relationship('User', foreign_keys=[reviewed_by])
+
 class ManagedWorker(db.Model):
     __tablename__ = 'managed_workers'
     id = db.Column(db.Integer, primary_key=True)
@@ -2216,6 +2238,122 @@ def get_payment_summary():
         'partialCount': partial_count,
         'paidCount': paid_count,
     }})
+
+# ============================================
+# PAYMENT OVERRIDE REQUESTS (supervisor override -> admin approval)
+# ============================================
+
+def payment_override_to_dict(r):
+    return {
+        'id': r.id,
+        'jobOrderId': r.job_order_id,
+        'jobOrderRef': r.job_order.job_order_id if r.job_order else None,
+        'customerName': r.job_order.customer_name if r.job_order else None,
+        'currentPaymentStatus': r.job_order.payment_status if r.job_order else None,
+        'currentBalance': float(r.job_order.balance or 0) if r.job_order else None,
+        'newPaymentStatus': r.new_payment_status,
+        'newBalance': r.new_balance,
+        'newDownPayment': r.new_down_payment,
+        'reason': r.reason,
+        'status': r.status,
+        'requestedBy': r.requested_by,
+        'requestedByName': r.requester.full_name if r.requester else None,
+        'reviewedByName': r.reviewer.full_name if r.reviewer else None,
+        'reviewNotes': r.review_notes,
+        'createdAt': fmt_dt(r.created_at),
+        'reviewedAt': fmt_dt(r.reviewed_at) if r.reviewed_at else None,
+    }
+
+@app.route('/api/payment-overrides', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def create_payment_override():
+    """Supervisor submits a payment override for admin approval. Nothing is
+    applied to the job order until an administrator approves it."""
+    data = request.get_json() or {}
+    job_order = JobOrder.query.get(int(data.get('jobOrderId', 0)))
+    if not job_order:
+        return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
+    new_status = data.get('paymentStatus')
+    if new_status and new_status not in ('unpaid', 'partial', 'paid'):
+        return jsonify({'status': 'error', 'message': 'Invalid payment status'}), 400
+    if not new_status and data.get('balance') is None and data.get('downPayment') is None:
+        return jsonify({'status': 'error', 'message': 'Provide a new payment status or balance to override'}), 400
+    req = PaymentOverrideRequest(
+        job_order_id=job_order.id,
+        requested_by=request.current_user['id'],
+        new_payment_status=new_status,
+        new_balance=float(data['balance']) if data.get('balance') is not None else None,
+        new_down_payment=float(data['downPayment']) if data.get('downPayment') is not None else None,
+        reason=(data.get('reason') or '').strip() or None,
+        status='pending',
+    )
+    db.session.add(req)
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Payment', f"Requested payment override for {job_order.job_order_id}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': payment_override_to_dict(req)}), 201
+
+@app.route('/api/payment-overrides', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def list_payment_overrides():
+    """Admins see all requests; supervisors see the ones they submitted."""
+    user = request.current_user
+    status = request.args.get('status')
+    job_order_id = request.args.get('jobOrderId')
+    query = PaymentOverrideRequest.query
+    if user['role'] != 'administrator':
+        query = query.filter_by(requested_by=user['id'])
+    if status:
+        query = query.filter_by(status=status)
+    if job_order_id:
+        query = query.filter_by(job_order_id=int(job_order_id))
+    reqs = query.order_by(PaymentOverrideRequest.created_at.desc()).all()
+    return jsonify({'status': 'success', 'data': [payment_override_to_dict(r) for r in reqs]})
+
+@app.route('/api/payment-overrides/<int:req_id>/approve', methods=['POST'])
+@require_auth
+@require_roles('administrator')
+def approve_payment_override(req_id):
+    req = PaymentOverrideRequest.query.get(req_id)
+    if not req:
+        return jsonify({'status': 'error', 'message': 'Override request not found'}), 404
+    if req.status != 'pending':
+        return jsonify({'status': 'error', 'message': 'This request has already been reviewed'}), 400
+    job_order = req.job_order
+    if not job_order:
+        return jsonify({'status': 'error', 'message': 'Job order no longer exists'}), 404
+    # Apply the requested override to the job order
+    if req.new_payment_status:
+        job_order.payment_status = req.new_payment_status
+    if req.new_balance is not None:
+        job_order.balance = req.new_balance
+    if req.new_down_payment is not None:
+        job_order.down_payment = req.new_down_payment
+    req.status = 'approved'
+    req.reviewed_by = request.current_user['id']
+    req.review_notes = ((request.get_json() or {}).get('notes') or '').strip() or None
+    req.reviewed_at = datetime.utcnow()
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Payment', f"Approved payment override for {job_order.job_order_id}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': payment_override_to_dict(req)})
+
+@app.route('/api/payment-overrides/<int:req_id>/reject', methods=['POST'])
+@require_auth
+@require_roles('administrator')
+def reject_payment_override(req_id):
+    req = PaymentOverrideRequest.query.get(req_id)
+    if not req:
+        return jsonify({'status': 'error', 'message': 'Override request not found'}), 404
+    if req.status != 'pending':
+        return jsonify({'status': 'error', 'message': 'This request has already been reviewed'}), 400
+    req.status = 'rejected'
+    req.reviewed_by = request.current_user['id']
+    req.review_notes = ((request.get_json() or {}).get('notes') or '').strip() or None
+    req.reviewed_at = datetime.utcnow()
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Payment', f"Rejected payment override #{req.id}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': payment_override_to_dict(req)})
 
 # ============================================
 # SALES MODULE - JOB ORDERS

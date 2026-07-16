@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, Fragment } from 'react';
 import { api, type Announcement } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 
@@ -153,6 +153,14 @@ export default function AnnouncementsPage() {
     load();
   };
 
+  const togglePin = async (a: Announcement) => {
+    await api.announcements.update(a.id, { isPinned: !a.isPinned });
+    load();
+  };
+
+  // Pinned announcements first, so we can draw a divider between them and the rest
+  const sortedItems = [...items].sort((a, b) => Number(b.isPinned) - Number(a.isPinned));
+
   return (
     <div className="min-h-screen bg-gray-50">
       <main className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
@@ -209,14 +217,31 @@ export default function AnnouncementsPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            {items.map((a) => {
+            {sortedItems.map((a, idx) => {
               const style = PRIORITY_STYLES[a.priority] || PRIORITY_STYLES.info;
               const isEditing = editingId === a.id;
               const isDeleting = deletingId === a.id;
+              const showDivider = !a.isPinned && idx > 0 && sortedItems[idx - 1].isPinned;
 
               return (
-                <div key={a.id}
-                  className={`bg-white rounded-2xl border border-gray-200 border-l-4 ${style.bar} shadow-sm overflow-hidden ${!a.isActive ? 'opacity-50' : ''}`}>
+                <Fragment key={a.id}>
+                  {showDivider && (
+                    <div className="flex items-center gap-3 pt-3">
+                      <div className="flex-1 border-t-2 border-gray-200" />
+                      <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">Other Announcements</span>
+                      <div className="flex-1 border-t-2 border-gray-200" />
+                    </div>
+                  )}
+                <div
+                  className={`relative bg-white rounded-2xl border border-gray-200 border-l-4 ${style.bar} shadow-sm ${!a.isActive ? 'opacity-50' : ''}`}>
+                  {a.isPinned && !isEditing && (
+                    <div className="absolute -top-2.5 -left-2.5 z-10 inline-flex items-center gap-1 bg-[#011c72] text-white text-[10px] font-bold px-2 py-1 rounded-full shadow-md">
+                      <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M16 3a1 1 0 011 1v1.586l2.707 2.707A1 1 0 0120 9v1a1 1 0 01-1 1h-6v7l-1 3-1-3v-7H5a1 1 0 01-1-1V9a1 1 0 01.293-.707L7 5.586V4a1 1 0 011-1h8z" />
+                      </svg>
+                      PINNED
+                    </div>
+                  )}
 
                   {isEditing ? (
                     <div className="p-5">
@@ -235,11 +260,6 @@ export default function AnnouncementsPage() {
                       {/* Top row */}
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex items-center gap-2 flex-wrap">
-                          {a.isPinned && (
-                            <svg className="w-4 h-4 text-[#011c72] shrink-0" fill="currentColor" viewBox="0 0 24 24">
-                              <path d="M16 3a1 1 0 011 1v1.586l2.707 2.707A1 1 0 0120 9v1a1 1 0 01-1 1h-6v7l-1 3-1-3v-7H5a1 1 0 01-1-1V9a1 1 0 01.293-.707L7 5.586V4a1 1 0 011-1h8z" />
-                            </svg>
-                          )}
                           <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${style.badge}`}>
                             {style.label}
                           </span>
@@ -249,6 +269,13 @@ export default function AnnouncementsPage() {
                         </div>
                         {isAdmin && !isDeleting && (
                           <div className="flex items-center gap-2 shrink-0">
+                            <button onClick={() => togglePin(a)}
+                              title={a.isPinned ? 'Unpin' : 'Pin to top'}
+                              className={`p-1 rounded-md transition-colors ${a.isPinned ? 'text-[#011c72] hover:bg-[#eef1fb]' : 'text-gray-400 hover:text-[#011c72] hover:bg-gray-100'}`}>
+                              <svg className="w-4 h-4" fill={a.isPinned ? 'currentColor' : 'none'} viewBox="0 0 24 24" stroke="currentColor" strokeWidth={a.isPinned ? 0 : 2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M16 3a1 1 0 011 1v1.586l2.707 2.707A1 1 0 0120 9v1a1 1 0 01-1 1h-6v7l-1 3-1-3v-7H5a1 1 0 01-1-1V9a1 1 0 01.293-.707L7 5.586V4a1 1 0 011-1h8z" />
+                              </svg>
+                            </button>
                             <button onClick={() => startEdit(a)}
                               className="text-xs text-gray-500 hover:text-[#011c72] transition-colors">Edit</button>
                             <button onClick={() => toggleArchive(a)}
@@ -291,6 +318,7 @@ export default function AnnouncementsPage() {
                     </div>
                   )}
                 </div>
+                </Fragment>
               );
             })}
           </div>
