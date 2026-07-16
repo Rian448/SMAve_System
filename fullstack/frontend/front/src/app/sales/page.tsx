@@ -30,6 +30,11 @@ export default function SalesPage() {
   const [actionError, setActionError] = useState('');
   const [savingId, setSavingId] = useState<number | null>(null);
 
+  // Draft job orders (saved but not confirmed; excluded from the lists/counts above)
+  const [drafts, setDrafts] = useState<JobOrder[]>([]);
+  const [showDrafts, setShowDrafts] = useState(false);
+  const [draftBusyId, setDraftBusyId] = useState<number | null>(null);
+
   const [transferDateFilter, setTransferDateFilter] = useState<'all' | 'day' | 'week' | 'month' | 'year'>('all');
 
   const canSeePremadeFeatures = user && ['administrator', 'supervisor'].includes(user.role);
@@ -81,8 +86,39 @@ export default function SalesPage() {
     }
   }, [canSeePremadeFeatures]);
 
+  const fetchDrafts = useCallback(async () => {
+    try {
+      const res = await api.sales.getDrafts();
+      setDrafts(res.data || []);
+    } catch {
+      setDrafts([]);
+    }
+  }, []);
+
   useEffect(() => { fetchOrders(); }, [fetchOrders]);
   useEffect(() => { fetchTabData(); }, [fetchTabData]);
+  useEffect(() => { fetchDrafts(); }, [fetchDrafts]);
+
+  const confirmDraft = async (id: number) => {
+    setDraftBusyId(id); setActionError('');
+    try {
+      await api.sales.updateJobOrder(id, { status: 'pending' });
+      await Promise.all([fetchDrafts(), fetchOrders()]);
+    } catch (err: any) {
+      setActionError(err?.message || 'Failed to confirm draft');
+    } finally { setDraftBusyId(null); }
+  };
+
+  const deleteDraft = async (id: number) => {
+    if (!confirm('Delete this draft? This cannot be undone.')) return;
+    setDraftBusyId(id); setActionError('');
+    try {
+      await api.sales.deleteJobOrder(id);
+      await fetchDrafts();
+    } catch (err: any) {
+      setActionError(err?.message || 'Failed to delete draft');
+    } finally { setDraftBusyId(null); }
+  };
 
   const markTransferred = async (transferId: number) => {
     setSavingId(transferId); setActionError('');
@@ -209,13 +245,21 @@ export default function SalesPage() {
             <h1 className="text-2xl font-bold text-gray-900">Sales & Orders</h1>
             <p className="text-gray-500 mt-1">Manage job orders, premade sales, and pickup queue</p>
           </div>
-          <Link href="/sales/new"
-            className="mt-4 sm:mt-0 inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors">
-            <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            New Job Order
-          </Link>
+          <div className="mt-4 sm:mt-0 flex flex-col items-start sm:items-end gap-1">
+            <Link href="/sales/new"
+              className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors">
+              <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              New Job Order
+            </Link>
+            {drafts.length > 0 && (
+              <button onClick={() => setShowDrafts(true)}
+                className="text-xs font-medium text-[#011c72] hover:underline">
+                {drafts.length} saved draft{drafts.length !== 1 ? 's' : ''} →
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Tabs */}
@@ -1036,6 +1080,50 @@ export default function SalesPage() {
                 })}
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── DRAFTS MODAL ── */}
+        {showDrafts && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            onClick={() => setShowDrafts(false)}>
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[80vh] overflow-hidden flex flex-col"
+              onClick={e => e.stopPropagation()}>
+              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-bold text-gray-900">Saved Drafts</h2>
+                  <p className="text-xs text-gray-500">Not counted in sales or pending until confirmed</p>
+                </div>
+                <button onClick={() => setShowDrafts(false)}
+                  className="text-gray-400 hover:text-gray-700 text-xl leading-none">✕</button>
+              </div>
+              <div className="overflow-y-auto divide-y divide-gray-100">
+                {drafts.length === 0 ? (
+                  <p className="p-8 text-center text-gray-400 text-sm">No drafts saved.</p>
+                ) : drafts.map(d => (
+                  <div key={d.id} className="px-6 py-4 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-900 truncate">{d.customerName || 'Unnamed customer'}</p>
+                      <p className="text-xs text-gray-500 truncate">{d.description || '—'} · {formatDate(d.createdAt)}</p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Link href={`/sales/${d.id}`}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200">
+                        Open
+                      </Link>
+                      <button onClick={() => confirmDraft(d.id)} disabled={draftBusyId === d.id}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#011c72] text-white hover:bg-[#01268c] disabled:opacity-50">
+                        {draftBusyId === d.id ? '…' : 'Confirm'}
+                      </button>
+                      <button onClick={() => deleteDraft(d.id)} disabled={draftBusyId === d.id}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-50 text-red-600 hover:bg-red-100 disabled:opacity-50">
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         )}
       </main>

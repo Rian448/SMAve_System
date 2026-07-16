@@ -1203,21 +1203,29 @@ export const api = {
       estimatedCompletion: string;
       downPayment?: number;
       totalPrice?: number;
+      discountPercent?: number;
       notes?: string;
+      isDraft?: boolean;
     }) =>
       fetchApi<JobOrder>('/api/sales/job-orders', {
         method: 'POST',
         body: JSON.stringify(order),
       }),
-    
+
     updateJobOrder: (id: number, updates: Partial<JobOrder>) =>
       fetchApi<JobOrder>(`/api/sales/job-orders/${id}`, {
         method: 'PUT',
         body: JSON.stringify(updates),
       }),
-    
+
     voidJobOrder: (id: number) =>
       fetchApi<null>(`/api/sales/job-orders/${id}/void`, { method: 'POST' }),
+
+    // Draft job orders — saved but not confirmed; excluded from normal lists/counts
+    getDrafts: () => fetchApi<JobOrder[]>('/api/sales/drafts'),
+
+    deleteJobOrder: (id: number) =>
+      fetchApi<null>(`/api/sales/job-orders/${id}`, { method: 'DELETE' }),
     
     // Line-up Slips
     getLineupSlips: () => fetchApi<LineupSlip[]>('/api/sales/lineup-slips'),

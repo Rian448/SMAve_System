@@ -2202,11 +2202,11 @@ def get_payment_summary():
     if user['role'] != 'administrator' and user.get('branchId'):
         jo_query = jo_query.filter_by(branch_id=user['branchId'])
     orders = jo_query.all()
-    total_revenue = sum(float(o.total_price or 0) for o in orders if o.status not in ('voided', 'cancelled'))
-    total_collected = sum(float(o.down_payment or 0) for o in orders if o.status not in ('voided', 'cancelled'))
-    total_balance = sum(float(o.balance or 0) for o in orders if o.status not in ('voided', 'cancelled'))
-    unpaid_count = sum(1 for o in orders if o.payment_status == 'unpaid' and o.status not in ('voided', 'cancelled'))
-    partial_count = sum(1 for o in orders if o.payment_status == 'partial' and o.status not in ('voided', 'cancelled'))
+    total_revenue = sum(float(o.total_price or 0) for o in orders if o.status not in ('voided', 'cancelled', 'draft'))
+    total_collected = sum(float(o.down_payment or 0) for o in orders if o.status not in ('voided', 'cancelled', 'draft'))
+    total_balance = sum(float(o.balance or 0) for o in orders if o.status not in ('voided', 'cancelled', 'draft'))
+    unpaid_count = sum(1 for o in orders if o.payment_status == 'unpaid' and o.status not in ('voided', 'cancelled', 'draft'))
+    partial_count = sum(1 for o in orders if o.payment_status == 'partial' and o.status not in ('voided', 'cancelled', 'draft'))
     paid_count = sum(1 for o in orders if o.payment_status == 'paid')
     return jsonify({'status': 'success', 'data': {
         'totalRevenue': round(total_revenue, 2),
@@ -2247,10 +2247,12 @@ def get_job_orders():
         else:
             return jsonify({'status': 'success', 'data': []})
     
-    # Filter by status if provided
+    # Filter by status if provided; otherwise hide drafts (they live in /api/sales/drafts)
     if status:
         query = query.filter_by(status=status)
-    
+    else:
+        query = query.filter(JobOrder.status != 'draft')
+
     orders = query.order_by(JobOrder.created_at.desc()).all()
     
     # Convert to dict format
@@ -2367,10 +2369,16 @@ def get_job_order(order_id):
 @require_roles('administrator', 'supervisor', 'sales_manager')
 def create_job_order():
     data = request.get_json()
-    
+    is_draft = bool(data.get('isDraft'))
+
     required = ['customerName', 'customerPhone', 'branchId', 'description', 'items', 'estimatedCompletion']
-    if not all(f in data for f in required):
+    if not is_draft and not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    # A draft may be incomplete, but still needs a customer name and a branch to be saved.
+    if is_draft and not (data.get('customerName') or '').strip():
+        return jsonify({'status': 'error', 'message': 'Customer name is required to save a draft'}), 400
+    if is_draft and not data.get('branchId'):
+        return jsonify({'status': 'error', 'message': 'Branch is required to save a draft'}), 400
     
     # Look up branch from database
     branch_db = Branch.query.get(data['branchId'])
@@ -2387,7 +2395,7 @@ def create_job_order():
         total_price = sum(item.get('quantity', 0) * item.get('unitPrice', 0) for item in items)
     computed_cost = sum(item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0)) for item in items)
     estimated_cost = data.get('estimatedCost') if data.get('estimatedCost') is not None else computed_cost
-    down_payment = data.get('downPayment', 0)
+    down_payment = 0 if is_draft else data.get('downPayment', 0)
     balance = max(total_price - down_payment, 0) if total_price > 0 else 0
     
     # Determine payment status
@@ -2398,9 +2406,10 @@ def create_job_order():
     else:
         payment_status = 'unpaid'
     
-    # Parse date
+    # Parse date (default to today for drafts that haven't picked one yet)
     from datetime import datetime as dt
-    estimated_completion = dt.strptime(data['estimatedCompletion'], '%Y-%m-%d').date()
+    ec_raw = data.get('estimatedCompletion')
+    estimated_completion = dt.strptime(ec_raw, '%Y-%m-%d').date() if ec_raw else dt.now().date()
 
     # Find or create customer account
     resolved_customer_id = data.get('customerId')
@@ -2433,14 +2442,14 @@ def create_job_order():
         customer_phone=data['customerPhone'],
         customer_email=data.get('customerEmail', ''),
         branch_id=data['branchId'],
-        description=data['description'],
+        description=data.get('description', '') or '',
         vehicle_info=data.get('vehicleInfo'),
         items=items,
         slip_data=data.get('slipData'),
         estimated_cost=estimated_cost,
         actual_cost=0,
         total_price=total_price,
-        status='pending',
+        status='draft' if is_draft else 'pending',
         payment_status=payment_status,
         down_payment=down_payment,
         balance=balance,
@@ -2475,7 +2484,7 @@ def create_job_order():
             'jobOrderId': new_order.job_order_id,
             'branchName': branch_db.name,
             'totalPrice': total_price,
-            'status': 'pending'
+            'status': 'draft' if is_draft else 'pending'
         }
     }), 201
 
@@ -2639,6 +2648,55 @@ def void_job_order(order_id):
     
     return jsonify({'status': 'success', 'message': 'Job order voided'})
 
+@app.route('/api/sales/drafts', methods=['GET'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+def get_draft_job_orders():
+    """Draft job orders — saved but not yet confirmed. Kept out of all normal
+    order lists and sales/pending counts until confirmed."""
+    user = request.current_user
+    query = JobOrder.query.filter(JobOrder.status == 'draft')
+    if user['role'] != 'administrator':
+        if user.get('branchId'):
+            query = query.filter(JobOrder.branch_id == user['branchId'])
+        elif user.get('branch'):
+            b = Branch.query.filter_by(name=user['branch']).first()
+            query = query.filter(JobOrder.branch_id == b.id) if b else query.filter(False)
+        else:
+            query = query.filter(False)
+    drafts = query.order_by(JobOrder.created_at.desc()).all()
+    return jsonify({'status': 'success', 'data': [{
+        'id': d.id,
+        'jobOrderId': d.job_order_id,
+        'customerName': d.customer_name,
+        'customerPhone': d.customer_phone,
+        'branchId': d.branch_id,
+        'branchName': d.branch.name if d.branch else '',
+        'description': d.description,
+        'totalPrice': d.total_price,
+        'status': d.status,
+        'createdAt': d.created_at.strftime('%Y-%m-%d'),
+    } for d in drafts]})
+
+
+@app.route('/api/sales/job-orders/<int:order_id>', methods=['DELETE'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def delete_job_order(order_id):
+    """Delete a job order. Only drafts may be deleted; confirmed orders must be
+    voided instead so their history is preserved."""
+    order = JobOrder.query.get(order_id)
+    if not order:
+        return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
+    if order.status != 'draft':
+        return jsonify({'status': 'error', 'message': 'Only draft orders can be deleted. Void confirmed orders instead.'}), 400
+    label = order.job_order_id
+    db.session.delete(order)
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'DELETE', 'Sales', f"Deleted draft job order: {label}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'message': 'Draft deleted'})
+
+
 @app.route('/api/sales/all-orders', methods=['GET'])
 @require_auth
 @require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
@@ -2648,19 +2706,19 @@ def get_all_orders():
     
     # Get job orders from database
     if user['role'] == 'administrator':
-        # Administrators can see all orders
-        job_orders_db = JobOrder.query.order_by(JobOrder.created_at.desc()).all()
+        # Administrators can see all orders (drafts are excluded — they live in /api/sales/drafts)
+        job_orders_db = JobOrder.query.filter(JobOrder.status != 'draft').order_by(JobOrder.created_at.desc()).all()
         customer_orders_db = CustomerOrder.query.order_by(CustomerOrder.created_at.desc()).all()
     else:
         # Other users can only see orders from their branch
         # Use branch_id directly from user if available, otherwise look up by name
         if user.get('branchId'):
-            job_orders_db = JobOrder.query.filter_by(branch_id=user['branchId']).order_by(JobOrder.created_at.desc()).all()
+            job_orders_db = JobOrder.query.filter_by(branch_id=user['branchId']).filter(JobOrder.status != 'draft').order_by(JobOrder.created_at.desc()).all()
             customer_orders_db = CustomerOrder.query.filter_by(branch_id=user['branchId']).order_by(CustomerOrder.created_at.desc()).all()
         elif user.get('branch'):
             user_branch = Branch.query.filter_by(name=user['branch']).first()
             if user_branch:
-                job_orders_db = JobOrder.query.filter_by(branch_id=user_branch.id).order_by(JobOrder.created_at.desc()).all()
+                job_orders_db = JobOrder.query.filter_by(branch_id=user_branch.id).filter(JobOrder.status != 'draft').order_by(JobOrder.created_at.desc()).all()
                 customer_orders_db = CustomerOrder.query.filter_by(branch_id=user_branch.id).order_by(CustomerOrder.created_at.desc()).all()
             else:
                 job_orders_db = []
@@ -4942,10 +5000,11 @@ def get_sales_report():
     except ValueError:
         return jsonify({'status': 'error', 'message': 'Invalid date format'}), 400
 
-    # ── Job Orders ──
+    # ── Job Orders ── (drafts are not real sales yet, so exclude them)
     jo_query = JobOrder.query.filter(
         JobOrder.created_at >= start_dt,
-        JobOrder.created_at <= end_dt
+        JobOrder.created_at <= end_dt,
+        JobOrder.status != 'draft'
     )
 
     user_branch = None
