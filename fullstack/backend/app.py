@@ -846,7 +846,16 @@ def seed_inventory_items():
         pass  # No default seed data for the new inventory schema
 
     if PremadeProduct.query.count() == 0:
+        # Seed data references branches by hardcoded ids (e.g. branchId=2), but the
+        # real ids are auto-assigned and may differ after a re-seed (Postgres
+        # sequences don't roll back). Resolve each product's branch by its code so
+        # the foreign key always matches an existing branch.
+        code_by_seed_id = {b['id']: b['code'] for b in branches}
+        branch_by_code = {b.code: b for b in Branch.query.all()}
+        fallback_branch = Branch.query.first()
+
         for product in finished_goods:
+            branch = branch_by_code.get(code_by_seed_id.get(product.get('branchId', 1))) or fallback_branch
             db.session.add(PremadeProduct(
                 name=product['name'],
                 sku=product.get('sku') or f"FG-{product['id']:03d}",
@@ -855,7 +864,7 @@ def seed_inventory_items():
                 category=product.get('category', 'General'),
                 price=float(product.get('price', 0)),
                 cost=float(product.get('cost', 0)),
-                branch_id=product.get('branchId', 1),
+                branch_id=branch.id if branch else None,
                 is_archived=product.get('isArchived', False)
             ))
 
@@ -1140,11 +1149,8 @@ def log_action(user_id, user_name, action, module, details, ip_address='0.0.0.0'
 def ensure_db_initialized():
     global db_initialized
     if not db_initialized:
-        init_db()
+        init_db()  # init_db() already seeds default users
         db_initialized = True
-    else:
-        # Ensure default users exist (safe no-op when already seeded)
-        seed_default_users()
 
 def generate_job_order_id(branch_code):
     """Generate unique job order ID"""

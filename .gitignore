@@ -1,18 +1,23 @@
 # Python
-backend/__pycache__/
-backend/*.pyc
-backend/.env
-backend/venv/
-backend/env/
-backend/.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+venv/
+env/
+.env
+.env.*
 
-# Node
-frontend/front/node_modules/
-frontend/front/.next/
-frontend/front/out/
-frontend/front/.env.local
-frontend/front/.env
-frontend/front/.vercel
+# Local SQLite databases (production uses Neon/Postgres)
+*.db
+*.sqlite
+*.sqlite3
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.vercel
 
 # OS
 .DS_Store
