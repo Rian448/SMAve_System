@@ -1,0 +1,410 @@
+﻿'use client';
+import { formatDate, formatDateTime } from '@/lib/dateUtils';
+import { useState, useEffect } from 'react';
+import { useAuth } from '@/context/AuthContext';
+import { api, CustomerOrder } from '@/lib/api';
+import Link from 'next/link';
+import { useRouter, useParams } from 'next/navigation';
+
+export default function MyOrderDetailPage() {
+  const { user, isLoading: authLoading } = useAuth();
+  const router = useRouter();
+  const params = useParams();
+  const [order, setOrder] = useState<CustomerOrder | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [responding, setResponding] = useState(false);
+  const [responseNotes, setResponseNotes] = useState('');
+  const [showRejectConfirm, setShowRejectConfirm] = useState(false);
+
+  useEffect(() => {
+    if (!authLoading) {
+      if (!user || user.role !== 'customer') {
+        router.push('/login');
+        return;
+      }
+      fetchOrder();
+    }
+  }, [authLoading, user, router, params.id]);
+
+  const fetchOrder = async () => {
+    try {
+      setLoading(true);
+      const response = await api.customerOrders.getMyOrder(Number(params.id));
+      setOrder(response.data || null);
+    } catch (err) {
+      setError('Failed to load order details');
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAcceptQuotation = async () => {
+    if (!order) return;
+    
+    setResponding(true);
+    try {
+      await api.customerOrders.respondToQuotation(order.id, 'accept', responseNotes);
+      await fetchOrder();
+    } catch (err: any) {
+      setError(err.message || 'Failed to accept quotation');
+    } finally {
+      setResponding(false);
+    }
+  };
+
+  const handleRejectQuotation = async () => {
+    if (!order) return;
+    
+    setResponding(true);
+    try {
+      await api.customerOrders.respondToQuotation(order.id, 'reject', responseNotes);
+      setShowRejectConfirm(false);
+      await fetchOrder();
+    } catch (err: any) {
+      setError(err.message || 'Failed to reject quotation');
+    } finally {
+      setResponding(false);
+    }
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'pending':
+        return 'bg-yellow-100 text-yellow-700';
+      case 'processing':
+      case 'in_progress':
+        return 'bg-blue-100 text-blue-700';
+      case 'ready_for_installation':
+        return 'bg-orange-100 text-orange-700';
+      case 'completed':
+        return 'bg-green-100 text-green-700';
+      case 'delivered':
+        return 'bg-purple-100 text-purple-700';
+      case 'cancelled':
+        return 'bg-red-100 text-red-700';
+      default:
+        return 'bg-gray-100 text-gray-700';
+    }
+  };
+
+  const getQuotationStatusColor = (status?: string) => {
+    switch (status) {
+      case 'pending_quotation':
+        return 'bg-gray-100 text-gray-700';
+      case 'quoted':
+        return 'bg-[#dde6ff] text-[#011c72]';
+      case 'accepted':
+        return 'bg-green-100 text-green-700';
+      case 'rejected':
+        return 'bg-red-100 text-red-700';
+      default:
+        return 'bg-gray-100 text-gray-700';
+    }
+  };
+
+  const getQuotationStatusLabel = (status?: string) => {
+    switch (status) {
+      case 'pending_quotation':
+        return 'Awaiting Quotation';
+      case 'quoted':
+        return 'Quotation Ready';
+      case 'accepted':
+        return 'Quotation Accepted';
+      case 'rejected':
+        return 'Quotation Rejected';
+      default:
+        return status || 'Unknown';
+    }
+  };
+
+  const getServiceLabel = (type: string) => {
+    const labels: { [key: string]: string } = {
+      flooring: 'Flooring',
+      reupholstery: 'Reupholstery',
+      ceiling: 'Ceiling',
+      sidings: 'Sidings',
+      seat_covers: 'Seat Covers',
+      other: 'Other Services'
+    };
+    return labels[type] || type;
+  };
+
+  if (authLoading || loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="animate-spin w-8 h-8 border-4 border-[#011c72] border-t-transparent rounded-full"></div>
+      </div>
+    );
+  }
+
+  if (error || !order) {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-center">
+            <p className="text-red-600">{error || 'Order not found'}</p>
+            <Link
+              href="/my-orders"
+              className="mt-4 inline-block text-[#011c72] hover:text-[#011c72] font-medium"
+            >
+              Back to My Orders
+            </Link>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* Header */}
+      <div className="bg-white border-b border-gray-200">
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          <Link href="/my-orders" className="text-[#011c72] text-sm font-medium mb-4 inline-block">
+            ← Back to My Orders
+          </Link>
+          <div className="flex items-center gap-3 flex-wrap">
+            <h1 className="text-3xl font-bold text-gray-900">{order.orderNumber}</h1>
+            <span className={`text-sm px-3 py-1 rounded-full font-medium ${getStatusColor(order.status)}`}>
+              {order.status.replace(/_/g, ' ').toUpperCase()}
+            </span>
+            <span className={`text-sm px-3 py-1 rounded-full font-medium ${getQuotationStatusColor(order.quotationStatus)}`}>
+              {getQuotationStatusLabel(order.quotationStatus)}
+            </span>
+          </div>
+          <p className="text-gray-600 mt-2">
+            Placed on {formatDate(order.createdAt)}
+          </p>
+        </div>
+      </div>
+
+      <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        {error && (
+          <div className="p-4 bg-red-50 border border-red-200 rounded-xl text-red-700">
+            {error}
+          </div>
+        )}
+
+        {/* Quotation Section - Show prominently if quotation is ready */}
+        {order.quotationStatus === 'quoted' && order.quotationItems && (
+          <div className="bg-[#eef1fb] border-2 border-[#c7d2f5] rounded-xl p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <svg className="w-6 h-6 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              <h2 className="text-xl font-bold text-[#011c72]">Quotation Ready</h2>
+            </div>
+
+            <p className="text-[#011c72] mb-4">
+              Our team has prepared a quotation for your order. Please review and accept or reject below.
+            </p>
+
+            {/* Quotation Items Table */}
+            <div className="bg-white rounded-lg overflow-hidden mb-4">
+              <table className="w-full">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Item</th>
+                    <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase">Qty</th>
+                    <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase">Unit Price</th>
+                    <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase">Total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {order.quotationItems.map((item, index) => (
+                    <tr key={index}>
+                      <td className="px-4 py-3">
+                        <p className="text-sm font-medium text-gray-900">{item.name}</p>
+                        {item.description && (
+                          <p className="text-xs text-gray-500">{item.description}</p>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-center text-sm text-gray-700">{item.quantity}</td>
+                      <td className="px-4 py-3 text-right text-sm text-gray-700">₱{item.unitPrice.toLocaleString()}</td>
+                      <td className="px-4 py-3 text-right text-sm font-medium text-gray-900">₱{item.total.toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot className="bg-gray-50">
+                  <tr>
+                    <td colSpan={3} className="px-4 py-3 text-right text-sm font-bold text-gray-900">Total</td>
+                    <td className="px-4 py-3 text-right text-lg font-bold text-[#011c72]">₱{order.quotationTotal?.toLocaleString()}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+
+            {/* Admin Notes */}
+            {order.quotationNotes && (
+              <div className="bg-white rounded-lg p-4 mb-4">
+                <p className="text-xs text-gray-500 uppercase font-semibold mb-1">Notes from our team:</p>
+                <p className="text-sm text-gray-700">{order.quotationNotes}</p>
+              </div>
+            )}
+
+            {/* Response Actions */}
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-[#011c72] mb-2">
+                  Your Response (Optional)
+                </label>
+                <textarea
+                  value={responseNotes}
+                  onChange={(e) => setResponseNotes(e.target.value)}
+                  placeholder="Add any comments or questions about the quotation..."
+                  rows={3}
+                  className="w-full px-4 py-3 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                />
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={handleAcceptQuotation}
+                  disabled={responding}
+                  className="flex-1 px-6 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 disabled:opacity-50 transition-colors"
+                >
+                  {responding ? 'Processing...' : 'Accept Quotation'}
+                </button>
+                <button
+                  onClick={() => setShowRejectConfirm(true)}
+                  disabled={responding}
+                  className="flex-1 px-6 py-3 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-700 disabled:opacity-50 transition-colors"
+                >
+                  Reject Quotation
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Accepted Quotation Display */}
+        {order.quotationStatus === 'accepted' && order.quotationItems && (
+          <div className="bg-green-50 border border-green-200 rounded-xl p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <svg className="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <h2 className="text-xl font-bold text-green-800">Quotation Accepted</h2>
+            </div>
+
+            <p className="text-green-700 mb-4">
+              You accepted this quotation on {order.respondedAt ? formatDate(order.respondedAt) : 'N/A'}. 
+              Our team will begin working on your order.
+            </p>
+
+            <div className="bg-white rounded-lg p-4">
+              <p className="text-lg font-bold text-gray-900">
+                Total: <span className="text-green-600">₱{order.quotationTotal?.toLocaleString()}</span>
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Pending Quotation Message */}
+        {order.quotationStatus === 'pending_quotation' && (
+          <div className="bg-blue-50 border border-blue-200 rounded-xl p-6">
+            <div className="flex items-center gap-2 mb-2">
+              <svg className="w-6 h-6 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <h2 className="text-xl font-bold text-blue-800">Awaiting Quotation</h2>
+            </div>
+            <p className="text-blue-700">
+              Our team is reviewing your order and preparing a quotation. We&apos;ll notify you once it&apos;s ready.
+            </p>
+          </div>
+        )}
+
+        {/* Order Details */}
+        <div className="bg-white rounded-xl border border-gray-200 p-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4">Order Details</h2>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+            <div>
+              <p className="text-xs text-gray-500 uppercase font-semibold mb-1">Customer</p>
+              <p className="text-sm text-gray-900">{order.customerName}</p>
+              <p className="text-sm text-gray-600">{order.customerPhone}</p>
+              {order.customerEmail && <p className="text-sm text-gray-600">{order.customerEmail}</p>}
+              {order.customerAddress && <p className="text-sm text-gray-600">{order.customerAddress}</p>}
+            </div>
+            <div>
+              <p className="text-xs text-gray-500 uppercase font-semibold mb-1">Vehicle</p>
+              {order.vehicleInfo ? (
+                <>
+                  <p className="text-sm text-gray-900">
+                    {order.vehicleInfo.year} {order.vehicleInfo.make} {order.vehicleInfo.model}
+                  </p>
+                  {order.vehicleInfo.plateNumber && (
+                    <p className="text-sm text-gray-600">Plate: {order.vehicleInfo.plateNumber}</p>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-gray-500">N/A</p>
+              )}
+              <p className="text-sm text-gray-600 mt-2">Branch: {order.branchName || 'N/A'}</p>
+            </div>
+          </div>
+
+          {/* Services */}
+          <div className="mb-6">
+            <p className="text-xs text-gray-500 uppercase font-semibold mb-2">Requested Services</p>
+            <div className="space-y-2">
+              {order.services?.map((service, index) => (
+                <div key={index} className="p-3 bg-gray-50 rounded-lg">
+                  <p className="text-sm font-medium text-gray-900">{getServiceLabel(service.type)}</p>
+                  {service.material && <p className="text-xs text-gray-600">Material: {service.material}</p>}
+                  {service.design && <p className="text-xs text-gray-600">Design: {service.design}</p>}
+                  {service.description && <p className="text-xs text-gray-600">{service.description}</p>}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Notes */}
+          {order.notes && (
+            <div>
+              <p className="text-xs text-gray-500 uppercase font-semibold mb-1">Your Notes</p>
+              <p className="text-sm text-gray-700">{order.notes}</p>
+            </div>
+          )}
+        </div>
+      </main>
+
+      {/* Reject Confirmation Modal */}
+      {showRejectConfirm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl max-w-md w-full p-6">
+            <h3 className="text-xl font-bold text-gray-900 mb-4">Reject Quotation?</h3>
+            <p className="text-gray-600 mb-6">
+              Are you sure you want to reject this quotation? You can provide a reason to help us understand your needs better.
+            </p>
+            <textarea
+              value={responseNotes}
+              onChange={(e) => setResponseNotes(e.target.value)}
+              placeholder="Reason for rejection (optional)"
+              rows={3}
+              className="w-full px-4 py-3 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-red-500 focus:border-transparent mb-4"
+            />
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowRejectConfirm(false)}
+                className="flex-1 px-4 py-2 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-100 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRejectQuotation}
+                disabled={responding}
+                className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors"
+              >
+                {responding ? 'Processing...' : 'Confirm Reject'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
