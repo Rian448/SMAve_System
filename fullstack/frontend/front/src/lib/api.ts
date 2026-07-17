@@ -1011,6 +1011,17 @@ export const api = {
   getAnalytics: () => fetchApi<AnalyticsData>('/api/analytics'),
 
   // ==================
+  // VEHICLE REFERENCE DATA (makes / models)
+  // ==================
+  vehicles: {
+    // List of vehicle makes/brands (alphabetical)
+    getMakes: () => fetchApi<string[]>('/api/vehicles/makes'),
+    // Models belonging to a given make
+    getModels: (make: string) =>
+      fetchApi<string[]>(`/api/vehicles/models?make=${encodeURIComponent(make)}`),
+  },
+
+  // ==================
   // AUTHENTICATION
   // ==================
   auth: {
