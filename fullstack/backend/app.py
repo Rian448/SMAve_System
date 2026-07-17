@@ -378,6 +378,33 @@ class Supplier(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+class VehicleMake(db.Model):
+    """Reference table of vehicle makes/brands (e.g. Toyota, Honda).
+
+    Populated once by seed_vehicles.py; the app only reads from it so the
+    make/model dropdowns never depend on an external API at runtime.
+    """
+    __tablename__ = 'vehicle_makes'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    models = db.relationship('VehicleModel', backref='make', cascade='all, delete-orphan')
+
+class VehicleModel(db.Model):
+    """Reference table of vehicle models, each belonging to one make."""
+    __tablename__ = 'vehicle_models'
+    id = db.Column(db.Integer, primary_key=True)
+    make_id = db.Column(db.Integer, db.ForeignKey('vehicle_makes.id'), nullable=False, index=True)
+    name = db.Column(db.String(150), nullable=False)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('make_id', 'name', name='uq_vehicle_model_make_name'),
+    )
+
 class MaterialWasteLog(db.Model):
     __tablename__ = 'material_waste_logs'
     id = db.Column(db.Integer, primary_key=True)
@@ -1566,6 +1593,43 @@ def material_usage_to_dict(log):
         'notes': log.notes,
         'usedAt': fmt_dt(log.created_at)
     }
+
+# ============================================
+# VEHICLE REFERENCE DATA (makes / models)
+# ============================================
+# Served entirely from the local vehicle_makes / vehicle_models tables, which
+# are populated once by seed_vehicles.py. This keeps the make/model dropdowns
+# fast and independent of any external car-data API at runtime.
+
+@app.route('/api/vehicles/makes', methods=['GET'])
+@require_auth
+def get_vehicle_makes():
+    makes = (VehicleMake.query
+             .filter_by(is_active=True)
+             .order_by(VehicleMake.name.asc())
+             .all())
+    return jsonify({'status': 'success', 'data': [m.name for m in makes]})
+
+
+@app.route('/api/vehicles/models', methods=['GET'])
+@require_auth
+def get_vehicle_models():
+    make_name = (request.args.get('make') or '').strip()
+    if not make_name:
+        return jsonify({'status': 'success', 'data': []})
+
+    make = VehicleMake.query.filter(
+        db.func.lower(VehicleMake.name) == make_name.lower()
+    ).first()
+    if not make:
+        return jsonify({'status': 'success', 'data': []})
+
+    models = (VehicleModel.query
+              .filter_by(make_id=make.id, is_active=True)
+              .order_by(VehicleModel.name.asc())
+              .all())
+    return jsonify({'status': 'success', 'data': [m.name for m in models]})
+
 
 @app.route('/api/inventory/raw-materials', methods=['GET'])
 @require_auth

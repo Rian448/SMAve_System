@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { api, type Customer, type FinishedGood, type RawMaterial } from '@/lib/api';
+import Combobox from '@/components/Combobox';
 
 interface MaterialItem {
   id: string;
@@ -100,6 +101,16 @@ export default function NewJobOrderPage() {
   const [vehicleYear, setVehicleYear] = useState('');
   const [vehiclePlate, setVehiclePlate] = useState('');
   const [reupholsteryItemType, setReupholsteryItemType] = useState('');
+  // Make/model reference data for the searchable dropdowns
+  const [vehicleMakes, setVehicleMakes] = useState<string[]>([]);
+  const [vehicleModels, setVehicleModels] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const modelFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Year options: current year (allow next model year) down to 1970, newest first
+  const yearOptions = Array.from(
+    { length: new Date().getFullYear() + 1 - 1970 + 1 },
+    (_, i) => String(new Date().getFullYear() + 1 - i)
+  );
 
   // Service Information
   const [estimatedCompletionDate, setEstimatedCompletionDate] = useState('');
@@ -193,6 +204,31 @@ export default function NewJobOrderPage() {
     }, 500);
     return () => { if (customerSearchTimerRef.current) clearTimeout(customerSearchTimerRef.current); };
   }, [customerName, customerPhone, customerEmail, linkedCustomerId]);
+
+  // Load the list of vehicle makes once.
+  useEffect(() => {
+    api.vehicles.getMakes()
+      .then((res) => setVehicleMakes(res.data || []))
+      .catch((err) => console.error('Failed to load vehicle makes:', err));
+  }, []);
+
+  // Load models for the selected make (debounced so free-typing doesn't spam
+  // the API). Falls back to an empty list for makes not in our reference data,
+  // in which case the user can still free-type a model.
+  useEffect(() => {
+    const make = vehicleMake.trim();
+    if (modelFetchTimerRef.current) clearTimeout(modelFetchTimerRef.current);
+    if (!make) { setVehicleModels([]); return; }
+    modelFetchTimerRef.current = setTimeout(async () => {
+      setLoadingModels(true);
+      try {
+        const res = await api.vehicles.getModels(make);
+        setVehicleModels(res.data || []);
+      } catch { setVehicleModels([]); }
+      finally { setLoadingModels(false); }
+    }, 350);
+    return () => { if (modelFetchTimerRef.current) clearTimeout(modelFetchTimerRef.current); };
+  }, [vehicleMake]);
 
   const linkCustomer = (c: Customer) => {
     setLinkedCustomerId(c.id);
@@ -920,18 +956,35 @@ export default function NewJobOrderPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Vehicle Make</label>
-                <input type="text" value={vehicleMake} onChange={(e) => setVehicleMake(e.target.value)}
-                  className={inputCls} placeholder="Toyota" />
+                <Combobox
+                  value={vehicleMake}
+                  onChange={(v) => {
+                    if (v !== vehicleMake) setVehicleModel(''); // reset model when make changes
+                    setVehicleMake(v);
+                  }}
+                  options={vehicleMakes}
+                  placeholder="Search or type a make (e.g. Toyota)"
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Vehicle Model</label>
-                <input type="text" value={vehicleModel} onChange={(e) => setVehicleModel(e.target.value)}
-                  className={inputCls} placeholder="Fortuner" />
+                <Combobox
+                  value={vehicleModel}
+                  onChange={setVehicleModel}
+                  options={vehicleModels}
+                  loading={loadingModels}
+                  disabled={!vehicleMake.trim()}
+                  placeholder={vehicleMake.trim() ? 'Search or type a model (e.g. Fortuner)' : 'Select a make first'}
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Year</label>
-                <input type="text" value={vehicleYear} onChange={(e) => setVehicleYear(e.target.value)}
-                  className={inputCls} placeholder="2023" />
+                <Combobox
+                  value={vehicleYear}
+                  onChange={setVehicleYear}
+                  options={yearOptions}
+                  placeholder="Search or type a year (e.g. 2023)"
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Plate Number</label>
