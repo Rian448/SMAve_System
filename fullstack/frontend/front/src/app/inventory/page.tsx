@@ -1,22 +1,48 @@
 ﻿'use client';
 import { formatDate, formatDateTime } from '@/lib/dateUtils';
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus } from '@/lib/api';
 import Link from 'next/link';
 
 type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'purchase-orders' | 'suppliers' | 'waste-log' | 'ai-predictions';
 
+const TAB_IDS: TabType[] = ['raw-materials', 'finished-goods', 'material-usage', 'purchase-orders', 'suppliers', 'waste-log', 'ai-predictions'];
+
 export default function InventoryPage() {
+  // useSearchParams needs a Suspense boundary for this route to prerender.
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="animate-spin w-8 h-8 border-2 border-[#011c72] border-t-transparent rounded-full" />
+      </div>
+    }>
+      <InventoryContent />
+    </Suspense>
+  );
+}
+
+function InventoryContent() {
   const { user } = useAuth();
-  const [activeTab, setActiveTab] = useState<TabType>('raw-materials');
+  const searchParams = useSearchParams();
+  // Deep links from the dashboard's low-stock alerts arrive as
+  // ?tab=raw-materials&status=low-stock&q=<material>
+  const tabParam = searchParams.get('tab');
+  const initialTab: TabType = TAB_IDS.includes(tabParam as TabType) ? (tabParam as TabType) : 'raw-materials';
+  const [activeTab, setActiveTab] = useState<TabType>(initialTab);
   const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([]);
   const [finishedGoods, setFinishedGoods] = useState<FinishedGood[]>([]);
   const [materialUsageLogs, setMaterialUsageLogs] = useState<MaterialUsageLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'in-stock' | 'low-stock' | 'out-of-stock'>('all');
+  const [searchTerm, setSearchTerm] = useState(searchParams.get('q') || '');
+  const statusParam = searchParams.get('status');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'in-stock' | 'low-stock' | 'out-of-stock'>(
+    statusParam === 'low-stock' || statusParam === 'out-of-stock' || statusParam === 'in-stock'
+      ? statusParam
+      : 'all'
+  );
   const [materialTypeFilter, setMaterialTypeFilter] = useState('');
   const [formError, setFormError] = useState('');
 

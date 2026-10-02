@@ -1,7 +1,9 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, Fragment } from 'react';
 import { api, type Announcement } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
+import { useConfirm } from '@/components/ConfirmDialog';
+import { formatDateTime, isMeaningfullyLater } from '@/lib/dateUtils';
 
 const PRIORITY_STYLES: Record<string, { bar: string; badge: string; label: string }> = {
   urgent: { bar: 'border-l-red-500', badge: 'bg-red-100 text-red-700', label: 'Urgent' },
@@ -73,8 +75,11 @@ function PostForm({ f, setF, onSubmit, onCancel, submitLabel, saving, formError 
 export default function AnnouncementsPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'administrator' || user?.role === 'supervisor';
+  const { confirm, confirmDialog } = useConfirm();
 
   const [items, setItems] = useState<Announcement[]>([]);
+  // Archived posts are hidden by default; only admins can reveal them to restore.
+  const [showArchived, setShowArchived] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -88,18 +93,15 @@ export default function AnnouncementsPage() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState({ ...BLANK_FORM });
 
-  // Delete confirm
-  const [deletingId, setDeletingId] = useState<number | null>(null);
-
-  const load = () => {
+  const load = (includeArchived = showArchived) => {
     setLoading(true);
-    api.announcements.list()
+    api.announcements.list(includeArchived && isAdmin)
       .then((res) => setItems(res.data || []))
       .catch(() => setError('Failed to load announcements.'))
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(showArchived); }, [showArchived, isAdmin]);
 
   const handleCreate = async () => {
     setFormError('');
@@ -138,10 +140,18 @@ export default function AnnouncementsPage() {
     }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (a: Announcement) => {
+    const ok = await confirm({
+      title: 'Delete this announcement?',
+      message: <>“{a.title}” will be permanently removed from the bulletin board.</>,
+      warning: 'This cannot be undone. To keep a copy you can restore later, archive it instead.',
+      confirmLabel: 'Delete permanently',
+      variant: 'danger',
+      requireText: 'DELETE',
+    });
+    if (!ok) return;
     try {
-      await api.announcements.delete(id);
-      setDeletingId(null);
+      await api.announcements.delete(a.id);
       load();
     } catch {
       setError('Failed to delete.');
@@ -149,9 +159,34 @@ export default function AnnouncementsPage() {
   };
 
   const toggleArchive = async (a: Announcement) => {
-    await api.announcements.update(a.id, { isActive: !a.isActive });
+    const archiving = a.isActive;
+    const ok = await confirm({
+      title: archiving ? 'Archive this announcement?' : 'Restore this announcement?',
+      message: archiving
+        ? <>“{a.title}” will be hidden from the bulletin board for all staff.</>
+        : <>“{a.title}” will reappear on the bulletin board for all staff.</>,
+      warning: archiving
+        ? 'You can bring it back any time with "Show archived".'
+        : undefined,
+      confirmLabel: archiving ? 'Archive' : 'Restore',
+      variant: archiving ? 'warning' : 'info',
+    });
+    if (!ok) return;
+    try {
+      await api.announcements.update(a.id, { isActive: !a.isActive });
+      load();
+    } catch {
+      setError(archiving ? 'Failed to archive.' : 'Failed to restore.');
+    }
+  };
+
+  const togglePin = async (a: Announcement) => {
+    await api.announcements.update(a.id, { isPinned: !a.isPinned });
     load();
   };
+
+  // Pinned announcements first, so we can draw a divider between them and the rest
+  const sortedItems = [...items].sort((a, b) => Number(b.isPinned) - Number(a.isPinned));
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -163,15 +198,25 @@ export default function AnnouncementsPage() {
             <h1 className="text-2xl font-bold text-gray-900">Bulletin Board</h1>
             <p className="text-sm text-gray-500 mt-1">Staff announcements and notices</p>
           </div>
-          {isAdmin && !showCreate && (
-            <button onClick={() => { setShowCreate(true); setFormError(''); }}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#011c72] text-white text-sm font-medium hover:bg-[#022494] transition-colors">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-              </svg>
-              Post Announcement
-            </button>
-          )}
+          <div className="flex items-center gap-3">
+            {isAdmin && (
+              <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-600 select-none">
+                <input type="checkbox" checked={showArchived}
+                  onChange={(e) => setShowArchived(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300 text-[#011c72] focus:ring-[#011c72]" />
+                Show archived
+              </label>
+            )}
+            {isAdmin && !showCreate && (
+              <button onClick={() => { setShowCreate(true); setFormError(''); }}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#011c72] text-white text-sm font-medium hover:bg-[#022494] transition-colors">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                Post Announcement
+              </button>
+            )}
+          </div>
         </div>
 
         {error && (
@@ -209,14 +254,30 @@ export default function AnnouncementsPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            {items.map((a) => {
+            {sortedItems.map((a, idx) => {
               const style = PRIORITY_STYLES[a.priority] || PRIORITY_STYLES.info;
               const isEditing = editingId === a.id;
-              const isDeleting = deletingId === a.id;
+              const showDivider = !a.isPinned && idx > 0 && sortedItems[idx - 1].isPinned;
 
               return (
-                <div key={a.id}
-                  className={`bg-white rounded-2xl border border-gray-200 border-l-4 ${style.bar} shadow-sm overflow-hidden ${!a.isActive ? 'opacity-50' : ''}`}>
+                <Fragment key={a.id}>
+                  {showDivider && (
+                    <div className="flex items-center gap-3 pt-3">
+                      <div className="flex-1 border-t-2 border-gray-200" />
+                      <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">Other Announcements</span>
+                      <div className="flex-1 border-t-2 border-gray-200" />
+                    </div>
+                  )}
+                <div
+                  className={`relative bg-white rounded-2xl border border-gray-200 border-l-4 ${style.bar} shadow-sm ${!a.isActive ? 'opacity-50' : ''}`}>
+                  {a.isPinned && !isEditing && (
+                    <div className="absolute -top-2.5 -left-2.5 z-10 inline-flex items-center gap-1 bg-[#011c72] text-white text-[10px] font-bold px-2 py-1 rounded-full shadow-md">
+                      <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M16 3a1 1 0 011 1v1.586l2.707 2.707A1 1 0 0120 9v1a1 1 0 01-1 1h-6v7l-1 3-1-3v-7H5a1 1 0 01-1-1V9a1 1 0 01.293-.707L7 5.586V4a1 1 0 011-1h8z" />
+                      </svg>
+                      PINNED
+                    </div>
+                  )}
 
                   {isEditing ? (
                     <div className="p-5">
@@ -235,11 +296,6 @@ export default function AnnouncementsPage() {
                       {/* Top row */}
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex items-center gap-2 flex-wrap">
-                          {a.isPinned && (
-                            <svg className="w-4 h-4 text-[#011c72] shrink-0" fill="currentColor" viewBox="0 0 24 24">
-                              <path d="M16 3a1 1 0 011 1v1.586l2.707 2.707A1 1 0 0120 9v1a1 1 0 01-1 1h-6v7l-1 3-1-3v-7H5a1 1 0 01-1-1V9a1 1 0 01.293-.707L7 5.586V4a1 1 0 011-1h8z" />
-                            </svg>
-                          )}
                           <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${style.badge}`}>
                             {style.label}
                           </span>
@@ -247,30 +303,26 @@ export default function AnnouncementsPage() {
                             <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500">Archived</span>
                           )}
                         </div>
-                        {isAdmin && !isDeleting && (
+                        {isAdmin && (
                           <div className="flex items-center gap-2 shrink-0">
+                            <button onClick={() => togglePin(a)}
+                              title={a.isPinned ? 'Unpin' : 'Pin to top'}
+                              className={`p-1 rounded-md transition-colors ${a.isPinned ? 'text-[#011c72] hover:bg-[#eef1fb]' : 'text-gray-400 hover:text-[#011c72] hover:bg-gray-100'}`}>
+                              <svg className="w-4 h-4" fill={a.isPinned ? 'currentColor' : 'none'} viewBox="0 0 24 24" stroke="currentColor" strokeWidth={a.isPinned ? 0 : 2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M16 3a1 1 0 011 1v1.586l2.707 2.707A1 1 0 0120 9v1a1 1 0 01-1 1h-6v7l-1 3-1-3v-7H5a1 1 0 01-1-1V9a1 1 0 01.293-.707L7 5.586V4a1 1 0 011-1h8z" />
+                              </svg>
+                            </button>
                             <button onClick={() => startEdit(a)}
                               className="text-xs text-gray-500 hover:text-[#011c72] transition-colors">Edit</button>
                             <button onClick={() => toggleArchive(a)}
                               className="text-xs text-gray-500 hover:text-yellow-600 transition-colors">
                               {a.isActive ? 'Archive' : 'Restore'}
                             </button>
-                            <button onClick={() => setDeletingId(a.id)}
+                            <button onClick={() => handleDelete(a)}
                               className="text-xs text-gray-500 hover:text-red-600 transition-colors">Delete</button>
                           </div>
                         )}
                       </div>
-
-                      {/* Delete confirm inline */}
-                      {isDeleting && (
-                        <div className="mt-3 flex items-center gap-3 bg-red-50 rounded-lg px-4 py-2.5">
-                          <span className="text-sm text-red-700 flex-1">Delete this announcement?</span>
-                          <button onClick={() => handleDelete(a.id)}
-                            className="px-3 py-1 rounded-lg bg-red-600 text-white text-xs font-medium hover:bg-red-700">Yes, delete</button>
-                          <button onClick={() => setDeletingId(null)}
-                            className="px-3 py-1 rounded-lg border border-gray-300 text-xs text-gray-600 hover:bg-gray-100">Cancel</button>
-                        </div>
-                      )}
 
                       {/* Content */}
                       <h3 className="mt-3 text-base font-semibold text-gray-900">{a.title}</h3>
@@ -286,16 +338,30 @@ export default function AnnouncementsPage() {
                         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
-                        <span>{a.createdAt}</span>
+                        {/* The API sends UTC with a Z suffix; formatDateTime renders it
+                            in Asia/Manila so staff see Philippine time. */}
+                        <span title={`Posted ${formatDateTime(a.createdAt)} (PHT)`}>
+                          {formatDateTime(a.createdAt)}
+                        </span>
+                        {isMeaningfullyLater(a.updatedAt, a.createdAt) && (
+                          <>
+                            <span className="mx-1">·</span>
+                            <span title={`Edited ${formatDateTime(a.updatedAt)} (PHT)`}>
+                              edited {formatDateTime(a.updatedAt)}
+                            </span>
+                          </>
+                        )}
                       </div>
                     </div>
                   )}
                 </div>
+                </Fragment>
               );
             })}
           </div>
         )}
       </main>
+      {confirmDialog}
     </div>
   );
 }

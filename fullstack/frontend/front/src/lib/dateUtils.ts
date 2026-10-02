@@ -34,6 +34,25 @@ export function formatTime(dateString: string | null | undefined): string {
   });
 }
 
+/**
+ * True when `later` is meaningfully after `earlier`.
+ *
+ * created_at and updated_at are written by separate clock reads on insert, so a
+ * brand-new record's timestamps differ by microseconds. The tolerance stops that
+ * from being mistaken for a real edit.
+ */
+export function isMeaningfullyLater(
+  later: string | null | undefined,
+  earlier: string | null | undefined,
+  toleranceMs = 2000,
+): boolean {
+  if (!later || !earlier) return false;
+  const a = new Date(later).getTime();
+  const b = new Date(earlier).getTime();
+  if (Number.isNaN(a) || Number.isNaN(b)) return false;
+  return a - b > toleranceMs;
+}
+
 /** Day label for chart axes: "15" */
 export function formatDayLabel(dateString: string): string {
   return new Date(dateString + 'T00:00:00').toLocaleDateString('en-PH', {
