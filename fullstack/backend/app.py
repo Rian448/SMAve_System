@@ -353,6 +353,38 @@ class PremadeProduct(db.Model):
 
     branch = db.relationship('Branch')
 
+class PremadeStockTransfer(db.Model):
+    """A pending hand-over of premade stock from the warehouse to a branch.
+
+    Stock is deliberately NOT moved when the transfer is raised — the warehouse
+    keeps it until the destination confirms receipt. So the quantity a warehouse
+    row can still promise is its quantity minus everything already pending
+    (see premade_available_quantity).
+    """
+    __tablename__ = 'premade_stock_transfers'
+    id = db.Column(db.Integer, primary_key=True)
+    # The warehouse row the stock is taken from.
+    product_id = db.Column(db.Integer, db.ForeignKey('premade_products.id'), nullable=False)
+    source_branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
+    destination_branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
+    quantity = db.Column(db.Float, nullable=False)
+    # pending -> received | cancelled
+    status = db.Column(db.String(20), default='pending', nullable=False, index=True)
+    # Groups the rows created by one "give to all branches" action.
+    batch_id = db.Column(db.String(50), nullable=True, index=True)
+    notes = db.Column(db.Text, nullable=True)
+    created_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # Who accepted or cancelled it, and when.
+    resolved_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    resolved_at = db.Column(db.DateTime, nullable=True)
+
+    product = db.relationship('PremadeProduct', foreign_keys=[product_id])
+    source_branch = db.relationship('Branch', foreign_keys=[source_branch_id])
+    destination_branch = db.relationship('Branch', foreign_keys=[destination_branch_id])
+    created_by = db.relationship('User', foreign_keys=[created_by_id])
+    resolved_by = db.relationship('User', foreign_keys=[resolved_by_id])
+
 class MaterialUsageLog(db.Model):
     __tablename__ = 'material_usage_logs'
     id = db.Column(db.Integer, primary_key=True)
@@ -1441,7 +1473,31 @@ def raw_material_group_to_dict(materials, include_components=True):
         'components': [material_to_dict(m) for m in materials] if include_components else []
     }
 
+def get_warehouse_branch():
+    """The branch that holds produced stock before it is handed to a shop."""
+    return Branch.query.filter_by(is_warehouse=True, is_active=True).first() \
+        or Branch.query.filter_by(is_warehouse=True).first()
+
+def premade_pending_outgoing(product_id):
+    """Quantity of this row already promised to branches but not yet received."""
+    total = db.session.query(
+        db.func.coalesce(db.func.sum(PremadeStockTransfer.quantity), 0.0)
+    ).filter(
+        PremadeStockTransfer.product_id == product_id,
+        PremadeStockTransfer.status == 'pending',
+    ).scalar()
+    return float(total or 0)
+
+def premade_available_quantity(product):
+    """What this row can still promise: on hand minus everything pending.
+
+    Pending transfers don't deduct stock until they're confirmed, so without
+    this the same units could be handed to several branches at once.
+    """
+    return float(product.quantity or 0) - premade_pending_outgoing(product.id)
+
 def premade_product_to_dict(product):
+    pending = premade_pending_outgoing(product.id)
     return {
         'id': product.id,
         'name': product.name,
@@ -1453,9 +1509,47 @@ def premade_product_to_dict(product):
         'cost': float(product.cost),
         'branchId': product.branch_id,
         'branchName': product.branch.name if product.branch else None,
+        'isWarehouse': bool(product.branch.is_warehouse) if product.branch else False,
+        # Units already promised to branches, and what is left to give out.
+        'pendingOutgoing': pending,
+        'availableQuantity': float(product.quantity or 0) - pending,
         'isArchived': product.is_archived,
         'lastUpdated': product.updated_at.strftime('%Y-%m-%d') if product.updated_at else None
     }
+
+def premade_transfer_to_dict(transfer):
+    product = transfer.product
+    return {
+        'id': transfer.id,
+        'productId': transfer.product_id,
+        'productName': product.name if product else None,
+        'sku': product.sku if product else None,
+        'unit': product.unit if product else 'pcs',
+        'sourceBranchId': transfer.source_branch_id,
+        'sourceBranchName': transfer.source_branch.name if transfer.source_branch else None,
+        'destinationBranchId': transfer.destination_branch_id,
+        'destinationBranchName': transfer.destination_branch.name if transfer.destination_branch else None,
+        'quantity': float(transfer.quantity),
+        'status': transfer.status,
+        'batchId': transfer.batch_id,
+        'notes': transfer.notes or '',
+        'createdById': transfer.created_by_id,
+        'createdByName': transfer.created_by.full_name if transfer.created_by else None,
+        'createdAt': fmt_dt(transfer.created_at),
+        'resolvedById': transfer.resolved_by_id,
+        'resolvedByName': transfer.resolved_by.full_name if transfer.resolved_by else None,
+        'resolvedAt': fmt_dt(transfer.resolved_at),
+    }
+
+def can_resolve_premade_transfer(user, transfer):
+    """Admins and supervisors may act on any transfer; a sales manager only on
+    deliveries addressed to their own branch."""
+    role = user.get('role')
+    if role in ('administrator', 'supervisor'):
+        return True
+    if role == 'sales_manager':
+        return user.get('branchId') == transfer.destination_branch_id
+    return False
 
 def material_usage_to_dict(log):
     return {
@@ -1765,7 +1859,11 @@ def get_finished_goods():
     if branch_id:
         query = query.filter_by(branch_id=int(branch_id))
 
-    items = query.order_by(PremadeProduct.name.asc()).all()
+    # Newest first so stock that was just added is at the top of the list.
+    # id is the tie-breaker because rows created in the same second share a timestamp.
+    items = query.order_by(
+        PremadeProduct.created_at.desc(), PremadeProduct.id.desc()
+    ).all()
 
     return jsonify({'status': 'success', 'data': [premade_product_to_dict(i) for i in items]})
 
@@ -1786,6 +1884,17 @@ def create_finished_good():
     if not branch or not branch.is_active:
         return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
 
+    # Premade stock is always produced at the warehouse. Choosing a shop branch
+    # does not put stock there directly — it raises a delivery that branch must
+    # confirm, so nothing appears in a branch's stock unconfirmed.
+    warehouse = get_warehouse_branch()
+    if not warehouse:
+        return jsonify({'status': 'error',
+                        'message': 'No warehouse branch is configured. Add one in Settings first.'}), 400
+
+    production_branch = warehouse
+    deliver_to = None if branch.id == warehouse.id else branch
+
     usage_entries = []
     computed_cost = 0
     for idx, used in enumerate(data.get('materialsUsed', [])):
@@ -1800,11 +1909,9 @@ def create_finished_good():
         if quantity_used <= 0:
             return jsonify({'status': 'error', 'message': f'Quantity used must be greater than zero at row {idx + 1}'}), 400
 
-        warehouse = Branch.query.filter_by(is_warehouse=True).first()
-        warehouse_id = warehouse.id if warehouse else None
-        allowed_branch_ids = [int(data['branchId'])]
-        if warehouse_id and warehouse_id != int(data['branchId']):
-            allowed_branch_ids.append(warehouse_id)
+        # Materials may be drawn from the warehouse (where production happens)
+        # or from the branch the stock is destined for.
+        allowed_branch_ids = {warehouse.id, branch.id}
         material = InventoryMaterial.query.filter(
             InventoryMaterial.id == material_id,
             InventoryMaterial.branch_id.in_(allowed_branch_ids),
@@ -1828,7 +1935,7 @@ def create_finished_good():
         category=data['category'],
         price=float(data['price']),
         cost=float(data.get('cost', computed_cost)),
-        branch_id=int(data['branchId']),
+        branch_id=production_branch.id,
         is_archived=False
     )
 
@@ -1853,11 +1960,39 @@ def create_finished_good():
             notes=f"Used to add premade product stock (qty: {product.quantity})"
         ))
 
+    # A shop branch was chosen, so hand the stock over as a pending delivery
+    # rather than placing it in that branch directly.
+    pending_transfer = None
+    if deliver_to:
+        transfers, error = create_premade_transfers(
+            product,
+            [{'branchId': deliver_to.id, 'quantity': float(product.quantity)}],
+            request.current_user,
+            notes=f'Raised automatically when {product.name} was added for {deliver_to.name}.',
+        )
+        if error:
+            payload, code = error
+            db.session.rollback()
+            return jsonify(payload), code
+        pending_transfer = transfers[0]
+
     db.session.commit()
 
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory', f"Created finished good: {product.name}", request.remote_addr or '0.0.0.0')
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory',
+               f"Created finished good: {product.name} at {production_branch.name}"
+               + (f" — delivery raised for {deliver_to.name}" if deliver_to else ''),
+               request.remote_addr or '0.0.0.0')
 
-    return jsonify({'status': 'success', 'data': premade_product_to_dict(product)}), 201
+    return jsonify({
+        'status': 'success',
+        'data': premade_product_to_dict(product),
+        'pendingTransfer': premade_transfer_to_dict(pending_transfer) if pending_transfer else None,
+        'message': (
+            f'Added to {production_branch.name}. {float(product.quantity):g} '
+            f'{product.unit or "pcs"} awaiting confirmation at {deliver_to.name}.'
+            if deliver_to else f'Added to {production_branch.name}.'
+        ),
+    }), 201
 
 @app.route('/api/inventory/finished-goods/<int:item_id>', methods=['PUT'])
 @require_auth
@@ -1893,6 +2028,267 @@ def update_finished_good(item_id):
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated finished good: {product.name}", request.remote_addr or '0.0.0.0')
 
     return jsonify({'status': 'success', 'data': premade_product_to_dict(product)})
+
+def resolve_destination_premade_row(source_product, destination_branch):
+    """Find (or create) the branch's own row for this product.
+
+    premade_products.sku is globally unique, so a branch cannot reuse the
+    warehouse's SKU — the branch code is appended to keep it distinct.
+    """
+    existing = PremadeProduct.query.filter(
+        PremadeProduct.branch_id == destination_branch.id,
+        db.func.lower(PremadeProduct.name) == (source_product.name or '').strip().lower(),
+        PremadeProduct.is_archived.is_(False),
+    ).first()
+    if existing:
+        return existing
+
+    base_sku = (source_product.sku or f'FG-{source_product.id:03d}').strip()
+    code = (destination_branch.code or str(destination_branch.id)).strip()
+    candidate = f'{base_sku}-{code}'
+    suffix = 2
+    while PremadeProduct.query.filter_by(sku=candidate).first():
+        candidate = f'{base_sku}-{code}-{suffix}'
+        suffix += 1
+
+    row = PremadeProduct(
+        name=source_product.name,
+        sku=candidate,
+        quantity=0,
+        unit=source_product.unit or 'pcs',
+        category=source_product.category,
+        price=float(source_product.price or 0),
+        cost=float(source_product.cost or 0),
+        branch_id=destination_branch.id,
+        is_archived=False,
+    )
+    db.session.add(row)
+    db.session.flush()
+    return row
+
+def create_premade_transfers(product, allocations, actor, notes='', batch_id=None):
+    """Raise pending transfers for {branchId: quantity} allocations.
+
+    Returns (transfers, None) or (None, (payload, status)). No stock moves here;
+    that happens when each transfer is confirmed.
+    """
+    if not allocations:
+        return None, ({'status': 'error', 'message': 'Select at least one branch to give stock to'}, 400)
+
+    available = premade_available_quantity(product)
+    requested_total = 0.0
+    resolved = []
+
+    for entry in allocations:
+        try:
+            quantity = float(entry.get('quantity', 0) or 0)
+        except (TypeError, ValueError):
+            return None, ({'status': 'error', 'message': 'Quantity must be a number'}, 400)
+        if quantity <= 0:
+            continue
+
+        branch = Branch.query.get(entry.get('branchId'))
+        if not branch or not branch.is_active:
+            return None, ({'status': 'error', 'message': 'Invalid or inactive destination branch'}, 400)
+        if branch.id == product.branch_id:
+            return None, ({'status': 'error',
+                           'message': f'{branch.name} already holds this stock'}, 400)
+
+        requested_total += quantity
+        resolved.append((branch, quantity))
+
+    if not resolved:
+        return None, ({'status': 'error', 'message': 'Enter a quantity greater than zero'}, 400)
+
+    # The whole allocation is rejected rather than partially filled, so the
+    # warehouse is never left over-promised.
+    if requested_total > available:
+        return None, ({
+            'status': 'error',
+            'message': f'Not enough stock. {available:g} {product.unit or "pcs"} available '
+                       f'to give out (you asked for {requested_total:g}).',
+            'available': available,
+            'requested': requested_total,
+        }, 400)
+
+    transfers = []
+    for branch, quantity in resolved:
+        transfer = PremadeStockTransfer(
+            product_id=product.id,
+            source_branch_id=product.branch_id,
+            destination_branch_id=branch.id,
+            quantity=quantity,
+            status='pending',
+            batch_id=batch_id,
+            notes=notes or '',
+            created_by_id=actor['id'],
+        )
+        db.session.add(transfer)
+        transfers.append(transfer)
+
+        notify_branch_users(
+            branch.id,
+            'premade_delivery',
+            f'Incoming Stock — {product.name}',
+            f'{quantity:g} {product.unit or "pcs"} on the way from '
+            f'{product.branch.name if product.branch else "the warehouse"}. '
+            f'Confirm receipt to add it to your stock.',
+            {'productName': product.name, 'quantity': quantity},
+        )
+
+    return transfers, None
+
+@app.route('/api/inventory/finished-goods/<int:item_id>/distribute', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor')
+def distribute_finished_good(item_id):
+    """Give warehouse stock to one or more branches as pending deliveries.
+
+    Body: {allocations: [{branchId, quantity}], notes?}
+       or {toAllBranches: true, quantityPerBranch: N, notes?}
+    """
+    product = PremadeProduct.query.get(item_id)
+    if not product:
+        return jsonify({'status': 'error', 'message': 'Premade product not found'}), 404
+    if product.is_archived:
+        return jsonify({'status': 'error', 'message': 'This product is archived'}), 400
+
+    data = request.get_json() or {}
+    notes = (data.get('notes') or '').strip()
+
+    if data.get('toAllBranches'):
+        try:
+            per_branch = float(data.get('quantityPerBranch', 0) or 0)
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'Quantity per branch must be a number'}), 400
+        if per_branch <= 0:
+            return jsonify({'status': 'error', 'message': 'Enter a quantity per branch'}), 400
+
+        targets = Branch.query.filter(
+            Branch.is_active.is_(True),
+            Branch.is_warehouse.is_(False),
+            Branch.id != product.branch_id,
+        ).order_by(Branch.name.asc()).all()
+        if not targets:
+            return jsonify({'status': 'error', 'message': 'There are no active branches to give stock to'}), 400
+
+        allocations = [{'branchId': b.id, 'quantity': per_branch} for b in targets]
+    else:
+        allocations = data.get('allocations') or []
+
+    batch_id = str(uuid.uuid4()) if len(allocations) > 1 else None
+    transfers, error = create_premade_transfers(
+        product, allocations, request.current_user, notes=notes, batch_id=batch_id)
+    if error:
+        payload, code = error
+        return jsonify(payload), code
+
+    db.session.commit()
+
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory',
+               f"Raised {len(transfers)} premade delivery(s) for {product.name}",
+               request.remote_addr or '0.0.0.0')
+
+    return jsonify({
+        'status': 'success',
+        'message': f'{len(transfers)} delivery(s) awaiting confirmation.',
+        'data': [premade_transfer_to_dict(t) for t in transfers],
+    }), 201
+
+@app.route('/api/inventory/premade-transfers', methods=['GET'])
+@require_auth
+def get_premade_transfers():
+    """Premade deliveries. Sales managers and staff only see their own branch."""
+    status = request.args.get('status')
+    user = request.current_user
+
+    query = PremadeStockTransfer.query
+    if status:
+        query = query.filter(PremadeStockTransfer.status == status)
+    if user.get('role') not in ('administrator', 'supervisor'):
+        if not user.get('branchId'):
+            return jsonify({'status': 'success', 'data': []})
+        query = query.filter(PremadeStockTransfer.destination_branch_id == user['branchId'])
+
+    transfers = query.order_by(PremadeStockTransfer.created_at.desc()).limit(200).all()
+    return jsonify({'status': 'success', 'data': [premade_transfer_to_dict(t) for t in transfers]})
+
+@app.route('/api/inventory/premade-transfers/<int:transfer_id>/confirm', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def confirm_premade_transfer(transfer_id):
+    """Accept a delivery: only now does stock leave the warehouse and appear
+    in the destination branch's own row."""
+    transfer = PremadeStockTransfer.query.get(transfer_id)
+    if not transfer:
+        return jsonify({'status': 'error', 'message': 'Delivery not found'}), 404
+    if transfer.status != 'pending':
+        return jsonify({'status': 'error',
+                        'message': f'This delivery was already {transfer.status}'}), 400
+    if not can_resolve_premade_transfer(request.current_user, transfer):
+        return jsonify({'status': 'error',
+                        'message': 'You can only confirm deliveries addressed to your branch'}), 403
+
+    source = transfer.product
+    if not source:
+        return jsonify({'status': 'error', 'message': 'The source product no longer exists'}), 400
+
+    quantity = float(transfer.quantity)
+    # Re-check at confirm time: the warehouse may have sold or used stock since.
+    if float(source.quantity or 0) < quantity:
+        return jsonify({
+            'status': 'error',
+            'message': f'The warehouse only has {float(source.quantity or 0):g} '
+                       f'{source.unit or "pcs"} left — not enough for this delivery.',
+        }), 409
+
+    destination_branch = transfer.destination_branch
+    if not destination_branch or not destination_branch.is_active:
+        return jsonify({'status': 'error', 'message': 'The destination branch is no longer active'}), 400
+
+    destination_row = resolve_destination_premade_row(source, destination_branch)
+
+    source.quantity = float(source.quantity or 0) - quantity
+    source.updated_at = datetime.utcnow()
+    destination_row.quantity = float(destination_row.quantity or 0) + quantity
+    destination_row.updated_at = datetime.utcnow()
+
+    transfer.status = 'received'
+    transfer.resolved_by_id = request.current_user['id']
+    transfer.resolved_at = datetime.utcnow()
+
+    db.session.commit()
+
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory',
+               f"Confirmed {quantity:g} x {source.name} into {destination_branch.name}",
+               request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': premade_transfer_to_dict(transfer)})
+
+@app.route('/api/inventory/premade-transfers/<int:transfer_id>/cancel', methods=['POST'])
+@require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
+def cancel_premade_transfer(transfer_id):
+    """Reject a delivery. Nothing moved, so the warehouse simply keeps the stock."""
+    transfer = PremadeStockTransfer.query.get(transfer_id)
+    if not transfer:
+        return jsonify({'status': 'error', 'message': 'Delivery not found'}), 404
+    if transfer.status != 'pending':
+        return jsonify({'status': 'error',
+                        'message': f'This delivery was already {transfer.status}'}), 400
+    if not can_resolve_premade_transfer(request.current_user, transfer):
+        return jsonify({'status': 'error',
+                        'message': 'You can only act on deliveries addressed to your branch'}), 403
+
+    transfer.status = 'cancelled'
+    transfer.resolved_by_id = request.current_user['id']
+    transfer.resolved_at = datetime.utcnow()
+    db.session.commit()
+
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory',
+               f"Cancelled premade delivery #{transfer.id}", request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': premade_transfer_to_dict(transfer)})
 
 @app.route('/api/inventory/material-usage', methods=['GET'])
 @require_auth
@@ -5924,6 +6320,9 @@ def user_history_blockers(user_id):
             ProductOrderTransfer.transferred_by_id == user_id,
             ProductOrderTransfer.received_by_id == user_id))),
         ('chat message', ChatMessage.query.filter_by(sender_id=user_id)),
+        ('premade delivery', PremadeStockTransfer.query.filter(db.or_(
+            PremadeStockTransfer.created_by_id == user_id,
+            PremadeStockTransfer.resolved_by_id == user_id))),
         ('work task', WorkTask.query.filter(WorkTask.worker_id.in_(worker_ids))),
     ]
     blockers = []

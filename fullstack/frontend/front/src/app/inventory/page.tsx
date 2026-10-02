@@ -2,8 +2,9 @@
 import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect, useMemo, useRef, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { useAuth } from '@/context/AuthContext';
-import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus } from '@/lib/api';
+import { useAuth, hasAccess } from '@/context/AuthContext';
+import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus, PremadeTransfer } from '@/lib/api';
+import { useConfirm } from '@/components/ConfirmDialog';
 import Link from 'next/link';
 
 type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'purchase-orders' | 'suppliers' | 'waste-log' | 'ai-predictions';
@@ -25,6 +26,7 @@ export default function InventoryPage() {
 
 function InventoryContent() {
   const { user } = useAuth();
+  const { confirm, confirmDialog } = useConfirm();
   const searchParams = useSearchParams();
   // Deep links from the dashboard's low-stock alerts arrive as
   // ?tab=raw-materials&status=low-stock&q=<material>
@@ -118,6 +120,26 @@ function InventoryContent() {
   const [editingPremadeId, setEditingPremadeId] = useState<number | null>(null);
   const [editPremade, setEditPremade] = useState({ quantity: '', price: '' });
 
+  // ── Premade distribution (warehouse -> branches) ──────────────────────────
+  type BranchOption = { id: number; name: string; isWarehouse: boolean; isActive: boolean };
+  const [warehouse, setWarehouse] = useState<BranchOption | null>(null);
+  const [transfers, setTransfers] = useState<PremadeTransfer[]>([]);
+  const [transferBusyId, setTransferBusyId] = useState<number | null>(null);
+  const [transferError, setTransferError] = useState('');
+  // The product being given out, plus the per-branch amounts typed in the modal.
+  const [distributing, setDistributing] = useState<FinishedGood | null>(null);
+  const [allocations, setAllocations] = useState<Record<number, string>>({});
+  const [allBranchesQty, setAllBranchesQty] = useState('');
+  const [distributeError, setDistributeError] = useState('');
+  const [distributeSaving, setDistributeSaving] = useState(false);
+
+  // Which location's finished goods to show: 'all', or a branch/warehouse id.
+  const [premadeBranchFilter, setPremadeBranchFilter] = useState<string>('all');
+
+  const canDistribute = hasAccess(user?.role, ['administrator', 'supervisor']);
+  /** Admin/supervisor approve on someone's behalf, so they get a confirm step first. */
+  const confirmsViaDialog = hasAccess(user?.role, ['administrator', 'supervisor']);
+
   useEffect(() => {
     if (activeTab !== 'ai-predictions') fetchInventory();
   }, [activeTab]);
@@ -166,11 +188,17 @@ function InventoryContent() {
   useEffect(() => {
     api.settings.getBranches().then(r => {
       if (r.data) {
-        const retail = r.data.filter((b: any) => !b.isWarehouse && b.isActive);
-        setBranches(retail);
-        if (retail.length > 0 && !newPremade.branchId) {
-          const def = retail.find((b: any) => b.id === user?.branchId) || retail[0];
-          setNewPremade(prev => ({ ...prev, branchId: String(def.id) }));
+        const active = r.data.filter((b: any) => b.isActive);
+        // The warehouse is where premade stock is produced, so it belongs in the
+        // location list; shop branches are kept separately for distribution.
+        const wh = active.find((b: any) => b.isWarehouse) || null;
+        setWarehouse(wh);
+        setBranches(active.filter((b: any) => !b.isWarehouse));
+        if (!newPremade.branchId) {
+          // Default to the warehouse so adding stock doesn't silently raise a
+          // delivery the admin didn't ask for.
+          const def = wh || active.find((b: any) => b.id === user?.branchId) || active[0];
+          if (def) setNewPremade(prev => ({ ...prev, branchId: String(def.id) }));
         }
       }
     }).catch(() => {});
@@ -196,12 +224,15 @@ function InventoryContent() {
         setSuppliers(supRes.data || []);
       } else if (activeTab === 'finished-goods') {
         const targetBranchId = Number(newPremade.branchId) || user?.branchId;
-        const [finishedGoodsResponse, rawMaterialsResponse] = await Promise.all([
+        const [finishedGoodsResponse, rawMaterialsResponse, transfersResponse] = await Promise.all([
           api.inventory.getFinishedGoods(),
-          api.inventory.getRawMaterials({ branchId: targetBranchId, includeWarehouse: true })
+          api.inventory.getRawMaterials({ branchId: targetBranchId, includeWarehouse: true }),
+          // Pending deliveries are optional context — don't fail the tab over them.
+          api.inventory.getPremadeTransfers({ status: 'pending' }).catch(() => ({ data: [] })),
         ]);
         setFinishedGoods(finishedGoodsResponse.data || []);
         setRawMaterials(rawMaterialsResponse.data || []);
+        setTransfers(transfersResponse.data || []);
       } else if (activeTab === 'material-usage') {
         const response = await api.inventory.getMaterialUsage({ branchId: user?.branchId });
         setMaterialUsageLogs(response.data || []);
@@ -374,8 +405,27 @@ function InventoryContent() {
 
     const branchId = Number(newPremade.branchId) || user?.branchId;
     if (!branchId) {
-      setFormError('Please select a branch for this product.');
+      setFormError('Please select a location for this product.');
       return;
+    }
+
+    // Choosing a shop branch raises a delivery that branch must accept, so make
+    // that consequence explicit before saving.
+    const target = branches.find(b => b.id === branchId);
+    if (target && !target.isWarehouse) {
+      const ok = await confirm({
+        title: `Send ${quantity} pcs to ${target.name}?`,
+        message: (
+          <>
+            The stock is produced at {warehouse?.name || 'the warehouse'} and sent to{' '}
+            <span className="font-medium text-gray-900">{target.name}</span> as a delivery.
+          </>
+        ),
+        warning: `It will not show in ${target.name}'s stock until they confirm receipt. Materials are deducted now.`,
+        confirmLabel: 'Add and send',
+        variant: 'warning',
+      });
+      if (!ok) return;
     }
 
     setSaving(true);
@@ -421,6 +471,137 @@ function InventoryContent() {
     setPremadeMaterials((prev) =>
       prev.map((entry, i) => (i === index ? { ...entry, [field]: value } : entry))
     );
+  };
+
+  // ── Distribution ──────────────────────────────────────────────────────────
+
+  const openDistribute = (item: FinishedGood) => {
+    setDistributing(item);
+    setAllocations({});
+    setAllBranchesQty('');
+    setDistributeError('');
+  };
+
+  const allocationTotal = useMemo(
+    () => Object.values(allocations).reduce((sum, v) => sum + (Number(v) || 0), 0),
+    [allocations],
+  );
+
+  const handleDistribute = async (toAll: boolean) => {
+    if (!distributing) return;
+    setDistributeError('');
+
+    const available = distributing.availableQuantity ?? distributing.quantity;
+    const perBranch = Number(allBranchesQty) || 0;
+    const total = toAll ? perBranch * branches.length : allocationTotal;
+
+    if (total <= 0) {
+      setDistributeError('Enter a quantity greater than zero.');
+      return;
+    }
+    // Checked here for immediate feedback; the server enforces it regardless.
+    if (total > available) {
+      setDistributeError(
+        `Not enough stock. ${available} available to give out, but that totals ${total}.`,
+      );
+      return;
+    }
+
+    const ok = await confirm({
+      title: toAll ? `Give ${perBranch} to each of ${branches.length} branches?` : 'Send this stock?',
+      message: (
+        <>
+          {total} {distributing.unit || 'pcs'} of{' '}
+          <span className="font-medium text-gray-900">{distributing.name}</span> will be sent out.
+        </>
+      ),
+      warning: 'Stock stays in the warehouse until each branch confirms receipt.',
+      confirmLabel: 'Send',
+      variant: 'warning',
+    });
+    if (!ok) return;
+
+    setDistributeSaving(true);
+    try {
+      if (toAll) {
+        await api.inventory.distributeFinishedGood(distributing.id, {
+          toAllBranches: true,
+          quantityPerBranch: perBranch,
+        });
+      } else {
+        await api.inventory.distributeFinishedGood(distributing.id, {
+          allocations: Object.entries(allocations)
+            .map(([branchId, qty]) => ({ branchId: Number(branchId), quantity: Number(qty) || 0 }))
+            .filter(a => a.quantity > 0),
+        });
+      }
+      setDistributing(null);
+      await fetchInventory();
+    } catch (err: any) {
+      setDistributeError(err?.message || 'Failed to send the stock.');
+    } finally {
+      setDistributeSaving(false);
+    }
+  };
+
+  /**
+   * Accept a delivery. A branch's own sales manager accepts directly; an
+   * admin or supervisor is approving on the branch's behalf, so they confirm first.
+   */
+  const handleConfirmTransfer = async (transfer: PremadeTransfer) => {
+    setTransferError('');
+    if (confirmsViaDialog) {
+      const ok = await confirm({
+        title: `Approve delivery to ${transfer.destinationBranchName}?`,
+        message: (
+          <>
+            {transfer.quantity} {transfer.unit} of{' '}
+            <span className="font-medium text-gray-900">{transfer.productName}</span> will move out of{' '}
+            {transfer.sourceBranchName} and into {transfer.destinationBranchName}.
+          </>
+        ),
+        warning: 'You are accepting this on the branch\'s behalf. Stock levels change immediately.',
+        confirmLabel: 'Approve delivery',
+        variant: 'warning',
+      });
+      if (!ok) return;
+    }
+
+    setTransferBusyId(transfer.id);
+    try {
+      await api.inventory.confirmPremadeTransfer(transfer.id);
+      await fetchInventory();
+    } catch (err: any) {
+      setTransferError(err?.message || 'Failed to confirm the delivery.');
+    } finally {
+      setTransferBusyId(null);
+    }
+  };
+
+  const handleCancelTransfer = async (transfer: PremadeTransfer) => {
+    const ok = await confirm({
+      title: 'Reject this delivery?',
+      message: (
+        <>
+          {transfer.quantity} {transfer.unit} of {transfer.productName} will stay at{' '}
+          {transfer.sourceBranchName}.
+        </>
+      ),
+      confirmLabel: 'Reject',
+      variant: 'danger',
+    });
+    if (!ok) return;
+
+    setTransferBusyId(transfer.id);
+    setTransferError('');
+    try {
+      await api.inventory.cancelPremadeTransfer(transfer.id);
+      await fetchInventory();
+    } catch (err: any) {
+      setTransferError(err?.message || 'Failed to reject the delivery.');
+    } finally {
+      setTransferBusyId(null);
+    }
   };
 
   const startEditPremade = (item: FinishedGood) => {
@@ -592,7 +773,11 @@ function InventoryContent() {
 
   const filteredFinishedGoods = useMemo(() => {
     const q = searchTerm.toLowerCase();
+    // The API already returns newest-first, so filtering preserves that order.
     return finishedGoods.filter((item) => {
+      if (premadeBranchFilter !== 'all' && item.branchId !== Number(premadeBranchFilter)) {
+        return false;
+      }
       if (!q) return true;
       return (
         item.name.toLowerCase().includes(q) ||
@@ -600,7 +785,11 @@ function InventoryContent() {
         (item.sku || '').toLowerCase().includes(q)
       );
     });
-  }, [finishedGoods, searchTerm]);
+  }, [finishedGoods, searchTerm, premadeBranchFilter]);
+
+  /** How many premade products sit at a given location, for the dropdown labels. */
+  const countAtLocation = (branchId: number) =>
+    finishedGoods.filter((item) => item.branchId === branchId).length;
 
   const lowStockItems = useMemo(() =>
     globalThreshold > 0
@@ -1000,9 +1189,12 @@ function InventoryContent() {
                 required
                 className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
               >
-                <option value="">Select branch *</option>
+                <option value="">Select location *</option>
+                {warehouse && (
+                  <option value={warehouse.id}>{warehouse.name} (stock room)</option>
+                )}
                 {branches.map(b => (
-                  <option key={b.id} value={b.id}>{b.name}</option>
+                  <option key={b.id} value={b.id}>{b.name} (send as delivery)</option>
                 ))}
               </select>
             </div>
@@ -1263,7 +1455,9 @@ function InventoryContent() {
                 </svg>
                 <input
                   type="text"
-                  placeholder="Search by type, color, pattern, ID..."
+                  placeholder={activeTab === 'finished-goods'
+                    ? 'Search by product name, category, SKU...'
+                    : 'Search by type, color, pattern, ID...'}
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                   className="w-full pl-10 pr-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
@@ -1294,6 +1488,35 @@ function InventoryContent() {
                   {(searchTerm || materialTypeFilter || statusFilter !== 'all') && (
                     <button
                       onClick={() => { setSearchTerm(''); setMaterialTypeFilter(''); setStatusFilter('all'); }}
+                      className="px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors whitespace-nowrap"
+                    >
+                      Clear filters
+                    </button>
+                  )}
+                </>
+              )}
+              {activeTab === 'finished-goods' && (
+                <>
+                  <select
+                    value={premadeBranchFilter}
+                    onChange={(e) => setPremadeBranchFilter(e.target.value)}
+                    className="px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                  >
+                    <option value="all">All Locations ({finishedGoods.length})</option>
+                    {warehouse && (
+                      <option value={warehouse.id}>
+                        {warehouse.name} ({countAtLocation(warehouse.id)})
+                      </option>
+                    )}
+                    {branches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name} ({countAtLocation(b.id)})
+                      </option>
+                    ))}
+                  </select>
+                  {(searchTerm || premadeBranchFilter !== 'all') && (
+                    <button
+                      onClick={() => { setSearchTerm(''); setPremadeBranchFilter('all'); }}
                       className="px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors whitespace-nowrap"
                     >
                       Clear filters
@@ -1508,13 +1731,91 @@ function InventoryContent() {
             </div>
           ) : activeTab === 'finished-goods' ? (
             <div className="overflow-x-auto">
+              {/* Deliveries awaiting receipt. Stock has not moved yet. */}
+              {transfers.length > 0 && (
+                <div className="border-b border-gray-200 bg-[#fbfcff] p-6">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <h3 className="text-sm font-bold text-gray-900">
+                        Incoming Deliveries ({transfers.length})
+                      </h3>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        Stock stays in the warehouse until the receiving branch confirms it.
+                      </p>
+                    </div>
+                  </div>
+
+                  {transferError && (
+                    <p className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                      {transferError}
+                    </p>
+                  )}
+
+                  <ul className="space-y-2">
+                    {transfers.map((t) => {
+                      const mine = user?.branchId === t.destinationBranchId;
+                      const canAct = canDistribute || (user?.role === 'sales_manager' && mine);
+                      return (
+                        <li key={t.id}
+                          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-gray-900">
+                              {t.quantity} {t.unit} · {t.productName}
+                            </p>
+                            <p className="text-xs text-gray-500">
+                              {t.sourceBranchName} → {t.destinationBranchName}
+                              {t.createdByName ? ` · sent by ${t.createdByName}` : ''}
+                              {' · '}{formatDateTime(t.createdAt)}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            {canAct ? (
+                              <>
+                                <button
+                                  onClick={() => handleConfirmTransfer(t)}
+                                  disabled={transferBusyId === t.id}
+                                  className="rounded-lg bg-green-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-green-700 disabled:opacity-50"
+                                >
+                                  {transferBusyId === t.id ? '…' : mine && !confirmsViaDialog ? 'Accept' : 'Approve'}
+                                </button>
+                                <button
+                                  onClick={() => handleCancelTransfer(t)}
+                                  disabled={transferBusyId === t.id}
+                                  className="rounded-lg bg-red-50 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-100 disabled:opacity-50"
+                                >
+                                  Reject
+                                </button>
+                              </>
+                            ) : (
+                              <span className="text-xs text-gray-400">
+                                Awaiting {t.destinationBranchName}
+                              </span>
+                            )}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+
               {filteredFinishedGoods.length === 0 ? (
                 <div className="p-8 text-center">
                   <svg className="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
                   </svg>
-                  <h3 className="text-lg font-medium text-gray-900 mb-2">No finished goods found</h3>
-                  <p className="text-gray-500">Finished goods will appear here once job orders are completed.</p>
+                  <h3 className="text-lg font-medium text-gray-900 mb-2">
+                    {searchTerm || premadeBranchFilter !== 'all'
+                      ? 'No premade products match these filters'
+                      : 'No premade products yet'}
+                  </h3>
+                  <p className="text-gray-500">
+                    {premadeBranchFilter !== 'all' && !searchTerm
+                      ? 'This location is not holding any premade stock right now.'
+                      : searchTerm
+                      ? 'Try a different search term or location.'
+                      : 'Add premade stock using the form above.'}
+                  </p>
                 </div>
               ) : (
                 <table className="w-full">
@@ -1548,7 +1849,7 @@ function InventoryContent() {
                             </div>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
-                            <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-600">
+                            <span className={`text-xs px-2 py-1 rounded-full ${item.isWarehouse ? 'bg-[#dde6ff] text-[#011c72] font-medium' : 'bg-gray-100 text-gray-600'}`}>
                               {item.branchName || `Branch ${item.branchId}`}
                             </span>
                           </td>
@@ -1566,7 +1867,16 @@ function InventoryContent() {
                                 className="w-24 px-2 py-1 rounded border border-gray-200 bg-white text-sm text-gray-900"
                               />
                             ) : (
-                              <span className="text-sm font-medium text-gray-900">{item.quantity}</span>
+                              <div>
+                                <span className="text-sm font-medium text-gray-900">{item.quantity}</span>
+                                {/* Pending deliveries are still counted in `quantity`,
+                                    so show what is actually free to give out. */}
+                                {!!item.pendingOutgoing && item.pendingOutgoing > 0 && (
+                                  <p className="text-xs text-yellow-700 mt-0.5">
+                                    {item.pendingOutgoing} pending · {item.availableQuantity} free
+                                  </p>
+                                )}
+                              </div>
                             )}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
@@ -1610,6 +1920,19 @@ function InventoryContent() {
                                 className="text-[#011c72] hover:text-[#011c72] text-sm font-medium"
                               >
                                 Edit
+                              </button>
+                            )}
+                            {/* Only warehouse stock is handed out to branches. */}
+                            {editingPremadeId !== item.id && canDistribute && item.isWarehouse && (
+                              <button
+                                onClick={() => openDistribute(item)}
+                                disabled={(item.availableQuantity ?? item.quantity) <= 0}
+                                title={(item.availableQuantity ?? item.quantity) <= 0
+                                  ? 'No free stock left to give out'
+                                  : 'Give this stock to branches'}
+                                className="ml-3 text-sm font-medium text-green-700 hover:text-green-800 disabled:opacity-40 disabled:cursor-not-allowed"
+                              >
+                                Give to branches
                               </button>
                             )}
                           </td>
@@ -2090,6 +2413,112 @@ function InventoryContent() {
           </div>
         </div>
       </main>
+
+      {/* ── Give warehouse stock to branches ── */}
+      {distributing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setDistributing(null)}>
+          <div className="w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-2xl bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between border-b border-gray-100 px-6 py-4">
+              <div>
+                <h2 className="text-lg font-bold text-gray-900">Give to branches</h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {distributing.name} ·{' '}
+                  <span className="font-medium text-gray-700">
+                    {distributing.availableQuantity ?? distributing.quantity} {distributing.unit || 'pcs'} free
+                  </span>
+                  {!!distributing.pendingOutgoing && distributing.pendingOutgoing > 0 && (
+                    <> ({distributing.pendingOutgoing} already pending)</>
+                  )}
+                </p>
+              </div>
+              <button onClick={() => setDistributing(null)}
+                className="text-xl leading-none text-gray-400 hover:text-gray-700">✕</button>
+            </div>
+
+            <div className="space-y-5 p-6">
+              {distributeError && (
+                <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {distributeError}
+                </p>
+              )}
+
+              {branches.length === 0 ? (
+                <p className="text-sm text-gray-500">There are no active branches to give stock to.</p>
+              ) : (
+                <>
+                  <div>
+                    <h3 className="mb-2 text-sm font-semibold text-gray-700">Give the same amount to every branch</h3>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number" min="0" step="1"
+                        value={allBranchesQty}
+                        onChange={(e) => setAllBranchesQty(e.target.value)}
+                        placeholder="Qty per branch"
+                        className="w-40 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleDistribute(true)}
+                        disabled={distributeSaving || !Number(allBranchesQty)}
+                        className="rounded-lg bg-[#011c72] px-4 py-2 text-sm font-semibold text-white hover:bg-[#01268c] disabled:opacity-50"
+                      >
+                        Give to all {branches.length}
+                      </button>
+                    </div>
+                    {!!Number(allBranchesQty) && (
+                      <p className="mt-1.5 text-xs text-gray-500">
+                        Total needed: {Number(allBranchesQty) * branches.length} {distributing.unit || 'pcs'}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="border-t border-gray-100 pt-5">
+                    <h3 className="mb-2 text-sm font-semibold text-gray-700">Or set each branch</h3>
+                    <div className="space-y-2">
+                      {branches.map((b) => (
+                        <div key={b.id} className="flex items-center justify-between gap-3">
+                          <span className="text-sm text-gray-700">{b.name}</span>
+                          <input
+                            type="number" min="0" step="1"
+                            value={allocations[b.id] || ''}
+                            onChange={(e) =>
+                              setAllocations((prev) => ({ ...prev, [b.id]: e.target.value }))
+                            }
+                            placeholder="0"
+                            className="w-28 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-3 flex items-center justify-between">
+                      <p className={`text-xs ${allocationTotal > (distributing.availableQuantity ?? distributing.quantity) ? 'font-medium text-red-600' : 'text-gray-500'}`}>
+                        Total: {allocationTotal} of {distributing.availableQuantity ?? distributing.quantity} free
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => handleDistribute(false)}
+                        disabled={distributeSaving || allocationTotal <= 0}
+                        className="rounded-lg bg-[#011c72] px-4 py-2 text-sm font-semibold text-white hover:bg-[#01268c] disabled:opacity-50"
+                      >
+                        {distributeSaving ? 'Sending…' : 'Send'}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              <p className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500">
+                Nothing leaves the warehouse yet — each branch must confirm receipt before the
+                stock shows up in their inventory.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmDialog}
     </div>
   );
 }

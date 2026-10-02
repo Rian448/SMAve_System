@@ -548,8 +548,37 @@ export interface FinishedGood {
   cost: number;
   branchId: number;
   branchName?: string;
+  /** True when this row sits in the warehouse rather than a shop branch. */
+  isWarehouse?: boolean;
+  /** Units already promised to branches but not yet confirmed. */
+  pendingOutgoing?: number;
+  /** quantity - pendingOutgoing: what can still be given out. */
+  availableQuantity?: number;
   isArchived: boolean;
   lastUpdated: string;
+}
+
+/** A hand-over of premade stock from the warehouse to a branch, pending receipt. */
+export interface PremadeTransfer {
+  id: number;
+  productId: number;
+  productName?: string;
+  sku?: string;
+  unit: string;
+  sourceBranchId: number;
+  sourceBranchName?: string;
+  destinationBranchId: number;
+  destinationBranchName?: string;
+  quantity: number;
+  status: 'pending' | 'received' | 'cancelled';
+  batchId?: string | null;
+  notes: string;
+  createdById?: number;
+  createdByName?: string;
+  createdAt: string;
+  resolvedById?: number;
+  resolvedByName?: string;
+  resolvedAt?: string;
 }
 
 export interface PremadeProductInput {
@@ -1206,6 +1235,35 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(item),
       }),
+
+    /**
+     * Hand warehouse stock to branches as pending deliveries. Pass either
+     * explicit `allocations` or `toAllBranches` with a per-branch quantity.
+     * Rejected outright if the total exceeds what's available.
+     */
+    distributeFinishedGood: (
+      id: number,
+      payload:
+        | { allocations: Array<{ branchId: number; quantity: number }>; notes?: string }
+        | { toAllBranches: true; quantityPerBranch: number; notes?: string },
+    ) =>
+      fetchApi<PremadeTransfer[]>(`/api/inventory/finished-goods/${id}/distribute`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+
+    getPremadeTransfers: (params?: { status?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.status) query.append('status', params.status);
+      return fetchApi<PremadeTransfer[]>(`/api/inventory/premade-transfers?${query}`);
+    },
+
+    /** Accept a delivery — this is what actually moves the stock. */
+    confirmPremadeTransfer: (id: number) =>
+      fetchApi<PremadeTransfer>(`/api/inventory/premade-transfers/${id}/confirm`, { method: 'POST' }),
+
+    cancelPremadeTransfer: (id: number) =>
+      fetchApi<PremadeTransfer>(`/api/inventory/premade-transfers/${id}/cancel`, { method: 'POST' }),
 
     getMaterialUsage: (params?: { branchId?: number; materialId?: number }) => {
       const query = new URLSearchParams();

@@ -86,6 +86,16 @@ export default function SettingsPage() {
     }
   };
 
+  /**
+   * Reload branches the same way the current tab first loaded them.
+   *
+   * The Branches tab manages inactive branches, so it must include them —
+   * otherwise a branch you just deactivated vanishes from the list and only
+   * reappears on refresh. Everywhere else the list feeds branch pickers, which
+   * should only offer active branches.
+   */
+  const reloadBranches = () => loadBranches(activeTab === 'branches');
+
   const loadBranches = async (includeInactive = false) => {
     setLoadingBranches(true);
     try {
@@ -179,6 +189,22 @@ export default function SettingsPage() {
       } finally {
         setSaving(false);
       }
+    };
+
+    /**
+     * Why this account can't be deactivated or deleted, or null if it can.
+     * Mirrors the server's guards so the buttons are disabled with a reason
+     * instead of failing after the user has already confirmed.
+     */
+    const protectedReason = (target: UserType): string | null => {
+      if (target.id === user?.id) return 'This is your own account';
+      const otherActiveAdmins = users.filter(
+        (u) => u.role === 'administrator' && u.isActive && u.id !== target.id,
+      ).length;
+      if (target.role === 'administrator' && target.isActive && otherActiveAdmins === 0) {
+        return 'Last active administrator';
+      }
+      return null;
     };
 
     const handleToggleUserStatus = async (target: UserType) => {
@@ -294,7 +320,7 @@ export default function SettingsPage() {
       }
       
       setShowBranchModal(false);
-      loadBranches();
+      reloadBranches();
     } catch (err: any) {
       setBranchError(err.message || 'Failed to save branch');
     } finally {
@@ -303,13 +329,14 @@ export default function SettingsPage() {
   };
 
   const handleToggleBranchStatus = async (branch: Branch) => {
+    setBranchError('');
     try {
       await api.settings.updateBranch(branch.id, {
         isActive: !branch.isActive
       });
-      loadBranches();
-    } catch (err) {
-      console.error('Failed to update branch status:', err);
+      reloadBranches();
+    } catch (err: any) {
+      setBranchError(err?.message || 'Failed to update branch status');
     }
   };
 
@@ -557,7 +584,9 @@ export default function SettingsPage() {
                         </button>
                               <button
                                 onClick={() => handleToggleUserStatus(u)}
-                                className={`text-sm font-medium mr-3 ${
+                                disabled={!!protectedReason(u)}
+                                title={protectedReason(u) || undefined}
+                                className={`text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300 ${
                                   u.isActive
                                     ? 'text-yellow-600 hover:text-yellow-700'
                                     : 'text-green-600 hover:text-green-700'
@@ -567,10 +596,16 @@ export default function SettingsPage() {
                         </button>
                               <button
                                 onClick={() => handleDeleteUser(u)}
-                                className="text-sm font-medium text-red-600 hover:text-red-700"
+                                disabled={!!protectedReason(u)}
+                                title={protectedReason(u) || undefined}
+                                className="text-sm font-medium text-red-600 hover:text-red-700 disabled:cursor-not-allowed disabled:text-gray-300"
                               >
                                 Delete
                               </button>
+                              {/* Say why up front rather than failing after a dialog. */}
+                              {protectedReason(u) && (
+                                <p className="mt-1 text-xs text-gray-400">{protectedReason(u)}</p>
+                              )}
                             </>
                           )}
                       </td>
@@ -586,6 +621,12 @@ export default function SettingsPage() {
       case 'branches':
         return (
           <div>
+            {/* Errors from row actions (activate / deactivate) — the modal has its own banner. */}
+            {branchError && !showBranchModal && (
+              <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {branchError}
+              </div>
+            )}
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-gray-900">Branch Management</h3>
               {user?.role === 'administrator' && (
