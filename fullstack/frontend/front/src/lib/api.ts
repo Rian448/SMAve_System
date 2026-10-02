@@ -49,7 +49,12 @@ export interface DashboardStats {
 }
 
 export interface Activity {
+  /** 'job_order' | 'delivery' — decides which record page this row opens. */
   type: string;
+  /** Database id of the underlying record, used to build the link. */
+  id?: number;
+  /** Human-readable reference, e.g. "JO-BA-2026-0001". */
+  reference?: string;
   title: string;
   description: string;
   timestamp: string;
@@ -57,11 +62,14 @@ export interface Activity {
 }
 
 export interface Alert {
+  /** 'low_stock' | 'delivery_due' | 'overdue_order' — decides the link target. */
   type: string;
   severity: 'info' | 'warning' | 'critical';
   title: string;
   description: string;
   itemId: number;
+  /** Only on low_stock: the material name, for deep-linking into inventory. */
+  itemName?: string;
 }
 
 export interface Announcement {
@@ -202,6 +210,60 @@ export interface ProductOrderItem {
   total: number;
   sourceBranchId?: number;
   sourceBranchName?: string;
+}
+
+/** One line of a saved cart re-checked against current stock. */
+export interface AvailabilityRow {
+  productId: number;
+  name: string;
+  sku?: string;
+  requested: number;
+  available: number;
+  currentPrice: number | null;
+  savedPrice?: number;
+  /** null when the line is fine; otherwise why it blocks confirmation. */
+  issue: 'unavailable' | 'out_of_stock' | 'insufficient' | 'invalid' | null;
+  message: string;
+}
+
+/** A customer's saved premade cart, not yet a real order. */
+export interface CartDraft {
+  id: number;
+  kind: 'premade';
+  userId: number;
+  customerName: string;
+  customerPhone: string;
+  customerEmail: string;
+  customerAddress: string;
+  pickupBranchId?: number | null;
+  pickupBranchName?: string | null;
+  notes: string;
+  items: ProductOrderItem[];
+  itemCount: number;
+  /** Total at *current* prices, counting only lines with no issue. */
+  totalAmount: number;
+  availability: AvailabilityRow[];
+  /** False when any line is out of stock or short — confirmation is blocked. */
+  isAvailable: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A staff-side custom job order saved but not yet confirmed. */
+export interface CustomDraft {
+  id: number;
+  kind: 'custom';
+  jobOrderId: string;
+  customerName: string;
+  customerPhone: string;
+  branchId: number;
+  branchName: string;
+  description: string;
+  totalPrice: number;
+  itemCount: number;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AppNotification {
@@ -959,6 +1021,18 @@ export const getAuthToken = (): string | null => {
 // FETCH WRAPPER
 // ============================================
 
+/** An error response from the API, carrying the HTTP status and the parsed body. */
+export class ApiError extends Error {
+  status: number;
+  body: any;
+  constructor(message: string, status: number, body: any) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
 async function fetchApi<T>(
   endpoint: string,
   options?: RequestInit
@@ -989,7 +1063,9 @@ async function fetchApi<T>(
     }
 
     if (!response.ok) {
-      throw new Error(data.message || `HTTP error! status: ${response.status}`);
+      // Keep the whole body on the error — some failures carry structured detail
+      // the UI needs (e.g. a 409 listing which cart items went out of stock).
+      throw new ApiError(data.message || `HTTP error! status: ${response.status}`, response.status, data);
     }
 
     return data;
@@ -1525,6 +1601,46 @@ export const api = {
   // PRODUCT ORDERS (Premade Products)
   // ==================
   productOrders: {
+    /** The logged-in customer's saved cart, or null if they have none. */
+    getCartDraft: () => fetchApi<CartDraft | null>('/api/product-orders/draft'),
+
+    saveCartDraft: (data: {
+      items: Array<{ productId: number; quantity: number }>;
+      pickupBranchId?: number | null;
+      customerName?: string;
+      customerPhone?: string;
+      customerEmail?: string;
+      customerAddress?: string;
+      notes?: string;
+    }) =>
+      fetchApi<CartDraft>('/api/product-orders/draft', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    deleteCartDraft: () =>
+      fetchApi<{ message: string }>('/api/product-orders/draft', { method: 'DELETE' }),
+
+    /**
+     * Confirms the saved cart into a real order. Rejects with status 409 and an
+     * `availability` report when stock has moved since the cart was saved.
+     */
+    confirmCartDraft: (data?: {
+      customerName?: string;
+      customerPhone?: string;
+      customerEmail?: string;
+      customerAddress?: string;
+      pickupBranchId?: number;
+      notes?: string;
+    }) =>
+      fetchApi<ProductOrder>('/api/product-orders/draft/confirm', {
+        method: 'POST',
+        body: JSON.stringify(data || {}),
+      }),
+
+    /** Staff view of all customers' unconfirmed saved carts. */
+    getPremadeDrafts: () => fetchApi<CartDraft[]>('/api/product-orders/drafts'),
+
     create: (data: {
       customerName: string;
       customerPhone: string;
@@ -1693,7 +1809,16 @@ export const api = {
     
     restoreUser: (id: number) =>
       fetchApi<null>(`/api/settings/users/${id}/restore`, { method: 'POST' }),
-    
+
+    /** Asks the server whether this account can be permanently deleted, and why not. */
+    checkUserDeletable: (id: number) =>
+      fetchApi<{ canDelete: boolean; reason: string; blockers: string[] }>(
+        `/api/settings/users/${id}/delete-check`,
+      ),
+
+    deleteUser: (id: number) =>
+      fetchApi<null>(`/api/settings/users/${id}`, { method: 'DELETE' }),
+
     // Roles
     getRoles: () => fetchApi<Role[]>('/api/settings/roles'),
     
@@ -1832,7 +1957,11 @@ export const api = {
   },
 
   announcements: {
-    list: () => fetchApi<Announcement[]>('/api/announcements'),
+    /** Archived announcements are returned only for administrators and supervisors. */
+    list: (includeArchived?: boolean) =>
+      fetchApi<Announcement[]>(
+        `/api/announcements${includeArchived ? '?includeArchived=true' : ''}`,
+      ),
     create: (data: { title: string; body: string; priority?: string; isPinned?: boolean }) =>
       fetchApi<Announcement>('/api/announcements', { method: 'POST', body: JSON.stringify(data) }),
     update: (id: number, data: Partial<{ title: string; body: string; priority: string; isPinned: boolean; isActive: boolean }>) =>

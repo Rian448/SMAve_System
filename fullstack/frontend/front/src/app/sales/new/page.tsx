@@ -1,7 +1,7 @@
 'use client';
 import { formatDate } from '@/lib/dateUtils';
-import { useEffect, useRef, useState, type ReactElement } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useRef, useState, Suspense, type ReactElement } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { api, type Customer, type FinishedGood, type RawMaterial } from '@/lib/api';
 import Combobox from '@/components/Combobox';
@@ -66,7 +66,25 @@ const SERVICE_ICONS: Record<string, ReactElement> = {
 };
 
 export default function NewJobOrderPage() {
+  // useSearchParams needs a Suspense boundary for this route to prerender.
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="animate-spin w-8 h-8 border-2 border-[#011c72] border-t-transparent rounded-full" />
+      </div>
+    }>
+      <NewJobOrderForm />
+    </Suspense>
+  );
+}
+
+function NewJobOrderForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // When present we are editing an existing draft rather than creating a new order.
+  const draftId = searchParams.get('draftId');
+  const editingDraftId = draftId ? Number(draftId) : null;
+  const [loadingDraft, setLoadingDraft] = useState(!!editingDraftId);
   const { user } = useAuth();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -323,6 +341,71 @@ export default function NewJobOrderPage() {
     setStep((s) => s + 1);
   };
 
+  // ── Load an existing draft for editing (?draftId=…) ───────────────────────
+  // saveDraft stores the chosen services as a joined description string, so the
+  // services are parsed back out of it here.
+  useEffect(() => {
+    if (!editingDraftId) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await api.sales.getJobOrder(editingDraftId);
+        const d: any = res.data;
+        if (cancelled || !d) return;
+        if (d.status !== 'draft') {
+          setError('That order is no longer a draft and cannot be edited here.');
+          return;
+        }
+
+        setCustomerName(d.customerName || '');
+        setCustomerPhone(d.customerPhone || '');
+        setCustomerEmail(d.customerEmail || '');
+        if (d.customerId) setLinkedCustomerId(d.customerId);
+        if (d.discountPercent != null) setOrderDiscount(String(d.discountPercent));
+        if (d.notes) setNotes(d.notes);
+        if (d.estimatedCompletion) setEstimatedCompletionDate(String(d.estimatedCompletion).slice(0, 10));
+
+        const v = d.vehicleInfo || {};
+        if (v.make === 'Reupholstery') {
+          setReupholsteryItemType(v.model || '');
+        } else {
+          setVehicleMake(v.make && v.make !== 'N/A' ? v.make : '');
+          setVehicleModel(v.model && v.model !== 'N/A' ? v.model : '');
+          setVehicleYear(v.year ? String(v.year) : '');
+          setVehiclePlate(v.plateNumber || '');
+        }
+
+        const services = String(d.description || '').toLowerCase();
+        if (services.includes('flooring')) setFlooring(s => ({ ...s, selected: true }));
+        if (services.includes('reupholstery')) {
+          setReupholstery(s => ({ ...s, selected: true }));
+          const match = services.match(/reupholstery \(([^)]*)\)/);
+          if (match) setReupholsteryItemType(match[1]);
+        }
+        if (services.includes('ceiling')) setCeiling(s => ({ ...s, selected: true }));
+        if (services.includes('sidings')) setSidings(s => ({ ...s, selected: true }));
+        if (services.includes('seat_covers')) setSeatCovers(s => ({ ...s, selected: true }));
+        if (services.includes('other')) setOtherServices(s => ({ ...s, selected: true }));
+
+        setMaterials((d.items || []).map((it: any, idx: number) => ({
+          id: `draft-${idx}`,
+          materialSource: it.materialId ? 'inventory' : 'custom',
+          materialId: it.materialId ?? '',
+          name: it.name || '',
+          quantity: Number(it.quantity) || 0,
+          unitPrice: Number(it.unitPrice ?? it.materialCost) || 0,
+        })));
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load draft.');
+      } finally {
+        if (!cancelled) setLoadingDraft(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [editingDraftId]);
+
   // Save the current (possibly incomplete) job order as a draft so work isn't lost.
   // Drafts stay out of sales/pending counts until confirmed.
   const saveDraft = async () => {
@@ -368,7 +451,13 @@ export default function NewJobOrderPage() {
         ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, totalPrice: discountedTotal } : {}),
       };
 
-      await api.sales.createJobOrder(draftData);
+      if (editingDraftId) {
+        // Editing an existing draft — update in place so we don't leave a duplicate.
+        const { isDraft: _isDraft, ...updates } = draftData;
+        await api.sales.updateJobOrder(editingDraftId, updates);
+      } else {
+        await api.sales.createJobOrder(draftData);
+      }
       router.push('/sales');
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : 'Failed to save draft.');
@@ -1648,6 +1737,20 @@ export default function NewJobOrderPage() {
           </div>
         )}
 
+        {editingDraftId && (
+          <div className="mb-5 flex items-center gap-3 rounded-xl border border-[#c7d2f5] bg-[#eef1fb] px-4 py-3">
+            <svg className="w-5 h-5 shrink-0 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+            </svg>
+            <p className="text-sm text-[#011c72]">
+              {loadingDraft
+                ? 'Loading draft…'
+                : <>Editing a saved draft. <span className="font-semibold">Update Draft</span> saves your changes; confirming it from the Sales page turns it into a real job order.</>}
+            </p>
+          </div>
+        )}
+
         {/* Form Card */}
         <form onSubmit={handleSubmit}>
           <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-5">
@@ -1668,12 +1771,12 @@ export default function NewJobOrderPage() {
               </button>
               <div className="flex items-center gap-3">
                 <button type="button" onClick={saveDraft} disabled={loading}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Save this order as a draft to finish later">
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  className="inline-flex items-center gap-2.5 px-6 py-3 rounded-xl text-base font-semibold bg-white border-2 border-[#011c72] text-[#011c72] hover:bg-[#eef1fb] transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  title={editingDraftId ? 'Save your changes to this draft' : 'Save this order as a draft to finish later'}>
+                  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h8l4 4v10a2 2 0 01-2 2H7a2 2 0 01-2-2V5z M9 3v4h6" />
                   </svg>
-                  Save as Draft
+                  {loading ? 'Saving…' : editingDraftId ? 'Update Draft' : 'Save as Draft'}
                 </button>
               {step < 5 ? (
                 <button key="next-btn" type="submit"

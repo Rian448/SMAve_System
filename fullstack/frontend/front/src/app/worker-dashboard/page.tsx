@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { api, type ManagedWorker, type WorkerAssignment, type WorkerAvailabilityEntry, type JobOrder } from '@/lib/api';
+import { useConfirm } from '@/components/ConfirmDialog';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const WORK_TYPES = ['Seat Maker', 'Sewer', 'Upholstery', 'Installer', 'Cutter', 'Finisher', 'Other'];
@@ -245,6 +246,7 @@ function SpecialTaskModal({
 
 // ── Main page ────────────────────────────────────────────────────────────────
 export default function WorkerDashboard() {
+  const { confirm, confirmDialog } = useConfirm();
   const router = useRouter();
   const { user, isLoading: authLoading } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>('assign');
@@ -370,7 +372,14 @@ export default function WorkerDashboard() {
   };
 
   const removeAssignment = async (a: WorkerAssignment) => {
-    if (!confirm(`Remove ${a.jobOrderRef} from ${a.workerName}?`)) return;
+    const ok = await confirm({
+      title: 'Remove this assignment?',
+      message: <>{a.jobOrderRef} will be unassigned from {a.workerName}.</>,
+      warning: 'Any logged hours and pay for this assignment are removed with it.',
+      confirmLabel: 'Remove',
+      variant: 'danger',
+    });
+    if (!ok) return;
     try { await api.workerAssignments.delete(a.id); fetchAssignments(); } catch { /* ignore */ }
   };
 
@@ -957,6 +966,7 @@ export default function WorkerDashboard() {
           onSave={addSpecialTask}
         />
       )}
+      {confirmDialog}
     </div>
   );
 }
