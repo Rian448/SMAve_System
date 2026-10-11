@@ -2,11 +2,13 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { api, Branch, User as UserType, Role } from '@/lib/api';
+import { useConfirm } from '@/components/ConfirmDialog';
 
 type TabType = 'general' | 'users' | 'branches' | 'services' | 'notifications';
 
 export default function SettingsPage() {
   const { user } = useAuth();
+  const { confirm, confirmDialog } = useConfirm();
   const [activeTab, setActiveTab] = useState<TabType>('general');
   const [saving, setSaving] = useState(false);
   
@@ -83,6 +85,16 @@ export default function SettingsPage() {
       console.error('Failed to load roles:', err);
     }
   };
+
+  /**
+   * Reload branches the same way the current tab first loaded them.
+   *
+   * The Branches tab manages inactive branches, so it must include them —
+   * otherwise a branch you just deactivated vanishes from the list and only
+   * reappears on refresh. Everywhere else the list feeds branch pickers, which
+   * should only offer active branches.
+   */
+  const reloadBranches = () => loadBranches(activeTab === 'branches');
 
   const loadBranches = async (includeInactive = false) => {
     setLoadingBranches(true);
@@ -179,16 +191,93 @@ export default function SettingsPage() {
       }
     };
 
-    const handleToggleUserStatus = async (user: UserType) => {
+    /**
+     * Why this account can't be deactivated or deleted, or null if it can.
+     * Mirrors the server's guards so the buttons are disabled with a reason
+     * instead of failing after the user has already confirmed.
+     */
+    const protectedReason = (target: UserType): string | null => {
+      if (target.id === user?.id) return 'This is your own account';
+      const otherActiveAdmins = users.filter(
+        (u) => u.role === 'administrator' && u.isActive && u.id !== target.id,
+      ).length;
+      if (target.role === 'administrator' && target.isActive && otherActiveAdmins === 0) {
+        return 'Last active administrator';
+      }
+      return null;
+    };
+
+    const handleToggleUserStatus = async (target: UserType) => {
+      const archiving = target.isActive;
+      const ok = await confirm({
+        title: archiving ? `Deactivate ${target.fullName}?` : `Reactivate ${target.fullName}?`,
+        message: archiving
+          ? <>This account will no longer be able to sign in. Their past records stay intact.</>
+          : <>This account will be able to sign in again with its existing password.</>,
+        warning: archiving ? 'You can reactivate the account at any time.' : undefined,
+        confirmLabel: archiving ? 'Deactivate' : 'Reactivate',
+        variant: archiving ? 'warning' : 'info',
+      });
+      if (!ok) return;
+
+      setUserError('');
       try {
-        if (user.isActive) {
-          await api.settings.archiveUser(user.id);
+        if (archiving) {
+          await api.settings.archiveUser(target.id);
         } else {
-          await api.settings.restoreUser(user.id);
+          await api.settings.restoreUser(target.id);
         }
         loadUsers();
-      } catch (err) {
-        console.error('Failed to update user status:', err);
+      } catch (err: any) {
+        setUserError(err?.message || 'Failed to update user status');
+      }
+    };
+
+    /**
+     * Permanent delete. The server decides whether the account is safe to remove,
+     * so the dialog can explain up front why it is blocked instead of failing on submit.
+     */
+    const handleDeleteUser = async (target: UserType) => {
+      setUserError('');
+
+      let check: { canDelete: boolean; reason: string; blockers: string[] };
+      try {
+        const response = await api.settings.checkUserDeletable(target.id);
+        check = response.data!;
+      } catch (err: any) {
+        setUserError(err?.message || 'Could not check whether this user can be deleted');
+        return;
+      }
+
+      if (!check.canDelete) {
+        await confirm({
+          title: `Cannot delete ${target.fullName}`,
+          message: check.reason,
+          warning: check.blockers.length > 0
+            ? <>Attached records: {check.blockers.join(', ')}.</>
+            : undefined,
+          confirmLabel: 'Got it',
+          cancelLabel: 'Close',
+          variant: 'warning',
+        });
+        return;
+      }
+
+      const ok = await confirm({
+        title: `Permanently delete ${target.fullName}?`,
+        message: <>The account <span className="font-medium text-gray-900">{target.username}</span> and its login will be erased from the system.</>,
+        warning: 'This cannot be undone. If you only want to block access, deactivate the account instead.',
+        confirmLabel: 'Delete permanently',
+        variant: 'danger',
+        requireText: 'DELETE',
+      });
+      if (!ok) return;
+
+      try {
+        await api.settings.deleteUser(target.id);
+        loadUsers();
+      } catch (err: any) {
+        setUserError(err?.message || 'Failed to delete user');
       }
     };
 
@@ -231,7 +320,7 @@ export default function SettingsPage() {
       }
       
       setShowBranchModal(false);
-      loadBranches();
+      reloadBranches();
     } catch (err: any) {
       setBranchError(err.message || 'Failed to save branch');
     } finally {
@@ -240,13 +329,14 @@ export default function SettingsPage() {
   };
 
   const handleToggleBranchStatus = async (branch: Branch) => {
+    setBranchError('');
     try {
       await api.settings.updateBranch(branch.id, {
         isActive: !branch.isActive
       });
-      loadBranches();
-    } catch (err) {
-      console.error('Failed to update branch status:', err);
+      reloadBranches();
+    } catch (err: any) {
+      setBranchError(err?.message || 'Failed to update branch status');
     }
   };
 
@@ -372,6 +462,12 @@ export default function SettingsPage() {
       case 'users':
         return (
           <div>
+            {/* Errors from row actions (archive / delete) — the modal has its own banner. */}
+            {userError && !showUserModal && (
+              <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {userError}
+              </div>
+            )}
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
               <h3 className="text-lg font-semibold text-gray-900">User Management</h3>
               <div className="flex items-center gap-3">
@@ -486,16 +582,30 @@ export default function SettingsPage() {
                               >
                           Edit
                         </button>
-                              <button 
+                              <button
                                 onClick={() => handleToggleUserStatus(u)}
-                                className={`text-sm font-medium ${
+                                disabled={!!protectedReason(u)}
+                                title={protectedReason(u) || undefined}
+                                className={`text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300 ${
                                   u.isActive
-                                    ? 'text-red-600 hover:text-red-700'
+                                    ? 'text-yellow-600 hover:text-yellow-700'
                                     : 'text-green-600 hover:text-green-700'
                                 }`}
                               >
                                 {u.isActive ? 'Deactivate' : 'Activate'}
                         </button>
+                              <button
+                                onClick={() => handleDeleteUser(u)}
+                                disabled={!!protectedReason(u)}
+                                title={protectedReason(u) || undefined}
+                                className="text-sm font-medium text-red-600 hover:text-red-700 disabled:cursor-not-allowed disabled:text-gray-300"
+                              >
+                                Delete
+                              </button>
+                              {/* Say why up front rather than failing after a dialog. */}
+                              {protectedReason(u) && (
+                                <p className="mt-1 text-xs text-gray-400">{protectedReason(u)}</p>
+                              )}
                             </>
                           )}
                       </td>
@@ -511,6 +621,12 @@ export default function SettingsPage() {
       case 'branches':
         return (
           <div>
+            {/* Errors from row actions (activate / deactivate) — the modal has its own banner. */}
+            {branchError && !showBranchModal && (
+              <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {branchError}
+              </div>
+            )}
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-gray-900">Branch Management</h3>
               {user?.role === 'administrator' && (
@@ -1015,6 +1131,7 @@ export default function SettingsPage() {
             </div>
           </div>
         )}
+      {confirmDialog}
     </div>
   );
 }

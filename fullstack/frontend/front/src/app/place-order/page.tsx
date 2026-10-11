@@ -1,7 +1,7 @@
 ﻿'use client';
 import { useState, useEffect, useMemo, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { api, setAuthToken, PublicProduct, VehicleInfo } from '@/lib/api';
+import { api, setAuthToken, PublicProduct, VehicleInfo, CartDraft } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
 
@@ -54,6 +54,12 @@ function PlaceOrderContent() {
   // Branch filter and search for product browsing
   const [branchFilter, setBranchFilter] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Saved cart (premade draft) — logged-in customers only, since it is stored
+  // against their account.
+  const [savedDraft, setSavedDraft] = useState<CartDraft | null>(null);
+  const [draftBusy, setDraftBusy] = useState(false);
+  const [draftNotice, setDraftNotice] = useState('');
 
   // Checkout modal
   const [showCheckout, setShowCheckout] = useState(false);
@@ -196,6 +202,74 @@ function PlaceOrderContent() {
     return Array.from(map.values());
   }, [cart, branches]);
 
+  // ── Saved cart (premade draft) ─────────────────────────────────────────────
+
+  // Load any cart this customer saved earlier. Products are matched against the
+  // live catalogue so a saved line that has since been pulled is simply dropped.
+  useEffect(() => {
+    if (!isAuthenticated || products.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.productOrders.getCartDraft();
+        if (cancelled || !res.data) return;
+        const draft = res.data;
+        setSavedDraft(draft);
+        setCart(prev => {
+          // Never clobber a cart the customer is already filling in this session.
+          if (prev.length > 0) return prev;
+          const restored: CartItem[] = [];
+          for (const line of draft.items) {
+            const product = products.find(p => p.id === line.productId);
+            if (product) restored.push({ product, quantity: line.quantity });
+          }
+          return restored;
+        });
+        if (draft.pickupBranchId) setPickupBranchId(draft.pickupBranchId);
+        if (draft.customerName) setCustomerName(draft.customerName);
+        if (draft.customerPhone) setCustomerPhone(draft.customerPhone);
+        if (draft.customerEmail) setCustomerEmail(draft.customerEmail);
+        if (draft.customerAddress) setCustomerAddress(draft.customerAddress);
+        if (draft.notes) setNotes(draft.notes);
+      } catch {
+        // No saved cart, or it couldn't be read — browsing still works.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isAuthenticated, products]);
+
+  const handleSaveCart = async () => {
+    if (cart.length === 0) { setError('Add at least one item before saving.'); return; }
+    setDraftBusy(true); setError(''); setDraftNotice('');
+    try {
+      const res = await api.productOrders.saveCartDraft({
+        items: cart.map(i => ({ productId: i.product.id, quantity: i.quantity })),
+        pickupBranchId: pickupBranchId || null,
+        customerName, customerPhone, customerEmail, customerAddress, notes,
+      });
+      setSavedDraft(res.data || null);
+      setDraftNotice('Cart saved. You can come back and place this order any time.');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to save your cart.');
+    } finally {
+      setDraftBusy(false);
+    }
+  };
+
+  const handleDiscardSavedCart = async () => {
+    setDraftBusy(true); setError(''); setDraftNotice('');
+    try {
+      await api.productOrders.deleteCartDraft();
+      setSavedDraft(null);
+      setCart([]);
+      setDraftNotice('Saved cart discarded.');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to discard your saved cart.');
+    } finally {
+      setDraftBusy(false);
+    }
+  };
+
   // ── Order submit ──────────────────────────────────────────────────────────
 
   const handleProductOrderSubmit = async () => {
@@ -215,6 +289,11 @@ function PlaceOrderContent() {
         pickupBranchId: pickupBranchId as number,
         notes,
       });
+      // The cart is now a real order, so a leftover saved cart would be a duplicate.
+      if (savedDraft) {
+        try { await api.productOrders.deleteCartDraft(); } catch { /* best effort */ }
+        setSavedDraft(null);
+      }
       setSuccessMessage('Order placed successfully! You can track your order in My Orders.');
       setCart([]);
       setShowCheckout(false);
@@ -556,6 +635,24 @@ function PlaceOrderContent() {
                     </div>
                   </div>
                 )}
+                {draftNotice && (
+                  <p className="mt-4 rounded-lg bg-green-50 border border-green-200 px-3 py-2 text-xs text-green-700">
+                    {draftNotice}
+                  </p>
+                )}
+
+                {/* A saved cart reserves no stock, so warn when something has moved. */}
+                {savedDraft && !savedDraft.isAvailable && (
+                  <div className="mt-4 rounded-lg bg-yellow-50 border border-yellow-200 px-3 py-2">
+                    <p className="text-xs font-semibold text-yellow-800">Some saved items changed:</p>
+                    <ul className="mt-1 space-y-0.5">
+                      {savedDraft.availability.filter(r => r.issue).map(r => (
+                        <li key={r.productId} className="text-xs text-yellow-800">• {r.message}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 <button
                   type="button"
                   onClick={() => { setError(''); setShowCheckout(true); }}
@@ -564,6 +661,40 @@ function PlaceOrderContent() {
                 >
                   Checkout
                 </button>
+
+                {isAuthenticated ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleSaveCart}
+                      disabled={cart.length === 0 || draftBusy}
+                      className="w-full mt-2 py-3 rounded-lg border-2 border-[#011c72] text-[#011c72] font-semibold hover:bg-[#eef1fb] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {draftBusy ? 'Saving…' : savedDraft ? 'Update Saved Cart' : 'Save Cart for Later'}
+                    </button>
+                    {savedDraft && (
+                      <div className="mt-2 flex items-center justify-between gap-2">
+                        <Link href="/my-orders?tab=premade"
+                          className="text-xs font-medium text-[#011c72] hover:underline">
+                          View saved cart
+                        </Link>
+                        <button type="button" onClick={handleDiscardSavedCart} disabled={draftBusy}
+                          className="text-xs font-medium text-red-600 hover:underline disabled:opacity-50">
+                          Discard saved cart
+                        </button>
+                      </div>
+                    )}
+                    <p className="mt-2 text-xs text-gray-500">
+                      Saving keeps your cart on your account — it does not reserve stock, so items can
+                      still sell out before you place the order.
+                    </p>
+                  </>
+                ) : cart.length > 0 && (
+                  <p className="mt-3 text-xs text-gray-500">
+                    <Link href="/login" className="font-medium text-[#011c72] hover:underline">Log in</Link>
+                    {' '}to save this cart and come back to it later.
+                  </p>
+                )}
               </div>
             </div>
           </div>

@@ -224,22 +224,24 @@ export default function DeliveryDetailPage() {
                   {new Date(delivery.scheduledDate).toLocaleDateString()}
                 </span>
               </div>
-              <div className="flex items-center justify-between py-3 border-b border-gray-100">
-                <span className="text-sm text-gray-500">Time Slot</span>
-                <span className="text-sm font-medium text-gray-900">
-                  {'9:00 AM - 12:00 PM'}
-                </span>
-              </div>
+              {delivery.estimatedArrival && (
+                <div className="flex items-center justify-between py-3 border-b border-gray-100">
+                  <span className="text-sm text-gray-500">Estimated Arrival</span>
+                  <span className="text-sm font-medium text-gray-900">
+                    {delivery.estimatedArrival}
+                  </span>
+                </div>
+              )}
               <div className="flex items-center justify-between py-3 border-b border-gray-100">
                 <span className="text-sm text-gray-500">Driver</span>
                 <span className="text-sm font-medium text-gray-900">
-                  {'Not assigned'}
+                  {delivery.driverName || 'Not assigned'}
                 </span>
               </div>
               <div className="flex items-center justify-between py-3">
                 <span className="text-sm text-gray-500">Vehicle</span>
                 <span className="text-sm font-medium text-gray-900">
-                  {'Delivery Van 01'}
+                  {delivery.vehiclePlate || 'Not assigned'}
                 </span>
               </div>
             </div>

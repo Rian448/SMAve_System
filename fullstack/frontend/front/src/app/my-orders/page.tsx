@@ -2,7 +2,7 @@
 import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect, Suspense } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, Appointment, CustomerOrder, ProductOrder } from '@/lib/api';
+import { api, Appointment, CustomerOrder, ProductOrder, CartDraft, ApiError } from '@/lib/api';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 
@@ -35,6 +35,10 @@ function MyOrdersContent() {
   const searchParams = useSearchParams();
   const [customOrders, setCustomOrders] = useState<CustomerOrder[]>([]);
   const [productOrders, setProductOrders] = useState<ProductOrder[]>([]);
+  // The customer's saved cart — a draft, not yet an order.
+  const [savedCart, setSavedCart] = useState<CartDraft | null>(null);
+  const [cartBusy, setCartBusy] = useState(false);
+  const [cartError, setCartError] = useState('');
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [activeTab, setActiveTab] = useState<OrderTab>('custom');
   const [loading, setLoading] = useState(true);
@@ -60,20 +64,62 @@ function MyOrdersContent() {
   const fetchOrders = async () => {
     try {
       setLoading(true);
-      const [customResponse, productResponse, appointmentResponse] = await Promise.all([
+      const [customResponse, productResponse, appointmentResponse, draftResponse] = await Promise.all([
         api.customerOrders.getMyOrders(),
         api.productOrders.getMyOrders(),
-        api.appointments.getMyAppointments()
+        api.appointments.getMyAppointments(),
+        // A saved cart is optional — never let its absence fail the whole page.
+        api.productOrders.getCartDraft().catch(() => ({ data: null })),
       ]);
 
       setCustomOrders(customResponse.data || []);
       setProductOrders(productResponse.data || []);
       setAppointments(appointmentResponse.data || []);
+      setSavedCart(draftResponse.data || null);
     } catch (err) {
       setError('Failed to load your orders');
       console.error(err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  /**
+   * Places the saved cart as a real order. The server re-checks stock, so a 409
+   * here means something sold out — refresh the draft to show what changed
+   * rather than reporting a generic failure.
+   */
+  const handleConfirmSavedCart = async () => {
+    if (!savedCart) return;
+    setCartBusy(true); setCartError('');
+    try {
+      await api.productOrders.confirmCartDraft();
+      setSavedCart(null);
+      await fetchOrders();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setCartError(err.message);
+        if (err.body?.availability) {
+          setSavedCart(prev => prev ? { ...prev, availability: err.body.availability, isAvailable: false } : prev);
+        }
+      } else {
+        setCartError(err instanceof Error ? err.message : 'Could not place your order.');
+      }
+    } finally {
+      setCartBusy(false);
+    }
+  };
+
+  const handleDiscardSavedCart = async () => {
+    if (!savedCart) return;
+    setCartBusy(true); setCartError('');
+    try {
+      await api.productOrders.deleteCartDraft();
+      setSavedCart(null);
+    } catch (err) {
+      setCartError(err instanceof Error ? err.message : 'Could not discard your saved cart.');
+    } finally {
+      setCartBusy(false);
     }
   };
 
@@ -254,6 +300,10 @@ function MyOrdersContent() {
             }`}
           >
             Premade Purchases ({productOrders.length})
+            {savedCart && (
+              <span title="You have a saved cart waiting to be placed"
+                className="ml-1.5 inline-block w-2 h-2 rounded-full bg-yellow-500 align-middle" />
+            )}
           </button>
           <button
             onClick={() => setActiveTab('appointments')}
@@ -328,10 +378,102 @@ function MyOrdersContent() {
 
         {activeTab === 'premade' && (
           <>
-            {productOrders.length === 0 ? (
-              <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
-                <p className="text-gray-600 mb-4">You have no premade product purchases yet</p>
+            {/* Saved cart — not an order yet. Shown above real purchases so the
+                customer sees there is something waiting to be placed. */}
+            {savedCart && (
+              <div className="mb-6 bg-white rounded-xl border-2 border-dashed border-[#011c72] p-6">
+                <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-lg font-semibold text-gray-900">Your Saved Cart</h3>
+                      <span className="px-2 py-0.5 rounded-full bg-[#eef1fb] text-[#011c72] text-xs font-semibold">
+                        NOT YET ORDERED
+                      </span>
+                    </div>
+                    <p className="text-sm text-gray-500 mt-1">
+                      {savedCart.itemCount} item{savedCart.itemCount !== 1 ? 's' : ''}
+                      {savedCart.pickupBranchName
+                        ? ` · pickup at ${savedCart.pickupBranchName}`
+                        : ' · no pickup branch chosen yet'}
+                      {' · saved '}{formatDate(savedCart.updatedAt)}
+                    </p>
+                  </div>
+                  <p className="text-xl font-bold text-[#011c72]">
+                    ₱{savedCart.totalAmount.toLocaleString()}
+                  </p>
+                </div>
+
+                <ul className="divide-y divide-gray-100 border-y border-gray-100">
+                  {savedCart.availability.map(row => (
+                    <li key={row.productId} className="py-2.5 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm text-gray-900">
+                          {row.requested}× {row.name}
+                        </p>
+                        {row.issue && (
+                          <p className="text-xs text-yellow-700 mt-0.5">{row.message}</p>
+                        )}
+                      </div>
+                      <div className="text-right shrink-0">
+                        {row.issue ? (
+                          <span className="text-xs font-semibold text-yellow-700">Unavailable</span>
+                        ) : (
+                          <span className="text-sm text-gray-700">
+                            ₱{((row.currentPrice || 0) * row.requested).toLocaleString()}
+                          </span>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+
+                {cartError && (
+                  <p className="mt-4 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+                    {cartError}
+                  </p>
+                )}
+
+                {!savedCart.isAvailable && (
+                  <p className="mt-4 rounded-lg bg-yellow-50 border border-yellow-200 px-3 py-2 text-sm text-yellow-800">
+                    Some items are no longer available in the quantity you saved. Update your cart
+                    before placing the order.
+                  </p>
+                )}
+
+                <div className="mt-5 flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    onClick={handleConfirmSavedCart}
+                    disabled={cartBusy || !savedCart.isAvailable || !savedCart.pickupBranchId}
+                    title={!savedCart.pickupBranchId ? 'Choose a pickup branch in your cart first' : undefined}
+                    className="px-5 py-2.5 rounded-xl bg-[#011c72] text-white font-semibold hover:bg-[#01268c] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {cartBusy ? 'Placing…' : 'Place This Order'}
+                  </button>
+                  <Link
+                    href="/place-order"
+                    className="px-5 py-2.5 rounded-xl border border-gray-300 text-gray-700 font-medium hover:bg-gray-50 transition-colors"
+                  >
+                    Edit Cart
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={handleDiscardSavedCart}
+                    disabled={cartBusy}
+                    className="px-5 py-2.5 rounded-xl text-red-600 font-medium hover:bg-red-50 disabled:opacity-50 transition-colors"
+                  >
+                    Discard
+                  </button>
+                </div>
               </div>
+            )}
+
+            {productOrders.length === 0 ? (
+              !savedCart && (
+                <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
+                  <p className="text-gray-600 mb-4">You have no premade product purchases yet</p>
+                </div>
+              )
             ) : (
               <div className="space-y-4">
                 {productOrders.map((order) => (

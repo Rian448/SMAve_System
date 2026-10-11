@@ -4,6 +4,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { useAuth } from '@/context/AuthContext';
 import { getAuthToken } from '@/lib/api';
+import { useConfirm } from '@/components/ConfirmDialog';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
@@ -184,6 +185,7 @@ const faqs = [
 
 export default function LandingPage() {
   const { user } = useAuth();
+  const { confirm, confirmDialog } = useConfirm();
   const isAdmin = user?.role === 'administrator';
 
   const [items, setItems] = useState<CatalogItem[]>([]);
@@ -245,7 +247,14 @@ export default function LandingPage() {
   }
 
   async function handleDelete(id: number) {
-    if (!confirm('Remove this item from the catalog?')) return;
+    const ok = await confirm({
+      title: 'Remove this catalog item?',
+      message: 'It will no longer appear on the public catalog.',
+      warning: 'This cannot be undone.',
+      confirmLabel: 'Remove item',
+      variant: 'danger',
+    });
+    if (!ok) return;
     const token = getAuthToken();
     const res = await fetch(`${API_BASE}/api/catalog/${id}`, {
       method: 'DELETE',
@@ -710,6 +719,7 @@ export default function LandingPage() {
           </div>
         </div>
       </footer>
+      {confirmDialog}
     </div>
   );
 }

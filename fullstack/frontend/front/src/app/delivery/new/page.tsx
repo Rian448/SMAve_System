@@ -83,12 +83,6 @@ function NewDeliveryForm() {
     setLoading(false);
   };
 
-  const drivers = [
-    { name: 'Juan Cruz', vehicle: 'Delivery Van 01' },
-    { name: 'Pedro Santos', vehicle: 'Delivery Van 02' },
-    { name: 'Miguel Garcia', vehicle: 'Pickup Truck 01' },
-  ];
-
   const timeSlots = [
     { value: 'morning', label: '9:00 AM - 12:00 PM', icon: '🌅' },
     { value: 'afternoon', label: '1:00 PM - 5:00 PM', icon: '☀️' },
@@ -309,37 +303,25 @@ function NewDeliveryForm() {
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Assign Driver
                 </label>
-                <select
+                <input
+                  type="text"
                   value={driverName}
-                  onChange={(e) => {
-                    const driver = drivers.find(d => d.name === e.target.value);
-                    setDriverName(e.target.value);
-                    if (driver) {
-                      setVehicleAssigned(driver.vehicle);
-                    }
-                  }}
+                  onChange={(e) => setDriverName(e.target.value)}
+                  placeholder="Driver name (optional)"
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                >
-                  <option value="">Select driver (optional)</option>
-                  {drivers.map(d => (
-                    <option key={d.name} value={d.name}>{d.name}</option>
-                  ))}
-                </select>
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Vehicle
                 </label>
-                <select
+                <input
+                  type="text"
                   value={vehicleAssigned}
                   onChange={(e) => setVehicleAssigned(e.target.value)}
+                  placeholder="Plate number or vehicle (optional)"
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                >
-                  <option value="">Select vehicle (optional)</option>
-                  <option value="Delivery Van 01">Delivery Van 01</option>
-                  <option value="Delivery Van 02">Delivery Van 02</option>
-                  <option value="Pickup Truck 01">Pickup Truck 01</option>
-                </select>
+                />
               </div>
             </div>
           </div>

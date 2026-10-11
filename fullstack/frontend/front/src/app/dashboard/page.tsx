@@ -8,8 +8,8 @@ import Link from 'next/link';
 export default function Dashboard() {
   const { user, isLoading: authLoading } = useAuth();
   const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [alerts, setAlerts] = useState<Array<Alert & { id: string }>>([]);
-  const [activities, setActivities] = useState<Array<Activity & { id: string; user: string; action: string; details: string }>>([]);
+  const [alerts, setAlerts] = useState<Array<Alert & { rowKey: string }>>([]);
+  const [activities, setActivities] = useState<Array<Activity & { rowKey: string; user: string; action: string; details: string }>>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -31,16 +31,18 @@ export default function Dashboard() {
         api.dashboard.getRecentActivity()
       ]);
       setStats(statsData.data || null);
+      // rowKey is only a React key — it must not shadow `id`/`itemId`, which
+      // carry the real record ids the rows link to.
       setAlerts(
         (alertsData.data || []).map((alert, index) => ({
           ...alert,
-          id: `${alert.type}-${index}`
+          rowKey: `${alert.type}-${index}`
         }))
       );
       setActivities(
         (activitiesData.data || []).map((activity, index) => ({
           ...activity,
-          id: `${activity.type}-${index}`,
+          rowKey: `${activity.type}-${index}`,
           user: activity.status ? activity.status.replace('_', ' ').toUpperCase() : 'SYSTEM',
           action: activity.title,
           details: activity.description
@@ -62,6 +64,44 @@ export default function Dashboard() {
     }).format(amount);
   };
 
+
+  /**
+   * Where an alert row should take you. Returns null when this user's role
+   * can't reach the destination, in which case the row stays non-clickable
+   * rather than linking somewhere that would bounce them.
+   */
+  const getAlertHref = (alert: Alert): string | null => {
+    switch (alert.type) {
+      case 'low_stock':
+        if (!hasAccess(user?.role, ['administrator', 'supervisor'])) return null;
+        // Land on the raw-materials tab, filtered to low stock and this material.
+        return `/inventory?tab=raw-materials&status=low-stock${
+          alert.itemName ? `&q=${encodeURIComponent(alert.itemName)}` : ''
+        }`;
+      case 'delivery_due':
+        if (!hasAccess(user?.role, ['administrator', 'supervisor'])) return null;
+        return alert.itemId ? `/delivery/${alert.itemId}` : '/delivery';
+      case 'overdue_order':
+        if (!hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager'])) return null;
+        return alert.itemId ? `/sales/${alert.itemId}` : '/sales';
+      default:
+        return null;
+    }
+  };
+
+  /** Where a recent-activity row should take you, with the same role gating. */
+  const getActivityHref = (activity: Activity): string | null => {
+    switch (activity.type) {
+      case 'job_order':
+        if (!hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager'])) return null;
+        return activity.id ? `/sales/${activity.id}` : '/sales';
+      case 'delivery':
+        if (!hasAccess(user?.role, ['administrator', 'supervisor'])) return null;
+        return activity.id ? `/delivery/${activity.id}` : '/delivery';
+      default:
+        return null;
+    }
+  };
 
   const getAlertIcon = (type: string) => {
     switch (type) {
@@ -352,28 +392,49 @@ export default function Dashboard() {
                   <p>All caught up! No alerts at the moment.</p>
                 </div>
               ) : (
-                alerts.map((alert) => (
-                  <div key={alert.id} className="px-6 py-4 flex items-start space-x-4 hover:bg-gray-50 transition-colors">
-                    {getAlertIcon(alert.type)}
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900">
-                        {alert.title}
-                      </p>
-                      <p className="text-sm text-gray-500 mt-1">
-                        {alert.description}
-                      </p>
+                alerts.map((alert) => {
+                  const href = getAlertHref(alert);
+                  const body = (
+                    <>
+                      {getAlertIcon(alert.type)}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-900">
+                          {alert.title}
+                        </p>
+                        <p className="text-sm text-gray-500 mt-1">
+                          {alert.description}
+                        </p>
+                      </div>
+                      <span className={`text-xs px-2 py-1 rounded-full shrink-0 ${
+                        alert.severity === 'critical'
+                          ? 'bg-red-100 text-red-700'
+                          : alert.severity === 'warning'
+                          ? 'bg-[#dde6ff] text-[#011c72]'
+                          : 'bg-blue-100 text-blue-700'
+                      }`}>
+                        {alert.severity}
+                      </span>
+                      {href && (
+                        <svg className="w-4 h-4 text-gray-300 shrink-0 self-center" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                        </svg>
+                      )}
+                    </>
+                  );
+
+                  // Rows this user can't act on stay as plain text instead of
+                  // linking somewhere their role would be refused.
+                  return href ? (
+                    <Link key={alert.rowKey} href={href}
+                      className="px-6 py-4 flex items-start space-x-4 hover:bg-[#f5f7ff] transition-colors cursor-pointer group">
+                      {body}
+                    </Link>
+                  ) : (
+                    <div key={alert.rowKey} className="px-6 py-4 flex items-start space-x-4">
+                      {body}
                     </div>
-                    <span className={`text-xs px-2 py-1 rounded-full ${
-                      alert.severity === 'critical' 
-                        ? 'bg-red-100 text-red-700'
-                        : alert.severity === 'warning'
-                        ? 'bg-[#dde6ff] text-[#011c72]'
-                        : 'bg-blue-100 text-blue-700'
-                    }`}>
-                      {alert.severity}
-                    </span>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
@@ -397,21 +458,35 @@ export default function Dashboard() {
                   <p>No recent activity to show.</p>
                 </div>
               ) : (
-                activities.map((activity) => (
-                  <div key={activity.id} className="px-6 py-4 hover:bg-gray-50 transition-colors">
-                    <div className="flex items-center justify-between">
-                      <p className="text-sm font-medium text-gray-900">
-                        {activity.action}
+                activities.map((activity) => {
+                  const href = getActivityHref(activity);
+                  const body = (
+                    <>
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-medium text-gray-900 min-w-0 truncate">
+                          {activity.action}
+                        </p>
+                        <span className="text-xs text-gray-500 shrink-0">
+                          {formatDate(activity.timestamp)}
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-500 mt-1">
+                        {activity.details} • <span className="text-gray-400">{activity.user}</span>
                       </p>
-                      <span className="text-xs text-gray-500">
-                        {formatDate(activity.timestamp)}
-                      </span>
+                    </>
+                  );
+
+                  return href ? (
+                    <Link key={activity.rowKey} href={href}
+                      className="block px-6 py-4 hover:bg-[#f5f7ff] transition-colors cursor-pointer">
+                      {body}
+                    </Link>
+                  ) : (
+                    <div key={activity.rowKey} className="px-6 py-4">
+                      {body}
                     </div>
-                    <p className="text-sm text-gray-500 mt-1">
-                      {activity.details} • <span className="text-gray-400">{activity.user}</span>
-                    </p>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>

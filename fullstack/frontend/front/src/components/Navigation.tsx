@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth, hasAccess } from '@/context/AuthContext';
 import { useNotifications } from '@/context/NotificationContext';
+import { formatDateTime } from '@/lib/dateUtils';
 import { useState } from 'react';
 
 interface NavigationProps {
@@ -381,21 +382,42 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
             <div className="max-h-80 overflow-y-auto divide-y divide-gray-50">
               {notifications.length === 0 ? (
                 <p className="text-center text-gray-400 text-sm py-8">No notifications</p>
-              ) : notifications.map(n => (
-                <button key={n.id} onClick={() => { markRead(n.id); setNotifOpen(false); }}
-                  className={`w-full text-left px-4 py-3 hover:bg-gray-50 transition-colors ${n.isRead ? '' : 'bg-blue-50'}`}>
-                  <div className="flex items-start gap-2">
-                    <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${n.isRead ? 'bg-transparent' : 'bg-blue-500'}`} />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs font-semibold text-gray-800 truncate">{n.title}</p>
-                      <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{n.message}</p>
-                      <p className="text-[10px] text-gray-400 mt-1">
-                        {new Date(n.createdAt).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
-                      </p>
+              ) : notifications.map(n => {
+                // Every notification type the backend emits carries the product
+                // order it concerns, so the row opens that order's record.
+                const orderId = (n.data as { orderId?: number } | undefined)?.orderId;
+                const href = orderId && hasAccess(user?.role, ['administrator', 'supervisor'])
+                  ? `/product-orders/${orderId}`
+                  : null;
+
+                const handleClick = () => {
+                  markRead(n.id);
+                  setNotifOpen(false);
+                  if (href) router.push(href);
+                };
+
+                return (
+                  <button key={n.id} onClick={handleClick}
+                    title={href ? 'Open this order' : undefined}
+                    className={`w-full text-left px-4 py-3 hover:bg-gray-50 transition-colors ${n.isRead ? '' : 'bg-blue-50'}`}>
+                    <div className="flex items-start gap-2">
+                      <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${n.isRead ? 'bg-transparent' : 'bg-blue-500'}`} />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-semibold text-gray-800 truncate">{n.title}</p>
+                        <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{n.message}</p>
+                        <p className="text-[10px] text-gray-400 mt-1">
+                          {formatDateTime(n.createdAt)}
+                        </p>
+                      </div>
+                      {href && (
+                        <svg className="w-3.5 h-3.5 text-gray-300 shrink-0 self-center" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                        </svg>
+                      )}
                     </div>
-                  </div>
-                </button>
-              ))}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </>
