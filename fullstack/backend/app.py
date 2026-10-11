@@ -141,6 +141,7 @@ class JobOrder(db.Model):
     down_payment = db.Column(db.Float, default=0)
     balance = db.Column(db.Float, default=0)
     discount_percent = db.Column(db.Float, nullable=True)  # per-order discount override
+    vat_percent = db.Column(db.Float, nullable=True)  # VAT added on top of the discounted price (None = no VAT)
     estimated_completion = db.Column(db.Date, nullable=False)
     completed_at = db.Column(db.Date)
     voided_at = db.Column(db.Date)
@@ -595,6 +596,80 @@ class WorkerAvailabilitySchedule(db.Model):
     worker = db.relationship('ManagedWorker', backref='schedule')
     __table_args__ = (db.UniqueConstraint('managed_worker_id', 'date', name='uq_worker_date'),)
 
+class AuditLog(db.Model):
+    """Audit trail. Kept in the database — an in-memory list was wiped on every
+    restart, and on serverless hosting each request could see a different one."""
+    __tablename__ = 'audit_logs'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=True)
+    user_name = db.Column(db.String(255))
+    action = db.Column(db.String(50))
+    module = db.Column(db.String(100), index=True)
+    details = db.Column(db.Text)
+    ip_address = db.Column(db.String(64))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+class PurchaseOrder(db.Model):
+    __tablename__ = 'purchase_orders'
+    id = db.Column(db.Integer, primary_key=True)
+    po_number = db.Column(db.String(50), unique=True, nullable=False)
+    supplier_id = db.Column(db.Integer, db.ForeignKey('suppliers.id'), nullable=True)
+    supplier_name = db.Column(db.String(255), nullable=False)
+    items = db.Column(db.JSON, nullable=False)  # [{materialId?, name, quantity, unit?, unitPrice}]
+    total_amount = db.Column(db.Float, default=0)
+    status = db.Column(db.String(20), default='pending')  # pending, approved, received, cancelled
+    expected_delivery = db.Column(db.String(20))
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    approved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    approved_at = db.Column(db.DateTime, nullable=True)
+    received_at = db.Column(db.DateTime, nullable=True)
+
+class LineupSlip(db.Model):
+    """Production line-up slip for a job order: its tasks and who is on them."""
+    __tablename__ = 'lineup_slips'
+    id = db.Column(db.Integer, primary_key=True)
+    slip_number = db.Column(db.String(50), unique=True, nullable=False)
+    job_order_id = db.Column(db.Integer, db.ForeignKey('job_orders.id'), nullable=False)
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
+    items = db.Column(db.JSON)  # [{description, status}]
+    priority = db.Column(db.String(20), default='normal')
+    assigned_to = db.Column(db.String(255), default='')
+    notes = db.Column(db.Text, default='')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    job_order = db.relationship('JobOrder')
+
+class Delivery(db.Model):
+    """Scheduled delivery of a finished job to a customer (or a branch restock)."""
+    __tablename__ = 'deliveries'
+    id = db.Column(db.Integer, primary_key=True)
+    delivery_number = db.Column(db.String(50), unique=True, nullable=False)
+    type = db.Column(db.String(30), default='customer_delivery')  # customer_delivery | branch_restock
+    from_branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
+    to_branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
+    customer_name = db.Column(db.String(255))
+    customer_address = db.Column(db.Text)
+    customer_phone = db.Column(db.String(50))
+    job_order_id = db.Column(db.Integer, db.ForeignKey('job_orders.id'), nullable=True)
+    items = db.Column(db.JSON)
+    status = db.Column(db.String(20), default='scheduled')  # scheduled, in_transit, delivered, cancelled
+    scheduled_date = db.Column(db.String(10))
+    time_slot = db.Column(db.String(20))
+    estimated_arrival = db.Column(db.String(30))
+    driver_name = db.Column(db.String(255))
+    driver_contact = db.Column(db.String(50))
+    vehicle_plate = db.Column(db.String(50))
+    notes = db.Column(db.Text)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    delivered_at = db.Column(db.DateTime, nullable=True)
+
+    from_branch = db.relationship('Branch', foreign_keys=[from_branch_id])
+    to_branch = db.relationship('Branch', foreign_keys=[to_branch_id])
+    job_order = db.relationship('JobOrder')
+
 # ============================================
 # SEED DATA
 # ============================================
@@ -854,10 +929,19 @@ def run_migrations():
         "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS managed_worker_id INTEGER REFERENCES managed_workers(id)",
         # Per-order discount override on job orders
         "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS discount_percent REAL",
+        # Printed job order slip snapshot
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS slip_data JSON",
+        # Optional VAT on job orders
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS vat_percent REAL",
         # Branch contact phone number
         "ALTER TABLE branches ADD COLUMN IF NOT EXISTS phone VARCHAR(50)",
     ]
+    is_sqlite = db.engine.dialect.name == 'sqlite'
     for sql in migrations:
+        if is_sqlite:
+            # SQLite (local dev) has no "ADD COLUMN IF NOT EXISTS"; without the clause a
+            # column that already exists just errors and is skipped below.
+            sql = sql.replace(' IF NOT EXISTS', '')
         try:
             # engine.begin() gives an auto-commit/auto-rollback transaction per statement
             with db.engine.begin() as conn:
@@ -1080,19 +1164,29 @@ def add_strike(phone: str, reason: str):
 
 
 def log_action(user_id, user_name, action, module, details, ip_address='0.0.0.0'):
-    """Log user action to audit trail"""
-    global counters
-    audit_logs.append({
-        'id': counters['audit_log'],
-        'userId': user_id,
-        'userName': user_name,
-        'action': action,
-        'module': module,
-        'details': details,
-        'ipAddress': ip_address,
-        'timestamp': now_pht()
-    })
-    counters['audit_log'] += 1
+    """Log user action to audit trail. Every caller has already committed its
+    own changes, so committing here only saves the log entry."""
+    try:
+        db.session.add(AuditLog(user_id=user_id, user_name=user_name, action=action, module=module,
+                                details=details, ip_address=ip_address))
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f"[audit] could not record {action} {module}: {e}")
+
+
+def audit_log_to_dict(log):
+    return {
+        'id': log.id,
+        'userId': log.user_id,
+        'userName': log.user_name,
+        'action': log.action,
+        'module': log.module,
+        'details': log.details,
+        'ipAddress': log.ip_address,
+        # Same 'YYYY-MM-DD HH:MM:SS PHT' format the in-memory log used
+        'timestamp': (log.created_at + PH_OFFSET).strftime('%Y-%m-%d %H:%M:%S PHT') if log.created_at else '',
+    }
 
 @app.before_request
 def ensure_db_initialized():
@@ -1113,11 +1207,6 @@ def generate_job_order_id(branch_code):
         .all()
         if row[0]
     ]
-    existing_ids.extend(
-        jo['jobOrderId']
-        for jo in job_orders
-        if jo.get('jobOrderId', '').startswith(prefix)
-    )
 
     next_sequence = 1
     for job_order_id in existing_ids:
@@ -1130,22 +1219,64 @@ def generate_job_order_id(branch_code):
     return f'{prefix}{next_sequence:04d}'
 
 def generate_lineup_slip_number(branch_code):
-    """Generate unique lineup slip number"""
-    year = datetime.now().year
-    count = sum(1 for ls in lineup_slips if ls['slipNumber'].startswith(f'LS-{branch_code}-{year}')) + 1
-    return f'LS-{branch_code}-{year}-{count:04d}'
+    """Next line-up slip number for this branch and year (LS-MW-2026-0001, ...)"""
+    prefix = f'LS-{branch_code}-{datetime.now().year}-'
+    numbers = [int(n[len(prefix):]) for (n,) in
+               db.session.query(LineupSlip.slip_number).filter(LineupSlip.slip_number.like(f'{prefix}%')).all()
+               if n[len(prefix):].isdigit()]
+    return f'{prefix}{(max(numbers) + 1 if numbers else 1):04d}'
 
 def generate_po_number():
-    """Generate unique PO number"""
-    year = datetime.now().year
-    count = len([po for po in purchase_orders if po['poNumber'].startswith(f'PO-{year}')]) + 1
-    return f'PO-{year}-{count:04d}'
+    """Next PO number for this year (PO-2026-0001, ...)"""
+    prefix = f'PO-{datetime.now().year}-'
+    numbers = [int(n[len(prefix):]) for (n,) in
+               db.session.query(PurchaseOrder.po_number).filter(PurchaseOrder.po_number.like(f'{prefix}%')).all()
+               if n[len(prefix):].isdigit()]
+    return f'{prefix}{(max(numbers) + 1 if numbers else 1):04d}'
 
 def generate_delivery_number():
-    """Generate unique delivery number"""
-    year = datetime.now().year
-    count = len([d for d in deliveries if d['deliveryNumber'].startswith(f'DL-{year}')]) + 1
-    return f'DL-{year}-{count:04d}'
+    """Next delivery number for this year (DL-2026-0001, ...)"""
+    prefix = f'DL-{datetime.now().year}-'
+    numbers = [int(n[len(prefix):]) for (n,) in
+               db.session.query(Delivery.delivery_number).filter(Delivery.delivery_number.like(f'{prefix}%')).all()
+               if n[len(prefix):].isdigit()]
+    return f'{prefix}{(max(numbers) + 1 if numbers else 1):04d}'
+
+
+def delivery_to_dict(d):
+    return {
+        'id': d.id,
+        'deliveryNumber': d.delivery_number,
+        'type': d.type,
+        'fromBranchId': d.from_branch_id,
+        'fromBranchName': d.from_branch.name if d.from_branch else None,
+        'toBranchId': d.to_branch_id,
+        'toBranchName': d.to_branch.name if d.to_branch else None,
+        'customerName': d.customer_name,
+        'customerAddress': d.customer_address,
+        'customerPhone': d.customer_phone,
+        'jobOrderId': d.job_order_id,
+        'jobOrderNumber': d.job_order.job_order_id if d.job_order else None,
+        'items': d.items or [],
+        'status': d.status,
+        'scheduledDate': d.scheduled_date,
+        'timeSlot': d.time_slot,
+        'estimatedArrival': d.estimated_arrival,
+        'driverName': d.driver_name or '',
+        'driverContact': d.driver_contact or '',
+        'vehiclePlate': d.vehicle_plate or '',
+        'notes': d.notes or '',
+        'createdAt': d.created_at.strftime('%Y-%m-%d') if d.created_at else None,
+        'createdBy': d.created_by,
+        'deliveredAt': (d.delivered_at + PH_OFFSET).strftime('%Y-%m-%d %H:%M') if d.delivered_at else None,
+    }
+
+
+def can_see_delivery(user, d):
+    if user['role'] == 'administrator':
+        return True
+    bid = user_branch_id(user)
+    return bid is not None and bid in (d.from_branch_id, d.to_branch_id)
 
 # ============================================
 # AUTHENTICATION ROUTES
@@ -1284,40 +1415,73 @@ def recover_account():
 # DASHBOARD ROUTES
 # ============================================
 
+STAFF_ROLES = ('administrator', 'supervisor', 'sales_manager', 'staff')
+
+# Revenue excludes VAT: it is collected for the government, not earned
+REVENUE_EX_VAT = JobOrder.total_price / (1 + db.func.coalesce(JobOrder.vat_percent, 0) / 100.0)
+
+def dashboard_scope():
+    """Branch the dashboard is limited to: (branch_id or None for all, error response).
+
+    Administrators see the whole company and may pick one branch with
+    ?branchId=; everyone else only ever sees their own branch."""
+    user = request.current_user
+    if user['role'] == 'administrator':
+        raw = request.args.get('branchId')
+        if not raw:
+            return None, None
+        try:
+            branch = Branch.query.get(int(raw))
+        except ValueError:
+            branch = None
+        if not branch:
+            return None, (jsonify({'status': 'error', 'message': 'Unknown branch'}), 400)
+        return branch.id, None
+    # A non-admin with no branch sees nothing rather than everything
+    return (user_branch_id(user) or -1), None
+
+
 @app.route('/api/dashboard/stats', methods=['GET'])
 @require_auth
+@require_roles(*STAFF_ROLES)
 def get_dashboard_stats():
-    user = request.current_user
-    role = user['role']
+    role = request.current_user['role']
+    bid, err = dashboard_scope()
+    if err:
+        return err
+
+    def scoped(query, column):
+        return query.filter(column == bid) if bid is not None else query
 
     # Orders that were voided or cancelled are excluded from totals and revenue —
-    # they represent work that never happened.
-    DEAD_STATUSES = ('voided', 'cancelled')
-    live_orders = JobOrder.query.filter(~JobOrder.status.in_(DEAD_STATUSES))
+    # they represent work that never happened — and drafts aren't real orders yet.
+    DEAD_STATUSES = ('voided', 'cancelled', 'draft')
+    live_orders = scoped(JobOrder.query.filter(~JobOrder.status.in_(DEAD_STATUSES)), JobOrder.branch_id)
 
     total_job_orders = live_orders.count()
     pending_orders = live_orders.filter(JobOrder.status == 'pending').count()
     in_progress_orders = live_orders.filter(JobOrder.status == 'in_progress').count()
     completed_orders = live_orders.filter(JobOrder.status == 'completed').count()
 
-    revenue_row = db.session.query(
-        db.func.coalesce(db.func.sum(JobOrder.total_price), 0.0),
+    revenue_row = scoped(db.session.query(
+        db.func.coalesce(db.func.sum(REVENUE_EX_VAT), 0.0),
         db.func.coalesce(db.func.sum(JobOrder.actual_cost), 0.0),
-    ).filter(JobOrder.status == 'completed').one()
+    ).filter(JobOrder.status == 'completed'), JobOrder.branch_id).one()
     total_revenue = float(revenue_row[0] or 0)
     total_cost = float(revenue_row[1] or 0)
     profit = total_revenue - total_cost
 
-    low_stock_count = InventoryMaterial.query.filter(
+    low_stock_count = scoped(InventoryMaterial.query.filter(
         InventoryMaterial.is_archived.is_(False),
         InventoryMaterial.status == 'available',
         InventoryMaterial.stock_quantity <= InventoryMaterial.low_stock_threshold,
-    ).count()
+    ), InventoryMaterial.branch_id).count()
 
-    # Deliveries are still held in memory only, so this resets whenever the
-    # service restarts. Persist the Delivery model to make this number durable.
-    pending_deliveries = len([d for d in deliveries if d['status'] in ['scheduled', 'in_transit']])
+    deliveries_q = Delivery.query.filter(Delivery.status.in_(('scheduled', 'in_transit')))
+    if bid is not None:
+        deliveries_q = deliveries_q.filter(db.or_(Delivery.from_branch_id == bid, Delivery.to_branch_id == bid))
 
+    scope_branch = Branch.query.get(bid) if bid not in (None, -1) else None
     stats = {
         'totalJobOrders': total_job_orders,
         'pendingOrders': pending_orders,
@@ -1328,9 +1492,12 @@ def get_dashboard_stats():
         'profit': profit,
         'profitMargin': round((profit / total_revenue * 100), 2) if total_revenue > 0 else 0,
         'lowStockItems': low_stock_count,
-        'pendingDeliveries': pending_deliveries,
-        'totalRawMaterials': InventoryMaterial.query.filter_by(is_archived=False).count(),
-        'totalFinishedGoods': PremadeProduct.query.filter_by(is_archived=False).count(),
+        'pendingDeliveries': deliveries_q.count(),
+        'totalRawMaterials': scoped(InventoryMaterial.query.filter_by(is_archived=False), InventoryMaterial.branch_id).count(),
+        'totalFinishedGoods': scoped(PremadeProduct.query.filter_by(is_archived=False), PremadeProduct.branch_id).count(),
+        # Which branch these figures cover (None = whole company)
+        'scopeBranchId': scope_branch.id if scope_branch else None,
+        'scopeBranchName': scope_branch.name if scope_branch else None,
     }
 
     if role == 'administrator':
@@ -1341,15 +1508,18 @@ def get_dashboard_stats():
 
 @app.route('/api/dashboard/recent-activity', methods=['GET'])
 @require_auth
+@require_roles(*STAFF_ROLES)
 def get_recent_activity():
+    bid, err = dashboard_scope()
+    if err:
+        return err
     activities = []
 
-    recent_orders = (JobOrder.query
-                     .order_by(JobOrder.updated_at.desc())
-                     .limit(5)
-                     .all())
+    orders_q = JobOrder.query.filter(JobOrder.status != 'draft')
+    if bid is not None:
+        orders_q = orders_q.filter(JobOrder.branch_id == bid)
     # `id` and `reference` let the dashboard link each row to its own record.
-    for jo in recent_orders:
+    for jo in orders_q.order_by(JobOrder.updated_at.desc()).limit(5).all():
         activities.append({
             'type': 'job_order',
             'id': jo.id,
@@ -1360,17 +1530,18 @@ def get_recent_activity():
             'status': jo.status,
         })
 
-    # In-memory until the Delivery model is persisted (see get_dashboard_stats).
-    recent_deliveries = sorted(deliveries, key=lambda x: x['createdAt'], reverse=True)[:5]
-    for d in recent_deliveries:
+    deliveries_q = Delivery.query
+    if bid is not None:
+        deliveries_q = deliveries_q.filter(db.or_(Delivery.from_branch_id == bid, Delivery.to_branch_id == bid))
+    for d in deliveries_q.order_by(Delivery.created_at.desc()).limit(5).all():
         activities.append({
             'type': 'delivery',
-            'id': d['id'],
-            'reference': d['deliveryNumber'],
-            'title': f"Delivery {d['deliveryNumber']}",
-            'description': f"To {d.get('toBranchName') or d.get('customerName')} - {d['status'].replace('_', ' ').title()}",
-            'timestamp': d['createdAt'],
-            'status': d['status'],
+            'id': d.id,
+            'reference': d.delivery_number,
+            'title': f"Delivery {d.delivery_number}",
+            'description': f"To {(d.to_branch.name if d.to_branch else None) or d.customer_name} - {(d.status or '').replace('_', ' ').title()}",
+            'timestamp': fmt_dt(d.created_at) or '',
+            'status': d.status,
         })
 
     activities.sort(key=lambda x: x['timestamp'], reverse=True)
@@ -1379,15 +1550,21 @@ def get_recent_activity():
 
 @app.route('/api/dashboard/alerts', methods=['GET'])
 @require_auth
+@require_roles(*STAFF_ROLES)
 def get_alerts():
+    bid, err = dashboard_scope()
+    if err:
+        return err
     alerts = []
 
-    low_stock = InventoryMaterial.query.filter(
+    low_stock_q = InventoryMaterial.query.filter(
         InventoryMaterial.is_archived.is_(False),
         InventoryMaterial.status == 'available',
         InventoryMaterial.stock_quantity <= InventoryMaterial.low_stock_threshold,
-    ).order_by(InventoryMaterial.stock_quantity.asc()).limit(20).all()
-    for material in low_stock:
+    )
+    if bid is not None:
+        low_stock_q = low_stock_q.filter(InventoryMaterial.branch_id == bid)
+    for material in low_stock_q.order_by(InventoryMaterial.stock_quantity.asc()).limit(20).all():
         name = ' '.join(filter(None, [material.material_type, material.color])).strip()
         threshold = float(material.low_stock_threshold or 0)
         alerts.append({
@@ -1400,25 +1577,26 @@ def get_alerts():
             'itemName': material.material_type or name,
         })
 
-    # In-memory until the Delivery model is persisted (see get_dashboard_stats).
     today_str = datetime.now().strftime('%Y-%m-%d')
-    for d in deliveries:
-        if d['status'] == 'scheduled' and d['scheduledDate'] <= today_str:
-            alerts.append({
-                'type': 'delivery_due',
-                'severity': 'info',
-                'title': f"Delivery Due: {d['deliveryNumber']}",
-                'description': f"Scheduled for {d['scheduledDate']}",
-                'itemId': d['id'],
-            })
+    due_q = Delivery.query.filter(Delivery.status == 'scheduled', Delivery.scheduled_date <= today_str)
+    if bid is not None:
+        due_q = due_q.filter(db.or_(Delivery.from_branch_id == bid, Delivery.to_branch_id == bid))
+    for d in due_q.all():
+        alerts.append({
+            'type': 'delivery_due',
+            'severity': 'info',
+            'title': f"Delivery Due: {d.delivery_number}",
+            'description': f"Scheduled for {d.scheduled_date}",
+            'itemId': d.id,
+        })
 
-    overdue = (JobOrder.query
-               .filter(~JobOrder.status.in_(('completed', 'cancelled', 'voided')),
-                       JobOrder.estimated_completion < datetime.now().date())
-               .order_by(JobOrder.estimated_completion.asc())
-               .limit(20)
-               .all())
-    for jo in overdue:
+    # Finished, dead and draft orders can't be overdue
+    overdue_q = JobOrder.query.filter(
+        ~JobOrder.status.in_(('completed', 'delivered', 'cancelled', 'voided', 'draft')),
+        JobOrder.estimated_completion < datetime.now().date())
+    if bid is not None:
+        overdue_q = overdue_q.filter(JobOrder.branch_id == bid)
+    for jo in overdue_q.order_by(JobOrder.estimated_completion.asc()).limit(20).all():
         alerts.append({
             'type': 'overdue_order',
             'severity': 'warning',
@@ -2587,8 +2765,9 @@ def create_payment():
 def get_payment_summary():
     user = request.current_user
     jo_query = JobOrder.query
-    if user['role'] != 'administrator' and user.get('branchId'):
-        jo_query = jo_query.filter_by(branch_id=user['branchId'])
+    # Non-admins only ever see their own branch (no branch on the account = nothing)
+    if user['role'] != 'administrator':
+        jo_query = jo_query.filter_by(branch_id=user_branch_id(user) or -1)
     orders = jo_query.all()
     total_revenue = sum(float(o.total_price or 0) for o in orders if o.status not in ('voided', 'cancelled', 'draft'))
     total_collected = sum(float(o.down_payment or 0) for o in orders if o.status not in ('voided', 'cancelled', 'draft'))
@@ -2725,6 +2904,202 @@ def reject_payment_override(req_id):
 # SALES MODULE - JOB ORDERS
 # ============================================
 
+# ── Job order line items ─────────────────────────────────────────────────────
+# Items are JSON dicts. 'category' is material | labor | expense; older orders
+# don't store it, so it is inferred (a line with only labor cost is labor).
+# Labor lines with a worker carry 'assignmentId' linking them to that worker's
+# WorkerAssignment, and 'actualLaborCost' (whole-line pay) once the work is done.
+
+def item_category(item):
+    cat = item.get('category')
+    if cat in ('material', 'labor', 'expense'):
+        return cat
+    if float(item.get('laborCost') or 0) > 0 and float(item.get('materialCost') or 0) == 0:
+        return 'labor'
+    return 'material'
+
+
+def job_order_cost(items):
+    """What the job costs us: materials + other expenses + labor, where a labor
+    line's actual pay replaces its estimate once the worker has finished."""
+    total = 0.0
+    for it in items or []:
+        qty = float(it.get('quantity') or 0)
+        if item_category(it) == 'labor':
+            actual = it.get('actualLaborCost')
+            total += float(actual) if actual is not None else qty * float(it.get('laborCost') or 0)
+        else:
+            total += qty * float(it.get('materialCost') or 0)
+    return round(total, 2)
+
+
+# Shown with labor lines but owned by the worker assignment, so never stored on the order
+TRANSIENT_ITEM_KEYS = ('assignmentStatus', 'scheduledDate')
+
+
+def items_with_assignment_status(order):
+    """The order's items, with each labor line's live assignment status attached."""
+    items = [dict(it) for it in (order.items or [])]
+    ids = [it['assignmentId'] for it in items if it.get('assignmentId')]
+    if ids:
+        by_id = {a.id: a for a in WorkerAssignment.query.filter(WorkerAssignment.id.in_(ids)).all()}
+        for it in items:
+            a = by_id.get(it.get('assignmentId'))
+            if a:
+                it['assignmentStatus'] = a.status
+                it['scheduledDate'] = a.scheduled_date.isoformat() if a.scheduled_date else None
+    return items
+
+
+def _assignments_for_order(order):
+    return WorkerAssignment.query.filter(
+        db.or_(WorkerAssignment.job_order_db_id == order.id,
+               WorkerAssignment.job_order_ref == order.job_order_id),
+        WorkerAssignment.assignment_type != 'special_task',
+    ).all()
+
+
+def sync_labor_assignments(order, previous_items):
+    """Keep exactly one worker assignment per labor line that names a worker.
+
+    The line remembers its assignment id, so re-saving the order updates that
+    assignment rather than creating another; renaming the task or switching the
+    worker on a not-yet-started line moves the same assignment; removing a line
+    deletes its assignment if work hasn't started (started work is kept as a
+    record). Actual pay is always read back from the assignment, so a save made
+    from a stale page can't wipe it."""
+    items = [dict(it) for it in (order.items or [])]
+    existing = _assignments_for_order(order)
+    by_id = {a.id: a for a in existing}
+    linked_ids = {it.get('assignmentId') for it in items if it.get('assignmentId')}
+    claimed = set()
+
+    for it in items:
+        if item_category(it) != 'labor':
+            continue
+        it['category'] = 'labor'
+        worker = ManagedWorker.query.get(int(it['workerId'])) if it.get('workerId') else None
+        if not worker:
+            it.pop('assignmentId', None)
+            it.pop('actualLaborCost', None)
+            continue
+
+        desc = (it.get('name') or '').strip()
+        a = by_id.get(it.get('assignmentId'))
+        if a and a.status != 'pending' and a.worker_id != worker.id:
+            # Work already started under another worker: leave that record alone
+            # and give the newly chosen worker their own assignment.
+            a = None
+        if a is None:
+            # Adopt an assignment made before lines were linked (older orders) so
+            # re-saving them doesn't create a duplicate.
+            a = next((c for c in existing
+                      if c.id not in claimed and c.id not in linked_ids
+                      and c.worker_id == worker.id and (c.description or '').strip() == desc), None)
+        if a is None:
+            a = WorkerAssignment(worker_id=worker.id, job_order_ref=order.job_order_id,
+                                 job_order_db_id=order.id, description=desc,
+                                 status='pending', assignment_type='job_order')
+            db.session.add(a)
+            db.session.flush()
+        elif a.status == 'pending':
+            a.worker_id = worker.id
+            a.description = desc
+            a.job_order_db_id = order.id
+        if a.status == 'pending' and (worker.pay_mode or 'per_hour') == 'per_hour':
+            a.expected_hours = float(it.get('quantity') or 0) or None
+
+        claimed.add(a.id)
+        it['assignmentId'] = a.id
+        it['workerName'] = worker.name
+        if a.status == 'completed' and a.pay is not None:
+            it['actualLaborCost'] = round(float(a.pay), 2)
+        else:
+            it.pop('actualLaborCost', None)
+
+    for prev in previous_items or []:
+        a = by_id.get(prev.get('assignmentId'))
+        if a and a.id not in claimed and a.status == 'pending':
+            db.session.delete(a)
+
+    order.items = items
+
+
+def add_labor_line_for_assignment(order, assignment):
+    """Give an assignment made in Worker Management its labor line on the job
+    order (or link an existing unlinked line for the same worker and task), so
+    the job order and Worker Management always show the same workers."""
+    items = [dict(it) for it in (order.items or [])]
+    if any(it.get('assignmentId') == assignment.id for it in items):
+        return
+    worker = assignment.worker or ManagedWorker.query.get(assignment.worker_id)
+    desc = (assignment.description or '').strip()
+    line = next((it for it in items
+                 if item_category(it) == 'labor' and not it.get('assignmentId')
+                 and int(it.get('workerId') or 0) == assignment.worker_id
+                 and (it.get('name') or '').strip() == desc), None)
+    if line is None:
+        per_hour = (worker.pay_mode if worker else 'per_hour') in (None, 'per_hour')
+        line = {
+            'category': 'labor',
+            'name': desc or (worker.work_type.replace('_', ' ').title() if worker else 'Labor'),
+            # Estimate: expected hours for hourly workers, otherwise one day / piece to start with
+            'quantity': float(assignment.expected_hours or 1) if per_hour else 1,
+            'unitPrice': 0, 'materialCost': 0,
+            'laborCost': float(worker.rate_per_hour or 0) if worker else 0,
+            'workerId': assignment.worker_id,
+            'workerName': worker.name if worker else '',
+        }
+        items.append(line)
+    line['assignmentId'] = assignment.id
+    order.items = items
+    order.actual_cost = job_order_cost(items)
+
+
+def record_assignment_pay(assignment):
+    """Copy a finished assignment's pay onto its job order's labor line so the
+    order's labor cost and profit reflect what was actually paid. If the
+    assignment is no longer completed, its line goes back to the estimate."""
+    if assignment.assignment_type == 'special_task':
+        return
+    order = (JobOrder.query.get(assignment.job_order_db_id) if assignment.job_order_db_id
+             else JobOrder.query.filter_by(job_order_id=assignment.job_order_ref).first())
+    if not order:
+        return
+    items = [dict(it) for it in (order.items or [])]
+    if assignment.status != 'completed' or assignment.pay is None:
+        linked = [it for it in items if it.get('assignmentId') == assignment.id and 'actualLaborCost' in it]
+        if linked:
+            for it in linked:
+                it.pop('actualLaborCost', None)
+            order.items = items
+            order.actual_cost = job_order_cost(items)
+        return
+    line = next((it for it in items if it.get('assignmentId') == assignment.id), None)
+    if line is None:
+        line = next((it for it in items
+                     if item_category(it) == 'labor' and not it.get('assignmentId')
+                     and int(it.get('workerId') or 0) == assignment.worker_id
+                     and (it.get('name') or '').strip() == (assignment.description or '').strip()), None)
+    worker = assignment.worker
+    if line is None:
+        # Work assigned straight from the worker dashboard still costs the job.
+        line = {
+            'category': 'labor',
+            'name': assignment.description or (worker.work_type.replace('_', ' ').title() if worker else 'Labor'),
+            'quantity': 1, 'unitPrice': 0, 'materialCost': 0,
+            'laborCost': round(float(assignment.pay), 2),
+            'workerId': assignment.worker_id,
+            'workerName': worker.name if worker else '',
+        }
+        items.append(line)
+    line['category'] = 'labor'
+    line['assignmentId'] = assignment.id
+    line['actualLaborCost'] = round(float(assignment.pay), 2)
+    order.items = items
+    order.actual_cost = job_order_cost(items)
+
+
 @app.route('/api/sales/job-orders', methods=['GET'])
 @require_auth
 def get_job_orders():
@@ -2778,6 +3153,7 @@ def get_job_orders():
             'actualCost': jo.actual_cost,
             'totalPrice': jo.total_price,
             'discountPercent': jo.discount_percent,
+            'vatPercent': jo.vat_percent,
             'status': jo.status,
             'paymentStatus': jo.payment_status,
             'downPayment': jo.down_payment,
@@ -2848,12 +3224,13 @@ def get_job_order(order_id):
         'branchName': order.branch.name if order.branch else '',
         'description': order.description,
         'vehicleInfo': order.vehicle_info,
-        'items': order.items,
+        'items': items_with_assignment_status(order),
         'slipData': order.slip_data,
         'estimatedCost': order.estimated_cost,
         'actualCost': order.actual_cost,
         'totalPrice': order.total_price,
         'discountPercent': order.discount_percent,
+        'vatPercent': order.vat_percent,
         'status': order.status,
         'paymentStatus': order.payment_status,
         'downPayment': order.down_payment,
@@ -2958,12 +3335,26 @@ def create_job_order():
         down_payment=down_payment,
         balance=balance,
         discount_percent=data.get('discountPercent'),
+        vat_percent=data.get('vatPercent') or None,
         estimated_completion=estimated_completion,
         created_by=request.current_user['id']
     )
-    
+
     db.session.add(new_order)
     db.session.flush()  # get new_order.id before commit
+    if not is_draft:
+        sync_labor_assignments(new_order, [])
+    new_order.actual_cost = job_order_cost(new_order.items)
+
+    # Materials typed in on the order form are added to inventory as "needed"
+    # just before the order is created; record which order needs them.
+    needed_ids = [int(it['materialId']) for it in items if it.get('materialId')]
+    if needed_ids:
+        for material in InventoryMaterial.query.filter(
+                InventoryMaterial.id.in_(needed_ids),
+                InventoryMaterial.status == 'needed',
+                InventoryMaterial.source_job_order_id.is_(None)).all():
+            material.source_job_order_id = job_order_id
 
     # Auto-create a PaymentRecord for the initial down payment
     if down_payment > 0:
@@ -3055,12 +3446,30 @@ def update_job_order(order_id):
         order.total_price = data['totalPrice']
     if 'discountPercent' in data:
         order.discount_percent = data['discountPercent']
+    if 'vatPercent' in data:
+        order.vat_percent = data['vatPercent'] or None
     if 'items' in data:
-        order.items = data['items']
+        previous_items = list(order.items or [])
+        order.items = [{k: v for k, v in it.items() if k not in TRANSIENT_ITEM_KEYS} for it in (data['items'] or [])]
         order.estimated_cost = sum(
             item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0))
             for item in data['items']
         )
+        # Drafts aren't real work yet, so their workers aren't booked until confirmed;
+        # cancelled/voided orders no longer need anyone.
+        if order.status not in ('draft', 'cancelled', 'voided'):
+            sync_labor_assignments(order, previous_items)
+        order.actual_cost = job_order_cost(order.items)
+    elif prev_status == 'draft' and order.status not in ('draft', 'cancelled', 'voided'):
+        # Confirming a draft books the workers named on its labor lines.
+        sync_labor_assignments(order, [])
+        order.actual_cost = job_order_cost(order.items)
+
+    if order.status in ('cancelled', 'voided') and prev_status != order.status:
+        # Free up workers who were booked on this order but never started
+        for a in _assignments_for_order(order):
+            if a.status == 'pending':
+                db.session.delete(a)
     if 'slipData' in data:
         order.slip_data = data['slipData']
 
@@ -3083,15 +3492,17 @@ def update_job_order(order_id):
 
     # ── Deduct inventory when a job order is completed ──────────────────────
     if data.get('status') == 'completed' and prev_status != 'completed':
+        # Total each material across lines first, then deduct only what earlier
+        # completions haven't — an order reverted to in-progress and completed
+        # again must not take its stock twice.
+        to_use = {}  # inventory material id -> [material, qty]
         for item in (order.items or []):
             qty = float(item.get('quantity', 0))
             if qty <= 0:
                 continue
 
-            # Skip pure-labor items (have laborCost > 0 and no materialCost)
-            labor_cost = float(item.get('laborCost', 0))
-            material_cost = float(item.get('materialCost', 0))
-            if labor_cost > 0 and material_cost == 0:
+            # Labor and other-expense lines aren't stock
+            if item_category(item) != 'material':
                 continue
 
             # Resolve the inventory material – prefer stored ID, fall back to name match.
@@ -3118,20 +3529,44 @@ def update_job_order(order_id):
                     ).first()
 
             if inv_material:
-                inv_material.stock_quantity = float(inv_material.stock_quantity) - qty
-                inv_material.status = 'available'   # clear 'needed' flag
-                inv_material.updated_at = datetime.now()
+                entry = to_use.setdefault(inv_material.id, [inv_material, 0.0])
+                entry[1] += qty
 
-                usage_log = MaterialUsageLog(
-                    material_id=inv_material.id,
-                    quantity_used=qty,
-                    used_in_type='job_order',
-                    used_in_reference=order.job_order_id,
-                    branch_id=order.branch_id,
-                    used_by=request.current_user['id'],
-                    notes=f"Used in job order {order.job_order_id} — {order.customer_name}"
-                )
-                db.session.add(usage_log)
+        # Credit the worker who did the job when there was exactly one
+        done = [a for a in _assignments_for_order(order) if a.status == 'completed']
+        worker_ids = {a.worker_id for a in done}
+        sole_worker_id = next(iter(worker_ids)) if len(worker_ids) == 1 else None
+        worker_names = ', '.join(sorted({a.worker.name for a in done if a.worker}))
+
+        for inv_material, qty in to_use.values():
+            # Logs with used_by set are the ones written here (and that took stock)
+            already = db.session.query(db.func.coalesce(db.func.sum(MaterialUsageLog.quantity_used), 0)).filter(
+                MaterialUsageLog.material_id == inv_material.id,
+                MaterialUsageLog.used_in_type == 'job_order',
+                MaterialUsageLog.used_in_reference == order.job_order_id,
+                MaterialUsageLog.used_by.isnot(None),
+            ).scalar()
+            qty = round(qty - float(already or 0), 4)
+            if qty <= 0:
+                continue
+
+            inv_material.stock_quantity = float(inv_material.stock_quantity) - qty
+            inv_material.status = 'available'   # clear 'needed' flag
+            inv_material.updated_at = datetime.now()
+
+            notes = f"Used in job order {order.job_order_id} — {order.customer_name}"
+            if worker_names:
+                notes += f" (by {worker_names})"
+            db.session.add(MaterialUsageLog(
+                material_id=inv_material.id,
+                quantity_used=qty,
+                used_in_type='job_order',
+                used_in_reference=order.job_order_id,
+                branch_id=order.branch_id,
+                used_by=request.current_user['id'],
+                managed_worker_id=sole_worker_id,
+                notes=notes,
+            ))
 
     db.session.commit()
 
@@ -3148,7 +3583,9 @@ def update_job_order(order_id):
             'balance': order.balance,
             'actualCost': order.actual_cost,
             'totalPrice': order.total_price,
-            'items': order.items,
+            'discountPercent': order.discount_percent,
+            'vatPercent': order.vat_percent,
+            'items': items_with_assignment_status(order),
             'completedAt': order.completed_at.strftime('%Y-%m-%d') if order.completed_at else None,
             'updatedAt': order.updated_at.strftime('%Y-%m-%d')
         }
@@ -3158,30 +3595,30 @@ def update_job_order(order_id):
 @require_auth
 @require_roles('administrator', 'supervisor')
 def void_job_order(order_id):
-    order = next((jo for jo in job_orders if jo['id'] == order_id), None)
+    user = request.current_user
+    order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    
-    # Check if unclaimed for 60 days
-    created_date = datetime.strptime(order['createdAt'], '%Y-%m-%d')
-    if (datetime.now() - created_date).days < 60:
+    if user['role'] != 'administrator' and order.branch_id != user_branch_id(user):
+        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+    if order.status in ('voided', 'cancelled', 'draft'):
+        return jsonify({'status': 'error', 'message': f'A {order.status} order cannot be voided'}), 400
+
+    # Only orders left unclaimed for 60 days may be voided
+    if order.created_at and (datetime.utcnow() - order.created_at).days < 60:
         return jsonify({'status': 'error', 'message': 'Job order can only be voided after 60 days'}), 400
-    
-    order['status'] = 'voided'
-    order['voidedAt'] = datetime.now().strftime('%Y-%m-%d')
-    order['updatedAt'] = datetime.now().strftime('%Y-%m-%d')
-    
-    void_items.append({
-        'type': 'job_order',
-        'originalId': order['id'],
-        'jobOrderId': order['jobOrderId'],
-        'customerName': order['customerName'],
-        'voidedAt': order['voidedAt'],
-        'reason': 'Unclaimed after 60 days'
-    })
-    
-    log_action(request.current_user['id'], request.current_user['fullName'], 'VOID', 'Sales', f"Voided job order: {order['jobOrderId']}", request.remote_addr or '0.0.0.0')
-    
+
+    order.status = 'voided'
+    order.voided_at = datetime.now().date()
+    order.updated_at = datetime.utcnow()
+    # Free up workers who were booked but never started
+    for a in _assignments_for_order(order):
+        if a.status == 'pending':
+            db.session.delete(a)
+    db.session.commit()
+
+    log_action(user['id'], user['fullName'], 'VOID', 'Sales', f"Voided job order: {order.job_order_id} (unclaimed after 60 days)", request.remote_addr or '0.0.0.0')
+
     return jsonify({'status': 'success', 'message': 'Job order voided'})
 
 @app.route('/api/sales/drafts', methods=['GET'])
@@ -3290,6 +3727,7 @@ def get_all_orders():
             'actualCost': jo.actual_cost,
             'totalPrice': jo.total_price,
             'discountPercent': jo.discount_percent,
+            'vatPercent': jo.vat_percent,
             'status': jo.status,
             'paymentStatus': jo.payment_status,
             'downPayment': jo.down_payment,
@@ -3316,230 +3754,266 @@ def get_all_orders():
 # SALES MODULE - LINE-UP SLIPS
 # ============================================
 
+def lineup_slip_to_dict(slip):
+    day = lambda dt: dt.strftime('%Y-%m-%d') if dt else None
+    return {
+        'id': slip.id,
+        'slipNumber': slip.slip_number,
+        'jobOrderId': slip.job_order_id,
+        'jobOrderNumber': slip.job_order.job_order_id if slip.job_order else '',
+        'customerName': slip.job_order.customer_name if slip.job_order else '',
+        'branchId': slip.branch_id,
+        'items': slip.items or [],
+        'priority': slip.priority,
+        'assignedTo': slip.assigned_to or '',
+        'notes': slip.notes or '',
+        'createdAt': day(slip.created_at),
+        'updatedAt': day(slip.updated_at),
+    }
+
+
+def can_use_lineup_slip(user, branch_id):
+    return user['role'] == 'administrator' or (branch_id is not None and branch_id == user_branch_id(user))
+
+
 @app.route('/api/sales/lineup-slips', methods=['GET'])
 @require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
 def get_lineup_slips():
-    return jsonify({'status': 'success', 'data': lineup_slips})
+    user = request.current_user
+    query = LineupSlip.query
+    if user['role'] != 'administrator':
+        query = query.filter(LineupSlip.branch_id == (user_branch_id(user) or -1))
+    slips = query.order_by(LineupSlip.created_at.desc()).all()
+    return jsonify({'status': 'success', 'data': [lineup_slip_to_dict(s) for s in slips]})
 
 @app.route('/api/sales/lineup-slips', methods=['POST'])
 @require_auth
 @require_roles('administrator', 'supervisor', 'sales_manager')
 def create_lineup_slip():
-    global counters
-    data = request.get_json()
-    
-    job_order = next((jo for jo in job_orders if jo['id'] == data.get('jobOrderId')), None)
-    if not job_order:
+    user = request.current_user
+    data = request.get_json() or {}
+
+    job_order = JobOrder.query.get(data.get('jobOrderId')) if data.get('jobOrderId') else None
+    if not job_order or job_order.status == 'draft':
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 400
-    
-    branch = next((b for b in branches if b['id'] == job_order['branchId']), None)
-    slip_number = generate_lineup_slip_number(branch['code'])
-    
-    new_slip = {
-        'id': counters['lineup_slip'],
-        'slipNumber': slip_number,
-        'jobOrderId': job_order['id'],
-        'jobOrderNumber': job_order['jobOrderId'],
-        'customerName': job_order['customerName'],
-        'branchId': job_order['branchId'],
-        'items': data.get('items', [{'description': item['name'], 'status': 'pending'} for item in job_order['items']]),
-        'priority': data.get('priority', 'normal'),
-        'assignedTo': data.get('assignedTo', ''),
-        'notes': data.get('notes', ''),
-        'createdAt': datetime.now().strftime('%Y-%m-%d'),
-        'updatedAt': datetime.now().strftime('%Y-%m-%d')
-    }
-    
-    lineup_slips.append(new_slip)
-    counters['lineup_slip'] += 1
-    
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Sales', f"Created lineup slip: {slip_number}", request.remote_addr or '0.0.0.0')
-    
-    return jsonify({'status': 'success', 'data': new_slip}), 201
+    if not can_use_lineup_slip(user, job_order.branch_id):
+        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+
+    branch_code = job_order.branch.code if job_order.branch else 'XX'
+    slip = LineupSlip(
+        slip_number=generate_lineup_slip_number(branch_code),
+        job_order_id=job_order.id,
+        branch_id=job_order.branch_id,
+        # Default tasks: the order's material and labor lines
+        items=data.get('items') or [{'description': it.get('name', ''), 'status': 'pending'}
+                                    for it in (job_order.items or [])
+                                    if item_category(it) != 'expense' and it.get('name')],
+        priority=data.get('priority', 'normal'),
+        assigned_to=data.get('assignedTo', ''),
+        notes=data.get('notes', ''),
+    )
+    db.session.add(slip)
+    db.session.commit()
+
+    log_action(user['id'], user['fullName'], 'CREATE', 'Sales', f"Created lineup slip: {slip.slip_number}", request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': lineup_slip_to_dict(slip)}), 201
 
 @app.route('/api/sales/lineup-slips/<int:slip_id>', methods=['PUT'])
 @require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
 def update_lineup_slip(slip_id):
-    slip = next((ls for ls in lineup_slips if ls['id'] == slip_id), None)
+    user = request.current_user
+    slip = LineupSlip.query.get(slip_id)
     if not slip:
         return jsonify({'status': 'error', 'message': 'Lineup slip not found'}), 404
-    
-    data = request.get_json()
-    for key in ['items', 'priority', 'assignedTo', 'notes']:
-        if key in data:
-            slip[key] = data[key]
-    
-    slip['updatedAt'] = datetime.now().strftime('%Y-%m-%d')
-    
-    return jsonify({'status': 'success', 'data': slip})
+    if not can_use_lineup_slip(user, slip.branch_id):
+        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+
+    data = request.get_json() or {}
+    if 'items' in data:
+        slip.items = data['items']
+    if 'priority' in data:
+        slip.priority = data['priority']
+    if 'assignedTo' in data:
+        slip.assigned_to = data['assignedTo']
+    if 'notes' in data:
+        slip.notes = data['notes']
+    slip.updated_at = datetime.utcnow()
+    db.session.commit()
+
+    return jsonify({'status': 'success', 'data': lineup_slip_to_dict(slip)})
 
 # ============================================
 # JOB ORDER COSTING MODULE
 # ============================================
 
+def user_branch_id(user):
+    """Branch a non-admin user is limited to (None if it can't be determined)."""
+    if user.get('branchId'):
+        return user['branchId']
+    if user.get('branch'):
+        b = Branch.query.filter_by(name=user['branch']).first()
+        return b.id if b else None
+    return None
+
+
+def costed_job_orders(user):
+    """Job orders the user may see for costing: real orders, not drafts or dead ones."""
+    query = JobOrder.query.filter(~JobOrder.status.in_(('draft', 'voided', 'cancelled')))
+    if user['role'] != 'administrator':
+        query = query.filter(JobOrder.branch_id == (user_branch_id(user) or -1))
+    return query
+
+
+def revenue_ex_vat(order):
+    """What the order earns us: its total less any VAT collected for the government."""
+    vat = float(order.vat_percent or 0)
+    return round(float(order.total_price or 0) / (1 + vat / 100), 2)
+
+
+def job_order_costing(order):
+    """Cost split for one job order — the same figures the job order page shows.
+    'Overhead' is the order's own other-expense lines; labor uses actual pay
+    once a worker has finished."""
+    materials = labor = expenses = estimated_labor = 0.0
+    for it in order.items or []:
+        qty = float(it.get('quantity') or 0)
+        cat = item_category(it)
+        if cat == 'labor':
+            est = qty * float(it.get('laborCost') or 0)
+            estimated_labor += est
+            labor += float(it['actualLaborCost']) if it.get('actualLaborCost') is not None else est
+        elif cat == 'expense':
+            expenses += qty * float(it.get('materialCost') or 0)
+        else:
+            materials += qty * float(it.get('materialCost') or 0)
+    total_cost = materials + labor + expenses
+    estimated_cost = materials + estimated_labor + expenses
+    revenue = revenue_ex_vat(order)
+    profit = revenue - total_cost
+    return {
+        'materials': round(materials, 2), 'labor': round(labor, 2), 'expenses': round(expenses, 2),
+        'totalCost': round(total_cost, 2), 'estimatedCost': round(estimated_cost, 2),
+        'revenue': revenue, 'grossProfit': round(profit, 2),
+        'profitMargin': round(profit / revenue * 100, 2) if revenue > 0 else 0,
+    }
+
+
 @app.route('/api/costing/all', methods=['GET'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def get_all_costings():
-    user = request.current_user
-    orders = list(job_orders)
-
-    if user['role'] != 'administrator':
-        user_branch = Branch.query.filter_by(name=user['branch']).first()
-        if user_branch:
-            orders = [jo for jo in orders if jo['branchId'] == user_branch.id]
-
+    orders = costed_job_orders(request.current_user).order_by(JobOrder.created_at.desc()).all()
     result = []
     for order in orders:
-        total_material_cost = sum(item.get('materialCost', 0) * item['quantity'] for item in order.get('items', []))
-        total_labor_cost = sum(item.get('laborCost', 0) * item['quantity'] for item in order.get('items', []))
-        overhead = total_material_cost * 0.1
-
+        c = job_order_costing(order)
         result.append({
-            'id': order['id'],
-            'jobOrderNumber': order['jobOrderId'],
-            'materialsCost': round(total_material_cost, 2),
-            'laborCost': round(total_labor_cost, 2),
-            'overheadCost': round(overhead, 2),
-            'totalAmount': order.get('totalPrice', 0),
-            'status': order.get('status', ''),
+            'id': order.id,
+            'jobOrderNumber': order.job_order_id,
+            'customerName': order.customer_name,
+            'materialsCost': c['materials'],
+            'laborCost': c['labor'],
+            'overheadCost': c['expenses'],
+            # Revenue before VAT, so profit and margin on the page are real
+            'totalAmount': c['revenue'],
+            'status': order.status,
         })
-
     return jsonify({'status': 'success', 'data': result})
 
 @app.route('/api/costing/job-order/<int:order_id>', methods=['GET'])
 @require_auth
+@require_roles('administrator', 'supervisor')
 def get_job_order_costing(order_id):
-    user = request.current_user
-    order = next((jo for jo in job_orders if jo['id'] == order_id), None)
+    order = costed_job_orders(request.current_user).filter(JobOrder.id == order_id).first()
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    
-    # Branch-level access control
-    if user['role'] != 'administrator':
-        user_branch = Branch.query.filter_by(name=user['branch']).first()
-        if not user_branch or order['branchId'] != user_branch.id:
-            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
-    
-    total_material_cost = sum(item.get('materialCost', 0) * item['quantity'] for item in order['items'])
-    total_labor_cost = sum(item.get('laborCost', 0) * item['quantity'] for item in order['items'])
-    overhead = total_material_cost * 0.1  # 10% overhead
-    
-    costing_data = {
-        'jobOrderId': order['jobOrderId'],
-        'items': order['items'],
-        'estimatedCost': order['estimatedCost'],
-        'actualCost': order['actualCost'],
-        'materialCost': total_material_cost,
-        'laborCost': total_labor_cost,
-        'overheadCost': round(overhead, 2),
-        'totalCost': round(total_material_cost + total_labor_cost + overhead, 2),
-        'totalPrice': order['totalPrice'],
-        'grossProfit': round(order['totalPrice'] - (total_material_cost + total_labor_cost + overhead), 2),
-        'profitMargin': round((order['totalPrice'] - (total_material_cost + total_labor_cost + overhead)) / order['totalPrice'] * 100, 2) if order['totalPrice'] > 0 else 0,
-        'variance': round(order['actualCost'] - order['estimatedCost'], 2) if order['actualCost'] > 0 else 0
-    }
-    
-    return jsonify({'status': 'success', 'data': costing_data})
+
+    c = job_order_costing(order)
+    return jsonify({'status': 'success', 'data': {
+        'id': order.id,
+        'jobOrderId': order.job_order_id,
+        'items': order.items,
+        'estimatedCost': c['estimatedCost'],
+        'actualCost': c['totalCost'],
+        'materialCost': c['materials'],
+        'laborCost': c['labor'],
+        'overheadCost': c['expenses'],
+        'totalCost': c['totalCost'],
+        'totalPrice': c['revenue'],
+        'grossProfit': c['grossProfit'],
+        'profitMargin': c['profitMargin'],
+        'variance': round(c['totalCost'] - c['estimatedCost'], 2),
+    }})
 
 @app.route('/api/costing/job-order/<int:order_id>/actual', methods=['PUT'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def update_actual_cost(order_id):
-    user = request.current_user
-    order = next((jo for jo in job_orders if jo['id'] == order_id), None)
-    if not order:
-        return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    
-    # Branch-level access control
-    if user['role'] != 'administrator':
-        user_branch = Branch.query.filter_by(name=user['branch']).first()
-        if not user_branch or order['branchId'] != user_branch.id:
-            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
-    
-    data = request.get_json()
-    
-    if 'actualCost' in data:
-        order['actualCost'] = data['actualCost']
-    
-    if 'items' in data:
-        order['items'] = data['items']
-    
-    order['updatedAt'] = datetime.now().strftime('%Y-%m-%d')
-    
-    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Costing', f"Updated actual cost for: {order['jobOrderId']}", request.remote_addr or '0.0.0.0')
-    
-    return jsonify({'status': 'success', 'data': order})
+    # Actual cost is now worked out from the order's lines and its workers'
+    # pay, so it can't be typed in; edit the order's parts instead.
+    return jsonify({'status': 'error',
+                    'message': "Actual cost is calculated automatically. Edit the job order's parts and labor instead."}), 410
 
 @app.route('/api/costing/variance-report', methods=['GET'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def get_variance_report():
-    user = request.current_user
-    completed_orders = [jo for jo in job_orders if jo['status'] == 'completed' and jo['actualCost'] > 0]
-    
-    # Branch-level access control
-    if user['role'] != 'administrator':
-        user_branch = Branch.query.filter_by(name=user['branch']).first()
-        if user_branch:
-            completed_orders = [jo for jo in completed_orders if jo['branchId'] == user_branch.id]
-    
+    orders = costed_job_orders(request.current_user).filter(JobOrder.status == 'completed').all()
     report = []
-    for order in completed_orders:
-        variance = order['actualCost'] - order['estimatedCost']
-        variance_pct = (variance / order['estimatedCost'] * 100) if order['estimatedCost'] > 0 else 0
-        
+    for order in orders:
+        c = job_order_costing(order)
+        if c['totalCost'] <= 0:
+            continue
+        variance = c['totalCost'] - c['estimatedCost']
         report.append({
-            'jobOrderId': order['jobOrderId'],
-            'customerName': order['customerName'],
-            'estimatedCost': order['estimatedCost'],
-            'actualCost': order['actualCost'],
+            'jobOrderId': order.job_order_id,
+            'customerName': order.customer_name,
+            'estimatedCost': c['estimatedCost'],
+            'actualCost': c['totalCost'],
             'variance': round(variance, 2),
-            'variancePercent': round(variance_pct, 2),
+            'variancePercent': round(variance / c['estimatedCost'] * 100, 2) if c['estimatedCost'] > 0 else 0,
             'status': 'over' if variance > 0 else 'under' if variance < 0 else 'on_target'
         })
-    
     return jsonify({'status': 'success', 'data': report})
 
 @app.route('/api/costing/receipt/<int:order_id>', methods=['GET'])
 @require_auth
+@require_roles('administrator', 'supervisor', 'sales_manager')
 def generate_receipt(order_id):
     user = request.current_user
-    order = next((jo for jo in job_orders if jo['id'] == order_id), None)
+    order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    
-    # Branch-level access control
-    if user['role'] != 'administrator':
-        user_branch = Branch.query.filter_by(name=user['branch']).first()
-        if not user_branch or order['branchId'] != user_branch.id:
-            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
-    
+    if user['role'] != 'administrator' and order.branch_id != user_branch_id(user):
+        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+
     receipt = {
-        'receiptNumber': f"RCP-{order['jobOrderId']}",
+        'receiptNumber': f"RCP-{order.job_order_id}",
         'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'customer': {
-            'name': order['customerName'],
-            'phone': order['customerPhone'],
-            'email': order['customerEmail']
+            'name': order.customer_name,
+            'phone': order.customer_phone,
+            'email': order.customer_email or ''
         },
-        'jobOrder': order['jobOrderId'],
-        'branch': order['branchName'],
+        'jobOrder': order.job_order_id,
+        'branch': order.branch.name if order.branch else '',
+        # Customer-facing: materials only, no internal labor or expense lines
         'items': [
             {
-                'description': item['name'],
-                'quantity': item['quantity'],
-                'unitPrice': item['unitPrice'],
-                'total': item['quantity'] * item['unitPrice']
+                'description': item.get('name', ''),
+                'quantity': item.get('quantity', 0),
+                'unitPrice': item.get('unitPrice', 0),
+                'total': float(item.get('quantity') or 0) * float(item.get('unitPrice') or 0)
             }
-            for item in order['items']
+            for item in (order.items or []) if item_category(item) == 'material'
         ],
-        'subtotal': order['totalPrice'],
-        'downPayment': order['downPayment'],
-        'balance': order['balance'],
-        'paymentStatus': order['paymentStatus']
+        'subtotal': order.total_price,
+        'downPayment': order.down_payment,
+        'balance': order.balance,
+        'paymentStatus': order.payment_status
     }
-    
     return jsonify({'status': 'success', 'data': receipt})
 
 # ============================================
@@ -3551,96 +4025,127 @@ def generate_receipt(order_id):
 @require_roles('administrator', 'supervisor')
 def get_purchase_orders():
     status = request.args.get('status')
-    items = purchase_orders
+    query = PurchaseOrder.query
     if status:
-        items = [po for po in items if po['status'] == status]
-    return jsonify({'status': 'success', 'data': items})
+        query = query.filter_by(status=status)
+    pos = query.order_by(PurchaseOrder.created_at.desc()).all()
+    return jsonify({'status': 'success', 'data': [purchase_order_to_dict(po) for po in pos]})
+
+
+def purchase_order_to_dict(po):
+    day = lambda dt: dt.strftime('%Y-%m-%d') if dt else None
+    return {
+        'id': po.id,
+        'poNumber': po.po_number,
+        'supplierId': po.supplier_id,
+        'supplierName': po.supplier_name,
+        'items': [{**it, 'totalPrice': round(float(it.get('quantity') or 0) * float(it.get('unitPrice') or 0), 2)}
+                  for it in (po.items or [])],
+        'totalAmount': po.total_amount,
+        'status': po.status,
+        'expectedDelivery': po.expected_delivery,
+        'createdAt': day(po.created_at),
+        'createdBy': po.created_by,
+        'approvedAt': day(po.approved_at),
+        'approvedBy': po.approved_by,
+        'receivedAt': day(po.received_at),
+    }
 
 @app.route('/api/purchase-orders/<int:po_id>', methods=['GET'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def get_purchase_order(po_id):
-    po = next((p for p in purchase_orders if p['id'] == po_id), None)
+    po = PurchaseOrder.query.get(po_id)
     if not po:
         return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
-    return jsonify({'status': 'success', 'data': po})
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
 
 @app.route('/api/purchase-orders', methods=['POST'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def create_purchase_order():
-    global counters
-    data = request.get_json()
-    
+    data = request.get_json() or {}
+
     required = ['supplierName', 'items', 'expectedDelivery']
-    if not all(f in data for f in required):
-        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
-    
-    total_amount = sum(item['quantity'] * item['unitPrice'] for item in data['items'])
-    
-    new_po = {
-        'id': counters['purchase_order'],
-        'poNumber': generate_po_number(),
-        'supplierId': data.get('supplierId'),
-        'supplierName': data['supplierName'],
-        'items': data['items'],
-        'totalAmount': total_amount,
-        'status': 'pending',
-        'expectedDelivery': data['expectedDelivery'],
-        'createdAt': datetime.now().strftime('%Y-%m-%d'),
-        'createdBy': request.current_user['id'],
-        'approvedAt': None,
-        'approvedBy': None
-    }
-    
-    purchase_orders.append(new_po)
-    counters['purchase_order'] += 1
-    
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Purchase Orders', f"Created PO: {new_po['poNumber']}", request.remote_addr or '0.0.0.0')
-    
-    return jsonify({'status': 'success', 'data': new_po}), 201
+    if not all(data.get(f) for f in required):
+        return jsonify({'status': 'error', 'message': 'Supplier, at least one item and an expected delivery date are required'}), 400
+
+    items = [{
+        'materialId': it.get('materialId'),
+        'name': it.get('name', ''),
+        'quantity': float(it.get('quantity') or 0),
+        'unit': it.get('unit', ''),
+        'unitPrice': float(it.get('unitPrice') or 0),
+    } for it in data['items']]
+    if any(it['quantity'] <= 0 for it in items):
+        return jsonify({'status': 'error', 'message': 'Every item needs a quantity above zero'}), 400
+
+    supplier_id = data.get('supplierId')
+    if supplier_id and not Supplier.query.get(supplier_id):
+        supplier_id = None
+
+    po = PurchaseOrder(
+        po_number=generate_po_number(),
+        supplier_id=supplier_id,
+        supplier_name=data['supplierName'],
+        items=items,
+        total_amount=round(sum(it['quantity'] * it['unitPrice'] for it in items), 2),
+        status='pending',
+        expected_delivery=str(data['expectedDelivery'])[:10],
+        created_by=request.current_user['id'],
+    )
+    db.session.add(po)
+    db.session.commit()
+
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Purchase Orders', f"Created PO: {po.po_number}", request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)}), 201
 
 @app.route('/api/purchase-orders/<int:po_id>/approve', methods=['POST'])
 @require_auth
 @require_roles('administrator')
 def approve_purchase_order(po_id):
-    po = next((p for p in purchase_orders if p['id'] == po_id), None)
+    po = PurchaseOrder.query.get(po_id)
     if not po:
         return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
-    
-    po['status'] = 'approved'
-    po['approvedAt'] = datetime.now().strftime('%Y-%m-%d')
-    po['approvedBy'] = request.current_user['id']
-    
-    log_action(request.current_user['id'], request.current_user['fullName'], 'APPROVE', 'Purchase Orders', f"Approved PO: {po['poNumber']}", request.remote_addr or '0.0.0.0')
-    
-    return jsonify({'status': 'success', 'data': po})
+    if po.status != 'pending':
+        return jsonify({'status': 'error', 'message': f'This PO is already {po.status}'}), 400
+
+    po.status = 'approved'
+    po.approved_at = datetime.utcnow()
+    po.approved_by = request.current_user['id']
+    db.session.commit()
+
+    log_action(request.current_user['id'], request.current_user['fullName'], 'APPROVE', 'Purchase Orders', f"Approved PO: {po.po_number}", request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
 
 @app.route('/api/purchase-orders/<int:po_id>/receive', methods=['POST'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def receive_purchase_order(po_id):
-    po = next((p for p in purchase_orders if p['id'] == po_id), None)
+    po = PurchaseOrder.query.get(po_id)
     if not po:
         return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
-    
-    if po['status'] != 'approved':
+
+    if po.status != 'approved':
         return jsonify({'status': 'error', 'message': 'PO must be approved first'}), 400
-    
+
     # Update inventory
-    for item in po['items']:
-        material = InventoryMaterial.query.get(item.get('materialId'))
+    for item in po.items or []:
+        material = InventoryMaterial.query.get(item.get('materialId')) if item.get('materialId') else None
         if material:
             material.stock_quantity = float(material.stock_quantity) + float(item['quantity'])
-    
-    po['status'] = 'received'
-    po['receivedAt'] = datetime.now().strftime('%Y-%m-%d')
+            material.status = 'available'
+            material.updated_at = datetime.utcnow()
 
+    po.status = 'received'
+    po.received_at = datetime.utcnow()
     db.session.commit()
-    
-    log_action(request.current_user['id'], request.current_user['fullName'], 'RECEIVE', 'Purchase Orders', f"Received PO: {po['poNumber']}", request.remote_addr or '0.0.0.0')
-    
-    return jsonify({'status': 'success', 'data': po})
+
+    log_action(request.current_user['id'], request.current_user['fullName'], 'RECEIVE', 'Purchase Orders', f"Received PO: {po.po_number}", request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
 
 # ============================================
 # DELIVERY MODULE
@@ -3648,148 +4153,129 @@ def receive_purchase_order(po_id):
 
 @app.route('/api/deliveries', methods=['GET'])
 @require_auth
+@require_roles(*STAFF_ROLES)
 def get_deliveries():
     user = request.current_user
-    status = request.args.get('status')
-    delivery_type = request.args.get('type')
-    
-    items = deliveries
-    
-    # Branch-level access control
+    query = Delivery.query
     if user['role'] != 'administrator':
-        user_branch = Branch.query.filter_by(name=user['branch']).first()
-        if user_branch:
-            items = [d for d in items if d['fromBranchId'] == user_branch.id or d.get('toBranchId') == user_branch.id]
-        else:
-            items = []
-    
-    if status:
-        items = [d for d in items if d['status'] == status]
-    if delivery_type:
-        items = [d for d in items if d['type'] == delivery_type]
-    
-    return jsonify({'status': 'success', 'data': items})
+        bid = user_branch_id(user) or -1
+        query = query.filter(db.or_(Delivery.from_branch_id == bid, Delivery.to_branch_id == bid))
+    if request.args.get('status'):
+        query = query.filter(Delivery.status == request.args['status'])
+    if request.args.get('type'):
+        query = query.filter(Delivery.type == request.args['type'])
+    deliveries_ = query.order_by(Delivery.created_at.desc()).all()
+    return jsonify({'status': 'success', 'data': [delivery_to_dict(d) for d in deliveries_]})
 
 @app.route('/api/deliveries/<int:delivery_id>', methods=['GET'])
 @require_auth
+@require_roles(*STAFF_ROLES)
 def get_delivery(delivery_id):
-    user = request.current_user
-    delivery = next((d for d in deliveries if d['id'] == delivery_id), None)
-    if not delivery:
+    d = Delivery.query.get(delivery_id)
+    if not d:
         return jsonify({'status': 'error', 'message': 'Delivery not found'}), 404
-    
-    # Branch-level access control
-    if user['role'] != 'administrator':
-        user_branch = Branch.query.filter_by(name=user['branch']).first()
-        if not user_branch or (delivery['fromBranchId'] != user_branch.id and delivery.get('toBranchId') != user_branch.id):
-            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
-    
-    return jsonify({'status': 'success', 'data': delivery})
+    if not can_see_delivery(request.current_user, d):
+        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+    return jsonify({'status': 'success', 'data': delivery_to_dict(d)})
 
 @app.route('/api/deliveries', methods=['POST'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def create_delivery():
-    global counters
-    data = request.get_json()
-    
-    required = ['type', 'fromBranchId', 'items', 'scheduledDate']
-    if not all(f in data for f in required):
-        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
-    
-    from_branch = next((b for b in branches if b['id'] == data['fromBranchId']), None)
-    to_branch = next((b for b in branches if b['id'] == data.get('toBranchId')), None) if data.get('toBranchId') else None
-    
-    new_delivery = {
-        'id': counters['delivery'],
-        'deliveryNumber': generate_delivery_number(),
-        'type': data['type'],
-        'fromBranchId': data['fromBranchId'],
-        'fromBranchName': from_branch['name'] if from_branch else None,
-        'toBranchId': data.get('toBranchId'),
-        'toBranchName': to_branch['name'] if to_branch else None,
-        'customerName': data.get('customerName'),
-        'customerAddress': data.get('customerAddress'),
-        'customerPhone': data.get('customerPhone'),
-        'jobOrderId': data.get('jobOrderId'),
-        'jobOrderNumber': data.get('jobOrderNumber'),
-        'items': data['items'],
-        'status': 'scheduled',
-        'scheduledDate': data['scheduledDate'],
-        'estimatedArrival': data.get('estimatedArrival'),
-        'driverName': data.get('driverName', ''),
-        'driverContact': data.get('driverContact', ''),
-        'vehiclePlate': data.get('vehiclePlate', ''),
-        'notes': data.get('notes', ''),
-        'createdAt': datetime.now().strftime('%Y-%m-%d'),
-        'createdBy': request.current_user['id']
-    }
-    
-    deliveries.append(new_delivery)
-    counters['delivery'] += 1
-    
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Delivery', f"Created delivery: {new_delivery['deliveryNumber']}", request.remote_addr or '0.0.0.0')
-    
-    return jsonify({'status': 'success', 'data': new_delivery}), 201
+    data = request.get_json() or {}
+    if not data.get('type') or not data.get('scheduledDate'):
+        return jsonify({'status': 'error', 'message': 'Delivery type and date are required'}), 400
+
+    job_order = JobOrder.query.get(data['jobOrderId']) if data.get('jobOrderId') else None
+    # Deliver from the branch that did the job, unless one is given
+    from_branch_id = data.get('fromBranchId') or (job_order.branch_id if job_order else None) \
+        or user_branch_id(request.current_user)
+    if from_branch_id and not Branch.query.get(from_branch_id):
+        return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
+    to_branch_id = data.get('toBranchId')
+    if to_branch_id and not Branch.query.get(to_branch_id):
+        return jsonify({'status': 'error', 'message': 'Invalid destination branch'}), 400
+
+    d = Delivery(
+        delivery_number=generate_delivery_number(),
+        type=data['type'],
+        from_branch_id=from_branch_id,
+        to_branch_id=to_branch_id,
+        customer_name=data.get('customerName'),
+        customer_address=data.get('customerAddress'),
+        customer_phone=data.get('customerPhone'),
+        job_order_id=job_order.id if job_order else None,
+        items=data.get('items') or [],
+        status='scheduled',
+        scheduled_date=str(data['scheduledDate'])[:10],
+        time_slot=data.get('timeSlot'),
+        estimated_arrival=data.get('estimatedArrival'),
+        driver_name=data.get('driverName', ''),
+        driver_contact=data.get('driverContact', ''),
+        vehicle_plate=data.get('vehiclePlate', ''),
+        notes=data.get('notes', ''),
+        created_by=request.current_user['id'],
+    )
+    db.session.add(d)
+    db.session.commit()
+
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Delivery', f"Created delivery: {d.delivery_number}", request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': delivery_to_dict(d)}), 201
 
 @app.route('/api/deliveries/<int:delivery_id>/status', methods=['PUT'])
 @require_auth
+@require_roles(*STAFF_ROLES)
 def update_delivery_status(delivery_id):
     user = request.current_user
-    delivery = next((d for d in deliveries if d['id'] == delivery_id), None)
-    if not delivery:
+    d = Delivery.query.get(delivery_id)
+    if not d:
         return jsonify({'status': 'error', 'message': 'Delivery not found'}), 404
-    
-    # Branch-level access control
-    if user['role'] != 'administrator':
-        user_branch = Branch.query.filter_by(name=user['branch']).first()
-        if not user_branch or (delivery['fromBranchId'] != user_branch.id and delivery.get('toBranchId') != user_branch.id):
-            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
-    
-    data = request.get_json()
-    new_status = data.get('status')
-    
+    if not can_see_delivery(user, d):
+        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+
+    new_status = (request.get_json() or {}).get('status')
     if new_status not in ['scheduled', 'in_transit', 'delivered', 'cancelled']:
         return jsonify({'status': 'error', 'message': 'Invalid status'}), 400
-    
-    delivery['status'] = new_status
-    
+
+    d.status = new_status
     if new_status == 'delivered':
-        delivery['deliveredAt'] = datetime.now().strftime('%Y-%m-%d %H:%M')
-    
-    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Delivery', f"Updated delivery status: {delivery['deliveryNumber']} to {new_status}", request.remote_addr or '0.0.0.0')
-    
-    return jsonify({'status': 'success', 'data': delivery})
+        d.delivered_at = datetime.utcnow()
+        # The job order it carried has now reached the customer
+        if d.job_order and d.job_order.status == 'completed':
+            d.job_order.status = 'delivered'
+            d.job_order.updated_at = datetime.utcnow()
+    db.session.commit()
+
+    log_action(user['id'], user['fullName'], 'UPDATE', 'Delivery', f"Updated delivery status: {d.delivery_number} to {new_status}", request.remote_addr or '0.0.0.0')
+
+    return jsonify({'status': 'success', 'data': delivery_to_dict(d)})
 
 @app.route('/api/deliveries/<int:delivery_id>/receipt', methods=['GET'])
 @require_auth
+@require_roles(*STAFF_ROLES)
 def generate_delivery_receipt(delivery_id):
-    user = request.current_user
-    delivery = next((d for d in deliveries if d['id'] == delivery_id), None)
-    if not delivery:
+    d = Delivery.query.get(delivery_id)
+    if not d:
         return jsonify({'status': 'error', 'message': 'Delivery not found'}), 404
-    
-    # Branch-level access control
-    if user['role'] != 'administrator':
-        user_branch = Branch.query.filter_by(name=user['branch']).first()
-        if not user_branch or (delivery['fromBranchId'] != user_branch.id and delivery.get('toBranchId') != user_branch.id):
-            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
-    
+    if not can_see_delivery(request.current_user, d):
+        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+
     receipt = {
-        'receiptNumber': f"DR-{delivery['deliveryNumber']}",
+        'receiptNumber': f"DR-{d.delivery_number}",
         'date': datetime.now().strftime('%Y-%m-%d'),
-        'deliveryNumber': delivery['deliveryNumber'],
-        'type': delivery['type'],
-        'from': delivery['fromBranchName'],
-        'to': delivery.get('toBranchName') or delivery.get('customerName'),
-        'address': delivery.get('customerAddress') or next((b['address'] for b in branches if b['id'] == delivery.get('toBranchId')), ''),
-        'items': delivery['items'],
-        'driver': delivery['driverName'],
-        'vehicle': delivery['vehiclePlate'],
-        'status': delivery['status'],
-        'deliveredAt': delivery.get('deliveredAt')
+        'deliveryNumber': d.delivery_number,
+        'type': d.type,
+        'from': d.from_branch.name if d.from_branch else '',
+        'to': (d.to_branch.name if d.to_branch else None) or d.customer_name,
+        'address': d.customer_address or (d.to_branch.address if d.to_branch else ''),
+        'items': d.items or [],
+        'driver': d.driver_name or '',
+        'vehicle': d.vehicle_plate or '',
+        'status': d.status,
+        'deliveredAt': delivery_to_dict(d)['deliveredAt'],
     }
-    
+
     return jsonify({'status': 'success', 'data': receipt})
 
 # ============================================
@@ -4281,8 +4767,10 @@ def build_product_order_timeline(order):
         })
 
     related_logs = [
-        l for l in audit_logs
-        if l.get('module') == 'Product Orders' and order.order_number in (l.get('details') or '')
+        audit_log_to_dict(l) for l in AuditLog.query.filter(
+            AuditLog.module == 'Product Orders',
+            AuditLog.details.contains(order.order_number),
+        ).all()
     ]
 
     for log in related_logs:
@@ -5702,62 +6190,95 @@ def get_inventory_forecast():
         'period': period,
     }})
 
+def forecast_branch_id():
+    """Admins forecast the whole company (or ?branchId=); supervisors their own branch."""
+    user = request.current_user
+    if user['role'] == 'administrator':
+        return request.args.get('branchId', type=int)
+    return user_branch_id(user) or -1
+
+
 @app.route('/api/forecasting/demand', methods=['GET'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def get_demand_forecast():
-    # Simple demand forecasting based on historical data
-    months = ['Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul']
-    
-    # Simulated forecast based on completed orders
-    completed_count = len([jo for jo in job_orders if jo['status'] == 'completed'])
-    base_demand = max(completed_count * 1.2, 5)  # Minimum 5 orders forecasted
-    
+    """Next six months of job orders, projected from the last six months of real
+    orders: the average of the latest three months, nudged by the recent trend."""
+    bid = forecast_branch_id()
+    today = datetime.now().date().replace(day=1)
+
+    def add_months(d, n):
+        y, m = divmod(d.month - 1 + n, 12)
+        return d.replace(year=d.year + y, month=m + 1)
+
+    history_start = add_months(today, -6)
+    q = JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided')),
+                              JobOrder.created_at >= datetime.combine(history_start, datetime.min.time()))
+    if bid is not None:
+        q = q.filter(JobOrder.branch_id == bid)
+
+    counts = {add_months(history_start, i): [0, 0.0] for i in range(6)}
+    for jo in q.all():
+        key = jo.created_at.date().replace(day=1)
+        if key in counts:
+            counts[key][0] += 1
+            counts[key][1] += revenue_ex_vat(jo)
+
+    monthly = [counts[k] for k in sorted(counts)]
+    recent = monthly[-3:]
+    avg_orders = sum(m[0] for m in recent) / 3
+    avg_value = (sum(m[1] for m in monthly) / sum(m[0] for m in monthly)) if any(m[0] for m in monthly) else 0
+    # Monthly change between the older and newer three-month halves
+    trend = (avg_orders - sum(m[0] for m in monthly[:3]) / 3) / 3
+    months_with_data = sum(1 for m in monthly if m[0] > 0)
+
     forecast = []
-    for i, month in enumerate(months):
-        # Add some variance for realistic forecasting
-        seasonal_factor = 1.0 + (0.1 * (i % 3))  # Slight seasonal variation
-        forecasted = round(base_demand * seasonal_factor + random.uniform(-2, 2))
-        
+    for i in range(1, 7):
+        orders = max(round(avg_orders + trend * i), 0)
         forecast.append({
-            'month': month,
-            'forecastedOrders': max(forecasted, 1),
-            'forecastedRevenue': round(forecasted * 500, 2),  # Avg order value
-            'confidence': round(85 - (i * 3), 1)  # Confidence decreases over time
+            'month': add_months(today, i).strftime('%b %Y'),
+            'forecastedOrders': orders,
+            'forecastedRevenue': round(orders * avg_value, 2),
+            # Less history and further ahead both mean less confidence
+            'confidence': round(max(40 + months_with_data * 8 - i * 4, 10), 1),
         })
-    
     return jsonify({'status': 'success', 'data': forecast})
 
 @app.route('/api/forecasting/materials', methods=['GET'])
 @require_auth
 @require_roles('administrator', 'supervisor')
 def get_material_forecast():
-    # Material requirement prediction
+    """When each material will hit its reorder point, from the last 30 days of real usage."""
+    bid = forecast_branch_id()
+    since = datetime.utcnow() - timedelta(days=30)
+
+    usage_q = db.session.query(MaterialUsageLog.material_id, db.func.sum(MaterialUsageLog.quantity_used)) \
+        .filter(MaterialUsageLog.created_at >= since, MaterialUsageLog.material_id.isnot(None))
+    usage = {mid: float(total or 0) for mid, total in usage_q.group_by(MaterialUsageLog.material_id).all()}
+
+    mat_q = InventoryMaterial.query.filter(InventoryMaterial.is_archived.is_(False))
+    if bid is not None:
+        mat_q = mat_q.filter(InventoryMaterial.branch_id == bid)
+
     forecasts = []
-    
-    for material in raw_materials:
-        if material['isArchived']:
-            continue
-        
-        # Calculate average daily usage (simulated)
-        daily_usage = material['quantity'] * 0.02  # 2% daily usage
-        days_until_reorder = int((material['quantity'] - material['reorderPoint']) / daily_usage) if daily_usage > 0 else 999
-        
+    for material in mat_q.all():
+        stock = float(material.stock_quantity or 0)
+        reorder_point = float(material.low_stock_threshold or 0)
+        daily_usage = usage.get(material.id, 0) / 30
+        days_until_reorder = int((stock - reorder_point) / daily_usage) if daily_usage > 0 else 999
         forecasts.append({
-            'materialId': material['id'],
-            'name': material['name'],
-            'currentStock': material['quantity'],
-            'reorderPoint': material['reorderPoint'],
+            'materialId': material.id,
+            'name': ' '.join(filter(None, [material.material_type, material.color])).strip(),
+            'currentStock': stock,
+            'reorderPoint': reorder_point,
             'dailyUsage': round(daily_usage, 2),
             'daysUntilReorder': max(days_until_reorder, 0),
-            'recommendedOrderQty': max(int(daily_usage * 30), material['reorderPoint']),  # 30 days supply
+            'recommendedOrderQty': round(max(daily_usage * 30, reorder_point), 2),  # about a month's supply
             'urgency': 'high' if days_until_reorder <= 7 else 'medium' if days_until_reorder <= 14 else 'low'
         })
-    
-    # Sort by urgency
+
     urgency_order = {'high': 0, 'medium': 1, 'low': 2}
-    forecasts.sort(key=lambda x: urgency_order[x['urgency']])
-    
+    forecasts.sort(key=lambda x: (urgency_order[x['urgency']], x['daysUntilReorder']))
     return jsonify({'status': 'success', 'data': forecasts})
 
 # ============================================
@@ -5799,7 +6320,8 @@ def get_sales_report():
     orders = jo_query.all()
 
     total_orders = len(orders)
-    total_revenue = sum(float(o.total_price) for o in orders if o.status == 'completed')
+    # Revenue excludes VAT (collected for the government); pending balances below stay as billed
+    total_revenue = sum(revenue_ex_vat(o) for o in orders if o.status == 'completed')
     total_pending_revenue = sum(float(o.balance) for o in orders if o.payment_status != 'paid')
 
     status_breakdown = {}
@@ -5810,7 +6332,7 @@ def get_sales_report():
         if status not in status_breakdown:
             status_breakdown[status] = {'count': 0, 'value': 0}
         status_breakdown[status]['count'] += 1
-        status_breakdown[status]['value'] += float(o.total_price)
+        status_breakdown[status]['value'] += revenue_ex_vat(o)
 
         date = o.created_at.strftime('%Y-%m-%d') if o.created_at else ''
         if date:
@@ -5818,7 +6340,7 @@ def get_sales_report():
                 daily_sales[date] = {'orders': 0, 'revenue': 0}
             daily_sales[date]['orders'] += 1
             if o.status == 'completed':
-                daily_sales[date]['revenue'] += float(o.total_price)
+                daily_sales[date]['revenue'] += revenue_ex_vat(o)
 
     # ── Premade Product Orders ──
     # Each branch gets revenue credit for items where sourceBranchId == their branch.
@@ -6084,20 +6606,22 @@ def get_audit_trail():
     user_id = request.args.get('userId')
     module = request.args.get('module')
     
-    logs = audit_logs
-    
-    if start_date:
-        logs = [l for l in logs if l['timestamp'][:10] >= start_date]
-    if end_date:
-        logs = [l for l in logs if l['timestamp'][:10] <= end_date]
+    query = AuditLog.query
+    # Dates are Philippine-time calendar days; stored times are UTC
+    try:
+        if start_date:
+            query = query.filter(AuditLog.created_at >= datetime.strptime(start_date, '%Y-%m-%d') - PH_OFFSET)
+        if end_date:
+            query = query.filter(AuditLog.created_at < datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - PH_OFFSET)
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Invalid date format'}), 400
     if user_id:
-        logs = [l for l in logs if l['userId'] == int(user_id)]
+        query = query.filter(AuditLog.user_id == int(user_id))
     if module:
-        logs = [l for l in logs if l['module'].lower() == module.lower()]
-    
-    logs = sorted(logs, key=lambda x: x['timestamp'], reverse=True)
-    
-    return jsonify({'status': 'success', 'data': logs})
+        query = query.filter(db.func.lower(AuditLog.module) == module.lower())
+
+    logs = query.order_by(AuditLog.created_at.desc()).limit(2000).all()
+    return jsonify({'status': 'success', 'data': [audit_log_to_dict(l) for l in logs]})
 
 # ============================================
 # SETTINGS MODULE - USER MANAGEMENT
@@ -7247,13 +7771,30 @@ def create_worker_assignment():
     worker = ManagedWorker.query.get(worker_id)
     if not worker:
         return jsonify({'error': 'Worker not found'}), 404
-    description = data.get('description', '') or ''
-    # Prevent exact duplicates (same worker + job order + description)
-    existing = WorkerAssignment.query.filter_by(
-        worker_id=worker_id,
-        job_order_ref=job_order_ref,
-        description=description,
-    ).first()
+    description = (data.get('description', '') or '').strip()
+    assignment_type = data.get('assignmentType', 'job_order')
+    if assignment_type not in ('job_order', 'special_task'):
+        assignment_type = 'job_order'
+
+    order = None
+    if assignment_type == 'job_order':
+        order = (JobOrder.query.get(data['jobOrderDbId']) if data.get('jobOrderDbId')
+                 else JobOrder.query.filter_by(job_order_id=job_order_ref).first())
+        if not order:
+            return jsonify({'error': 'Job order not found'}), 404
+        if order.status in ('draft', 'cancelled', 'voided'):
+            return jsonify({'error': f'Workers cannot be assigned to a {order.status} job order'}), 400
+        if not description:
+            # Name the task after the worker's trade so the job order's labor line reads sensibly
+            description = worker.work_type.replace('_', ' ').title()
+
+    # Prevent exact duplicates (same worker + job order + task). Special tasks all
+    # share one reference, so their title is part of what makes them different.
+    existing = None
+    if assignment_type == 'job_order':
+        existing = WorkerAssignment.query.filter_by(
+            worker_id=worker_id, job_order_db_id=order.id, description=description,
+        ).first()
     if existing:
         return jsonify({
             'status': 'success',
@@ -7268,9 +7809,6 @@ def create_worker_assignment():
                 }
             }
         })
-    assignment_type = data.get('assignmentType', 'job_order')
-    if assignment_type not in ('job_order', 'special_task'):
-        assignment_type = 'job_order'
     special_task_title = (data.get('specialTaskTitle') or '').strip() or None
     scheduled_date = None
     if data.get('scheduledDate'):
@@ -7281,8 +7819,8 @@ def create_worker_assignment():
             pass
     assignment = WorkerAssignment(
         worker_id=worker_id,
-        job_order_ref=job_order_ref,
-        job_order_db_id=data.get('jobOrderDbId'),
+        job_order_ref=order.job_order_id if order else job_order_ref,
+        job_order_db_id=order.id if order else None,
         description=description,
         expected_hours=data.get('expectedHours'),
         assignment_type=assignment_type,
@@ -7292,6 +7830,9 @@ def create_worker_assignment():
         notes=data.get('notes', ''),
     )
     db.session.add(assignment)
+    db.session.flush()
+    if order:
+        add_labor_line_for_assignment(order, assignment)
     db.session.commit()
     return jsonify({
         'status': 'success',
@@ -7327,31 +7868,11 @@ def update_worker_assignment(assignment_id):
                 assignment.hours_worked = round(delta.total_seconds() / 3600, 2)
             if data.get('hoursWorked') is not None:
                 assignment.hours_worked = float(data['hoursWorked'])
-            # Materials snapshot
+            # Materials snapshot. Stock usage itself is logged once, when the job
+            # order is completed — logging the order's whole material list here
+            # too counted it again for every worker on the job.
             if data.get('materialsUsed') is not None:
                 assignment.materials_used = data['materialsUsed']
-            # Log material usage when a job order assignment is completed
-            if assignment.assignment_type != 'special_task' and assignment.job_order_db_id:
-                job_order = JobOrder.query.get(assignment.job_order_db_id)
-                if job_order and job_order.items:
-                    worker_name = assignment.worker.name if assignment.worker else 'Unknown'
-                    for item in job_order.items:
-                        material_id = item.get('materialId')
-                        qty = float(item.get('quantity') or 0)
-                        if not material_id or qty <= 0:
-                            continue
-                        material = InventoryMaterial.query.get(material_id)
-                        if not material:
-                            continue
-                        db.session.add(MaterialUsageLog(
-                            material_id=material.id,
-                            quantity_used=qty,
-                            used_in_type='job_order',
-                            used_in_reference=assignment.job_order_ref,
-                            branch_id=job_order.branch_id,
-                            managed_worker_id=assignment.worker_id,
-                            notes=f"Job order completed by {worker_name}",
-                        ))
             # Pay: explicit override wins; otherwise compute from pay_mode
             if data.get('payOverride') is not None:
                 assignment.pay = float(data['payOverride'])
@@ -7386,6 +7907,7 @@ def update_worker_assignment(assignment_id):
     if 'expectedHours' in data and data['expectedHours'] is not None:
         assignment.expected_hours = float(data['expectedHours'])
     assignment.updated_at = datetime.utcnow()
+    record_assignment_pay(assignment)
     db.session.commit()
     return jsonify({
         'status': 'success',
@@ -7454,6 +7976,13 @@ def delete_worker_assignment(assignment_id):
     assignment = WorkerAssignment.query.get(assignment_id)
     if not assignment:
         return jsonify({'error': 'Assignment not found'}), 404
+    # Its labor line goes with it, so both screens keep showing the same workers
+    order = (JobOrder.query.get(assignment.job_order_db_id) if assignment.job_order_db_id
+             else JobOrder.query.filter_by(job_order_id=assignment.job_order_ref).first())
+    if order and any(it.get('assignmentId') == assignment.id for it in (order.items or [])):
+        items = [dict(it) for it in order.items if it.get('assignmentId') != assignment.id]
+        order.items = items
+        order.actual_cost = job_order_cost(items)
     db.session.delete(assignment)
     db.session.commit()
     return jsonify({'status': 'success', 'message': 'Assignment deleted'})
@@ -7574,6 +8103,7 @@ def health_check():
 
 @app.route('/api/debug/branches-and-orders', methods=['GET'])
 @require_auth
+@require_roles('administrator')
 def debug_branches_and_orders():
     """Debug endpoint to see all branches and orders"""
     user = request.current_user
@@ -7586,14 +8116,15 @@ def debug_branches_and_orders():
     memory_branches = branches
     
     # Get job orders with their branch info
+    db_orders = JobOrder.query.order_by(JobOrder.created_at.desc()).all()
     orders_info = [{
-        'id': jo['id'],
-        'jobOrderId': jo['jobOrderId'],
-        'branchId': jo['branchId'],
-        'branchName': jo['branchName'],
-        'customerName': jo['customerName'],
-        'status': jo['status']
-    } for jo in job_orders]
+        'id': jo.id,
+        'jobOrderId': jo.job_order_id,
+        'branchId': jo.branch_id,
+        'branchName': jo.branch.name if jo.branch else '',
+        'customerName': jo.customer_name,
+        'status': jo.status
+    } for jo in db_orders]
     
     return jsonify({
         'status': 'success',
@@ -7607,7 +8138,7 @@ def debug_branches_and_orders():
             'databaseBranches': db_branches_list,
             'memoryBranches': memory_branches,
             'jobOrders': orders_info,
-            'totalOrders': len(job_orders)
+            'totalOrders': len(db_orders)
         }
     })
 
@@ -8322,7 +8853,6 @@ if __name__ == '__main__':
         db_branches = Branch.query.all()
         print(f"Database branches: {[(b.id, b.name) for b in db_branches]}")
         print(f"In-memory branches: {[(b['id'], b['name']) for b in branches]}")
-        print(f"Job orders count: {len(job_orders)}")
-        print(f"Job orders by branch: {[(jo['id'], jo['branchId'], jo['branchName']) for jo in job_orders]}")
+        print(f"Job orders count: {JobOrder.query.count()}")
         print("=" * 60)
     app.run(debug=True, port=8080)

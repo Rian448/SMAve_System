@@ -46,6 +46,9 @@ export interface DashboardStats {
   totalFinishedGoods: number;
   totalUsers?: number;
   totalBranches?: number;
+  /** Branch these figures cover; null means the whole company (admins only) */
+  scopeBranchId?: number | null;
+  scopeBranchName?: string | null;
 }
 
 export interface Activity {
@@ -109,63 +112,6 @@ export interface CustomerOrderSummary {
   balance: number;
   createdAt: string;
   estimatedCompletion?: string | null;
-}
-
-export interface WorkerProfile {
-  id: number;
-  userId: number;
-  userName: string;
-  workerType: 'staff';
-  isAvailable: boolean;
-  specialization?: 'seat_maker' | 'sewer' | 'general' | string;
-  branchId?: number;
-}
-
-export interface WorkTask {
-  id: number;
-  taskNumber: string;
-  jobOrderId: string;
-  workerId?: number;
-  workerName?: string;
-  title: string;
-  description?: string;
-  taskType: string;
-  priority: 'low' | 'normal' | 'high' | 'urgent';
-  status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
-  estimatedHours?: number;
-  actualHours?: number;
-  dueDate?: string;
-  startedAt?: string;
-  completedAt?: string;
-  createdAt: string;
-  notes?: string;
-  queuePosition?: number | null;
-  isOverdue?: boolean;
-  overdueByHours?: number;
-}
-
-export interface WorkerWorkload {
-  workerId: number;
-  workerName: string;
-  workerType: string;
-  isAvailable: boolean;
-  branchId?: number;
-  activeTask: WorkTask | null;
-  queuedCount: number;
-  queuedTasks: WorkTask[];
-  totalRemainingHours: number;
-}
-
-export interface WorkTaskInput {
-  jobOrderId: string;
-  title: string;
-  taskType: string;
-  description?: string;
-  priority?: 'low' | 'normal' | 'high' | 'urgent';
-  estimatedHours?: number;
-  dueDate?: string;
-  workerId?: number;
-  notes?: string;
 }
 
 export interface PhoneBlacklistRecord {
@@ -641,6 +587,46 @@ export interface JobOrderItem {
   notes?: string;
   /** FK to inventory_materials.id — used to deduct stock on job order completion */
   materialId?: number;
+  /** Older orders don't store this; see jobOrderItemCategory() */
+  category?: 'material' | 'labor' | 'expense';
+  /** Worker assignment this labor line is linked to (managed by the server) */
+  assignmentId?: number;
+  /** What the worker was actually paid for this whole line, once their assignment is completed */
+  actualLaborCost?: number;
+  /** Read-only, from the linked worker assignment (not stored on the order) */
+  assignmentStatus?: 'pending' | 'in_progress' | 'completed';
+  scheduledDate?: string | null;
+}
+
+/** Material, labor or other expense. Older orders didn't store it: a line with only labor cost is labor. */
+export function jobOrderItemCategory(item: JobOrderItem): 'material' | 'labor' | 'expense' {
+  if (item.category) return item.category;
+  return Number(item.laborCost) > 0 && Number(item.materialCost) === 0 ? 'labor' : 'material';
+}
+
+/** Standard Philippine VAT rate, used when VAT is switched on for a job order */
+export const DEFAULT_VAT_PERCENT = 12;
+
+/**
+ * Splits a job order's final price into subtotal → discount → VAT → total.
+ * Only the total and the two percentages are stored, so the rest is derived
+ * backwards from them; the parts always add up to the stored total.
+ */
+export function jobOrderPriceBreakdown(total: number, discountPercent?: number | null, vatPercent?: number | null) {
+  const d = Math.min(Math.max(Number(discountPercent) || 0, 0), 100);
+  const v = Math.max(Number(vatPercent) || 0, 0);
+  const round = (n: number) => Math.round(n * 100) / 100;
+  const afterDiscount = round(total / (1 + v / 100));
+  const vat = round(total - afterDiscount);
+  const subtotal = d < 100 ? round(afterDiscount / (1 - d / 100)) : afterDiscount;
+  return { subtotal, discount: round(subtotal - afterDiscount), afterDiscount, vat, total, discountPercent: d, vatPercent: v };
+}
+
+/** Final price from the price before discount, a discount % and a VAT % */
+export function jobOrderTotalFrom(subtotal: number, discountPercent?: number | null, vatPercent?: number | null) {
+  const d = Math.min(Math.max(Number(discountPercent) || 0, 0), 100);
+  const v = Math.max(Number(vatPercent) || 0, 0);
+  return Math.round(subtotal * (1 - d / 100) * (1 + v / 100) * 100) / 100;
 }
 
 export interface ManagedWorker {
@@ -726,6 +712,8 @@ export interface JobOrder {
   estimatedCost: number;
   actualCost: number;
   totalPrice: number;
+  discountPercent?: number | null;
+  vatPercent?: number | null;
   status: 'pending' | 'in_progress' | 'completed' | 'voided' | 'cancelled' | 'delivered';
   paymentStatus: 'unpaid' | 'partial' | 'paid';
   downPayment: number;
@@ -843,6 +831,7 @@ export interface Delivery {
   items: DeliveryItem[];
   status: 'scheduled' | 'in_transit' | 'delivered' | 'cancelled';
   scheduledDate: string;
+  timeSlot?: string;
   estimatedArrival?: string;
   deliveredAt?: string;
   driverName: string;
@@ -856,6 +845,7 @@ export interface Delivery {
 export interface JobOrderCost {
   id: number;
   jobOrderNumber: string;
+  customerName?: string;
   materialsCost: number;
   laborCost: number;
   overheadCost: number;
@@ -864,6 +854,8 @@ export interface JobOrderCost {
 }
 
 export interface CostingData {
+  /** Job order database id (for links); jobOrderId is its display number */
+  id: number;
   jobOrderId: string;
   items: JobOrderItem[];
   estimatedCost: number;
@@ -1158,11 +1150,15 @@ export const api = {
   // DASHBOARD
   // ==================
   dashboard: {
-    getStats: () => fetchApi<DashboardStats>('/api/dashboard/stats'),
+    // branchId is honoured for administrators only; everyone else always gets their own branch
+    getStats: (branchId?: number) =>
+      fetchApi<DashboardStats>(`/api/dashboard/stats${branchId ? `?branchId=${branchId}` : ''}`),
     
-    getRecentActivity: () => fetchApi<Activity[]>('/api/dashboard/recent-activity'),
-    
-    getAlerts: () => fetchApi<Alert[]>('/api/dashboard/alerts'),
+    getRecentActivity: (branchId?: number) =>
+      fetchApi<Activity[]>(`/api/dashboard/recent-activity${branchId ? `?branchId=${branchId}` : ''}`),
+
+    getAlerts: (branchId?: number) =>
+      fetchApi<Alert[]>(`/api/dashboard/alerts${branchId ? `?branchId=${branchId}` : ''}`),
   },
 
   // ==================
@@ -1506,7 +1502,8 @@ export const api = {
     
     create: (delivery: {
       type: string;
-      fromBranchId: number;
+      /** Defaults to the job order's branch */
+      fromBranchId?: number;
       toBranchId?: number;
       customerName?: string;
       customerAddress?: string;
@@ -1515,6 +1512,7 @@ export const api = {
       jobOrderNumber?: string;
       items: DeliveryItem[];
       scheduledDate: string;
+      timeSlot?: string;
       estimatedArrival?: string;
       driverName?: string;
       driverContact?: string;
@@ -1907,57 +1905,6 @@ export const api = {
       fetchApi<Record<string, string>>(`/api/settings/system/${key}`, {
         method: 'PUT',
         body: JSON.stringify({ value }),
-      }),
-  },
-
-  // ==================
-  // WORKERS
-  // ==================
-  workers: {
-    getProfile: () => fetchApi<{ worker: WorkerProfile }>('/api/workers/profile'),
-    
-    toggleAvailability: (isAvailable: boolean) =>
-      fetchApi<{ isAvailable: boolean }>('/api/workers/availability', {
-        method: 'POST',
-        body: JSON.stringify({ isAvailable }),
-      }),
-    
-    getTasks: (status?: string) => {
-      const query = status ? `?status=${status}` : '';
-      return fetchApi<{ tasks: WorkTask[] }>(`/api/workers/tasks${query}`);
-    },
-    
-    getTaskDetail: (taskId: number) =>
-      fetchApi<{ task: WorkTask }>(`/api/workers/tasks/${taskId}`),
-    
-    updateTaskStatus: (taskId: number, data: { status: string; actualHours?: number; notes?: string }) =>
-      fetchApi<{ task: WorkTask }>(`/api/workers/tasks/${taskId}/status`, {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-    
-    createTask: (task: WorkTaskInput) =>
-      fetchApi<{ task: WorkTask }>('/api/workers/tasks', {
-        method: 'POST',
-        body: JSON.stringify(task),
-      }),
-    
-    getAllTasks: (params?: { status?: string; jobOrderId?: string }) => {
-      const query = new URLSearchParams();
-      if (params?.status) query.append('status', params.status);
-      if (params?.jobOrderId) query.append('jobOrderId', params.jobOrderId);
-      return fetchApi<{ tasks: (WorkTask & { workerName?: string })[] }>(`/api/workers/all-tasks?${query}`);
-    },
-    
-    getWorkersList: () =>
-      fetchApi<{ workers: WorkerProfile[] }>('/api/workers/list'),
-
-    getWorkload: () =>
-      fetchApi<{ workload: WorkerWorkload[] }>('/api/workers/workload'),
-    
-    syncWorkerProfiles: () =>
-      fetchApi<{ status: string; message: string; created: number }>('/api/workers/sync', {
-        method: 'POST',
       }),
   },
 

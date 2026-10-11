@@ -67,9 +67,21 @@ export default function ReportsPage() {
   const [auditData, setAuditData]           = useState<AuditLog[] | null>(null);
   const [settlementData, setSettlementData] = useState<BranchSettlementReport | null>(null);
   const [auditModule, setAuditModule]       = useState('');
+  // '' means all branches; only administrators can pick (the server pins everyone else to their own branch)
+  const [salesBranchId, setSalesBranchId]   = useState('');
+  const [branches, setBranches]             = useState<{ id: number; name: string; isWarehouse: boolean }[]>([]);
 
   const isAdmin        = user?.role === 'administrator';
   const canViewInventory = isAdmin || user?.role === 'supervisor';
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    api.settings.getBranches().then(r => {
+      if (r.data) setBranches(r.data.filter((b: any) => b.isActive));
+    }).catch(() => {});
+  }, [isAdmin]);
+
+  const selectedBranchName = branches.find(b => b.id.toString() === salesBranchId)?.name;
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -80,7 +92,10 @@ export default function ReportsPage() {
         : getDateRange(dateRange);
 
       if (reportType === 'sales') {
-        const res = await api.reports.getSalesReport(dates);
+        const res = await api.reports.getSalesReport({
+          ...dates,
+          ...(isAdmin && salesBranchId ? { branchId: Number(salesBranchId) } : {}),
+        });
         setSalesData(res.data || null);
       } else if (reportType === 'inventory' && canViewInventory) {
         const res = await api.reports.getInventoryReport();
@@ -97,7 +112,7 @@ export default function ReportsPage() {
     } finally {
       setLoading(false);
     }
-  }, [reportType, dateRange, customStart, customEnd, auditModule, canViewInventory, isAdmin]);
+  }, [reportType, dateRange, customStart, customEnd, auditModule, salesBranchId, canViewInventory, isAdmin]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -106,7 +121,8 @@ export default function ReportsPage() {
     let filename = 'report.csv';
 
     if (reportType === 'sales' && salesData) {
-      filename = 'sales-report.csv';
+      const branchSlug = selectedBranchName ? selectedBranchName.toLowerCase().replace(/[^a-z0-9]+/g, '-') : 'all-branches';
+      filename = `sales-report-${isAdmin ? branchSlug : 'my-branch'}.csv`;
       const jobRows = salesData.dailySales.map(d => `"Job Order","${d.date}",${d.orders},${d.revenue}`);
       const premadeRows = (salesData.premadeDailySales || []).map(d => `"Premade Sale","${d.date}",${d.orders},${d.revenue}`);
       csv = 'Type,Date,Orders,Revenue\n' + [...jobRows, ...premadeRows].join('\n');
@@ -269,6 +285,27 @@ export default function ReportsPage() {
                 </div>
               </>
             )}
+            {reportType === 'sales' && (
+              isAdmin ? (
+                <select
+                  value={salesBranchId}
+                  onChange={(e) => setSalesBranchId(e.target.value)}
+                  className="px-3 py-1.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 text-sm"
+                  aria-label="Branch"
+                >
+                  <option value="">All Branches</option>
+                  {branches.map(b => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}{b.isWarehouse ? ' (Warehouse)' : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : user?.branch ? (
+                <span className="px-3 py-1.5 rounded-lg bg-gray-100 text-gray-600 text-sm">
+                  Branch: <span className="font-medium text-gray-900">{user.branch}</span>
+                </span>
+              ) : null
+            )}
             {reportType === 'audit' && (
               <select
                 value={auditModule}
@@ -392,7 +429,7 @@ export default function ReportsPage() {
                   <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
                     <div className="px-6 py-4 border-b border-gray-200">
                       <h2 className="text-base font-semibold text-gray-900">Premade Sales Trend</h2>
-                      <p className="text-xs text-gray-500 mt-0.5">Premade product revenue per day (your branch's items)</p>
+                      <p className="text-xs text-gray-500 mt-0.5">Premade product revenue per day ({isAdmin ? (selectedBranchName ? `${selectedBranchName}'s items` : 'all branches') : "your branch's items"})</p>
                     </div>
                     <div className="p-6">
                       {!salesData.premadeDailySales || salesData.premadeDailySales.length === 0 ? (

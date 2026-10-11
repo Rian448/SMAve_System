@@ -3,7 +3,10 @@ import { formatDate } from '@/lib/dateUtils';
 import { useEffect, useRef, useState, Suspense, type ReactElement } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { api, type Customer, type FinishedGood, type RawMaterial } from '@/lib/api';
+import {
+  api, type Customer, type FinishedGood, type RawMaterial,
+  DEFAULT_VAT_PERCENT, jobOrderTotalFrom, jobOrderPriceBreakdown,
+} from '@/lib/api';
 import Combobox from '@/components/Combobox';
 
 interface MaterialItem {
@@ -109,6 +112,7 @@ function NewJobOrderForm() {
   const [linkedCustomerId, setLinkedCustomerId] = useState<number | null>(null);
   const [linkedCustomerDiscount, setLinkedCustomerDiscount] = useState<number | null>(null);
   const [orderDiscount, setOrderDiscount] = useState<string>('');  // editable per-order discount %
+  const [vatOn, setVatOn] = useState(false);
   const [customerSuggestions, setCustomerSuggestions] = useState<Customer[]>([]);
   const [searchingCustomer, setSearchingCustomer] = useState(false);
   const customerSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -335,6 +339,10 @@ function NewJobOrderForm() {
   const orderDiscountPct = Math.min(Math.max(Number(orderDiscount) || 0, 0), 100);
   const discountAmount = estimatedTotal > 0 ? Math.round(estimatedTotal * (orderDiscountPct / 100) * 100) / 100 : 0;
   const discountedTotal = estimatedTotal > 0 ? Math.round((estimatedTotal - discountAmount) * 100) / 100 : 0;
+  // Optional VAT on top of the discounted price; this is what the customer pays
+  const vatPct = vatOn ? DEFAULT_VAT_PERCENT : 0;
+  const finalTotal = estimatedTotal > 0 ? jobOrderTotalFrom(estimatedTotal, orderDiscountPct, vatPct) : 0;
+  const vatAmount = Math.round((finalTotal - discountedTotal) * 100) / 100;
 
   const goNext = () => {
     setError('');
@@ -363,6 +371,11 @@ function NewJobOrderForm() {
         setCustomerEmail(d.customerEmail || '');
         if (d.customerId) setLinkedCustomerId(d.customerId);
         if (d.discountPercent != null) setOrderDiscount(String(d.discountPercent));
+        setVatOn(Number(d.vatPercent) > 0);
+        // Restore the price (it used to be lost when reopening a draft)
+        if (Number(d.totalPrice) > 0) {
+          setEstimatedTotal(jobOrderPriceBreakdown(Number(d.totalPrice), d.discountPercent, d.vatPercent).subtotal);
+        }
         if (d.notes) setNotes(d.notes);
         if (d.estimatedCompletion) setEstimatedCompletionDate(String(d.estimatedCompletion).slice(0, 10));
 
@@ -448,7 +461,8 @@ function NewJobOrderForm() {
         items: normalizedItems,
         notes,
         ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
-        ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, totalPrice: discountedTotal } : {}),
+        vatPercent: vatPct || null,
+        ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, totalPrice: finalTotal } : {}),
       };
 
       if (editingDraftId) {
@@ -601,9 +615,32 @@ function NewJobOrderForm() {
 
     const branchId = user?.branchId || 1;
 
+    // Add typed-in materials to inventory first (flagged as needed), so the order's
+    // lines carry their inventory id and the stock is deducted when the job completes.
+    const createdIds = new Map<string, number>();
+    for (const m of materials.filter((x) => x.materialSource === 'custom' && x.name.trim())) {
+      const existing = inventoryMaterials.find(
+        (inv) => inv.materialType.trim().toLowerCase() === m.name.trim().toLowerCase());
+      if (existing) { createdIds.set(m.id, existing.id); continue; }
+      try {
+        const res = await api.inventory.createRawMaterial({
+          materialType: m.name.trim(),
+          color: '', pattern: '',
+          unitPrice: Number(m.unitPrice) || 0,
+          stockQuantity: 0,
+          branchId,
+          status: 'needed',
+        });
+        if (res.data) createdIds.set(m.id, res.data.id);
+      } catch (customErr) {
+        console.error('Failed to save needed material:', customErr);
+      }
+    }
+
     const normalizedItems = materials.map((m) => ({
       name: m.name.trim(),
-      materialId: m.materialId ? Number(m.materialId) : undefined,
+      category: 'material' as const,
+      materialId: m.materialId ? Number(m.materialId) : createdIds.get(m.id),
       quantity: Number(m.quantity) || 0,
       unitPrice: Number(m.unitPrice) || 0,
       materialCost: Number(m.unitPrice) || 0,
@@ -611,7 +648,7 @@ function NewJobOrderForm() {
     }));
 
     if (normalizedItems.length === 0) {
-      normalizedItems.push({ name: 'Service Package', materialId: undefined, quantity: 1, unitPrice: 0, materialCost: 0, laborCost: 0 });
+      normalizedItems.push({ name: 'Service Package', category: 'material', materialId: undefined, quantity: 1, unitPrice: 0, materialCost: 0, laborCost: 0 });
     }
 
     if (labor.length > 0) {
@@ -643,12 +680,9 @@ function NewJobOrderForm() {
       cutterName, sewerName,
     } : undefined;
 
-    const computedTotal = materialTotal > 0 ? materialTotal : (estimatedTotal > 0 ? estimatedTotal : 0);
-    const grossTotal = estimatedTotal > 0 ? estimatedTotal : computedTotal;
-    const finalTotal = orderDiscountPct > 0
-      ? Math.round(grossTotal * (1 - orderDiscountPct / 100) * 100) / 100
-      : grossTotal;
-    const finalDown = estimatedTotal > 0 ? Math.round((finalTotal / 2) * 100) / 100 : 0;
+    const grossTotal = estimatedTotal > 0 ? estimatedTotal : materialTotal;
+    const orderTotal = jobOrderTotalFrom(grossTotal, orderDiscountPct, vatPct);
+    const finalDown = estimatedTotal > 0 ? Math.round((orderTotal / 2) * 100) / 100 : 0;
 
     try {
       const jobOrderData: any = {
@@ -663,34 +697,12 @@ function NewJobOrderForm() {
         paymentMethod,
         notes,
         ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
+        ...(vatPct > 0 ? { vatPercent: vatPct } : {}),
         ...(slipData ? { slipData } : {}),
-        ...(finalTotal > 0 ? { estimatedCost: grossTotal, totalPrice: finalTotal } : {}),
+        ...(orderTotal > 0 ? { estimatedCost: grossTotal, totalPrice: orderTotal } : {}),
       };
 
-      const createResponse = await api.sales.createJobOrder(jobOrderData);
-      const createdJobOrderId = (createResponse.data as any)?.jobOrderId || 'PENDING-JO';
-
-      const customNeeded = materials.filter((m) => m.materialSource === 'custom' && m.name.trim());
-      if (customNeeded.length > 0) {
-        try {
-          await Promise.all(
-            customNeeded.map((m) =>
-              api.inventory.createRawMaterial({
-                materialType: m.name.trim(),
-                color: '', pattern: '',
-                unitPrice: Number(m.unitPrice) || 0,
-                stockQuantity: 0,
-                branchId: user?.branchId || 1,
-                status: 'needed',
-                sourceJobOrderId: createdJobOrderId
-              })
-            )
-          );
-        } catch (customErr) {
-          console.error('Failed to save some needed materials:', customErr);
-        }
-      }
-
+      await api.sales.createJobOrder(jobOrderData);
       router.push('/sales');
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : 'Failed to create job order. Please try again.');
@@ -1527,7 +1539,7 @@ function NewJobOrderForm() {
                   <span className="font-medium text-gray-900">₱{materialTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                 </div>
                 <div className="flex items-center gap-3">
-                  <label className="text-sm text-gray-600 shrink-0">Profit Margin</label>
+                  <label className="text-sm text-gray-600 shrink-0">Price as % of materials</label>
                   <div className="relative flex-1">
                     <input
                       type="number" min="0" max="1000" step="1"
@@ -1541,7 +1553,9 @@ function NewJobOrderForm() {
                 <div className="flex items-center justify-between bg-white border border-[#c7d2f5] rounded-lg px-4 py-3">
                   <div>
                     <p className="text-sm font-medium text-[#011c72]">Suggested Price</p>
-                    <p className="text-xs text-gray-500 mt-0.5">{profitMargin}% of materials cost (100% = break-even)</p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {(profitMargin / 100).toLocaleString('en-PH', { maximumFractionDigits: 2 })}× materials cost (100% = break-even, before labor)
+                    </p>
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="text-lg font-bold text-[#011c72]">
@@ -1563,7 +1577,7 @@ function NewJobOrderForm() {
             <div className="space-y-3">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Total Amount for the Work
+                  Price for the Work <span className="text-xs font-normal text-gray-400">(before discount and VAT)</span>
                 </label>
                 <div className="relative">
                   <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">₱</span>
@@ -1599,15 +1613,33 @@ function NewJobOrderForm() {
                 </div>
               </div>
 
-              {estimatedTotal > 0 && orderDiscountPct > 0 && (
-                <div className="bg-green-50 border border-green-200 rounded-xl p-4 space-y-1">
-                  <div className="flex items-center justify-between text-sm text-green-800">
-                    <span>Discount ({orderDiscountPct}%)</span>
-                    <span>− ₱{discountAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+              <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
+                <input type="checkbox" checked={vatOn} onChange={(e) => setVatOn(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300 text-[#011c72]" />
+                Add {DEFAULT_VAT_PERCENT}% VAT
+              </label>
+
+              {estimatedTotal > 0 && (orderDiscountPct > 0 || vatPct > 0) && (
+                <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-1 text-sm">
+                  <div className="flex items-center justify-between text-gray-600">
+                    <span>Price</span>
+                    <span>₱{estimatedTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   </div>
-                  <div className="flex items-center justify-between text-sm font-semibold text-green-900">
-                    <span>Total after discount</span>
-                    <span>₱{discountedTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  {orderDiscountPct > 0 && (
+                    <div className="flex items-center justify-between text-green-700">
+                      <span>Discount ({orderDiscountPct}%)</span>
+                      <span>− ₱{discountAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                  )}
+                  {vatPct > 0 && (
+                    <div className="flex items-center justify-between text-gray-600">
+                      <span>VAT ({vatPct}%)</span>
+                      <span>+ ₱{vatAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between font-semibold text-gray-900 pt-1 border-t border-gray-200">
+                    <span>Total</span>
+                    <span>₱{finalTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   </div>
                 </div>
               )}
@@ -1616,10 +1648,10 @@ function NewJobOrderForm() {
                 <div className="bg-[#eef1fb] border border-[#c7d2f5] rounded-xl p-4 flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-[#011c72]">Down Payment (50%)</p>
-                    <p className="text-xs text-[#011c72] mt-0.5">{orderDiscountPct > 0 ? 'Half of total after discount' : 'Half of total'}</p>
+                    <p className="text-xs text-[#011c72] mt-0.5">Half of the total</p>
                   </div>
                   <span className="text-xl font-bold text-[#011c72]">
-                    ₱{(discountedTotal / 2).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    ₱{(finalTotal / 2).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </span>
                 </div>
               )}

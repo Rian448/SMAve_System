@@ -27,9 +27,34 @@ export default function DeliveryPage() {
   // Admin override confirmation
   const [overrideConfirm, setOverrideConfirm] = useState<{ id: number; action: 'mark-sent' | 'confirm-receipt'; transfer: TransferDashboardItem } | null>(null);
 
+  // Pins are kept per user in this browser so each supervisor can flag what they're watching
+  const [pinned, setPinned] = useState<Set<number>>(new Set());
+  const [actionFirst, setActionFirst] = useState(true);
+
   const isAdmin = user?.role === 'administrator';
 
   const canSee = user && ['administrator', 'supervisor'].includes(user.role);
+
+  const pinKey = user ? `itemTrailPins:${user.id}` : null;
+
+  useEffect(() => {
+    if (!pinKey) return;
+    try {
+      const raw = localStorage.getItem(pinKey);
+      setPinned(new Set(raw ? JSON.parse(raw) : []));
+    } catch { /* storage unavailable — pins just won't persist */ }
+  }, [pinKey]);
+
+  const togglePin = (id: number) => {
+    setPinned(prev => {
+      const s = new Set(prev);
+      s.has(id) ? s.delete(id) : s.add(id);
+      if (pinKey) {
+        try { localStorage.setItem(pinKey, JSON.stringify([...s])); } catch { /* ignore */ }
+      }
+      return s;
+    });
+  };
 
   const load = useCallback(async () => {
     if (!canSee) return;
@@ -120,6 +145,22 @@ export default function DeliveryPage() {
 
   const fmt = (iso?: string) => iso ? formatDateTime(iso) : '—';
 
+  const needsAction = (t: TransferDashboardItem) => t.status === 'pending' || t.status === 'transferred';
+
+  // Pinned first; then (if enabled) items needing action — overdue, then oldest — ahead of completed ones.
+  // Array.sort is stable, so ties keep the server's order.
+  const sortedTransfers = [...transfers].sort((a, b) => {
+    const pin = Number(pinned.has(b.id)) - Number(pinned.has(a.id));
+    if (pin !== 0) return pin;
+    if (!actionFirst) return 0;
+    const act = Number(needsAction(b)) - Number(needsAction(a));
+    if (act !== 0) return act;
+    if (!needsAction(a)) return 0;
+    const overdue = Number(b.isOverdue) - Number(a.isOverdue);
+    if (overdue !== 0) return overdue;
+    return b.agingHours - a.agingHours;
+  });
+
   const selectedPending = [...selected].filter(id => transfers.find(t => t.id === id)?.status === 'pending');
   const selectedTransferred = [...selected].filter(id => transfers.find(t => t.id === id)?.status === 'transferred');
 
@@ -159,6 +200,11 @@ export default function DeliveryPage() {
             </button>
           ))}
           <div className="ml-auto flex items-center gap-2">
+            <label className="flex items-center gap-1.5 px-2 text-sm text-gray-600 cursor-pointer select-none">
+              <input type="checkbox" checked={actionFirst} onChange={e => setActionFirst(e.target.checked)}
+                className="w-4 h-4 rounded border-gray-300 text-[#011c72] cursor-pointer" />
+              Needs action first
+            </label>
             <button onClick={() => setScanning(true)}
               className="px-3 py-1.5 rounded-lg text-sm font-medium bg-purple-100 text-purple-700 hover:bg-purple-200 flex items-center gap-1.5">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -296,11 +342,13 @@ export default function DeliveryPage() {
               <span className="text-xs text-gray-400">Select actionable</span>
             </div>
 
-            {transfers.map(t => (
+            {sortedTransfers.map(t => (
               <TransferRow
                 key={t.id}
                 transfer={t}
                 selected={selected.has(t.id)}
+                pinned={pinned.has(t.id)}
+                onTogglePin={togglePin}
                 onToggle={toggleSelect}
                 onMarkSent={transfer => triggerAction(transfer, 'mark-sent')}
                 onConfirm={transfer => triggerAction(transfer, 'confirm-receipt')}
@@ -343,6 +391,8 @@ function StatCard({ label, value, color, onClick, active }: {
 interface TransferRowProps {
   transfer: TransferDashboardItem;
   selected: boolean;
+  pinned: boolean;
+  onTogglePin: (id: number) => void;
   onToggle: (id: number) => void;
   onMarkSent: (transfer: TransferDashboardItem) => void;
   onConfirm: (transfer: TransferDashboardItem) => void;
@@ -352,7 +402,7 @@ interface TransferRowProps {
   fmt: (iso?: string) => string;
 }
 
-function TransferRow({ transfer: t, selected, onToggle, onMarkSent, onConfirm, onShowQr, savingId, isAdmin, fmt }: TransferRowProps) {
+function TransferRow({ transfer: t, selected, pinned, onTogglePin, onToggle, onMarkSent, onConfirm, onShowQr, savingId, isAdmin, fmt }: TransferRowProps) {
   const isSaving = savingId === t.id;
   const isActionable = t.status === 'pending' || t.status === 'transferred';
   const total = t.items.reduce((s, i) => s + (i.total ?? i.unitPrice * i.quantity), 0);
@@ -376,7 +426,7 @@ function TransferRow({ transfer: t, selected, onToggle, onMarkSent, onConfirm, o
   const stepReceived = t.status === 'received';
 
   return (
-    <div className={`bg-white rounded-xl border shadow-sm overflow-hidden ${t.isOverdue ? 'border-red-300' : 'border-gray-200'}`}>
+    <div className={`bg-white rounded-xl border shadow-sm overflow-hidden ${t.isOverdue ? 'border-red-300' : pinned ? 'border-[#011c72]/40' : 'border-gray-200'} ${pinned ? 'ring-1 ring-[#011c72]/20' : ''}`}>
       {/* Overdue banner */}
       {t.isOverdue && (
         <div className="px-4 py-1.5 bg-red-50 border-b border-red-200 flex items-center gap-1.5">
@@ -410,6 +460,15 @@ function TransferRow({ transfer: t, selected, onToggle, onMarkSent, onConfirm, o
                 <span className="text-xs text-gray-400">{agingLabel}</span>
               )}
               <span className="ml-auto text-sm font-bold text-gray-900">₱{total.toLocaleString()}</span>
+              <button onClick={() => onTogglePin(t.id)}
+                title={pinned ? 'Unpin' : 'Pin to top'}
+                aria-label={pinned ? 'Unpin transfer' : 'Pin transfer to top'}
+                aria-pressed={pinned}
+                className={`p-1 rounded-md transition-colors ${pinned ? 'text-[#011c72] bg-[#eef1fb] hover:bg-[#dde6ff]' : 'text-gray-300 hover:text-gray-500 hover:bg-gray-100'}`}>
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill={pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16 3l5 5-3 1-4 4 1 5-2 2-4-4-5 5v-1l4-5-4-4 2-2 5 1 4-4 1-3z" />
+                </svg>
+              </button>
             </div>
 
             {/* Branch route */}
