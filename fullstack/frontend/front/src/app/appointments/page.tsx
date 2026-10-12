@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { api, Appointment } from '@/lib/api';
 import { formatDate as fmtDate, formatDateTime } from '@/lib/dateUtils';
-import { useAuth, hasAccess } from '@/context/AuthContext';
+import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 
 const TIME_RANGES: Record<string, [number, number]> = {

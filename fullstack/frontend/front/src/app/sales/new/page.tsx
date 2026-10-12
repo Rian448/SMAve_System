@@ -174,7 +174,6 @@ function NewJobOrderForm() {
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [profitMargin, setProfitMargin] = useState(250);
   const [estimatedTotal, setEstimatedTotal] = useState(0);
-  const [downPayment, setDownPayment] = useState(0);
   const [notes, setNotes] = useState('');
 
   useEffect(() => {
@@ -1563,7 +1562,7 @@ function NewJobOrderForm() {
                     </span>
                     <button
                       type="button"
-                      onClick={() => { setEstimatedTotal(suggestedPrice); setDownPayment(suggestedPrice / 2); }}
+                      onClick={() => setEstimatedTotal(suggestedPrice)}
                       className="text-xs font-medium text-white bg-[#011c72] hover:bg-[#022494] px-3 py-1.5 rounded-lg transition-colors shrink-0"
                     >
                       Use This
@@ -1586,7 +1585,6 @@ function NewJobOrderForm() {
                     onChange={(e) => {
                       const val = parseFloat(e.target.value) || 0;
                       setEstimatedTotal(val);
-                      setDownPayment(val / 2);
                     }}
                     className="w-full pl-8 pr-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                     placeholder="0.00" />

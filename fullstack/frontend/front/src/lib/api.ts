@@ -195,23 +195,6 @@ export interface CartDraft {
   updatedAt: string;
 }
 
-/** A staff-side custom job order saved but not yet confirmed. */
-export interface CustomDraft {
-  id: number;
-  kind: 'custom';
-  jobOrderId: string;
-  customerName: string;
-  customerPhone: string;
-  branchId: number;
-  branchName: string;
-  description: string;
-  totalPrice: number;
-  itemCount: number;
-  status: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface AppNotification {
   id: number;
   type: 'transfer_request' | 'transfer_dispatched' | 'order_ready' | string;
@@ -277,18 +260,6 @@ export interface ProductOrder {
   notes?: string;
   createdAt: string;
   updatedAt?: string;
-}
-
-export interface MultiProductOrderResult {
-  groupId: string;
-  pickupBranchName: string;
-  totalAmount: number;
-  orders: ProductOrder[];
-}
-
-export interface IncomingShipmentGroup {
-  groupId: string;
-  orders: ProductOrder[];
 }
 
 export interface ProductOrderTimelineEvent {
@@ -471,16 +442,6 @@ export interface RawMaterialInput {
   status?: string;
   /** The job order ID this material is being ordered for */
   sourceJobOrderId?: string;
-}
-
-export interface RawMaterialSummaryGroup {
-  key: string;
-  name: string;
-  color: string;
-  pattern: string;
-  unitPrice: number;
-  totalStockQuantity: number;
-  components: RawMaterial[];
 }
 
 export interface FinishedGood {
@@ -765,26 +726,6 @@ export interface CustomerOrder {
   respondedAt?: string;
 }
 
-export interface LineupSlipItem {
-  description: string;
-  status: 'pending' | 'in_progress' | 'completed';
-}
-
-export interface LineupSlip {
-  id: number;
-  slipNumber: string;
-  jobOrderId: number;
-  jobOrderNumber: string;
-  customerName: string;
-  branchId: number;
-  items: LineupSlipItem[];
-  priority: 'low' | 'normal' | 'high';
-  assignedTo: string;
-  notes: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface PurchaseOrderItem {
   materialId?: number;
   name: string;
@@ -890,30 +831,6 @@ export interface Receipt {
   downPayment: number;
   balance: number;
   paymentStatus: string;
-}
-
-export interface AnalyticsData {
-  categoryDistribution: Array<{ name: string; count: number; value: number }>;
-  topMaterials: Array<{ name: string; value: number }>;
-  monthlyTrends: Array<{ month: string; purchases: number; sales: number }>;
-}
-
-export interface ForecastItem {
-  month: string;
-  forecastedOrders: number;
-  forecastedRevenue: number;
-  confidence: number;
-}
-
-export interface MaterialForecast {
-  materialId: number;
-  name: string;
-  currentStock: number;
-  reorderPoint: number;
-  dailyUsage: number;
-  daysUntilReorder: number;
-  recommendedOrderQty: number;
-  urgency: 'high' | 'medium' | 'low';
 }
 
 export interface SalesReport {
@@ -1104,9 +1021,6 @@ export const api = {
   // Health check
   healthCheck: () => fetchApi<null>('/api/health'),
 
-  // Analytics
-  getAnalytics: () => fetchApi<AnalyticsData>('/api/analytics'),
-
   // ==================
   // VEHICLE REFERENCE DATA (makes / models)
   // ==================
@@ -1132,13 +1046,7 @@ export const api = {
       fetchApi<null>('/api/auth/logout', { method: 'POST' }),
     
     me: () => fetchApi<User>('/api/auth/me'),
-    
-    recover: (email: string) =>
-      fetchApi<null>('/api/auth/recover', {
-        method: 'POST',
-        body: JSON.stringify({ email }),
-      }),
-    
+
     register: (data: { username: string; password: string; email: string; fullName: string; phone: string }) =>
       fetchApi<AuthResponse>('/api/auth/register', {
         method: 'POST',
@@ -1175,25 +1083,6 @@ export const api = {
       return fetchApi<RawMaterial[]>(`/api/inventory/raw-materials?${query}`);
     },
 
-    getRawMaterialsSummary: (params?: { includeArchived?: boolean; branchId?: number; category?: string; includeComponents?: boolean }) => {
-      const query = new URLSearchParams();
-      if (params?.includeArchived) query.append('includeArchived', 'true');
-      if (params?.branchId) query.append('branchId', params.branchId.toString());
-      if (params?.category) query.append('category', params.category);
-      if (params?.includeComponents) query.append('includeComponents', 'true');
-      return fetchApi<RawMaterialSummaryGroup[]>(`/api/inventory/raw-materials/summary?${query}`);
-    },
-
-    getRawMaterialGroupDetail: (key: string, params?: { includeArchived?: boolean; branchId?: number }) => {
-      const query = new URLSearchParams();
-      query.append('key', key);
-      if (params?.includeArchived) query.append('includeArchived', 'true');
-      if (params?.branchId) query.append('branchId', params.branchId.toString());
-      return fetchApi<RawMaterialSummaryGroup>(`/api/inventory/raw-materials/group-detail?${query}`);
-    },
-    
-    getRawMaterial: (id: number) => fetchApi<RawMaterial>(`/api/inventory/raw-materials/${id}`),
-    
     createRawMaterial: (material: RawMaterialInput) =>
       fetchApi<RawMaterial>('/api/inventory/raw-materials', {
         method: 'POST',
@@ -1205,13 +1094,7 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(material),
       }),
-    
-    archiveRawMaterial: (id: number) =>
-      fetchApi<null>(`/api/inventory/raw-materials/${id}/archive`, { method: 'POST' }),
-    
-    restoreRawMaterial: (id: number) =>
-      fetchApi<null>(`/api/inventory/raw-materials/${id}/restore`, { method: 'POST' }),
-    
+
     // Finished Goods
     getFinishedGoods: (params?: { includeArchived?: boolean; branchId?: number }) => {
       const query = new URLSearchParams();
@@ -1275,12 +1158,6 @@ export const api = {
       if (params?.category) query.append('category', params.category);
       return fetchApi<PublicProduct[]>(`/api/inventory/finished-goods/public?${query}`);
     },
-    
-    // Categories
-    getCategories: () => fetchApi<{ rawMaterials: string[]; finishedGoods: string[] }>('/api/inventory/categories'),
-    
-    // Low Stock
-    getLowStock: () => fetchApi<RawMaterial[]>('/api/inventory/low-stock'),
 
     // Suppliers
     getSuppliers: (includeInactive?: boolean) => {
@@ -1398,35 +1275,12 @@ export const api = {
         body: JSON.stringify(updates),
       }),
 
-    voidJobOrder: (id: number) =>
-      fetchApi<null>(`/api/sales/job-orders/${id}/void`, { method: 'POST' }),
-
     // Draft job orders — saved but not confirmed; excluded from normal lists/counts
     getDrafts: () => fetchApi<JobOrder[]>('/api/sales/drafts'),
 
     deleteJobOrder: (id: number) =>
       fetchApi<null>(`/api/sales/job-orders/${id}`, { method: 'DELETE' }),
-    
-    // Line-up Slips
-    getLineupSlips: () => fetchApi<LineupSlip[]>('/api/sales/lineup-slips'),
-    
-    createLineupSlip: (slip: {
-      jobOrderId: number;
-      items?: LineupSlipItem[];
-      priority?: string;
-      assignedTo?: string;
-      notes?: string;
-    }) =>
-      fetchApi<LineupSlip>('/api/sales/lineup-slips', {
-        method: 'POST',
-        body: JSON.stringify(slip),
-      }),
-    
-    updateLineupSlip: (id: number, updates: Partial<LineupSlip>) =>
-      fetchApi<LineupSlip>(`/api/sales/lineup-slips/${id}`, {
-        method: 'PUT',
-        body: JSON.stringify(updates),
-      }),
+
   },
 
   // ==================
@@ -1437,24 +1291,7 @@ export const api = {
 
     getJobOrderCosting: (orderId: number) =>
       fetchApi<CostingData>(`/api/costing/job-order/${orderId}`),
-    
-    updateActualCost: (orderId: number, data: { actualCost?: number; items?: JobOrderItem[] }) =>
-      fetchApi<JobOrder>(`/api/costing/job-order/${orderId}/actual`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-    
-    getVarianceReport: () => fetchApi<Array<{
-      jobOrderId: string;
-      customerName: string;
-      estimatedCost: number;
-      actualCost: number;
-      variance: number;
-      variancePercent: number;
-      status: string;
-    }>>('/api/costing/variance-report'),
-    
-    generateReceipt: (orderId: number) => fetchApi<Receipt>(`/api/costing/receipt/${orderId}`),
+
   },
 
   // ==================
@@ -1530,53 +1367,12 @@ export const api = {
         body: JSON.stringify({ status }),
       }),
     
-    getReceipt: (id: number) => fetchApi<{
-      receiptNumber: string;
-      date: string;
-      deliveryNumber: string;
-      type: string;
-      from: string;
-      to: string;
-      address: string;
-      items: DeliveryItem[];
-      driver: string;
-      vehicle: string;
-      status: string;
-      deliveredAt?: string;
-    }>(`/api/deliveries/${id}/receipt`),
   },
 
   // ==================
   // CUSTOMER ORDERS
   // ==================
   customerOrders: {
-    placeOrder: (orderData: {
-      customerName: string;
-      customerPhone: string;
-      customerEmail: string;
-      customerAddress: string;
-      vehicleInfo: {
-        make: string;
-        model: string;
-        year: string;
-        plateNumber: string;
-      };
-      services: Array<{
-        type: string;
-        material?: string;
-        design?: string;
-        pocket?: string;
-        others?: string;
-        description?: string;
-      }>;
-      notes: string;
-      orderDate: string;
-      branchId?: number;
-    }) =>
-      fetchApi<{ id: number; orderNumber: string }>('/api/customer-orders', {
-        method: 'POST',
-        body: JSON.stringify(orderData),
-      }),
 
     getOrders: () => fetchApi<CustomerOrder[]>('/api/customer-orders'),
 
@@ -1741,8 +1537,6 @@ export const api = {
         body: JSON.stringify(data),
       }),
 
-    getGroup: (groupId: string) => fetchApi<ProductOrder[]>(`/api/product-orders/group/${groupId}`),
-
     getMyOrders: () => fetchApi<ProductOrder[]>('/api/product-orders/my-orders'),
 
     getPickupQueue: () => fetchApi<ProductOrder[]>('/api/product-orders/pickup-queue'),
@@ -1788,8 +1582,6 @@ export const api = {
   // FORECASTING
   // ==================
   forecasting: {
-    getDemandForecast: () => fetchApi<ForecastItem[]>('/api/forecasting/demand'),
-    getMaterialForecast: () => fetchApi<MaterialForecast[]>('/api/forecasting/materials'),
     getInventoryForecast: (params?: { period?: string }) => {
       const q = params?.period ? `?period=${params.period}` : '';
       return fetchApi<InventoryForecastData>(`/api/forecasting/inventory${q}`);
@@ -1921,8 +1713,6 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
-    deactivate: (id: number) =>
-      fetchApi<{ message: string }>(`/api/managed-workers/${id}`, { method: 'DELETE' }),
   },
 
   workerAssignments: {

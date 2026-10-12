@@ -1,12 +1,13 @@
 ﻿'use client';
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, SalesReport, InventoryReport, AuditLog, BranchSettlementReport } from '@/lib/api';
-import { formatShortDate, formatDayLabel, formatDateTime } from '@/lib/dateUtils';
+import { api, SalesReport, InventoryReport, BranchSettlementReport } from '@/lib/api';
+import { formatShortDate, formatDayLabel, manilaDateString } from '@/lib/dateUtils';
 
 function getDateRange(range: string): { startDate: string; endDate: string } {
+  // Manila calendar days, not UTC: the server reads these dates as Philippine time,
+  // and between midnight and 8 AM the UTC date is still yesterday.
   const now = new Date();
-  const end = now.toISOString().split('T')[0];
   const start = new Date(now);
   switch (range) {
     case 'week':    start.setDate(start.getDate() - 7); break;
@@ -14,7 +15,12 @@ function getDateRange(range: string): { startDate: string; endDate: string } {
     case 'year':    start.setFullYear(start.getFullYear() - 1); break;
     default:        start.setDate(start.getDate() - 30);
   }
-  return { startDate: start.toISOString().split('T')[0], endDate: end };
+  return { startDate: manilaDateString(start), endDate: manilaDateString(now) };
+}
+
+/** Quote a CSV cell, doubling embedded quotes so a comma or quote in a value can't break the row. */
+function csvCell(value: unknown): string {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
 }
 
 const formatCurrency = (amount: number) =>
@@ -29,15 +35,6 @@ const STATUS_COLORS: Record<string, string> = {
   cancelled:   'bg-red-500',
   for_pickup:  'bg-purple-500',
   delivered:   'bg-teal-500',
-};
-
-const STATUS_LABEL_COLORS: Record<string, string> = {
-  completed:   'bg-green-100 text-green-700',
-  in_progress: 'bg-blue-100 text-blue-700',
-  pending:     'bg-yellow-100 text-yellow-700',
-  cancelled:   'bg-red-100 text-red-700',
-  for_pickup:  'bg-purple-100 text-purple-700',
-  delivered:   'bg-teal-100 text-teal-700',
 };
 
 function SkeletonCard() {
@@ -64,9 +61,7 @@ export default function ReportsPage() {
   const [customEnd, setCustomEnd]       = useState('');
   const [salesData, setSalesData]           = useState<SalesReport | null>(null);
   const [inventoryData, setInventoryData]   = useState<InventoryReport | null>(null);
-  const [auditData, setAuditData]           = useState<AuditLog[] | null>(null);
   const [settlementData, setSettlementData] = useState<BranchSettlementReport | null>(null);
-  const [auditModule, setAuditModule]       = useState('');
   // '' means all branches; only administrators can pick (the server pins everyone else to their own branch)
   const [salesBranchId, setSalesBranchId]   = useState('');
   const [branches, setBranches]             = useState<{ id: number; name: string; isWarehouse: boolean }[]>([]);
@@ -100,9 +95,6 @@ export default function ReportsPage() {
       } else if (reportType === 'inventory' && canViewInventory) {
         const res = await api.reports.getInventoryReport();
         setInventoryData(res.data || null);
-      } else if (reportType === 'audit' && isAdmin) {
-        const res = await api.reports.getAuditTrail({ ...dates, ...(auditModule ? { module: auditModule } : {}) });
-        setAuditData(res.data || null);
       } else if (reportType === 'settlement') {
         const res = await api.reports.getSettlementReport(dates);
         setSettlementData(res.data || null);
@@ -112,7 +104,7 @@ export default function ReportsPage() {
     } finally {
       setLoading(false);
     }
-  }, [reportType, dateRange, customStart, customEnd, auditModule, salesBranchId, canViewInventory, isAdmin]);
+  }, [reportType, dateRange, customStart, customEnd, salesBranchId, canViewInventory, isAdmin]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -123,31 +115,33 @@ export default function ReportsPage() {
     if (reportType === 'sales' && salesData) {
       const branchSlug = selectedBranchName ? selectedBranchName.toLowerCase().replace(/[^a-z0-9]+/g, '-') : 'all-branches';
       filename = `sales-report-${isAdmin ? branchSlug : 'my-branch'}.csv`;
-      const jobRows = salesData.dailySales.map(d => `"Job Order","${d.date}",${d.orders},${d.revenue}`);
-      const premadeRows = (salesData.premadeDailySales || []).map(d => `"Premade Sale","${d.date}",${d.orders},${d.revenue}`);
+      const jobRows = salesData.dailySales.map(d => [csvCell('Job Order'), csvCell(d.date), d.orders, d.revenue].join(','));
+      const premadeRows = (salesData.premadeDailySales || []).map(d => [csvCell('Premade Sale'), csvCell(d.date), d.orders, d.revenue].join(','));
       csv = 'Type,Date,Orders,Revenue\n' + [...jobRows, ...premadeRows].join('\n');
     } else if (reportType === 'inventory' && inventoryData) {
       filename = 'inventory-report.csv';
       csv = 'Category,Items,Value\n' +
-        inventoryData.categoryBreakdown.map(c => `${c.category},${c.count},${c.value}`).join('\n');
-    } else if (reportType === 'audit' && auditData) {
-      filename = 'audit-trail.csv';
-      csv = 'Timestamp,User,Module,Action,Details\n' +
-        auditData.map(l => `"${l.timestamp}","${l.userName}","${l.module}","${l.action}","${l.details}"`).join('\n');
+        inventoryData.categoryBreakdown.map(c => [csvCell(c.category), c.count, c.value].join(',')).join('\n');
     } else if (reportType === 'settlement' && settlementData) {
       filename = 'branch-settlement.csv';
       csv = 'Order,Date,Source Branch,Pickup Branch,Items Value,Transfer Status,Settled,Customer\n' +
-        settlementData.entries.map(e =>
-          `"${e.orderNumber}","${e.orderDate?.slice(0,10) || ''}","${e.sourceBranchName}","${e.pickupBranchName}",${e.itemsValue},"${e.transferStatus}",${e.isSettled},"${e.customerName}"`
-        ).join('\n');
+        settlementData.entries.map(e => [
+          csvCell(e.orderNumber), csvCell(e.orderDate?.slice(0, 10) || ''), csvCell(e.sourceBranchName),
+          csvCell(e.pickupBranchName), e.itemsValue, csvCell(e.transferStatus), e.isSettled, csvCell(e.customerName),
+        ].join(',')).join('\n');
     }
 
     if (!csv) return;
-    const blob = new Blob([csv], { type: 'text/csv' });
+    // BOM so Excel opens peso signs and accented names correctly.
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
-    URL.revokeObjectURL(url);
+    a.href = url; a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoking straight after click() can cancel the download in some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const reportTypes = [
@@ -164,14 +158,6 @@ export default function ReportsPage() {
       icon: (
         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-        </svg>
-      ),
-    }] : []),
-    ...(isAdmin ? [{
-      id: 'audit', name: 'Audit Trail',
-      icon: (
-        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
         </svg>
       ),
     }] : []),
@@ -305,20 +291,6 @@ export default function ReportsPage() {
                   Branch: <span className="font-medium text-gray-900">{user.branch}</span>
                 </span>
               ) : null
-            )}
-            {reportType === 'audit' && (
-              <select
-                value={auditModule}
-                onChange={(e) => setAuditModule(e.target.value)}
-                className="px-3 py-1.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 text-sm"
-              >
-                <option value="">All Modules</option>
-                <option value="auth">Auth</option>
-                <option value="sales">Sales</option>
-                <option value="inventory">Inventory</option>
-                <option value="delivery">Delivery</option>
-                <option value="settings">Settings</option>
-              </select>
             )}
             <button
               onClick={fetchData}
@@ -540,64 +512,6 @@ export default function ReportsPage() {
               </>
             ) : (
               <EmptyState message="No inventory data available." />
-            )}
-          </>
-        )}
-
-        {/* ── AUDIT TRAIL ── */}
-        {reportType === 'audit' && isAdmin && (
-          <>
-            {loading ? (
-              <div className="space-y-3">
-                {[...Array(5)].map((_, i) => (
-                  <div key={i} className="h-16 bg-gray-200 rounded-xl animate-pulse" />
-                ))}
-              </div>
-            ) : auditData ? (
-              <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-                  <h2 className="text-base font-semibold text-gray-900">Audit Log</h2>
-                  <span className="text-sm text-gray-500">{auditData.length} entries</span>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
-                      <tr>
-                        <th className="px-5 py-3 text-left">Timestamp</th>
-                        <th className="px-5 py-3 text-left">User</th>
-                        <th className="px-5 py-3 text-left">Module</th>
-                        <th className="px-5 py-3 text-left">Action</th>
-                        <th className="px-5 py-3 text-left">Details</th>
-                        <th className="px-5 py-3 text-left">IP</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {auditData.length === 0 ? (
-                        <tr>
-                          <td colSpan={6} className="px-5 py-12 text-center text-gray-400">No audit entries for this period</td>
-                        </tr>
-                      ) : auditData.map((log) => (
-                        <tr key={log.id} className="hover:bg-gray-50 transition-colors">
-                          <td className="px-5 py-3 whitespace-nowrap text-gray-500">
-                            {formatDateTime(log.timestamp)}
-                          </td>
-                          <td className="px-5 py-3 whitespace-nowrap font-medium text-gray-900">{log.userName}</td>
-                          <td className="px-5 py-3 whitespace-nowrap">
-                            <span className="px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-600 capitalize">
-                              {log.module}
-                            </span>
-                          </td>
-                          <td className="px-5 py-3 whitespace-nowrap text-gray-700">{log.action}</td>
-                          <td className="px-5 py-3 text-gray-500 max-w-xs truncate">{log.details}</td>
-                          <td className="px-5 py-3 whitespace-nowrap text-gray-400 font-mono text-xs">{log.ipAddress}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            ) : (
-              <EmptyState message="No audit data available." />
             )}
           </>
         )}

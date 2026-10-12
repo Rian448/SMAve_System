@@ -1,11 +1,9 @@
 ﻿'use client';
 import { useState, useEffect } from 'react';
-import { useAuth } from '@/context/AuthContext';
 import { api, JobOrderCost } from '@/lib/api';
 import Link from 'next/link';
 
 export default function CostingPage() {
-  const { user } = useAuth();
   const [costings, setCostings] = useState<JobOrderCost[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
