@@ -32,10 +32,14 @@ CORS(
 # ============================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
-    'DATABASE_URL',
-    f"sqlite:///{os.path.join(BASE_DIR, 'smaeve_system.db')}"
-)
+DATABASE_URL = os.getenv('DATABASE_URL', f"sqlite:///{os.path.join(BASE_DIR, 'smaeve_system.db')}")
+# Name the driver explicitly: SQLAlchemy 2.1 made psycopg (v3) the default for
+# postgresql:// URLs, but the installed driver is psycopg2.
+if DATABASE_URL.startswith('postgres://'):
+    DATABASE_URL = 'postgresql://' + DATABASE_URL[len('postgres://'):]
+if DATABASE_URL.startswith('postgresql://'):
+    DATABASE_URL = 'postgresql+psycopg2://' + DATABASE_URL[len('postgresql://'):]
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 CATALOG_UPLOAD_FOLDER = os.path.join(BASE_DIR, 'static', 'catalog')
