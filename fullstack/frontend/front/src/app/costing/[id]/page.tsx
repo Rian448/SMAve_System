@@ -56,6 +56,9 @@ export default function CostingDetailPage() {
   const totalCost = costing.materialCost + costing.laborCost + costing.overheadCost;
   const profit = costing.totalPrice - totalCost;
   const profitMargin = costing.totalPrice > 0 ? (profit / costing.totalPrice) * 100 : 0;
+  // Share of total cost; an order with no recorded costs would otherwise show NaN%
+  const share = (value: number) => (totalCost > 0 ? (value / totalCost) * 100 : 0);
+  const gaugePct = Math.min(Math.max(profitMargin, 0), 100);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -97,7 +100,7 @@ export default function CostingDetailPage() {
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Total Revenue</p>
+                <p className="text-sm font-medium text-gray-500">Total Revenue <span className="text-xs font-normal text-gray-400">(excl. VAT)</span></p>
                 <p className="text-2xl font-bold text-gray-900 mt-1">
                   ₱{costing.totalPrice.toLocaleString()}
                 </p>
@@ -170,21 +173,21 @@ export default function CostingDetailPage() {
               <div className="h-8 flex rounded-lg overflow-hidden">
                 <div 
                   className="bg-blue-500 flex items-center justify-center text-xs text-white font-medium"
-                  style={{ width: `${(costing.materialCost / totalCost) * 100}%` }}
+                  style={{ width: `${share(costing.materialCost)}%` }}
                 >
-                  {((costing.materialCost / totalCost) * 100).toFixed(0)}%
+                  {share(costing.materialCost).toFixed(0)}%
                 </div>
                 <div 
                   className="bg-green-500 flex items-center justify-center text-xs text-white font-medium"
-                  style={{ width: `${(costing.laborCost / totalCost) * 100}%` }}
+                  style={{ width: `${share(costing.laborCost)}%` }}
                 >
-                  {((costing.laborCost / totalCost) * 100).toFixed(0)}%
+                  {share(costing.laborCost).toFixed(0)}%
                 </div>
                 <div 
                   className="bg-[#011c72] flex items-center justify-center text-xs text-white font-medium"
-                  style={{ width: `${(costing.overheadCost / totalCost) * 100}%` }}
+                  style={{ width: `${share(costing.overheadCost)}%` }}
                 >
-                  {((costing.overheadCost / totalCost) * 100).toFixed(0)}%
+                  {share(costing.overheadCost).toFixed(0)}%
                 </div>
               </div>
             </div>
@@ -200,7 +203,7 @@ export default function CostingDetailPage() {
                 </div>
                 <div className="text-right">
                   <p className="text-sm font-bold text-gray-900">₱{costing.materialCost.toLocaleString()}</p>
-                  <p className="text-xs text-gray-500">{((costing.materialCost / totalCost) * 100).toFixed(1)}%</p>
+                  <p className="text-xs text-gray-500">{share(costing.materialCost).toFixed(1)}%</p>
                 </div>
               </div>
               <div className="flex items-center justify-between p-4 bg-green-50 rounded-lg">
@@ -213,20 +216,20 @@ export default function CostingDetailPage() {
                 </div>
                 <div className="text-right">
                   <p className="text-sm font-bold text-gray-900">₱{costing.laborCost.toLocaleString()}</p>
-                  <p className="text-xs text-gray-500">{((costing.laborCost / totalCost) * 100).toFixed(1)}%</p>
+                  <p className="text-xs text-gray-500">{share(costing.laborCost).toFixed(1)}%</p>
                 </div>
               </div>
               <div className="flex items-center justify-between p-4 bg-[#eef1fb] rounded-lg">
                 <div className="flex items-center">
                   <div className="w-3 h-3 bg-[#011c72] rounded-full mr-3"></div>
                   <div>
-                    <p className="text-sm font-medium text-gray-900">Overhead</p>
-                    <p className="text-xs text-gray-500">Indirect costs and expenses</p>
+                    <p className="text-sm font-medium text-gray-900">Other Expenses</p>
+                    <p className="text-xs text-gray-500">Thread, glue, delivery and other job expenses</p>
                   </div>
                 </div>
                 <div className="text-right">
                   <p className="text-sm font-bold text-gray-900">₱{costing.overheadCost.toLocaleString()}</p>
-                  <p className="text-xs text-gray-500">{((costing.overheadCost / totalCost) * 100).toFixed(1)}%</p>
+                  <p className="text-xs text-gray-500">{share(costing.overheadCost).toFixed(1)}%</p>
                 </div>
               </div>
             </div>
@@ -247,7 +250,7 @@ export default function CostingDetailPage() {
                     stroke={profitMargin >= 30 ? '#22c55e' : profitMargin >= 15 ? '#eab308' : '#ef4444'}
                     strokeWidth="20" 
                     strokeLinecap="round"
-                    strokeDasharray={`${(profitMargin / 100) * 251.2} 251.2`}
+                    strokeDasharray={`${(gaugePct / 100) * 251.2} 251.2`}
                   />
                 </svg>
                 <div className="absolute inset-0 flex items-end justify-center pb-2">
@@ -274,7 +277,7 @@ export default function CostingDetailPage() {
               <div className="flex items-center justify-between py-3">
                 <span className="text-sm text-gray-500">Cost per Peso Revenue</span>
                 <span className="text-sm font-medium text-gray-900">
-                  ₱{(totalCost / costing.totalPrice).toFixed(2)}
+                  {costing.totalPrice > 0 ? `₱${(totalCost / costing.totalPrice).toFixed(2)}` : '—'}
                 </span>
               </div>
             </div>
@@ -354,7 +357,7 @@ export default function CostingDetailPage() {
         {/* Actions */}
         <div className="mt-6 flex flex-wrap gap-3">
           <button 
-            onClick={() => router.push(`/sales/${costing.jobOrderId}`)}
+            onClick={() => router.push(`/sales/${costing.id}`)}
             className="inline-flex items-center px-4 py-2 bg-white border border-gray-200 hover:border-[#011c72] text-gray-700 rounded-lg font-medium transition-colors"
           >
             <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">

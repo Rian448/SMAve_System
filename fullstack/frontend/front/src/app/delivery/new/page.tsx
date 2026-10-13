@@ -20,6 +20,7 @@ function NewDeliveryForm() {
   const [driverName, setDriverName] = useState('');
   const [vehicleAssigned, setVehicleAssigned] = useState('');
   const [notes, setNotes] = useState('');
+  const [error, setError] = useState('');
 
   useEffect(() => {
     api.sales.getJobOrders()
@@ -35,7 +36,6 @@ function NewDeliveryForm() {
           const selectedOrder = completedOrders.find((jo: JobOrder) => String(jo.id) === preselectedId);
           if (selectedOrder) {
             setRecipientName(selectedOrder.customerName);
-            setDeliveryAddress(selectedOrder.customerEmail || '');
             setContactNumber(selectedOrder.customerPhone || '');
           }
         }
@@ -51,7 +51,6 @@ function NewDeliveryForm() {
     const selectedOrder = jobOrders.find(jo => String(jo.id) === id);
     if (selectedOrder) {
       setRecipientName(selectedOrder.customerName);
-      setDeliveryAddress(selectedOrder.customerEmail || '');
       setContactNumber(selectedOrder.customerPhone || '');
     }
   };
@@ -59,28 +58,32 @@ function NewDeliveryForm() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setError('');
 
     try {
+      // Sent from the branch that did the job (the server works it out from the job order)
       const delivery = {
         type: 'customer_delivery' as const,
-        fromBranchId: 1,
         customerName: recipientName,
         customerPhone: contactNumber,
         customerAddress: deliveryAddress,
         jobOrderId: parseInt(jobOrderId) || undefined,
         items: [],
         scheduledDate,
+        timeSlot,
         driverName,
         vehiclePlate: vehicleAssigned,
         notes,
       };
 
-      await api.deliveries.create(delivery);
-      router.push('/delivery');
+      const res = await api.deliveries.create(delivery);
+      // Open the new delivery; the Item Trail page only lists branch transfers
+      router.push(res.data ? `/delivery/${res.data.id}` : '/dashboard');
     } catch (err) {
       console.error(err);
+      setError(err instanceof Error && err.message ? err.message : 'Failed to schedule the delivery.');
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const timeSlots = [
@@ -108,6 +111,10 @@ function NewDeliveryForm() {
             Schedule delivery for a completed job order
           </p>
         </div>
+
+        {error && (
+          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>
+        )}
 
         <form onSubmit={handleSubmit}>
           {/* Job Order Selection */}

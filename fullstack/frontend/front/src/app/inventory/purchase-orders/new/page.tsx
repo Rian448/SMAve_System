@@ -14,6 +14,7 @@ interface POItem {
 export default function NewPurchaseOrderPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
   const [materials, setMaterials] = useState<RawMaterial[]>([]);
   const [loadingMaterials, setLoadingMaterials] = useState(true);
   const [savedSuppliers, setSavedSuppliers] = useState<Supplier[]>([]);
@@ -63,7 +64,8 @@ export default function NewPurchaseOrderPage() {
           ...newItems[index],
           material_id: material.id.toString(),
           material_name: label,
-          unit_cost: material.unitPrice,
+          // A purchase order pays the supplier's cost, not our selling price
+          unit_cost: material.costPerUnit || material.unitPrice,
           unit: 'unit'
         };
       }
@@ -79,6 +81,11 @@ export default function NewPurchaseOrderPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError('');
+    if (!items.some(item => item.material_id)) {
+      setError('Add at least one material to the purchase order.');
+      return;
+    }
     setLoading(true);
 
     try {
@@ -98,6 +105,7 @@ export default function NewPurchaseOrderPage() {
       router.push('/inventory?tab=purchase-orders');
     } catch (err) {
       console.error(err);
+      setError(err instanceof Error && err.message ? err.message : 'Failed to create the purchase order.');
     }
     setLoading(false);
   };
@@ -123,6 +131,9 @@ export default function NewPurchaseOrderPage() {
           </p>
         </div>
 
+        {error && (
+          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>
+        )}
         <form onSubmit={handleSubmit}>
           {/* Supplier Information */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">

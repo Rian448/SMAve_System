@@ -11,6 +11,20 @@ export default function Dashboard() {
   const [alerts, setAlerts] = useState<Array<Alert & { rowKey: string }>>([]);
   const [activities, setActivities] = useState<Array<Activity & { rowKey: string; user: string; action: string; details: string }>>([]);
   const [loading, setLoading] = useState(true);
+  // Administrators can narrow the dashboard to one branch ('' = whole company);
+  // everyone else always sees only their own branch.
+  const isAdmin = user?.role === 'administrator';
+  const isStaff = hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager']);
+  const isWorkerAccount = user?.role === 'seat_maker' || user?.role === 'sewer';
+  const [branchFilter, setBranchFilter] = useState('');
+  const [branches, setBranches] = useState<{ id: number; name: string; isWarehouse: boolean }[]>([]);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    api.settings.getBranches().then(r => {
+      if (r.data) setBranches(r.data.filter(b => b.isActive));
+    }).catch(() => {});
+  }, [isAdmin]);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -18,17 +32,25 @@ export default function Dashboard() {
       return;
     }
 
+    // Customers and worker accounts get a simple dashboard and no company figures
+    if (!authLoading && user && !isStaff) {
+      setLoading(false);
+      return;
+    }
+
     if (!authLoading && user) {
       fetchDashboardData();
     }
-  }, [authLoading, user]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, user, branchFilter]);
 
   const fetchDashboardData = async () => {
+    const branchId = isAdmin && branchFilter ? Number(branchFilter) : undefined;
     try {
       const [statsData, alertsData, activitiesData] = await Promise.all([
-        api.dashboard.getStats(),
-        api.dashboard.getAlerts(),
-        api.dashboard.getRecentActivity()
+        api.dashboard.getStats(branchId),
+        api.dashboard.getAlerts(branchId),
+        api.dashboard.getRecentActivity(branchId)
       ]);
       setStats(statsData.data || null);
       // rowKey is only a React key — it must not shadow `id`/`itemId`, which
@@ -169,15 +191,36 @@ export default function Dashboard() {
               Back to website
             </Link>
           )}
-          <h1 className="text-2xl font-bold text-gray-900">
-            Welcome back, {user?.fullName?.split(' ')[0]}!
-          </h1>
-          <p className="text-gray-500 mt-1">
-            {user?.role === 'customer'
-              ? 'Track your orders and view quotations here.'
-              : `Here's what's happening at ${user?.branch || 'your branch'} today.`
-            }
-          </p>
+          <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">
+                Welcome back, {user?.fullName?.split(' ')[0]}!
+              </h1>
+              <p className="text-gray-500 mt-1">
+                {user?.role === 'customer'
+                  ? 'Track your orders and view quotations here.'
+                  : `Here's what's happening at ${
+                      isAdmin
+                        ? (stats?.scopeBranchName || 'all branches')
+                        : (stats?.scopeBranchName || user?.branch || 'your branch')
+                    } today.`
+                }
+              </p>
+            </div>
+            {isAdmin && (
+              <select
+                value={branchFilter}
+                onChange={(e) => { setLoading(true); setBranchFilter(e.target.value); }}
+                aria-label="Branch"
+                className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
+              >
+                <option value="">All Branches</option>
+                {branches.map(b => (
+                  <option key={b.id} value={b.id}>{b.name}{b.isWarehouse ? ' (Warehouse)' : ''}</option>
+                ))}
+              </select>
+            )}
+          </div>
         </div>
 
         {/* Customer Dashboard */}
@@ -238,8 +281,20 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* Worker accounts: their tasks are run from Worker Management by an admin */}
+        {isWorkerAccount && (
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-8 max-w-2xl">
+            <h2 className="text-lg font-semibold text-gray-900">Your work assignments</h2>
+            <p className="text-sm text-gray-600 mt-2">
+              Jobs are assigned to you by your supervisor or administrator through Worker Management.
+              Ask them for your schedule, and let them know when you start and finish a task so your
+              hours and pay are recorded.
+            </p>
+          </div>
+        )}
+
         {/* Stats Cards - For staff only */}
-        {user?.role !== 'customer' && (
+        {isStaff && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-6 mb-8">
           {/* Pending Orders */}
           <Link href="/sales" className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:border-[#011c72] hover:shadow-md transition-all block">
@@ -371,7 +426,7 @@ export default function Dashboard() {
         )}
 
         {/* Main Content Grid - For staff only */}
-        {user?.role !== 'customer' && (
+        {isStaff && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Alerts Section */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
