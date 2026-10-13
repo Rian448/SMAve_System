@@ -14,7 +14,7 @@ export default function Dashboard() {
   // Administrators can narrow the dashboard to one branch ('' = whole company);
   // everyone else always sees only their own branch.
   const isAdmin = user?.role === 'administrator';
-  const isStaff = hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager', 'staff']);
+  const isStaff = hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager']);
   const isWorkerAccount = user?.role === 'seat_maker' || user?.role === 'sewer';
   const [branchFilter, setBranchFilter] = useState('');
   const [branches, setBranches] = useState<{ id: number; name: string; isWarehouse: boolean }[]>([]);

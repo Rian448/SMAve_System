@@ -203,8 +203,8 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
   const navItems = [
     { name: 'My Orders', path: '/my-orders', icon: OrdersIcon, roles: ['customer'] },
     { name: 'Shop Products', path: '/place-order', icon: ShoppingIcon, roles: ['customer'] },
-    { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, roles: ['administrator', 'supervisor', 'sales_manager', 'staff'] },
-    { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, roles: ['administrator', 'supervisor', 'sales_manager', 'staff'] },
+    { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
+    { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
     { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, roles: ['administrator'] },
     { name: 'Sales', path: '/sales', icon: SalesIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
     { name: 'Customers', path: '/customers', icon: CustomersIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
