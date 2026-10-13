@@ -4,7 +4,7 @@ import { useAuth } from '@/context/AuthContext';
 import { api, Branch, User as UserType, Role } from '@/lib/api';
 import { useConfirm } from '@/components/ConfirmDialog';
 
-type TabType = 'general' | 'users' | 'branches' | 'services' | 'notifications';
+type TabType = 'general' | 'users' | 'branches' | 'notifications';
 
 export default function SettingsPage() {
   const { user } = useAuth();
@@ -22,7 +22,7 @@ export default function SettingsPage() {
       password: '',
       email: '',
       fullName: '',
-      role: 'staff',
+      role: 'sales_manager',
       branchId: 0
     });
     const [userError, setUserError] = useState('');
@@ -116,7 +116,7 @@ export default function SettingsPage() {
       password: '', 
       email: '', 
       fullName: '', 
-      role: 'staff',
+      role: 'sales_manager',
       branchId: branches.length > 0 ? branches[0].id : 0
     });
     setEditingUser(null);
@@ -371,11 +371,6 @@ export default function SettingsPage() {
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
       </svg>
     )},
-    { id: 'services' as TabType, name: 'Services', icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-      </svg>
-    )},
     { id: 'notifications' as TabType, name: 'Notifications', icon: (
       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
@@ -485,7 +480,6 @@ export default function SettingsPage() {
                       <option value="sales_manager">Sales Manager</option>
                       <option value="seat_maker">Seat Maker</option>
                       <option value="sewer">Sewer</option>
-                      <option value="staff">Staff</option>
                     </optgroup>
                     <optgroup label="General">
                       <option value="group:staff">All Staff</option>
@@ -724,55 +718,6 @@ export default function SettingsPage() {
                 ))}
               </div>
             )}
-          </div>
-        );
-
-      case 'services':
-        return (
-          <div>
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-lg font-semibold text-gray-900">Service Types</h3>
-              <button className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors">
-                <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                </svg>
-                Add Service
-              </button>
-            </div>
-            <div className="space-y-4">
-              {[
-                { name: 'Full Upholstery', description: 'Complete interior upholstery service', basePrice: 15000, duration: '3-5 days' },
-                { name: 'Seat Cover Installation', description: 'Install custom or pre-made seat covers', basePrice: 5000, duration: '1-2 days' },
-                { name: 'Headliner Replacement', description: 'Replace sagging or damaged headliner', basePrice: 3500, duration: '1 day' },
-                { name: 'Door Panel Repair', description: 'Repair or replace door panel upholstery', basePrice: 2500, duration: '1 day' },
-                { name: 'Dashboard Cover', description: 'Install dashboard cover or repair dashboard', basePrice: 3000, duration: '1 day' },
-                { name: 'Carpet Installation', description: 'Install custom automotive carpet', basePrice: 4000, duration: '1-2 days' },
-                { name: 'Custom Work', description: 'Custom upholstery and modifications', basePrice: 8000, duration: 'Varies' },
-              ].map((service, index) => (
-                <div key={index} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
-                  <div className="flex items-center">
-                    <div className="w-10 h-10 rounded-lg bg-[#dde6ff] flex items-center justify-center mr-4">
-                      <svg className="w-5 h-5 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                      </svg>
-                    </div>
-                    <div>
-                      <h4 className="text-sm font-medium text-gray-900">{service.name}</h4>
-                      <p className="text-xs text-gray-500">{service.description}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-6">
-                    <div className="text-right">
-                      <p className="text-sm font-medium text-gray-900">₱{service.basePrice.toLocaleString()}</p>
-                      <p className="text-xs text-gray-500">{service.duration}</p>
-                    </div>
-                    <button className="text-[#011c72] hover:text-[#011c72] text-sm font-medium">
-                      Edit
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
           </div>
         );
 

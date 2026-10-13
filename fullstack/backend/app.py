@@ -8,8 +8,15 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 import os
 import hashlib
+import hmac
+import json
 import secrets
+import threading
+import time
+import urllib.error
+import urllib.request
 import uuid
+from html import escape
 
 app = Flask(__name__)
 CORS(
@@ -64,6 +71,28 @@ class User(db.Model):
 
     role = db.relationship('Role')
     branch_rel = db.relationship('Branch')
+
+class UserSession(db.Model):
+    """A sign-in session. Stored in the database (not in memory) so logins
+    survive restarts, redeploys and Render's free-tier sleep. Only a hash of
+    the token is kept, so a copy of this table cannot be used to sign in."""
+    __tablename__ = 'user_sessions'
+    id = db.Column(db.Integer, primary_key=True)
+    token_hash = db.Column(db.String(64), unique=True, nullable=False, index=True)
+    user_id = db.Column(db.Integer, nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False)
+
+class PasswordResetCode(db.Model):
+    """A 6-digit code emailed for 'Forgot password'. Only its hash is stored."""
+    __tablename__ = 'password_reset_codes'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False, index=True)
+    code_hash = db.Column(db.String(64), nullable=False)
+    attempts = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    used_at = db.Column(db.DateTime, nullable=True)  # also set when superseded or out of attempts
 
 class Branch(db.Model):
     __tablename__ = 'branches'
@@ -677,7 +706,6 @@ default_roles = [
     {'key': 'administrator', 'name': 'Administrator'},
     {'key': 'supervisor', 'name': 'Supervisor'},
     {'key': 'sales_manager', 'name': 'Sales Manager'},
-    {'key': 'staff', 'name': 'Staff'},
     {'key': 'seat_maker', 'name': 'Seat Maker'},
     {'key': 'sewer', 'name': 'Sewer'},
     {'key': 'customer', 'name': 'Customer'}
@@ -687,15 +715,13 @@ default_users = [
     {'username': 'admin', 'password': 'admin123', 'email': 'admin@seatmakers.com', 'fullName': 'System Administrator', 'role': 'administrator', 'branch': 'Main Warehouse', 'isActive': True},
     {'username': 'supervisor', 'password': 'super123', 'email': 'supervisor@seatmakers.com', 'fullName': 'John Supervisor', 'role': 'supervisor', 'branch': 'Main Warehouse', 'isActive': True},
     {'username': 'salesmanager', 'password': 'sales123', 'email': 'sales@seatmakers.com', 'fullName': 'Jane Sales', 'role': 'sales_manager', 'branch': 'Branch A', 'isActive': True},
-    {'username': 'staff1', 'password': 'staff123', 'email': 'staff1@seatmakers.com', 'fullName': 'Mike Staff', 'role': 'staff', 'branch': 'Branch B', 'isActive': True},
 ]
 
 # ============================================
 # IN-MEMORY STATE AND SEED DATA
 # ============================================
 
-# Sessions for authentication
-sessions = {}
+# Sign-in sessions live in the user_sessions table; see create_session()
 
 # Branch and finished-goods seed data, used only to populate an empty database.
 branches = [
@@ -773,6 +799,26 @@ def branch_to_dict(branch):
         'createdAt': fmt_dt(branch.created_at)
     }
 
+def retire_staff_role():
+    """The 'staff' role was removed: move any remaining staff accounts to
+    sales_manager, then drop the role so it can no longer be assigned.
+
+    Idempotent, and safe if several workers start at once — a worker that loses
+    the race just rolls back and finds nothing left to do next time."""
+    staff_role = Role.query.filter_by(key='staff').first()
+    sales_manager_role = Role.query.filter_by(key='sales_manager').first()
+    if not staff_role or not sales_manager_role:
+        return
+    try:
+        moved = User.query.filter_by(role_id=staff_role.id).update(
+            {'role_id': sales_manager_role.id}, synchronize_session=False)
+        Role.query.filter_by(id=staff_role.id).delete(synchronize_session=False)
+        db.session.commit()
+        print(f"[migration] Retired 'staff' role; {moved} user(s) moved to sales_manager")
+    except Exception as e:
+        db.session.rollback()
+        print(f"[migration] Retiring 'staff' role skipped: {e}")
+
 def seed_default_users():
     for user in default_users:
         existing = User.query.filter_by(username=user['username']).first()
@@ -799,7 +845,7 @@ def seed_default_users():
         db.session.flush()  # Flush to get the user ID
         
         # Create Worker profile for worker roles
-        worker_roles = ['seat_maker', 'sewer', 'staff']
+        worker_roles = ['seat_maker', 'sewer']
         if user['role'] in worker_roles:
             # Determine specialization based on role
             if user['role'] in ['seat_maker', 'sewer']:
@@ -930,6 +976,8 @@ def init_db():
         existing = Role.query.filter_by(key=role['key']).first()
         if not existing:
             db.session.add(Role(key=role['key'], name=role['name']))
+    db.session.commit()
+    retire_staff_role()
 
     # Seed default system settings
     default_settings = [
@@ -981,28 +1029,62 @@ def init_db():
             db.session.add(item)
         db.session.commit()
 
-def get_user_from_token(token):
-    """Get user from session token.
+SESSION_TTL = timedelta(days=7)  # signed out after a week without using the system
+SESSION_CACHE_SECONDS = 60
 
-    The resolved user dict is cached on the session for a short window (60s) so
-    a burst of API calls (e.g. a page loading several endpoints at once) doesn't
-    re-query the database on every single request. The 60s bound means role or
-    branch changes still take effect quickly.
-    """
-    import time
-    s = sessions.get(token)
-    if not s:
+# Per-process cache of token -> (user dict, cached_at), so a burst of API calls
+# (e.g. a page loading several endpoints at once) doesn't hit the database on
+# every request. The 60s bound means role, branch or archive changes still take
+# effect quickly.
+_session_cache = {}
+
+def _token_hash(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def end_user_sessions(user_id):
+    """Sign a user out everywhere. The caller commits."""
+    UserSession.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+    for t in [t for t, (u, _) in _session_cache.items() if u['id'] == user_id]:
+        _session_cache.pop(t, None)
+
+def create_session(user):
+    """Start a session and return its token. One login at a time: any other
+    session the user has is ended. Commits."""
+    now = datetime.utcnow()
+    end_user_sessions(user.id)
+    UserSession.query.filter(UserSession.expires_at < now).delete(synchronize_session=False)
+    token = secrets.token_hex(32)
+    db.session.add(UserSession(token_hash=_token_hash(token), user_id=user.id,
+                               created_at=now, expires_at=now + SESSION_TTL))
+    db.session.commit()
+    return token
+
+def get_user_from_token(token):
+    """Get the signed-in user for a session token, or None."""
+    if not token:
         return None
-    now = time.time()
-    cached = s.get('_userCache')
-    if cached and (now - s.get('_userCacheAt', 0)) < 60:
-        return cached
-    user = User.query.get(s['userId'])
-    if not user:
+    now_ts = time.time()
+    cached = _session_cache.get(token)
+    if cached and (now_ts - cached[1]) < SESSION_CACHE_SECONDS:
+        return cached[0]
+
+    now = datetime.utcnow()
+    s = UserSession.query.filter_by(token_hash=_token_hash(token)).first()
+    user = User.query.get(s.user_id) if s and s.expires_at > now else None
+    if not user or not user.is_active:
+        _session_cache.pop(token, None)
         return None
+
+    # Sliding expiry, written at most once a day per session
+    if s.expires_at - now < SESSION_TTL - timedelta(days=1):
+        s.expires_at = now + SESSION_TTL
+        db.session.commit()
+
+    if len(_session_cache) > 1000:
+        for t in [t for t, (_, at) in _session_cache.items() if now_ts - at >= SESSION_CACHE_SECONDS]:
+            _session_cache.pop(t, None)
     resolved = user_to_dict(user)
-    s['_userCache'] = resolved
-    s['_userCacheAt'] = now
+    _session_cache[token] = (resolved, now_ts)
     return resolved
 
 def require_auth(f):
@@ -1306,27 +1388,8 @@ def login():
     user.failed_login_attempts = 0
     user.lockout_until = None
 
-    # Invalidate any existing sessions for this user (prevent concurrent logins)
-    existing_tokens = [t for t, s in sessions.items() if s.get('userId') == user.id]
-    for t in existing_tokens:
-        del sessions[t]
-
-    token = secrets.token_hex(32)
-    sessions[token] = {
-        'id': user.id,
-        'userId': user.id,
-        'username': user.username,
-        'email': user.email,
-        'fullName': user.full_name,
-        'role': user.role.key if user.role else None,
-        'roleName': user.role.name if user.role else None,
-        'branch': user.branch,
-        'branchId': user.branch_id,
-        'isActive': user.is_active,
-        'createdAt': fmt_dt(datetime.utcnow())
-    }
-
-    db.session.commit()
+    # Ends any other session this user has (one login at a time) and commits
+    token = create_session(user)
     log_action(user.id, user.full_name, 'LOGIN', 'Auth', 'User logged in', request.remote_addr or '0.0.0.0')
 
     return jsonify({
@@ -1341,9 +1404,10 @@ def login():
 @require_auth
 def logout():
     token = request.headers.get('Authorization', '').replace('Bearer ', '')
-    if token in sessions:
-        log_action(request.current_user['id'], request.current_user['fullName'], 'LOGOUT', 'Auth', 'User logged out', request.remote_addr or '0.0.0.0')
-        del sessions[token]
+    UserSession.query.filter_by(token_hash=_token_hash(token)).delete(synchronize_session=False)
+    db.session.commit()
+    _session_cache.pop(token, None)
+    log_action(request.current_user['id'], request.current_user['fullName'], 'LOGOUT', 'Auth', 'User logged out', request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'message': 'Logged out successfully'})
 
 @app.route('/api/auth/me', methods=['GET'])
@@ -1362,28 +1426,155 @@ def get_current_user():
         }
     })
 
+# ============================================
+# EMAIL + PASSWORD RESET CODES
+# ============================================
+
+# Email goes out through Brevo's HTTP API, since Render's free tier blocks SMTP.
+BREVO_API_KEY = os.getenv('BREVO_API_KEY', '')
+MAIL_SENDER_EMAIL = os.getenv('MAIL_SENDER_EMAIL', '')
+MAIL_SENDER_NAME = os.getenv('MAIL_SENDER_NAME', 'Seatmakers Avenue')
+
+RESET_CODE_TTL = timedelta(minutes=10)
+RESET_CODE_MAX_ATTEMPTS = 5
+RESET_CODE_RESEND_SECONDS = 60
+RESET_CODE_MAX_PER_HOUR = 5
+MIN_PASSWORD_LENGTH = 8
+
+def send_email(to_email, to_name, subject, text, html):
+    """Send one email through Brevo. Returns True on success.
+
+    Without BREVO_API_KEY / MAIL_SENDER_EMAIL nothing is sent and the message
+    is printed to the server log instead, which is how it works locally."""
+    if not BREVO_API_KEY or not MAIL_SENDER_EMAIL:
+        print(f"[email] Brevo not configured, not sent. To: {to_email} | {subject}\n{text}", flush=True)
+        return False
+    payload = json.dumps({
+        'sender': {'name': MAIL_SENDER_NAME, 'email': MAIL_SENDER_EMAIL},
+        'to': [{'email': to_email, 'name': to_name or to_email}],
+        'subject': subject,
+        'textContent': text,
+        'htmlContent': html,
+    }).encode('utf-8')
+    req = urllib.request.Request(
+        'https://api.brevo.com/v3/smtp/email', data=payload, method='POST',
+        headers={'api-key': BREVO_API_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.HTTPError as e:
+        print(f"[email] Brevo rejected the message to {to_email}: {e.code} {e.read().decode('utf-8', 'replace')[:300]}", flush=True)
+    except Exception as e:
+        print(f"[email] Sending to {to_email} failed: {e}", flush=True)
+    return False
+
+def _reset_code_hash(user_id, code):
+    return hashlib.sha256(f"{user_id}:{code}".encode()).hexdigest()
+
+def _active_user_by_email(email):
+    return User.query.filter(db.func.lower(User.email) == email.lower(), User.is_active == True).first()
+
 @app.route('/api/auth/recover', methods=['POST'])
 def recover_account():
-    data = request.get_json()
-    email = data.get('email', '')
-    
-    user = User.query.filter_by(email=email).first()
+    """Forgot password, step 1: email a 6-digit code.
+
+    The reply is identical whether or not the email has an account (and when a
+    request is throttled), so this can't be used to find out who has one."""
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip()
+    if not email:
+        return jsonify({'status': 'error', 'message': 'Email is required'}), 400
+    reply = jsonify({'status': 'success',
+                     'message': 'If that email belongs to an account, a 6-digit code has been sent to it.'})
+
+    user = _active_user_by_email(email)
     if not user:
-        return jsonify({'status': 'success', 'message': 'If the email exists, a recovery link has been sent'})
-    
-    # In production, send actual email
-    recovery_token = secrets.token_hex(32)
-    return jsonify({
-        'status': 'success',
-        'message': 'If the email exists, a recovery link has been sent',
-        'debug_token': recovery_token  # Remove in production
-    })
+        return reply
+
+    now = datetime.utcnow()
+    PasswordResetCode.query.filter(PasswordResetCode.created_at < now - timedelta(days=1)).delete(synchronize_session=False)
+    recent = (PasswordResetCode.query
+              .filter(PasswordResetCode.user_id == user.id,
+                      PasswordResetCode.created_at > now - timedelta(hours=1))
+              .order_by(PasswordResetCode.created_at.desc()).all())
+    if recent and ((now - recent[0].created_at).total_seconds() < RESET_CODE_RESEND_SECONDS
+                   or len(recent) >= RESET_CODE_MAX_PER_HOUR):
+        db.session.commit()
+        return reply
+
+    # Only the newest code works
+    PasswordResetCode.query.filter_by(user_id=user.id, used_at=None).update({'used_at': now}, synchronize_session=False)
+    code = f"{secrets.randbelow(10**6):06d}"
+    db.session.add(PasswordResetCode(user_id=user.id, code_hash=_reset_code_hash(user.id, code),
+                                     created_at=now, expires_at=now + RESET_CODE_TTL))
+    db.session.commit()
+    log_action(user.id, user.full_name, 'PASSWORD_RESET_REQUESTED', 'Auth', 'Password reset code requested',
+               request.remote_addr or '0.0.0.0')
+
+    minutes = int(RESET_CODE_TTL.total_seconds() // 60)
+    subject = f"{code} is your Seatmakers Avenue password reset code"
+    text = (f"Hi {user.full_name},\n\nYour password reset code is: {code}\n\n"
+            f"It expires in {minutes} minutes. If you did not ask to reset your password, "
+            f"you can ignore this email.\n\nSeatmakers Avenue")
+    html = (f"<p>Hi {escape(user.full_name)},</p>"
+            f"<p>Your password reset code is:</p>"
+            f"<p style=\"font-size:28px;font-weight:bold;letter-spacing:6px;color:#011c72\">{code}</p>"
+            f"<p>It expires in {minutes} minutes. If you did not ask to reset your password, "
+            f"you can ignore this email.</p><p>Seatmakers Avenue</p>")
+    # Sent in the background so the reply doesn't wait on (or reveal) the email send
+    threading.Thread(target=send_email, args=(user.email, user.full_name, subject, text, html), daemon=True).start()
+    return reply
+
+@app.route('/api/auth/reset-password', methods=['POST'])
+def reset_password():
+    """Forgot password, step 2: check the emailed code and set the new password."""
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip()
+    code = (data.get('code') or '').strip()
+    new_password = data.get('newPassword') or ''
+    if not email or not code or not new_password:
+        return jsonify({'status': 'error', 'message': 'Email, code and new password are required'}), 400
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        return jsonify({'status': 'error',
+                        'message': f'Password must be at least {MIN_PASSWORD_LENGTH} characters'}), 400
+
+    invalid = jsonify({'status': 'error', 'message': 'This code is invalid or has expired. Request a new one.'}), 400
+    user = _active_user_by_email(email)
+    if not user:
+        return invalid
+    now = datetime.utcnow()
+    rc = (PasswordResetCode.query
+          .filter(PasswordResetCode.user_id == user.id, PasswordResetCode.used_at.is_(None),
+                  PasswordResetCode.expires_at > now)
+          .order_by(PasswordResetCode.created_at.desc()).first())
+    if not rc:
+        return invalid
+
+    if not hmac.compare_digest(rc.code_hash, _reset_code_hash(user.id, code)):
+        rc.attempts = (rc.attempts or 0) + 1
+        left = RESET_CODE_MAX_ATTEMPTS - rc.attempts
+        if left <= 0:
+            rc.used_at = now
+        db.session.commit()
+        message = (f'Incorrect code. {left} attempt(s) left.' if left > 0
+                   else 'Too many incorrect attempts. Request a new code.')
+        return jsonify({'status': 'error', 'message': message}), 400
+
+    rc.used_at = now
+    user.password = hash_password(new_password)
+    user.failed_login_attempts = 0
+    user.lockout_until = None
+    end_user_sessions(user.id)  # sign out anyone using the old password
+    db.session.commit()
+    log_action(user.id, user.full_name, 'PASSWORD_RESET', 'Auth', 'Password reset with emailed code',
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'message': 'Your password has been changed. You can now sign in.'})
 
 # ============================================
 # DASHBOARD ROUTES
 # ============================================
 
-STAFF_ROLES = ('administrator', 'supervisor', 'sales_manager', 'staff')
+STAFF_ROLES = ('administrator', 'supervisor', 'sales_manager')
 
 # Revenue excludes VAT: it is collected for the government, not earned
 REVENUE_EX_VAT = JobOrder.total_price / (1 + db.func.coalesce(JobOrder.vat_percent, 0) / 100.0)
@@ -2344,7 +2535,7 @@ def distribute_finished_good(item_id):
 @app.route('/api/inventory/premade-transfers', methods=['GET'])
 @require_auth
 def get_premade_transfers():
-    """Premade deliveries. Sales managers and staff only see their own branch."""
+    """Premade deliveries. Sales managers only see their own branch."""
     status = request.args.get('status')
     user = request.current_user
 
@@ -3567,7 +3758,7 @@ def void_job_order(order_id):
 
 @app.route('/api/sales/drafts', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+@require_roles('administrator', 'supervisor', 'sales_manager')
 def get_draft_job_orders():
     """Draft job orders — saved but not yet confirmed. Kept out of all normal
     order lists and sales/pending counts until confirmed."""
@@ -3619,7 +3810,7 @@ def delete_job_order(order_id):
 
 @app.route('/api/sales/all-orders', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+@require_roles('administrator', 'supervisor', 'sales_manager')
 def get_all_orders():
     """Get both job orders and customer orders - filtered by branch for non-admin users"""
     user = request.current_user
@@ -3722,7 +3913,7 @@ def can_use_lineup_slip(user, branch_id):
 
 @app.route('/api/sales/lineup-slips', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+@require_roles('administrator', 'supervisor', 'sales_manager')
 def get_lineup_slips():
     user = request.current_user
     query = LineupSlip.query
@@ -3766,7 +3957,7 @@ def create_lineup_slip():
 
 @app.route('/api/sales/lineup-slips/<int:slip_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+@require_roles('administrator', 'supervisor', 'sales_manager')
 def update_lineup_slip(slip_id):
     user = request.current_user
     slip = LineupSlip.query.get(slip_id)
@@ -5809,7 +6000,7 @@ def place_customer_order():
 
 @app.route('/api/customer-orders', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager', 'staff')
+@require_roles('administrator', 'supervisor', 'sales_manager')
 def get_customer_orders():
     """Get customer orders - filtered by branch for non-admin users"""
     user = request.current_user
@@ -5928,12 +6119,7 @@ def register_customer():
     db.session.add(new_user)
     db.session.commit()
     
-    # Generate session token
-    token = secrets.token_hex(32)
-    sessions[token] = {
-        'userId': new_user.id,
-        'createdAt': fmt_dt(datetime.utcnow())
-    }
+    token = create_session(new_user)
     
     log_action(new_user.id, new_user.full_name, 'REGISTER', 'Auth', 'New customer registered', request.remote_addr or '0.0.0.0')
     
@@ -6635,7 +6821,7 @@ def create_user():
     db.session.commit()
     
     # Automatically create Worker profile for worker roles
-    worker_roles = ['seat_maker', 'sewer', 'staff']
+    worker_roles = ['seat_maker', 'sewer']
     if data['role'] in worker_roles:
         # Determine specialization based on role
         if data['role'] in ['seat_maker', 'sewer']:
@@ -6694,7 +6880,7 @@ def update_user(user_id):
     db.session.commit()
     
     # Handle Worker profile when role changes
-    worker_roles = ['seat_maker', 'sewer', 'staff']
+    worker_roles = ['seat_maker', 'sewer']
     new_role_key = user.role.key if user.role else None
     
     if new_role_key in worker_roles:
@@ -6874,6 +7060,8 @@ def delete_user(user_id):
         # These rows belong to the account itself and carry no history worth keeping.
         Notification.query.filter_by(user_id=user.id).delete(synchronize_session=False)
         Worker.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+        UserSession.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+        PasswordResetCode.query.filter_by(user_id=user.id).delete(synchronize_session=False)
         # Announcements outlive their author — keep the post, drop the byline.
         Announcement.query.filter_by(created_by_id=user.id).update(
             {'created_by_id': None}, synchronize_session=False)

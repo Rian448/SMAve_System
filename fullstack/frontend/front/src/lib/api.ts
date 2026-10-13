@@ -17,7 +17,7 @@ export interface User {
   username: string;
   email: string;
   fullName: string;
-  role: 'administrator' | 'supervisor' | 'sales_manager' | 'staff' | 'seat_maker' | 'sewer' | 'customer';
+  role: 'administrator' | 'supervisor' | 'sales_manager' | 'seat_maker' | 'sewer' | 'customer';
   roleName?: string;
   branch: string;
   branchId?: number;
