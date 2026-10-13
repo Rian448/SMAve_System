@@ -1,11 +1,11 @@
 'use client';
-import { formatDate } from '@/lib/dateUtils';
+import { formatDate, manilaDateString } from '@/lib/dateUtils';
 import { useEffect, useRef, useState, Suspense, type ReactElement } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import {
-  api, type Customer, type FinishedGood, type RawMaterial,
-  DEFAULT_VAT_PERCENT, jobOrderTotalFrom, jobOrderPriceBreakdown,
+  api, type Customer, type FinishedGood, type RawMaterial, type Appointment, type QuoteStatus, type Branch,
+  DEFAULT_VAT_PERCENT, jobOrderTotalFrom, jobOrderPriceBreakdown, MAX_JOB_ORDER_PRICE, isValidPriceInput,
 } from '@/lib/api';
 import Combobox from '@/components/Combobox';
 
@@ -88,6 +88,17 @@ function NewJobOrderForm() {
   const draftId = searchParams.get('draftId');
   const editingDraftId = draftId ? Number(draftId) : null;
   const [loadingDraft, setLoadingDraft] = useState(!!editingDraftId);
+  // ?appointmentId=… : this job order is a quotation for that appointment
+  const appointmentParam = searchParams.get('appointmentId');
+  const quoteAppointmentId = appointmentParam ? Number(appointmentParam) : null;
+  const [quoteAppointment, setQuoteAppointment] = useState<Appointment | null>(null);
+  // Set when the draft being edited was already sent to the customer as a quotation
+  const [editingQuoteStatus, setEditingQuoteStatus] = useState<QuoteStatus | null>(null);
+  const [editingQuoteReason, setEditingQuoteReason] = useState('');
+  const quoteMode = !!quoteAppointmentId || !!editingQuoteStatus;
+  // A quotation is paid for at a retail branch (never the warehouse) chosen here
+  const [retailBranches, setRetailBranches] = useState<Branch[]>([]);
+  const [quoteBranchId, setQuoteBranchId] = useState<number | ''>('');
   const { user } = useAuth();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -369,6 +380,11 @@ function NewJobOrderForm() {
         setCustomerPhone(d.customerPhone || '');
         setCustomerEmail(d.customerEmail || '');
         if (d.customerId) setLinkedCustomerId(d.customerId);
+        if (d.quoteStatus) {
+          setEditingQuoteStatus(d.quoteStatus);
+          setEditingQuoteReason(d.quoteRejectReason || '');
+          if (d.branchId) setQuoteBranchId(d.branchId);
+        }
         if (d.discountPercent != null) setOrderDiscount(String(d.discountPercent));
         setVatOn(Number(d.vatPercent) > 0);
         // Restore the price (it used to be lost when reopening a draft)
@@ -418,13 +434,52 @@ function NewJobOrderForm() {
     return () => { cancelled = true; };
   }, [editingDraftId]);
 
+  useEffect(() => {
+    if (!quoteMode) return;
+    api.settings.getBranchesPublic()
+      .then((res) => {
+        const retail = (res.data || []).filter((b) => !b.isWarehouse && b.isActive);
+        setRetailBranches(retail);
+        // No branch yet (e.g. a phone-call appointment): use the staff member's own retail branch
+        setQuoteBranchId((cur) => cur || (retail.some((b) => b.id === user?.branchId) ? (user?.branchId as number) : ''));
+      })
+      .catch(() => setRetailBranches([]));
+  }, [quoteMode, user?.branchId]);
+
+  // ── Pre-fill a quotation from an appointment (?appointmentId=…) ─────────────
+  useEffect(() => {
+    if (!quoteAppointmentId || editingDraftId) return;
+    let cancelled = false;
+    api.appointments.get(quoteAppointmentId)
+      .then((res) => {
+        const a = res.data;
+        if (cancelled || !a) return;
+        setQuoteAppointment(a);
+        setOrderType('normal');
+        if (a.branchId) setQuoteBranchId(a.branchId);
+        setCustomerName(a.customerName || '');
+        setCustomerPhone(a.customerPhone || '');
+        setCustomerEmail(a.customerEmail || '');
+        const v = a.vehicleInfo;
+        if (v) {
+          if (v.make) setVehicleMake(v.make);
+          if (v.model) setVehicleModel(v.model);
+          if (v.year) setVehicleYear(String(v.year));
+          if (v.plateNumber) setVehiclePlate(v.plateNumber);
+        }
+        if (a.description) setNotes(`From appointment ${a.appointmentNumber}: ${a.description}`);
+      })
+      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load the appointment.'); });
+    return () => { cancelled = true; };
+  }, [quoteAppointmentId, editingDraftId]);
+
   // Save the current (possibly incomplete) job order as a draft so work isn't lost.
   // Drafts stay out of sales/pending counts until confirmed.
   const saveDraft = async () => {
     if (!customerName.trim()) { setError('Enter a customer name to save a draft.'); return; }
     setLoading(true); setError('');
     try {
-      const branchId = user?.branchId || 1;
+      const branchId = quoteMode && quoteBranchId ? quoteBranchId : (user?.branchId || 1);
 
       const selectedServices: string[] = [];
       if (flooring.selected) selectedServices.push('flooring');
@@ -487,6 +542,10 @@ function NewJobOrderForm() {
         if (!customerPhone.trim()) { setError('Phone number is required.'); return; }
       }
       if (step === 3) {
+        if (estimatedCompletionDate && estimatedCompletionDate < manilaDateString()) {
+          setError('Estimated completion date cannot be in the past.');
+          return;
+        }
         const anyService = flooring.selected || reupholstery.selected || ceiling.selected ||
           sidings.selected || seatCovers.selected || otherServices.selected;
         if (!anyService) { setError('Please select at least one service.'); return; }
@@ -611,8 +670,24 @@ function NewJobOrderForm() {
       setLoading(false);
       return;
     }
+    if (estimatedCompletionDate && estimatedCompletionDate < manilaDateString()) {
+      setError('Estimated completion date cannot be in the past.');
+      setLoading(false);
+      return;
+    }
+    // Checked before anything is saved (typed-in materials are added to inventory below)
+    if (quoteMode && !(estimatedTotal > 0 || materialTotal > 0)) {
+      setError('Enter the price for the work before sending the quotation.');
+      setLoading(false);
+      return;
+    }
 
-    const branchId = user?.branchId || 1;
+    if (quoteMode && !quoteBranchId) {
+      setError('Choose the branch where the customer will pay for this quotation.');
+      setLoading(false);
+      return;
+    }
+    const branchId = quoteMode ? (quoteBranchId as number) : (user?.branchId || 1);
 
     // Add typed-in materials to inventory first (flagged as needed), so the order's
     // lines carry their inventory id and the stock is deducted when the job completes.
@@ -681,7 +756,8 @@ function NewJobOrderForm() {
 
     const grossTotal = estimatedTotal > 0 ? estimatedTotal : materialTotal;
     const orderTotal = jobOrderTotalFrom(grossTotal, orderDiscountPct, vatPct);
-    const finalDown = estimatedTotal > 0 ? Math.round((orderTotal / 2) * 100) / 100 : 0;
+    // A quotation takes no payment: the customer pays once they have accepted it
+    const finalDown = quoteMode ? 0 : estimatedTotal > 0 ? Math.round((orderTotal / 2) * 100) / 100 : 0;
 
     try {
       const jobOrderData: any = {
@@ -701,10 +777,20 @@ function NewJobOrderForm() {
         ...(orderTotal > 0 ? { estimatedCost: grossTotal, totalPrice: orderTotal } : {}),
       };
 
+      if (quoteMode) {
+        if (editingDraftId) {
+          // Revised quotation: update it in place and send it to the customer again
+          await api.sales.updateJobOrder(editingDraftId, { ...jobOrderData, sendQuotation: true });
+        } else {
+          await api.sales.createJobOrder({ ...jobOrderData, isDraft: true, sendQuotation: true, appointmentId: quoteAppointmentId });
+        }
+        router.push(quoteAppointmentId ? '/appointments' : '/sales');
+        return;
+      }
       await api.sales.createJobOrder(jobOrderData);
       router.push('/sales');
     } catch (err) {
-      setError(err instanceof Error && err.message ? err.message : 'Failed to create job order. Please try again.');
+      setError(err instanceof Error && err.message ? err.message : quoteMode ? 'Failed to send the quotation. Please try again.' : 'Failed to create job order. Please try again.');
       console.error(err);
     } finally {
       setLoading(false);
@@ -1271,7 +1357,9 @@ function NewJobOrderForm() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Estimated Completion Date</label>
-                <input type="date" value={estimatedCompletionDate} onChange={(e) => setEstimatedCompletionDate(e.target.value)} className={inputCls} />
+                {/* Completion can't be in the past (Manila date) */}
+                <input type="date" value={estimatedCompletionDate} min={manilaDateString()}
+                  onChange={(e) => setEstimatedCompletionDate(e.target.value)} className={inputCls} />
               </div>
             </div>
           </div>
@@ -1563,7 +1651,9 @@ function NewJobOrderForm() {
                     <button
                       type="button"
                       onClick={() => setEstimatedTotal(suggestedPrice)}
-                      className="text-xs font-medium text-white bg-[#011c72] hover:bg-[#022494] px-3 py-1.5 rounded-lg transition-colors shrink-0"
+                      disabled={suggestedPrice > MAX_JOB_ORDER_PRICE}
+                      title={suggestedPrice > MAX_JOB_ORDER_PRICE ? 'Above the ₱99,999,999.99 price limit' : undefined}
+                      className="text-xs font-medium text-white bg-[#011c72] hover:bg-[#022494] px-3 py-1.5 rounded-lg transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       Use This
                     </button>
@@ -1580,15 +1670,17 @@ function NewJobOrderForm() {
                 </label>
                 <div className="relative">
                   <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">₱</span>
-                  <input type="number" min="0" step="0.01"
+                  <input type="number" min="0" max={MAX_JOB_ORDER_PRICE} step="0.01"
                     value={estimatedTotal || ''}
                     onChange={(e) => {
-                      const val = parseFloat(e.target.value) || 0;
-                      setEstimatedTotal(val);
+                      // Up to 8 digits (under ₱100M): longer input is ignored
+                      if (!isValidPriceInput(e.target.value)) return;
+                      setEstimatedTotal(parseFloat(e.target.value) || 0);
                     }}
                     className="w-full pl-8 pr-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                     placeholder="0.00" />
                 </div>
+                <p className="text-xs text-gray-400 mt-1">Up to ₱99,999,999.99</p>
               </div>
 
               {/* Discount (editable per-order; pre-filled from the customer's loyalty discount) */}
@@ -1642,7 +1734,7 @@ function NewJobOrderForm() {
                 </div>
               )}
 
-              {estimatedTotal > 0 && (
+              {estimatedTotal > 0 && !quoteMode && (
                 <div className="bg-[#eef1fb] border border-[#c7d2f5] rounded-xl p-4 flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-[#011c72]">Down Payment (50%)</p>
@@ -1655,6 +1747,12 @@ function NewJobOrderForm() {
               )}
             </div>
 
+            {quoteMode ? (
+              <p className="rounded-xl bg-[#eef1fb] border border-[#c7d2f5] px-4 py-3 text-sm text-[#011c72]">
+                No payment is taken for a quotation. Once the customer accepts it, it becomes a job order and the
+                down payment is collected at the branch.
+              </p>
+            ) : (
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Payment Method</label>
               <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} className={inputCls}>
@@ -1677,6 +1775,7 @@ function NewJobOrderForm() {
                 </optgroup>
               </select>
             </div>
+            )}
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Additional Notes</label>
@@ -1704,11 +1803,50 @@ function NewJobOrderForm() {
             </svg>
             Back
           </button>
-          <h1 className="text-3xl font-bold text-gray-900">New Job Order</h1>
-          <p className="text-gray-500 mt-1">Create a new service order for a customer</p>
+          <h1 className="text-3xl font-bold text-gray-900">{quoteMode ? (editingDraftId ? 'Edit Quotation' : 'New Quotation') : 'New Job Order'}</h1>
+          <p className="text-gray-500 mt-1">
+            {quoteMode
+              ? 'Prepare a job order for the customer to accept or reject'
+              : 'Create a new service order for a customer'}
+          </p>
         </div>
 
+        {quoteMode && (
+          <div className="mb-5 rounded-xl border border-[#c7d2f5] bg-[#eef1fb] px-4 py-3 text-sm text-[#011c72] space-y-1">
+            {quoteAppointment && (
+              <p>
+                Quotation for appointment <span className="font-semibold">{quoteAppointment.appointmentNumber}</span>
+                {' '}({quoteAppointment.customerName}).
+              </p>
+            )}
+            {quoteAppointment && !quoteAppointment.hasAccount ? (
+              <p className="text-yellow-800">
+                This customer booked without an online account, so they can&apos;t answer it online. Share the
+                quotation with them in person or by phone.
+              </p>
+            ) : (
+              <p>The customer will see it in <span className="font-semibold">My Orders › Custom</span> and can accept or reject it there.</p>
+            )}
+            <label className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1">
+              <span className="font-medium shrink-0">Branch where the customer will pay:</span>
+              <select value={quoteBranchId} onChange={(e) => setQuoteBranchId(e.target.value ? Number(e.target.value) : '')}
+                className="px-3 py-1.5 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
+                <option value="">Select a branch</option>
+                {retailBranches.map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            </label>
+            {editingQuoteStatus === 'rejected' && (
+              <p className="text-red-700">
+                The customer rejected this quotation: “{editingQuoteReason}”. Revise it and press <span className="font-semibold">Resend Quotation</span>.
+              </p>
+            )}
+          </div>
+        )}
+
         {/* Order Type Selector */}
+        {!quoteMode && (
         <div className="mb-6 bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
           <p className="text-sm font-semibold text-gray-700 mb-3">Order Type</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1734,6 +1872,7 @@ function NewJobOrderForm() {
             </button>
           </div>
         </div>
+        )}
 
         {/* Step Indicator (Normal orders only) */}
         {orderType === 'normal' && (
@@ -1800,6 +1939,7 @@ function NewJobOrderForm() {
                 Previous
               </button>
               <div className="flex items-center gap-3">
+                {!(quoteMode && !editingDraftId) && (
                 <button type="button" onClick={saveDraft} disabled={loading}
                   className="inline-flex items-center gap-2.5 px-6 py-3 rounded-xl text-base font-semibold bg-white border-2 border-[#011c72] text-[#011c72] hover:bg-[#eef1fb] transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                   title={editingDraftId ? 'Save your changes to this draft' : 'Save this order as a draft to finish later'}>
@@ -1808,6 +1948,7 @@ function NewJobOrderForm() {
                   </svg>
                   {loading ? 'Saving…' : editingDraftId ? 'Update Draft' : 'Save as Draft'}
                 </button>
+                )}
               {step < 5 ? (
                 <button key="next-btn" type="submit"
                   className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#011c72] hover:bg-[#01268c] text-white rounded-xl font-medium transition-colors shadow-sm">
@@ -1829,7 +1970,7 @@ function NewJobOrderForm() {
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                       </svg>
-                      Create Job Order
+                      {quoteMode ? (editingDraftId ? 'Resend Quotation' : 'Send Quotation') : 'Create Job Order'}
                     </>
                   )}
                 </button>

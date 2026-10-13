@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
@@ -15,7 +15,41 @@ export default function RegisterPage() {
   });
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  // Step 2: the 6-digit code emailed to prove the address is real
+  const [step, setStep] = useState<'details' | 'code'>('details');
+  const [code, setCode] = useState('');
+  const [info, setInfo] = useState('');
+  const [resendSeconds, setResendSeconds] = useState(0);
   const router = useRouter();
+
+  useEffect(() => {
+    if (resendSeconds <= 0) return;
+    const id = setTimeout(() => setResendSeconds(s => s - 1), 1000);
+    return () => clearTimeout(id);
+  }, [resendSeconds]);
+
+  const details = () => ({
+    username: form.username.trim(),
+    password: form.password,
+    email: form.email.trim(),
+    fullName: form.fullName.trim(),
+    phone: form.phone.trim(),
+  });
+
+  const sendCode = async () => {
+    setError('');
+    setIsLoading(true);
+    try {
+      const res = await api.auth.sendSignupCode(details());
+      setInfo(res.message || `A 6-digit code has been sent to ${form.email.trim()}.`);
+      setStep('code');
+      setResendSeconds(60);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Could not send the code. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setForm({ ...form, [e.target.name]: e.target.value });
@@ -25,20 +59,22 @@ export default function RegisterPage() {
     e.preventDefault();
     setError('');
 
-    if (form.password !== form.confirmPassword) {
-      setError('Passwords do not match.');
+    if (step === 'details') {
+      if (form.password !== form.confirmPassword) {
+        setError('Passwords do not match.');
+        return;
+      }
+      if (form.password.length < 8) {
+        setError('Password must be at least 8 characters.');
+        return;
+      }
+      await sendCode();
       return;
     }
 
     setIsLoading(true);
     try {
-      await api.auth.register({
-        username: form.username,
-        password: form.password,
-        email: form.email,
-        fullName: form.fullName,
-        phone: form.phone,
-      });
+      await api.auth.register({ ...details(), code: code.trim() });
       router.push('/login');
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Registration failed. Please try again.';
@@ -84,6 +120,50 @@ export default function RegisterPage() {
             </div>
           )}
 
+          {step === 'code' ? (
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {info && (
+              <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-green-700 text-sm">{info}</div>
+            )}
+            <div>
+              <label htmlFor="code" className="block text-sm font-medium text-gray-700 mb-1">
+                Verification code
+              </label>
+              <input
+                id="code"
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
+                className="w-full px-4 py-3 rounded-xl border border-gray-300 bg-gray-50 text-gray-900 text-center text-2xl font-mono tracking-[0.5em] focus:ring-2 focus:ring-[#011c72] focus:border-transparent transition-all"
+                placeholder="••••••"
+                required
+              />
+              <p className="mt-1 text-xs text-gray-500">
+                We sent it to {form.email.trim()}. It expires in 10 minutes, so check your spam folder if you don&apos;t see it.
+              </p>
+            </div>
+            <button
+              type="submit"
+              disabled={isLoading || code.length !== 6}
+              className="w-full py-3 px-4 bg-[#011c72] hover:bg-[#01268c] text-white font-medium rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isLoading ? 'Creating account...' : 'Verify & Create Account'}
+            </button>
+            <div className="flex items-center justify-between text-sm">
+              <button type="button" onClick={() => { setStep('details'); setCode(''); setInfo(''); setError(''); }}
+                className="text-gray-600 hover:text-[#011c72]">
+                Change details
+              </button>
+              <button type="button" onClick={sendCode} disabled={isLoading || resendSeconds > 0}
+                className="text-[#011c72] font-medium disabled:text-gray-400 disabled:cursor-not-allowed">
+                {resendSeconds > 0 ? `Resend code in ${resendSeconds}s` : 'Resend code'}
+              </button>
+            </div>
+          </form>
+          ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label htmlFor="fullName" className="block text-sm font-medium text-gray-700 mb-1">
@@ -160,7 +240,7 @@ export default function RegisterPage() {
                 value={form.password}
                 onChange={handleChange}
                 className="w-full px-4 py-3 rounded-xl border border-gray-300 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent transition-all"
-                placeholder="Create a password"
+                placeholder="At least 8 characters"
                 required
               />
             </div>
@@ -192,13 +272,15 @@ export default function RegisterPage() {
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                   </svg>
-                  Creating account...
+                  Sending code...
                 </span>
               ) : (
-                'Create Account'
+                'Continue'
               )}
             </button>
+            <p className="text-xs text-gray-500 text-center">We&apos;ll email you a code to confirm your address.</p>
           </form>
+          )}
 
           <div className="mt-6 text-center">
             <p className="text-sm text-gray-600">

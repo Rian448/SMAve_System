@@ -3,6 +3,8 @@ import { useState, useEffect, useMemo, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api, setAuthToken, PublicProduct, VehicleInfo, CartDraft } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
+import { useConfirm } from '@/components/ConfirmDialog';
+import { manilaDateString, manilaHour, addDaysToDateString } from '@/lib/dateUtils';
 import Link from 'next/link';
 
 interface Branch {
@@ -18,6 +20,13 @@ interface Branch {
 interface CartItem {
   product: PublicProduct;
   quantity: number;
+}
+
+/** Why a cart line can't be ordered right now, or null when it can. */
+function cartLineIssue(item: CartItem): string | null {
+  if (item.product.quantity <= 0) return 'Out of stock';
+  if (item.quantity > item.product.quantity) return `Only ${item.product.quantity} left`;
+  return null;
 }
 
 type OrderTab = 'products' | 'appointment';
@@ -54,6 +63,8 @@ function PlaceOrderContent() {
   // Branch filter and search for product browsing
   const [branchFilter, setBranchFilter] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  // Shoppers start on what they can actually buy
+  const [stockFilter, setStockFilter] = useState<'available' | 'all' | 'unavailable'>('available');
 
   // Saved cart (premade draft) — logged-in customers only, since it is stored
   // against their account.
@@ -63,6 +74,7 @@ function PlaceOrderContent() {
 
   // Checkout modal
   const [showCheckout, setShowCheckout] = useState(false);
+  const { confirm, confirmDialog } = useConfirm();
   const [pickupBranchId, setPickupBranchId] = useState<number | ''>('');
   const [notes, setNotes] = useState('');
   const [agreeTerms, setAgreeTerms] = useState(false);
@@ -78,6 +90,10 @@ function PlaceOrderContent() {
   const [registerEmail, setRegisterEmail] = useState('');
   const [registerFullName, setRegisterFullName] = useState('');
   const [registerPhone, setRegisterPhone] = useState('');
+  // Sign-up is confirmed with a 6-digit code emailed to the address given
+  const [registerCode, setRegisterCode] = useState('');
+  const [registerCodeSent, setRegisterCodeSent] = useState(false);
+  const [registerInfo, setRegisterInfo] = useState('');
 
   // Customer info
   const [customerName, setCustomerName] = useState('');
@@ -93,15 +109,12 @@ function PlaceOrderContent() {
   const [appointmentDescription, setAppointmentDescription] = useState('');
   const [appointmentVehicleInfo, setAppointmentVehicleInfo] = useState({ make: '', model: '', year: '', plateNumber: '' });
 
-  // Date/time availability helpers — uses local browser time (Philippines)
-  const now = new Date();
-  const currentHour = now.getHours();
-  // YYYY-MM-DD in local time
-  const todayStr = now.toLocaleDateString('en-CA');
+  // Date/time availability helpers — always Philippine time, like the server,
+  // so a device set to another time zone can't grey out slots that are free.
+  const currentHour = manilaHour();
+  const todayStr = manilaDateString();
   // If it's past 8 PM, all slots for today are gone — minimum date becomes tomorrow
-  const minBookingDate = currentHour >= 20
-    ? new Date(now.getTime() + 86400000).toLocaleDateString('en-CA')
-    : todayStr;
+  const minBookingDate = currentHour >= 20 ? addDaysToDateString(todayStr, 1) : todayStr;
 
   const PERIOD_END: Record<string, number> = { morning: 12, afternoon: 17, evening: 20 };
 
@@ -142,7 +155,7 @@ function PlaceOrderContent() {
   }, []);
 
   useEffect(() => {
-    api.inventory.getPublicProducts().then(r => {
+    api.inventory.getPublicProducts({ includeUnavailable: true }).then(r => {
       if (r.status === 'success' && r.data) setProducts(r.data);
     }).catch(() => {}).finally(() => setLoadingProducts(false));
   }, []);
@@ -159,11 +172,27 @@ function PlaceOrderContent() {
     finally { setIsAuthLoading(false); }
   };
 
-  const handleRegister = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const signupDetails = () => ({
+    username: registerUsername.trim(), password: registerPassword, email: registerEmail.trim(),
+    fullName: registerFullName.trim(), phone: registerPhone.trim(),
+  });
+
+  const sendRegisterCode = async () => {
     setIsAuthLoading(true); setAuthError('');
     try {
-      const r = await api.auth.register({ username: registerUsername, password: registerPassword, email: registerEmail, fullName: registerFullName, phone: registerPhone });
+      const r = await api.auth.sendSignupCode(signupDetails());
+      setRegisterInfo(r.message || `A 6-digit code has been sent to ${registerEmail.trim()}.`);
+      setRegisterCodeSent(true);
+    } catch (err) { setAuthError(err instanceof Error && err.message ? err.message : 'Could not send the code.'); }
+    finally { setIsAuthLoading(false); }
+  };
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!registerCodeSent) { await sendRegisterCode(); return; }
+    setIsAuthLoading(true); setAuthError('');
+    try {
+      const r = await api.auth.register({ ...signupDetails(), code: registerCode.trim() });
       if (r.data) { setAuthToken(r.data.token); await checkAuth(); }
     } catch (err: any) { setAuthError(err.message || 'Registration failed.'); }
     finally { setIsAuthLoading(false); }
@@ -186,7 +215,12 @@ function PlaceOrderContent() {
 
   const removeFromCart = (productId: number) => setCart(prev => prev.filter(i => i.product.id !== productId));
 
-  const cartTotal = useMemo(() => cart.reduce((s, i) => s + i.product.price * i.quantity, 0), [cart]);
+  const unavailableInCart = cart.filter(i => cartLineIssue(i) !== null);
+
+  // Lines that can't be ordered don't count toward the total
+  const cartTotal = useMemo(
+    () => cart.reduce((s, i) => s + (cartLineIssue(i) ? 0 : i.product.price * i.quantity), 0),
+    [cart]);
 
   // Group cart items by source branch for the checkout modal summary
   const cartByBranch = useMemo(() => {
@@ -220,8 +254,14 @@ function PlaceOrderContent() {
           if (prev.length > 0) return prev;
           const restored: CartItem[] = [];
           for (const line of draft.items) {
-            const product = products.find(p => p.id === line.productId);
-            if (product) restored.push({ product, quantity: line.quantity });
+            // A product that was pulled from sale entirely is kept as an out-of-stock
+            // line, so the customer sees what happened instead of it vanishing.
+            const product = products.find(p => p.id === line.productId) ?? {
+              id: line.productId, name: line.name, sku: line.sku, quantity: 0, unit: '',
+              category: '', price: line.unitPrice, branchId: line.sourceBranchId ?? 0,
+              branchName: line.sourceBranchName, isAvailable: false,
+            };
+            restored.push({ product, quantity: line.quantity });
           }
           return restored;
         });
@@ -277,6 +317,25 @@ function PlaceOrderContent() {
     if (!customerName || !customerPhone) { setError('Please fill in your name and phone number'); return; }
     if (!pickupBranchId) { setError('Please select a pickup branch'); return; }
     if (cart.length === 0) { setError('Your cart is empty'); return; }
+    if (unavailableInCart.length > 0) { setError('Remove or adjust the unavailable items in your cart first.'); return; }
+
+    const itemCount = cart.reduce((s, i) => s + i.quantity, 0);
+    const pickupName = branches.find(b => b.id === pickupBranchId)?.name || 'the selected branch';
+    const ok = await confirm({
+      title: 'Place this order?',
+      message: (
+        <>
+          You are ordering <b>{itemCount} item{itemCount !== 1 ? 's' : ''}</b> for a total of{' '}
+          <b>₱{cartTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</b>,
+          to be picked up at <b>{pickupName}</b>.
+        </>
+      ),
+      warning: 'Deposits for items left unclaimed for 60 days or more are forfeited.',
+      confirmLabel: 'Place Order',
+      cancelLabel: 'Review Cart',
+      variant: 'info',
+    });
+    if (!ok) return;
 
     setLoading(true); setError('');
     try {
@@ -391,16 +450,45 @@ function PlaceOrderContent() {
               </form>
             ) : (
               <form onSubmit={handleRegister} className="space-y-4">
-                {[['Full Name', 'text', registerFullName, setRegisterFullName], ['Email', 'email', registerEmail, setRegisterEmail], ['Phone Number', 'tel', registerPhone, setRegisterPhone], ['Username', 'text', registerUsername, setRegisterUsername], ['Password', 'password', registerPassword, setRegisterPassword]].map(([label, type, val, setter]) => (
-                  <div key={label as string}>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">{label as string} *</label>
-                    <input type={type as string} value={val as string} onChange={e => (setter as any)(e.target.value)} required minLength={type === 'password' ? 6 : undefined}
-                      className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
-                  </div>
-                ))}
-                <button type="submit" disabled={isAuthLoading} className="w-full px-4 py-3 rounded-lg bg-[#011c72] text-white font-semibold hover:bg-[#01268c] disabled:opacity-50 transition-colors">
-                  {isAuthLoading ? 'Creating Account...' : 'Create Account & Continue'}
-                </button>
+                {registerCodeSent ? (
+                  <>
+                    {registerInfo && (
+                      <p className="p-3 bg-green-50 border border-green-200 rounded-lg text-green-700 text-sm">{registerInfo}</p>
+                    )}
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Verification code *</label>
+                      <input type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={6} required
+                        value={registerCode} onChange={e => setRegisterCode(e.target.value.replace(/\D/g, ''))}
+                        placeholder="••••••"
+                        className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-center text-xl font-mono tracking-[0.4em] focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                      <p className="mt-1 text-xs text-gray-500">Sent to {registerEmail.trim()}. Check your spam folder if you don&apos;t see it.</p>
+                    </div>
+                    <button type="submit" disabled={isAuthLoading || registerCode.length !== 6} className="w-full px-4 py-3 rounded-lg bg-[#011c72] text-white font-semibold hover:bg-[#01268c] disabled:opacity-50 transition-colors">
+                      {isAuthLoading ? 'Creating Account...' : 'Verify & Create Account'}
+                    </button>
+                    <div className="flex items-center justify-between text-sm">
+                      <button type="button" onClick={() => { setRegisterCodeSent(false); setRegisterCode(''); setRegisterInfo(''); setAuthError(''); }}
+                        className="text-gray-600 hover:text-[#011c72]">Change details</button>
+                      <button type="button" onClick={sendRegisterCode} disabled={isAuthLoading}
+                        className="text-[#011c72] font-medium disabled:text-gray-400">Resend code</button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    {[['Full Name', 'text', registerFullName, setRegisterFullName], ['Email', 'email', registerEmail, setRegisterEmail], ['Phone Number', 'tel', registerPhone, setRegisterPhone], ['Username', 'text', registerUsername, setRegisterUsername], ['Password', 'password', registerPassword, setRegisterPassword]].map(([label, type, val, setter]) => (
+                      <div key={label as string}>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">{label as string} *</label>
+                        <input type={type as string} value={val as string} onChange={e => (setter as any)(e.target.value)} required minLength={type === 'password' ? 8 : undefined}
+                          placeholder={type === 'password' ? 'At least 8 characters' : undefined}
+                          className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                      </div>
+                    ))}
+                    <button type="submit" disabled={isAuthLoading} className="w-full px-4 py-3 rounded-lg bg-[#011c72] text-white font-semibold hover:bg-[#01268c] disabled:opacity-50 transition-colors">
+                      {isAuthLoading ? 'Sending code...' : 'Continue'}
+                    </button>
+                    <p className="text-xs text-gray-500 text-center">We&apos;ll email you a code to confirm your address.</p>
+                  </>
+                )}
               </form>
             )}
           </div>
@@ -557,29 +645,73 @@ function PlaceOrderContent() {
                       const q = searchQuery.toLowerCase();
                       return p.name.toLowerCase().includes(q) || p.category.toLowerCase().includes(q);
                     });
-                  const visible = filtered;
-                  if (visible.length === 0) return (
-                    <div className="text-center py-8 text-gray-500">
-                      {searchQuery ? `No products found for "${searchQuery}".` : branchFilter ? 'No products available at this branch.' : 'No premade products available at the moment.'}
+                  const inStock = filtered.filter(p => p.quantity > 0);
+                  const outOfStock = filtered.filter(p => p.quantity <= 0);
+                  // "All" lists what can be bought first, out-of-stock items last
+                  const visible = stockFilter === 'available' ? inStock
+                    : stockFilter === 'unavailable' ? outOfStock
+                    : [...inStock, ...outOfStock];
+                  const stockTabs = [
+                    { key: 'available' as const, label: 'Available', count: inStock.length },
+                    { key: 'all' as const, label: 'All', count: filtered.length },
+                    { key: 'unavailable' as const, label: 'Out of Stock', count: outOfStock.length },
+                  ];
+                  const stockFilterBar = (
+                    <div className="flex gap-1 p-1 bg-gray-100 rounded-lg mb-5 w-full sm:w-fit">
+                      {stockTabs.map(t => (
+                        <button key={t.key} type="button" onClick={() => setStockFilter(t.key)}
+                          className={`flex-1 sm:flex-none px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${stockFilter === t.key ? 'bg-white text-[#011c72] shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>
+                          {t.label} <span className="text-xs text-gray-400">({t.count})</span>
+                        </button>
+                      ))}
                     </div>
                   );
+                  if (visible.length === 0) return (
+                    <>
+                      {stockFilterBar}
+                      <div className="text-center py-8 text-gray-500">
+                        {searchQuery ? `No products found for "${searchQuery}".`
+                          : stockFilter === 'unavailable' ? 'Nothing is out of stock right now.'
+                          : branchFilter ? 'No products available at this branch.'
+                          : 'No premade products available at the moment.'}
+                      </div>
+                    </>
+                  );
                   return (
+                    <>
+                    {stockFilterBar}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {visible.map((product) => {
                         const cartItem = cart.find(i => i.product.id === product.id);
                         const branchName = product.branchName || branches.find(b => b.id === product.branchId)?.name || `Branch ${product.branchId}`;
+                        const soldOut = product.quantity <= 0;
                         return (
-                          <div key={product.id} className="border border-gray-200 rounded-lg p-4 hover:border-[#011c72] transition-colors">
+                          <div key={product.id} className={`relative border rounded-lg p-4 transition-colors ${soldOut
+                            ? 'border-gray-200 bg-gray-50'
+                            : 'border-gray-200 hover:border-[#011c72]'}`}>
+                            {soldOut && (
+                              <span className="absolute top-3 right-3 z-10 text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                                Out of stock
+                              </span>
+                            )}
+                            {/* Sold-out products stay visible, just faded */}
+                            <div className={soldOut ? 'opacity-50 grayscale blur-[0.5px] select-none' : ''}>
                             <div className="flex justify-between items-start mb-1">
                               <div>
                                 <h3 className="font-semibold text-gray-900">{product.name}</h3>
                                 <p className="text-xs text-gray-500">{product.category}</p>
                               </div>
-                              <span className="text-lg font-bold text-[#011c72]">₱{product.price.toLocaleString()}</span>
+                              <span className={`text-lg font-bold text-[#011c72] ${soldOut ? 'mr-24' : ''}`}>₱{product.price.toLocaleString()}</span>
                             </div>
                             <p className="text-xs text-gray-500 mb-1">SKU: {product.sku} · Stock: {product.quantity} {product.unit}</p>
                             <span className="inline-block text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 mb-3">{branchName}</span>
-                            {cartItem ? (
+                            </div>
+                            {cartItem && soldOut ? (
+                              <button type="button" onClick={() => removeFromCart(product.id)}
+                                className="w-full py-2 rounded-lg border border-red-200 text-red-600 text-sm font-medium hover:bg-red-50 transition-colors">
+                                Remove from cart
+                              </button>
+                            ) : cartItem ? (
                               <div className="flex items-center gap-2">
                                 <button type="button" onClick={() => updateCartQuantity(product.id, cartItem.quantity - 1)}
                                   className="w-8 h-8 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors flex items-center justify-center">−</button>
@@ -600,6 +732,7 @@ function PlaceOrderContent() {
                         );
                       })}
                     </div>
+                    </>
                   );
                 })()}
               </div>
@@ -618,21 +751,38 @@ function PlaceOrderContent() {
                     {cartByBranch.map(group => (
                       <div key={group.branchName}>
                         <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">{group.branchName}</p>
-                        {group.items.map(item => (
-                          <div key={item.product.id} className="flex justify-between items-start border-b border-gray-100 pb-2 mb-1">
-                            <div className="flex-1">
+                        {group.items.map(item => {
+                          const issue = cartLineIssue(item);
+                          return (
+                          <div key={item.product.id} className={`flex justify-between items-start border-b border-gray-100 pb-2 mb-1 ${issue ? 'bg-gray-50 rounded-md px-2 pt-2 -mx-2' : ''}`}>
+                            <div className={`flex-1 ${issue ? 'opacity-50 grayscale blur-[0.5px]' : ''}`}>
                               <p className="font-medium text-gray-900 text-sm">{item.product.name}</p>
                               <p className="text-xs text-gray-500">₱{item.product.price.toLocaleString()} × {item.quantity}</p>
                             </div>
-                            <span className="font-semibold text-gray-900 text-sm ml-2">₱{(item.product.price * item.quantity).toLocaleString()}</span>
+                            {issue ? (
+                              <div className="ml-2 flex flex-col items-end gap-1 shrink-0">
+                                <span className="text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-red-100 text-red-700">{issue}</span>
+                                <button type="button" onClick={() => removeFromCart(item.product.id)}
+                                  className="text-xs text-red-600 hover:underline">Remove</button>
+                              </div>
+                            ) : (
+                              <span className="font-semibold text-gray-900 text-sm ml-2">₱{(item.product.price * item.quantity).toLocaleString()}</span>
+                            )}
                           </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     ))}
                     <div className="flex justify-between items-center pt-2 border-t border-gray-200">
                       <span className="font-semibold text-gray-900">Total</span>
                       <span className="text-xl font-bold text-[#011c72]">₱{cartTotal.toLocaleString()}</span>
                     </div>
+                    {unavailableInCart.length > 0 && (
+                      <p className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+                        {unavailableInCart.length === 1 ? '1 item is' : `${unavailableInCart.length} items are`} unavailable
+                        and not counted in the total. Remove {unavailableInCart.length === 1 ? 'it' : 'them'} (or lower the quantity) to check out.
+                      </p>
+                    )}
                   </div>
                 )}
                 {draftNotice && (
@@ -656,7 +806,7 @@ function PlaceOrderContent() {
                 <button
                   type="button"
                   onClick={() => { setError(''); setShowCheckout(true); }}
-                  disabled={cart.length === 0}
+                  disabled={cart.length === 0 || unavailableInCart.length > 0}
                   className="w-full mt-5 py-3 rounded-lg bg-[#011c72] text-white font-semibold hover:bg-[#01268c] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   Checkout
@@ -796,7 +946,7 @@ function PlaceOrderContent() {
                     required
                     className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   />
-                  {currentHour >= 20 && (
+                  {currentHour >= 20 && (!appointmentDate || appointmentDate === todayStr) && (
                     <p className="mt-1 text-xs text-orange-600">
                       All slots for today have passed. Earliest available date is tomorrow.
                     </p>
@@ -1010,6 +1160,7 @@ function PlaceOrderContent() {
           </div>
         </div>
       )}
+      {confirmDialog}
     </div>
   );
 }

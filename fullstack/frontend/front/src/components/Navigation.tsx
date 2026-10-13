@@ -5,6 +5,7 @@ import { useAuth, hasAccess } from '@/context/AuthContext';
 import { useNotifications } from '@/context/NotificationContext';
 import { formatDateTime } from '@/lib/dateUtils';
 import { useState } from 'react';
+import { useConfirm } from './ConfirmDialog';
 
 interface NavigationProps {
   collapsed: boolean;
@@ -50,6 +51,11 @@ const SettingsIcon = () => (
   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+  </svg>
+);
+const ProfileIcon = () => (
+  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0zm6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
   </svg>
 );
 const WorkerIcon = () => (
@@ -104,6 +110,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
   const { user, isAuthenticated, logout, isLoading } = useAuth();
   const { notifications, unreadCount, markRead, markAllRead } = useNotifications();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const { confirm, confirmDialog } = useConfirm();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
 
@@ -209,7 +216,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
     { name: 'Sales', path: '/sales', icon: SalesIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
     { name: 'Customers', path: '/customers', icon: CustomersIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
     { name: 'Payments', path: '/payments', icon: PaymentsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Appointments', path: '/appointments', icon: AppointmentsIcon, roles: ['administrator', 'supervisor'] },
+    { name: 'Appointments', path: '/appointments', icon: AppointmentsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
     { name: 'Inventory', path: '/inventory', icon: InventoryIcon, roles: ['administrator', 'supervisor'] },
     { name: 'Product Orders', path: '/product-orders', icon: ShoppingIcon, roles: ['administrator', 'supervisor'] },
     { name: 'Costing', path: '/costing', icon: CostingIcon, roles: ['administrator', 'supervisor'] },
@@ -217,11 +224,19 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
     { name: 'Item Trail', path: '/delivery', icon: DeliveryIcon, roles: ['administrator', 'supervisor'] },
     { name: 'Reports', path: '/reports', icon: ReportsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
     { name: 'Settings', path: '/settings', icon: SettingsIcon, roles: ['administrator', 'supervisor'] },
+    { name: 'My Profile', path: '/profile', icon: ProfileIcon, roles: ['administrator', 'supervisor', 'sales_manager', 'seat_maker', 'sewer', 'customer'] },
   ];
 
   const filteredNavItems = navItems.filter((item) => hasAccess(user?.role, item.roles));
 
   const handleLogout = async () => {
+    const ok = await confirm({
+      title: 'Sign out?',
+      message: 'You will need to sign in again to use your account.',
+      confirmLabel: 'Sign Out',
+      variant: 'warning',
+    });
+    if (!ok) return;
     setIsLoggingOut(true);
     try {
       await logout();
@@ -244,6 +259,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
   };
 
   return (
+    <>
     <aside
       className={`fixed left-0 top-0 h-full bg-white border-r border-gray-200 z-40 flex flex-col shadow-sm transition-all duration-300 ${
         collapsed ? 'w-16' : 'w-64'
@@ -320,9 +336,9 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
       <div className="border-t border-gray-200 p-3 shrink-0">
         {collapsed ? (
           <div className="flex flex-col items-center gap-2">
-            <div className="w-8 h-8 bg-[#011c72] rounded-full flex items-center justify-center" title={user?.fullName}>
+            <Link href="/profile" className="w-8 h-8 bg-[#011c72] rounded-full flex items-center justify-center" title={`${user?.fullName} (My Profile)`}>
               <span className="text-white text-sm font-semibold">{user?.fullName?.charAt(0).toUpperCase()}</span>
-            </div>
+            </Link>
             <button onClick={() => setNotifOpen(o => !o)} title="Notifications"
               className="relative p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 transition-colors">
               <BellIcon />
@@ -338,15 +354,17 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
         ) : (
           <div className="space-y-2">
             <div className="flex items-center gap-2">
-              <div className="w-8 h-8 bg-[#011c72] rounded-full flex items-center justify-center shrink-0">
-                <span className="text-white text-sm font-semibold">{user?.fullName?.charAt(0).toUpperCase()}</span>
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-gray-900 truncate">{user?.fullName}</p>
-                <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${getRoleBadgeColor(user?.role || '')}`}>
-                  {user?.role?.replace('_', ' ').toUpperCase()}
-                </span>
-              </div>
+              <Link href="/profile" title="My Profile" className="flex items-center gap-2 flex-1 min-w-0 rounded-lg hover:bg-gray-50 -m-1 p-1 transition-colors">
+                <div className="w-8 h-8 bg-[#011c72] rounded-full flex items-center justify-center shrink-0">
+                  <span className="text-white text-sm font-semibold">{user?.fullName?.charAt(0).toUpperCase()}</span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900 truncate">{user?.fullName}</p>
+                  <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${getRoleBadgeColor(user?.role || '')}`}>
+                    {user?.role?.replace('_', ' ').toUpperCase()}
+                  </span>
+                </div>
+              </Link>
               <button onClick={() => setNotifOpen(o => !o)} title="Notifications"
                 className="relative p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 transition-colors shrink-0">
                 <BellIcon />
@@ -383,39 +401,47 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
               {notifications.length === 0 ? (
                 <p className="text-center text-gray-400 text-sm py-8">No notifications</p>
               ) : notifications.map(n => {
-                // Every notification type the backend emits carries the product
-                // order it concerns, so the row opens that order's record.
-                const orderId = (n.data as { orderId?: number } | undefined)?.orderId;
-                const href = orderId && hasAccess(user?.role, ['administrator', 'supervisor'])
-                  ? `/product-orders/${orderId}`
-                  : null;
-
-                const handleClick = () => {
-                  markRead(n.id);
-                  setNotifOpen(false);
-                  if (href) router.push(href);
-                };
-
-                return (
-                  <button key={n.id} onClick={handleClick}
-                    title={href ? 'Open this order' : undefined}
-                    className={`w-full text-left px-4 py-3 hover:bg-gray-50 transition-colors ${n.isRead ? '' : 'bg-blue-50'}`}>
-                    <div className="flex items-start gap-2">
-                      <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${n.isRead ? 'bg-transparent' : 'bg-blue-500'}`} />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-semibold text-gray-800 truncate">{n.title}</p>
-                        <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{n.message}</p>
-                        <p className="text-[10px] text-gray-400 mt-1">
-                          {formatDateTime(n.createdAt)}
-                        </p>
-                      </div>
-                      {href && (
-                        <svg className="w-3.5 h-3.5 text-gray-300 shrink-0 self-center" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                        </svg>
-                      )}
+                const href = notificationHref(n.type, n.data, user?.role);
+                const body = (
+                  <div className="flex items-start gap-2">
+                    <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${n.isRead ? 'bg-transparent' : 'bg-blue-500'}`} />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-semibold text-gray-800 truncate">{n.title}</p>
+                      <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{n.message}</p>
+                      <p className="text-[10px] text-gray-400 mt-1">
+                        {formatDateTime(n.createdAt)}
+                      </p>
                     </div>
-                  </button>
+                    {href && (
+                      <svg className="w-3.5 h-3.5 text-gray-300 shrink-0 self-center" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    )}
+                  </div>
+                );
+
+                // Only a notification with somewhere to go is clickable
+                if (href) {
+                  return (
+                    <button key={n.id} type="button" title="Open"
+                      onClick={() => { markRead(n.id); setNotifOpen(false); router.push(href); }}
+                      className={`w-full text-left px-4 py-3 hover:bg-gray-50 cursor-pointer transition-colors ${n.isRead ? '' : 'bg-blue-50'}`}>
+                      {body}
+                    </button>
+                  );
+                }
+                return (
+                  <div key={n.id} className={`px-4 py-3 cursor-default ${n.isRead ? '' : 'bg-blue-50'}`}>
+                    {body}
+                    {!n.isRead && (
+                      <div className="mt-1 pl-4">
+                        <button type="button" onClick={() => markRead(n.id)}
+                          className="text-[11px] font-medium text-[#011c72] hover:underline">
+                          Mark read
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 );
               })}
             </div>
@@ -423,7 +449,32 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
         </>
       )}
     </aside>
+    {confirmDialog}
+    </>
   );
+}
+
+/**
+ * Where a notification leads, or null when it has nowhere to go for this role
+ * (the row is then shown as plain text rather than a link).
+ */
+function notificationHref(type: string, data: unknown, role: string | undefined): string | null {
+  const d = (data || {}) as { orderId?: number; jobOrderId?: number };
+  switch (type) {
+    case 'transfer_request':
+    case 'transfer_dispatched':
+    case 'order_ready':
+    case 'sale_completed':
+      return d.orderId && hasAccess(role, ['administrator', 'supervisor']) ? `/product-orders/${d.orderId}` : null;
+    case 'premade_delivery':
+      // Incoming premade stock is confirmed on the Finished Goods tab
+      return hasAccess(role, ['administrator', 'supervisor']) ? '/inventory?tab=finished-goods' : null;
+    case 'quotation_response':
+      return d.jobOrderId && hasAccess(role, ['administrator', 'supervisor', 'sales_manager'])
+        ? `/sales/${d.jobOrderId}` : null;
+    default:
+      return null;
+  }
 }
 
 function BellIcon() {

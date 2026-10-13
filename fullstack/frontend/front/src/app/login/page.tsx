@@ -23,7 +23,6 @@ export default function LoginPage() {
   const [recoveryLoading, setRecoveryLoading] = useState(false);
   const [resendSeconds, setResendSeconds] = useState(0);
   const [notice, setNotice] = useState('');
-  const [attemptsLeft, setAttemptsLeft] = useState<number | null>(null);
   const [lockoutSeconds, setLockoutSeconds] = useState(0);
   const [showPassword, setShowPassword] = useState(false);
 
@@ -53,7 +52,6 @@ export default function LoginPage() {
     if (lockoutSeconds > 0) return;
     setError('');
     setNotice('');
-    setAttemptsLeft(null);
     setIsLoading(true);
 
     try {
@@ -67,11 +65,8 @@ export default function LoginPage() {
       if (!res.ok) {
         if (data.lockedOut) {
           setLockoutSeconds(data.retryAfterSeconds || 900);
-          setAttemptsLeft(null);
-        } else if (data.attemptsLeft !== undefined) {
-          setAttemptsLeft(data.attemptsLeft);
         }
-        setError(data.message || 'Invalid credentials');
+        setError(data.message || 'Incorrect username or password.');
         return;
       }
 
@@ -222,11 +217,6 @@ export default function LoginPage() {
               {error && lockoutSeconds === 0 && (
                 <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm">
                   {error}
-                  {attemptsLeft !== null && attemptsLeft > 0 && (
-                    <div className="mt-1.5 font-semibold">
-                      {attemptsLeft} attempt{attemptsLeft !== 1 ? 's' : ''} remaining before lockout.
-                    </div>
-                  )}
                 </div>
               )}
 

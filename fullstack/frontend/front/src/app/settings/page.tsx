@@ -26,12 +26,15 @@ export default function SettingsPage() {
       branchId: 0
     });
     const [userError, setUserError] = useState('');
+    // Setting someone else's password must be confirmed with the admin's own password
+    const [adminPassword, setAdminPassword] = useState('');
     const [roles, setRoles] = useState<Role[]>([]);
     const [roleFilter, setRoleFilter] = useState('all');
     const filteredUsers = users.filter((u) => {
       if (roleFilter === 'all') return true;
       if (roleFilter === 'group:staff') return u.role !== 'customer';       // all employees
       if (roleFilter === 'group:customers') return u.role === 'customer';
+      if (roleFilter === 'group:workers') return u.role === 'seat_maker' || u.role === 'sewer';
       return u.role === roleFilter;                                          // a specific role
     });
   
@@ -135,6 +138,7 @@ export default function SettingsPage() {
     });
     setEditingUser(user);
     setUserError('');
+    setAdminPassword('');
     setShowUserModal(true);
   };
 
@@ -154,6 +158,30 @@ export default function SettingsPage() {
       return;
     }
 
+    const changingPassword = !!editingUser && !!userFormData.password;
+    if (changingPassword) {
+      if (userFormData.password.length < 8) {
+        setUserError('The new password must be at least 8 characters.');
+        return;
+      }
+      if (!adminPassword) {
+        setUserError('Enter your own password to confirm the password change.');
+        return;
+      }
+      const ok = await confirm({
+        title: `Change ${editingUser.fullName}'s password?`,
+        message: (
+          <>
+            <b>{editingUser.username}</b> will be signed out on every device and will need the new password to
+            sign in. They will get an email telling them their password was changed.
+          </>
+        ),
+        confirmLabel: 'Change Password',
+        variant: 'warning',
+      });
+      if (!ok) return;
+    }
+
       setSaving(true);
       setUserError('');
 
@@ -166,8 +194,9 @@ export default function SettingsPage() {
             role: userFormData.role,
             branchId: userFormData.branchId || null
           };
-          if (userFormData.password) {
+          if (changingPassword) {
             updateData.password = userFormData.password;
+            updateData.adminPassword = adminPassword;
           }
           await api.settings.updateUser(editingUser.id, updateData);
         } else {
@@ -483,6 +512,7 @@ export default function SettingsPage() {
                     </optgroup>
                     <optgroup label="General">
                       <option value="group:staff">All Staff</option>
+                      <option value="group:workers">Workers (Seat Makers &amp; Sewers)</option>
                       <option value="group:customers">Customers</option>
                     </optgroup>
                   </select>
@@ -1021,6 +1051,25 @@ export default function SettingsPage() {
                     placeholder={editingUser ? 'Leave blank to keep current password' : 'Enter password'}
                   />
                 </div>
+
+                {editingUser && userFormData.password && (
+                  <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-3">
+                    <label className="block text-sm font-medium text-yellow-900 mb-2">
+                      Your password (to confirm) *
+                    </label>
+                    <input
+                      type="password"
+                      autoComplete="current-password"
+                      value={adminPassword}
+                      onChange={(e) => setAdminPassword(e.target.value)}
+                      className="w-full px-4 py-2 rounded-lg border border-yellow-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                      placeholder="Enter your own password"
+                    />
+                    <p className="text-xs text-yellow-800 mt-1">
+                      Changing another user&apos;s password signs them out everywhere.
+                    </p>
+                  </div>
+                )}
 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
