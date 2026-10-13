@@ -10,6 +10,7 @@ import os
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import threading
 import time
@@ -1444,6 +1445,7 @@ RESET_CODE_MAX_ATTEMPTS = 5
 RESET_CODE_RESEND_SECONDS = 60
 RESET_CODE_MAX_PER_HOUR = 5
 MIN_PASSWORD_LENGTH = 8
+EMAIL_PATTERN = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
 def send_email(to_email, to_name, subject, text, html):
     """Send one email through Brevo. Returns True on success.
@@ -1480,20 +1482,17 @@ def _active_user_by_email(email):
 
 @app.route('/api/auth/recover', methods=['POST'])
 def recover_account():
-    """Forgot password, step 1: email a 6-digit code.
-
-    The reply is identical whether or not the email has an account (and when a
-    request is throttled), so this can't be used to find out who has one."""
+    """Forgot password, step 1: email a 6-digit code to a registered, active account."""
     data = request.get_json(silent=True) or {}
     email = (data.get('email') or '').strip()
     if not email:
         return jsonify({'status': 'error', 'message': 'Email is required'}), 400
-    reply = jsonify({'status': 'success',
-                     'message': 'If that email belongs to an account, a 6-digit code has been sent to it.'})
+    if not EMAIL_PATTERN.match(email):
+        return jsonify({'status': 'error', 'message': 'Please enter a valid email address.'}), 400
 
     user = _active_user_by_email(email)
     if not user:
-        return reply
+        return jsonify({'status': 'error', 'message': 'No account was found with that email address.'}), 404
 
     now = datetime.utcnow()
     PasswordResetCode.query.filter(PasswordResetCode.created_at < now - timedelta(days=1)).delete(synchronize_session=False)
@@ -1501,10 +1500,14 @@ def recover_account():
               .filter(PasswordResetCode.user_id == user.id,
                       PasswordResetCode.created_at > now - timedelta(hours=1))
               .order_by(PasswordResetCode.created_at.desc()).all())
-    if recent and ((now - recent[0].created_at).total_seconds() < RESET_CODE_RESEND_SECONDS
-                   or len(recent) >= RESET_CODE_MAX_PER_HOUR):
-        db.session.commit()
-        return reply
+    db.session.commit()
+    if len(recent) >= RESET_CODE_MAX_PER_HOUR:
+        return jsonify({'status': 'error',
+                        'message': 'Too many code requests for this account. Please try again in an hour.'}), 429
+    if recent and (now - recent[0].created_at).total_seconds() < RESET_CODE_RESEND_SECONDS:
+        # The last code is still on its way and still valid, so carry on to the code step
+        return jsonify({'status': 'success',
+                        'message': 'A code was sent to this email less than a minute ago. Please check your inbox and spam folder.'})
 
     # Only the newest code works
     PasswordResetCode.query.filter_by(user_id=user.id, used_at=None).update({'used_at': now}, synchronize_session=False)
@@ -1525,9 +1528,9 @@ def recover_account():
             f"<p style=\"font-size:28px;font-weight:bold;letter-spacing:6px;color:#011c72\">{code}</p>"
             f"<p>It expires in {minutes} minutes. If you did not ask to reset your password, "
             f"you can ignore this email.</p><p>Seatmakers Avenue</p>")
-    # Sent in the background so the reply doesn't wait on (or reveal) the email send
+    # Sent in the background so the reply doesn't wait on the email send
     threading.Thread(target=send_email, args=(user.email, user.full_name, subject, text, html), daemon=True).start()
-    return reply
+    return jsonify({'status': 'success', 'message': f'A 6-digit code has been sent to {user.email}.'})
 
 @app.route('/api/auth/reset-password', methods=['POST'])
 def reset_password():
