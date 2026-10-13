@@ -5,6 +5,7 @@ import { useAuth } from '@/context/AuthContext';
 import { api, CustomerOrder } from '@/lib/api';
 import Link from 'next/link';
 import { useRouter, useParams } from 'next/navigation';
+import RejectQuotationDialog from '@/components/RejectQuotationDialog';
 
 export default function MyOrderDetailPage() {
   const { user, isLoading: authLoading } = useAuth();
@@ -16,6 +17,7 @@ export default function MyOrderDetailPage() {
   const [responding, setResponding] = useState(false);
   const [responseNotes, setResponseNotes] = useState('');
   const [showRejectConfirm, setShowRejectConfirm] = useState(false);
+  const [rejectError, setRejectError] = useState('');
 
   useEffect(() => {
     if (!authLoading) {
@@ -54,16 +56,19 @@ export default function MyOrderDetailPage() {
     }
   };
 
-  const handleRejectQuotation = async () => {
+  const handleRejectQuotation = async (reason: string) => {
     if (!order) return;
-    
+
     setResponding(true);
+    setRejectError('');
     try {
-      await api.customerOrders.respondToQuotation(order.id, 'reject', responseNotes);
+      // The chosen reason comes first; any extra comments typed above follow it
+      const notes = responseNotes.trim() ? `${reason} — ${responseNotes.trim()}` : reason;
+      await api.customerOrders.respondToQuotation(order.id, 'reject', notes);
       setShowRejectConfirm(false);
       await fetchOrder();
     } catch (err: any) {
-      setError(err.message || 'Failed to reject quotation');
+      setRejectError(err.message || 'Failed to reject quotation');
     } finally {
       setResponding(false);
     }
@@ -372,39 +377,13 @@ export default function MyOrderDetailPage() {
         </div>
       </main>
 
-      {/* Reject Confirmation Modal */}
-      {showRejectConfirm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl max-w-md w-full p-6">
-            <h3 className="text-xl font-bold text-gray-900 mb-4">Reject Quotation?</h3>
-            <p className="text-gray-600 mb-6">
-              Are you sure you want to reject this quotation? You can provide a reason to help us understand your needs better.
-            </p>
-            <textarea
-              value={responseNotes}
-              onChange={(e) => setResponseNotes(e.target.value)}
-              placeholder="Reason for rejection (optional)"
-              rows={3}
-              className="w-full px-4 py-3 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-red-500 focus:border-transparent mb-4"
-            />
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowRejectConfirm(false)}
-                className="flex-1 px-4 py-2 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-100 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleRejectQuotation}
-                disabled={responding}
-                className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors"
-              >
-                {responding ? 'Processing...' : 'Confirm Reject'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <RejectQuotationDialog
+        open={showRejectConfirm}
+        busy={responding}
+        error={rejectError}
+        onCancel={() => { setShowRejectConfirm(false); setRejectError(''); }}
+        onConfirm={handleRejectQuotation}
+      />
     </div>
   );
 }

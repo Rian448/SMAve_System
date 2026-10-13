@@ -1,7 +1,8 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import { api, type Customer, type CustomerOrderSummary } from '@/lib/api';
+import { api, type Customer, type CustomerOrderSummary, type CustomerOnlineOrder } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 
 const STATUS_COLORS: Record<string, string> = {
   pending: 'bg-yellow-100 text-yellow-800',
@@ -15,9 +16,13 @@ export default function CustomerProfilePage() {
   const router = useRouter();
   const params = useParams();
   const id = Number(params.id);
+  const { user } = useAuth();
+  // Premade product orders are only viewable by administrators and supervisors
+  const canOpenProductOrders = ['administrator', 'supervisor'].includes(user?.role || '');
 
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [orders, setOrders] = useState<CustomerOrderSummary[]>([]);
+  const [onlineOrders, setOnlineOrders] = useState<CustomerOnlineOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -49,6 +54,7 @@ export default function CustomerProfilePage() {
         setPromoCode(c.promoCode || '');
         setPromoDiscount(c.promoDiscount != null ? String(c.promoDiscount) : '');
         setOrders(c.orderHistory || []);
+        setOnlineOrders(c.onlineOrders || []);
       })
       .catch(() => setError('Customer not found.'))
       .finally(() => setLoading(false));
@@ -102,7 +108,16 @@ export default function CustomerProfilePage() {
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-2xl font-bold text-gray-900">{customer?.name}</h1>
-              <p className="text-sm text-gray-500 mt-0.5">Customer since {customer?.createdAt || '—'}</p>
+              <p className="text-sm text-gray-500 mt-0.5 flex items-center gap-2 flex-wrap">
+                <span>Customer since {customer?.createdAt || '—'}</span>
+                {customer?.hasAccount ? (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                    Online account{customer.username ? ` · @${customer.username}` : ''}{customer.accountActive === false ? ' (archived)' : ''}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">Walk-in</span>
+                )}
+              </p>
             </div>
             <div className="flex items-center gap-3">
               {saved && <span className="text-sm text-green-600 font-medium">Saved!</span>}
@@ -121,7 +136,7 @@ export default function CustomerProfilePage() {
         {/* Stats row */}
         <div className="grid grid-cols-3 gap-4">
           {[
-            { label: 'Total Orders', value: orders.length },
+            { label: 'Total Orders', value: orders.length + onlineOrders.length },
             { label: 'Total Spend', value: `₱${totalSpend.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
             { label: 'Loyalty Discount', value: discountPercent ? `${discountPercent}%` : 'None' },
           ].map((s) => (
@@ -216,7 +231,7 @@ export default function CustomerProfilePage() {
         {/* Order History */}
         <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-100">
-            <h2 className="font-semibold text-gray-900">Order History</h2>
+            <h2 className="font-semibold text-gray-900">Job Orders</h2>
           </div>
           {orders.length === 0 ? (
             <p className="text-center text-gray-400 text-sm py-10">No orders yet.</p>
@@ -255,6 +270,56 @@ export default function CustomerProfilePage() {
             </table>
           )}
         </div>
+
+        {/* Orders placed through the online account */}
+        {customer?.hasAccount && (
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-x-auto">
+            <div className="px-6 py-4 border-b border-gray-100">
+              <h2 className="font-semibold text-gray-900">Online Orders</h2>
+              <p className="text-xs text-gray-500 mt-0.5">Premade products and custom requests placed through the customer&apos;s account</p>
+            </div>
+            {onlineOrders.length === 0 ? (
+              <p className="text-center text-gray-400 text-sm py-10">No online orders yet.</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th className="text-left px-5 py-3 font-semibold text-gray-600">Order #</th>
+                    <th className="text-left px-5 py-3 font-semibold text-gray-600">Type</th>
+                    <th className="text-left px-5 py-3 font-semibold text-gray-600">Date</th>
+                    <th className="text-left px-5 py-3 font-semibold text-gray-600">Status</th>
+                    <th className="text-left px-5 py-3 font-semibold text-gray-600">Total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {onlineOrders.map((o) => {
+                    const href = o.type === 'custom' ? `/customer-orders/${o.id}`
+                      : canOpenProductOrders ? `/product-orders/${o.id}` : null;
+                    return (
+                    <tr key={`${o.type}-${o.id}`}
+                      onClick={href ? () => router.push(href) : undefined}
+                      className={href ? 'hover:bg-gray-50 cursor-pointer transition-colors' : ''}>
+                      <td className="px-5 py-3 font-medium text-[#011c72]">{o.orderNumber}</td>
+                      <td className="px-5 py-3 text-gray-600">{o.type === 'product' ? 'Premade product' : 'Custom request'}</td>
+                      <td className="px-5 py-3 text-gray-600">{o.createdAt || '—'}</td>
+                      <td className="px-5 py-3">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[o.status] || 'bg-gray-100 text-gray-600'}`}>
+                          {o.status.replace('_', ' ')}
+                        </span>
+                      </td>
+                      <td className="px-5 py-3 font-medium text-gray-900">
+                        {o.totalPrice > 0
+                          ? `₱${o.totalPrice.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                          : '—'}
+                      </td>
+                    </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
 
       </main>
     </div>

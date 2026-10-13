@@ -33,6 +33,18 @@ export function manilaDateString(date: Date = new Date()): string {
   }).format(date);
 }
 
+/** Current hour (0-23) in Manila, whatever the device's own time zone. */
+export function manilaHour(date: Date = new Date()): number {
+  return Number(new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: 'numeric', hourCycle: 'h23' }).format(date));
+}
+
+/** The Manila calendar date the given number of days after `dateStr` ("YYYY-MM-DD"). */
+export function addDaysToDateString(dateStr: string, days: number): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const next = new Date(Date.UTC(y, m - 1, d + days));
+  return next.toISOString().slice(0, 10);
+}
+
 /** Short date: "Jan 15, 2024" */
 export function formatDate(dateString: string | null | undefined): string {
   if (!dateString) return 'N/A';

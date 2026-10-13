@@ -72,6 +72,7 @@ class User(db.Model):
     is_active = db.Column(db.Boolean, default=True)
     failed_login_attempts = db.Column(db.Integer, default=0)
     lockout_until = db.Column(db.DateTime, nullable=True)
+    phone = db.Column(db.String(50), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     role = db.relationship('Role')
@@ -93,6 +94,31 @@ class PasswordResetCode(db.Model):
     __tablename__ = 'password_reset_codes'
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, nullable=False, index=True)
+    code_hash = db.Column(db.String(64), nullable=False)
+    attempts = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    used_at = db.Column(db.DateTime, nullable=True)  # also set when superseded or out of attempts
+
+class SignupCode(db.Model):
+    """A 6-digit code emailed during sign-up to prove the address is real
+    before the account is created. Only its hash is stored."""
+    __tablename__ = 'signup_codes'
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(255), nullable=False, index=True)  # stored lower-case
+    code_hash = db.Column(db.String(64), nullable=False)
+    attempts = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    used_at = db.Column(db.DateTime, nullable=True)  # also set when superseded or out of attempts
+
+class EmailChangeCode(db.Model):
+    """A 6-digit code sent to a new email address to confirm a user owns it
+    before their account email is changed. Only its hash is stored."""
+    __tablename__ = 'email_change_codes'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False, index=True)
+    new_email = db.Column(db.String(255), nullable=False)
     code_hash = db.Column(db.String(64), nullable=False)
     attempts = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -122,6 +148,8 @@ class Customer(db.Model):
     promo_discount = db.Column(db.Float, nullable=True)
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # The online account (users row) of a customer who signed up; walk-ins have none
+    user_id = db.Column(db.Integer, nullable=True, index=True)
 
 class CustomerOrder(db.Model):
     __tablename__ = 'customer_orders'
@@ -175,6 +203,13 @@ class JobOrder(db.Model):
     balance = db.Column(db.Float, default=0)
     discount_percent = db.Column(db.Float, nullable=True)  # per-order discount override
     vat_percent = db.Column(db.Float, nullable=True)  # VAT added on top of the discounted price (None = no VAT)
+    # Quotations: a draft sent to the customer to accept or reject online.
+    # quote_status: None (not a quotation) | sent | rejected | accepted
+    quote_status = db.Column(db.String(20), nullable=True)
+    quote_reject_reason = db.Column(db.Text, nullable=True)
+    quote_sent_at = db.Column(db.DateTime, nullable=True)
+    quote_responded_at = db.Column(db.DateTime, nullable=True)
+    appointment_id = db.Column(db.Integer, nullable=True)  # the appointment the quotation came from
     estimated_completion = db.Column(db.Date, nullable=False)
     completed_at = db.Column(db.Date)
     voided_at = db.Column(db.Date)
@@ -763,7 +798,8 @@ def user_to_dict(user):
         'branch': user.branch,
         'branchId': user.branch_id,
         'branchName': user.branch_rel.name if user.branch_rel else user.branch,
-        'isActive': user.is_active
+        'isActive': user.is_active,
+        'phone': user.phone
     }
 
 def customer_order_to_dict(order):
@@ -823,6 +859,64 @@ def retire_staff_role():
     except Exception as e:
         db.session.rollback()
         print(f"[migration] Retiring 'staff' role skipped: {e}")
+
+def link_customer_record(user):
+    """Give a signed-up customer a row in the Customers list, and return it.
+
+    A walk-in record with the same email or phone (e.g. from an earlier job
+    order) is linked instead of creating a duplicate. The caller commits."""
+    existing = Customer.query.filter_by(user_id=user.id).first()
+    if existing:
+        return existing
+    unlinked = Customer.query.filter(Customer.user_id.is_(None))
+    match = None
+    if user.email:
+        match = unlinked.filter(db.func.lower(Customer.email) == user.email.lower()).first()
+    if not match and user.phone:
+        match = unlinked.filter(Customer.phone == user.phone).first()
+    if match:
+        match.user_id = user.id
+        match.email = match.email or user.email
+        match.phone = match.phone or user.phone
+        return match
+    customer = Customer(name=user.full_name, phone=user.phone or '', email=user.email or '', address='',
+                        user_id=user.id, created_at=user.created_at or datetime.utcnow())
+    db.session.add(customer)
+    return customer
+
+def sync_customer_contact(user):
+    """Copy a customer's own profile edits onto their customer record. The caller commits."""
+    customer = Customer.query.filter_by(user_id=user.id).first()
+    if not customer:
+        return
+    customer.name = user.full_name
+    customer.email = user.email
+    if user.phone:
+        customer.phone = user.phone
+
+def link_registered_customers():
+    """Startup backfill: link every signed-up customer to a customer record.
+
+    Accounts made before phones were saved get the phone from their latest
+    online order. Idempotent: linked accounts are skipped."""
+    try:
+        linked = db.session.query(Customer.user_id).filter(Customer.user_id.isnot(None))
+        users = (User.query.join(Role).filter(Role.key == 'customer', ~User.id.in_(linked))
+                 .order_by(User.id).all())
+        for user in users:
+            if not user.phone:
+                latest = (ProductOrder.query.filter_by(user_id=user.id).order_by(ProductOrder.created_at.desc()).first()
+                          or CustomerOrder.query.filter_by(user_id=user.id).order_by(CustomerOrder.created_at.desc()).first())
+                if latest and latest.customer_phone:
+                    user.phone = latest.customer_phone.strip() or None
+            link_customer_record(user)
+            db.session.flush()
+        db.session.commit()
+        if users:
+            print(f"[migration] Linked {len(users)} signed-up customer(s) to customer records")
+    except Exception as e:
+        db.session.rollback()
+        print(f"[migration] Linking signed-up customers skipped: {e}")
 
 def seed_default_users():
     for user in default_users:
@@ -958,6 +1052,16 @@ def run_migrations():
         "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS vat_percent REAL",
         # Branch contact phone number
         "ALTER TABLE branches ADD COLUMN IF NOT EXISTS phone VARCHAR(50)",
+        # User's own contact number, editable on My Profile
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(50)",
+        # Link a customer record to the online account of a customer who signed up
+        "ALTER TABLE customers ADD COLUMN IF NOT EXISTS user_id INTEGER",
+        # Quotations sent to customers (job orders kept as drafts until accepted)
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS quote_status VARCHAR(20)",
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS quote_reject_reason TEXT",
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS quote_sent_at TIMESTAMP",
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS quote_responded_at TIMESTAMP",
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS appointment_id INTEGER",
     ]
     is_sqlite = db.engine.dialect.name == 'sqlite'
     for sql in migrations:
@@ -1019,6 +1123,7 @@ def init_db():
 
     # Seed users
     seed_default_users()
+    link_registered_customers()
     seed_inventory_items()
     normalize_premade_units()
 
@@ -1119,11 +1224,17 @@ def require_roles(*roles):
 
 PH_OFFSET = timedelta(hours=8)
 
+def manila_today():
+    """Today's date in the Philippines (the server clock is UTC)."""
+    return (datetime.utcnow() + PH_OFFSET).date()
+
 # ============================================
 # PASSWORD HELPERS
 # ============================================
 
 MAX_FAILED_ATTEMPTS = 5
+# Same reply for an unknown username and a wrong password, so neither is revealed
+LOGIN_FAILED_MESSAGE = 'Incorrect username or password.'
 LOCKOUT_MINUTES = 15
 
 def hash_password(raw_password: str) -> str:
@@ -1346,7 +1457,7 @@ def login():
     user = User.query.filter_by(username=username, is_active=True).first()
 
     if not user:
-        return jsonify({'status': 'error', 'message': 'Invalid credentials'}), 401
+        return jsonify({'status': 'error', 'message': LOGIN_FAILED_MESSAGE}), 401
 
     # Check if account is locked
     now_utc = datetime.utcnow()
@@ -1366,7 +1477,6 @@ def login():
     # Verify password (supports legacy SHA-256 and new salted hash)
     if not verify_password(user, raw_password):
         user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
-        attempts_left = MAX_FAILED_ATTEMPTS - user.failed_login_attempts
         if user.failed_login_attempts >= MAX_FAILED_ATTEMPTS:
             user.lockout_until = now_utc + timedelta(minutes=LOCKOUT_MINUTES)
             db.session.commit()
@@ -1383,11 +1493,8 @@ def login():
         log_action(user.id, user.full_name, 'LOGIN_FAILED', 'Auth',
                    f'Failed login attempt {user.failed_login_attempts}/{MAX_FAILED_ATTEMPTS}',
                    request.remote_addr or '0.0.0.0')
-        return jsonify({
-            'status': 'error',
-            'message': f'Invalid credentials. {attempts_left} attempt(s) remaining before lockout.',
-            'attemptsLeft': attempts_left
-        }), 401
+        # Attempts are still counted toward the lockout, but how many remain isn't revealed
+        return jsonify({'status': 'error', 'message': LOGIN_FAILED_MESSAGE}), 401
 
     # Successful login — reset lockout counters and upgrade legacy hash if needed
     user.failed_login_attempts = 0
@@ -1427,7 +1534,8 @@ def get_current_user():
             'email': user['email'],
             'fullName': user['fullName'],
             'role': user['role'],
-            'branch': user['branch']
+            'branch': user['branch'],
+            'phone': user.get('phone')
         }
     })
 
@@ -1576,6 +1684,220 @@ def reset_password():
     log_action(user.id, user.full_name, 'PASSWORD_RESET', 'Auth', 'Password reset with emailed code',
                request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'message': 'Your password has been changed. You can now sign in.'})
+
+# ============================================
+# MY PROFILE (every signed-in user edits their own account)
+# ============================================
+
+USERNAME_PATTERN = re.compile(r'^[A-Za-z0-9_.-]{3,50}$')
+PHONE_PATTERN = re.compile(r'^\+?[0-9][0-9 -]{6,19}$')
+EMAIL_CHANGE_CODE_TTL = timedelta(minutes=10)
+
+def refresh_cached_user(user):
+    """Push a user's new details into the session cache so the change shows at once."""
+    resolved, now_ts = user_to_dict(user), time.time()
+    for t, (u, _) in list(_session_cache.items()):
+        if u['id'] == user.id:
+            _session_cache[t] = (resolved, now_ts)
+
+def check_current_password(user, raw_password):
+    """None if raw_password is the user's password, else an error response.
+
+    Wrong guesses count toward the same lockout as the login form, so a
+    signed-in session can't be used to guess the password."""
+    now = datetime.utcnow()
+    if user.lockout_until and user.lockout_until > now:
+        minutes = int((user.lockout_until - now).total_seconds() // 60) + 1
+        return jsonify({'status': 'error',
+                        'message': f'Too many incorrect attempts. Try again in {minutes} minute(s).'}), 429
+    if not raw_password or not verify_password(user, raw_password):
+        user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
+        if user.failed_login_attempts >= MAX_FAILED_ATTEMPTS:
+            user.lockout_until = now + timedelta(minutes=LOCKOUT_MINUTES)
+        db.session.commit()
+        return jsonify({'status': 'error', 'message': 'Current password is incorrect.'}), 400
+    user.failed_login_attempts = 0
+    return None
+
+def _email_taken(email, exclude_user_id):
+    return User.query.filter(db.func.lower(User.email) == email.lower(), User.id != exclude_user_id).first() is not None
+
+@app.route('/api/profile', methods=['GET'])
+@require_auth
+def get_my_profile():
+    user = User.query.get(request.current_user['id'])
+    return jsonify({'status': 'success', 'data': user_to_dict(user)})
+
+@app.route('/api/profile', methods=['PUT'])
+@require_auth
+def update_my_profile():
+    """Update your own name, phone and username. A new username needs the current password."""
+    user = User.query.get(request.current_user['id'])
+    data = request.get_json(silent=True) or {}
+    changes = []
+
+    full_name = (data.get('fullName') if 'fullName' in data else user.full_name) or ''
+    full_name = full_name.strip()
+    if not full_name or len(full_name) > 255:
+        return jsonify({'status': 'error', 'message': 'Full name is required (up to 255 characters).'}), 400
+
+    phone = (data.get('phone') if 'phone' in data else user.phone) or ''
+    phone = phone.strip()
+    if phone and not PHONE_PATTERN.match(phone):
+        return jsonify({'status': 'error', 'message': 'Enter a valid phone number, e.g. 09171234567.'}), 400
+
+    username = ((data.get('username') if 'username' in data else user.username) or '').strip()
+    if username != user.username:
+        if not USERNAME_PATTERN.match(username):
+            return jsonify({'status': 'error',
+                            'message': 'Username must be 3 to 50 characters: letters, numbers, dots, dashes or underscores.'}), 400
+        if User.query.filter(db.func.lower(User.username) == username.lower(), User.id != user.id).first():
+            return jsonify({'status': 'error', 'message': 'That username is already taken.'}), 400
+        error = check_current_password(user, data.get('currentPassword'))
+        if error:
+            return error
+        user.username = username
+        changes.append('username')
+
+    if full_name != user.full_name:
+        user.full_name = full_name
+        changes.append('name')
+    if (phone or None) != user.phone:
+        user.phone = phone or None
+        changes.append('phone')
+
+    if changes:
+        sync_customer_contact(user)
+    db.session.commit()
+    if changes:
+        refresh_cached_user(user)
+        log_action(user.id, user.full_name, 'UPDATE', 'Profile', 'Updated own ' + ', '.join(changes),
+                   request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': user_to_dict(user),
+                    'message': 'Profile saved.' if changes else 'Nothing to change.'})
+
+@app.route('/api/profile/password', methods=['POST'])
+@require_auth
+def change_my_password():
+    """Change your own password. Other devices are signed out; this one gets a fresh token."""
+    user = User.query.get(request.current_user['id'])
+    data = request.get_json(silent=True) or {}
+    new_password = data.get('newPassword') or ''
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        return jsonify({'status': 'error',
+                        'message': f'New password must be at least {MIN_PASSWORD_LENGTH} characters.'}), 400
+    error = check_current_password(user, data.get('currentPassword'))
+    if error:
+        return error
+    if verify_password(user, new_password):
+        return jsonify({'status': 'error', 'message': 'New password must be different from the current one.'}), 400
+
+    user.password = hash_password(new_password)
+    token = create_session(user)  # ends every other session and commits
+    log_action(user.id, user.full_name, 'PASSWORD_CHANGE', 'Profile', 'Changed own password',
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': {'token': token},
+                    'message': 'Password changed. Other devices have been signed out.'})
+
+@app.route('/api/profile/email/request', methods=['POST'])
+@require_auth
+def request_email_change():
+    """Changing your email, step 1: send a code to the new address to prove it's yours."""
+    user = User.query.get(request.current_user['id'])
+    data = request.get_json(silent=True) or {}
+    new_email = (data.get('newEmail') or '').strip()
+    if not EMAIL_PATTERN.match(new_email):
+        return jsonify({'status': 'error', 'message': 'Please enter a valid email address.'}), 400
+    if new_email.lower() == (user.email or '').lower():
+        return jsonify({'status': 'error', 'message': 'That is already your email address.'}), 400
+    if _email_taken(new_email, user.id):
+        return jsonify({'status': 'error', 'message': 'That email is already used by another account.'}), 400
+    error = check_current_password(user, data.get('currentPassword'))
+    if error:
+        return error
+
+    now = datetime.utcnow()
+    EmailChangeCode.query.filter(EmailChangeCode.created_at < now - timedelta(days=1)).delete(synchronize_session=False)
+    recent = (EmailChangeCode.query
+              .filter(EmailChangeCode.user_id == user.id, EmailChangeCode.created_at > now - timedelta(hours=1))
+              .order_by(EmailChangeCode.created_at.desc()).all())
+    db.session.commit()
+    if len(recent) >= RESET_CODE_MAX_PER_HOUR:
+        return jsonify({'status': 'error', 'message': 'Too many code requests. Please try again in an hour.'}), 429
+    if (recent and recent[0].new_email.lower() == new_email.lower()
+            and (now - recent[0].created_at).total_seconds() < RESET_CODE_RESEND_SECONDS):
+        return jsonify({'status': 'success',
+                        'message': f'A code was sent to {new_email} less than a minute ago. Please check your inbox and spam folder.'})
+
+    # Only the newest code works
+    EmailChangeCode.query.filter_by(user_id=user.id, used_at=None).update({'used_at': now}, synchronize_session=False)
+    code = f"{secrets.randbelow(10**6):06d}"
+    db.session.add(EmailChangeCode(user_id=user.id, new_email=new_email, code_hash=_reset_code_hash(user.id, code),
+                                   created_at=now, expires_at=now + EMAIL_CHANGE_CODE_TTL))
+    db.session.commit()
+
+    minutes = int(EMAIL_CHANGE_CODE_TTL.total_seconds() // 60)
+    subject = f"{code} is your Seatmakers Avenue email verification code"
+    text = (f"Hi {user.full_name},\n\nUse this code to confirm your new email address: {code}\n\n"
+            f"It expires in {minutes} minutes. If you did not ask for this, you can ignore this email.\n\n"
+            f"Seatmakers Avenue")
+    html = (f"<p>Hi {escape(user.full_name)},</p>"
+            f"<p>Use this code to confirm your new email address:</p>"
+            f"<p style=\"font-size:28px;font-weight:bold;letter-spacing:6px;color:#011c72\">{code}</p>"
+            f"<p>It expires in {minutes} minutes. If you did not ask for this, you can ignore this email.</p>"
+            f"<p>Seatmakers Avenue</p>")
+    threading.Thread(target=send_email, args=(new_email, user.full_name, subject, text, html), daemon=True).start()
+    return jsonify({'status': 'success', 'message': f'A 6-digit code has been sent to {new_email}.'})
+
+@app.route('/api/profile/email/confirm', methods=['POST'])
+@require_auth
+def confirm_email_change():
+    """Changing your email, step 2: check the code and switch the account to the new address."""
+    user = User.query.get(request.current_user['id'])
+    code = ((request.get_json(silent=True) or {}).get('code') or '').strip()
+    now = datetime.utcnow()
+    rc = (EmailChangeCode.query
+          .filter(EmailChangeCode.user_id == user.id, EmailChangeCode.used_at.is_(None),
+                  EmailChangeCode.expires_at > now)
+          .order_by(EmailChangeCode.created_at.desc()).first())
+    if not rc:
+        return jsonify({'status': 'error', 'message': 'This code is invalid or has expired. Request a new one.'}), 400
+
+    if not hmac.compare_digest(rc.code_hash, _reset_code_hash(user.id, code)):
+        rc.attempts = (rc.attempts or 0) + 1
+        left = RESET_CODE_MAX_ATTEMPTS - rc.attempts
+        if left <= 0:
+            rc.used_at = now
+        db.session.commit()
+        message = (f'Incorrect code. {left} attempt(s) left.' if left > 0
+                   else 'Too many incorrect attempts. Request a new code.')
+        return jsonify({'status': 'error', 'message': message}), 400
+
+    rc.used_at = now
+    if _email_taken(rc.new_email, user.id):
+        db.session.commit()
+        return jsonify({'status': 'error', 'message': 'That email is already used by another account.'}), 400
+    old_email = user.email
+    user.email = rc.new_email
+    sync_customer_contact(user)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({'status': 'error', 'message': 'That email is already used by another account.'}), 400
+    refresh_cached_user(user)
+    log_action(user.id, user.full_name, 'UPDATE', 'Profile', 'Changed own email',
+               request.remote_addr or '0.0.0.0')
+
+    # Let the old address know, in case the change wasn't made by its owner
+    notice = (f"Hi {user.full_name},\n\nThe email on your Seatmakers Avenue account was changed to "
+              f"{user.email}. If you did not do this, contact the shop right away.\n\nSeatmakers Avenue")
+    notice_html = (f"<p>Hi {escape(user.full_name)},</p><p>The email on your Seatmakers Avenue account was "
+                   f"changed to <b>{escape(user.email)}</b>. If you did not do this, contact the shop right away.</p>"
+                   f"<p>Seatmakers Avenue</p>")
+    threading.Thread(target=send_email, args=(old_email, user.full_name, 'Your account email was changed',
+                                              notice, notice_html), daemon=True).start()
+    return jsonify({'status': 'success', 'data': user_to_dict(user), 'message': 'Your email has been changed.'})
 
 # ============================================
 # DASHBOARD ROUTES
@@ -2651,19 +2973,23 @@ def get_material_usage_logs():
 
 @app.route('/api/inventory/finished-goods/public', methods=['GET'])
 def get_finished_goods_public():
-    """Public API to get available finished goods (products) for customers.
-    Only returns products from active, non-warehouse retail branches."""
+    """Public API to get finished goods (products) for customers.
+    Only returns products from active, non-warehouse retail branches. Out-of-stock
+    products are left out unless ?includeUnavailable=true, which the shop uses to
+    show them greyed out."""
     branch_id = request.args.get('branchId')
     category = request.args.get('category')
+    include_unavailable = request.args.get('includeUnavailable', 'false').lower() == 'true'
 
     query = PremadeProduct.query.join(
         Branch, PremadeProduct.branch_id == Branch.id
     ).filter(
         PremadeProduct.is_archived.is_(False),
-        PremadeProduct.quantity > 0,
         Branch.is_warehouse.is_(False),
         Branch.is_active.is_(True)
     )
+    if not include_unavailable:
+        query = query.filter(PremadeProduct.quantity > 0)
 
     if branch_id:
         query = query.filter(PremadeProduct.branch_id == int(branch_id))
@@ -2682,7 +3008,8 @@ def get_finished_goods_public():
         'category': item.category,
         'price': float(item.price),
         'branchId': item.branch_id,
-        'branchName': item.branch.name if item.branch else None
+        'branchName': item.branch.name if item.branch else None,
+        'isAvailable': float(item.quantity or 0) > 0
     } for item in items]
 
     return jsonify({'status': 'success', 'data': public_items})
@@ -3328,7 +3655,8 @@ def get_job_orders():
             'completedAt': jo.completed_at.strftime('%Y-%m-%d') if jo.completed_at else None,
             'createdAt': jo.created_at.strftime('%Y-%m-%d'),
             'createdBy': jo.created_by,
-            'updatedAt': jo.updated_at.strftime('%Y-%m-%d')
+            'updatedAt': jo.updated_at.strftime('%Y-%m-%d'),
+            **job_order_quote_fields(jo)
         }
 
     return jsonify({'status': 'success', 'data': [job_order_to_dict(jo) for jo in orders]})
@@ -3383,9 +3711,32 @@ def get_job_order(order_id):
         'createdAt': order.created_at.strftime('%Y-%m-%d'),
         'createdBy': order.created_by,
         'updatedAt': order.updated_at.strftime('%Y-%m-%d'),
+        **job_order_quote_fields(order),
     }
     
     return jsonify({'status': 'success', 'data': order_dict})
+
+# The price for the work (before discount and VAT) is at most 8 digits
+MAX_JOB_ORDER_PRICE = 99_999_999.99
+
+def job_order_price_error(total_price, discount_percent, vat_percent):
+    """Error message if a job order's price is out of range, else None.
+
+    Only the final total is stored, so the price for the work is worked back
+    from it the same way the frontend's jobOrderPriceBreakdown() does."""
+    try:
+        total = float(total_price or 0)
+        d = min(max(float(discount_percent or 0), 0), 100)
+        v = max(float(vat_percent or 0), 0)
+    except (TypeError, ValueError):
+        return 'Invalid price'
+    if total < 0:
+        return 'Price cannot be negative'
+    after_discount = total / (1 + v / 100)
+    subtotal = after_discount / (1 - d / 100) if d < 100 else after_discount
+    if round(subtotal, 2) > MAX_JOB_ORDER_PRICE:
+        return 'Price for the work must be less than ₱100,000,000 (up to 8 digits)'
+    return None
 
 @app.route('/api/sales/job-orders', methods=['POST'])
 @require_auth
@@ -3402,12 +3753,36 @@ def create_job_order():
         return jsonify({'status': 'error', 'message': 'Customer name is required to save a draft'}), 400
     if is_draft and not data.get('branchId'):
         return jsonify({'status': 'error', 'message': 'Branch is required to save a draft'}), 400
+
+    # A quotation is a complete job order that the customer still has to accept.
+    # It is kept as a draft until then, so it stays out of sales figures and
+    # worker schedules exactly like any other draft.
+    send_quotation = bool(data.get('sendQuotation'))
+    appointment = None
+    if send_quotation:
+        if not all(f in data for f in required):
+            return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+        is_draft = True
+        if data.get('appointmentId'):
+            appointment = Appointment.query.get(data['appointmentId'])
+            if not appointment:
+                return jsonify({'status': 'error', 'message': 'Appointment not found'}), 400
     
     # Look up branch from database
     branch_db = Branch.query.get(data['branchId'])
     if not branch_db:
         return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
     
+    # A quotation is paid for at a retail branch, never at a warehouse: fall back
+    # to the branch the appointment was booked at.
+    if send_quotation and branch_db.is_warehouse:
+        if appointment and appointment.branch_id:
+            branch_db = Branch.query.get(appointment.branch_id)
+            data['branchId'] = branch_db.id
+        else:
+            return jsonify({'status': 'error',
+                            'message': 'Choose the branch where the customer will pay for this quotation.'}), 400
+
     job_order_id = generate_job_order_id(branch_db.code)
     
     items = data.get('items') or []
@@ -3416,6 +3791,9 @@ def create_job_order():
     total_price = data.get('totalPrice')
     if total_price is None:
         total_price = sum(item.get('quantity', 0) * item.get('unitPrice', 0) for item in items)
+    price_error = job_order_price_error(total_price, data.get('discountPercent'), data.get('vatPercent'))
+    if price_error:
+        return jsonify({'status': 'error', 'message': price_error}), 400
     computed_cost = sum(item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0)) for item in items)
     estimated_cost = data.get('estimatedCost') if data.get('estimatedCost') is not None else computed_cost
     down_payment = 0 if is_draft else data.get('downPayment', 0)
@@ -3432,7 +3810,19 @@ def create_job_order():
     # Parse date (default to today for drafts that haven't picked one yet)
     from datetime import datetime as dt
     ec_raw = data.get('estimatedCompletion')
-    estimated_completion = dt.strptime(ec_raw, '%Y-%m-%d').date() if ec_raw else dt.now().date()
+    try:
+        estimated_completion = dt.strptime(str(ec_raw)[:10], '%Y-%m-%d').date() if ec_raw else manila_today()
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Invalid estimated completion date'}), 400
+    if ec_raw and estimated_completion < manila_today():
+        return jsonify({'status': 'error', 'message': 'Estimated completion date cannot be in the past'}), 400
+
+    # A quotation for a signed-up customer's appointment goes to their account
+    if appointment and appointment.user_id and not data.get('customerId'):
+        account = User.query.get(appointment.user_id)
+        if account:
+            data['customerId'] = link_customer_record(account).id
+            db.session.flush()
 
     # Find or create customer account
     resolved_customer_id = data.get('customerId')
@@ -3479,7 +3869,10 @@ def create_job_order():
         discount_percent=data.get('discountPercent'),
         vat_percent=data.get('vatPercent') or None,
         estimated_completion=estimated_completion,
-        created_by=request.current_user['id']
+        created_by=request.current_user['id'],
+        quote_status='sent' if send_quotation else None,
+        quote_sent_at=datetime.utcnow() if send_quotation else None,
+        appointment_id=appointment.id if appointment else None,
     )
 
     db.session.add(new_order)
@@ -3511,7 +3904,11 @@ def create_job_order():
 
     db.session.commit()
 
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Sales', f"Created job order: {job_order_id}", request.remote_addr or '0.0.0.0')
+    if send_quotation:
+        log_action(request.current_user['id'], request.current_user['fullName'], 'QUOTATION', 'Sales',
+                   f"Sent quotation {job_order_id} to {new_order.customer_name}", request.remote_addr or '0.0.0.0')
+    else:
+        log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Sales', f"Created job order: {job_order_id}", request.remote_addr or '0.0.0.0')
 
     # Return the created order
     return jsonify({
@@ -3521,7 +3918,8 @@ def create_job_order():
             'jobOrderId': new_order.job_order_id,
             'branchName': branch_db.name,
             'totalPrice': total_price,
-            'status': 'draft' if is_draft else 'pending'
+            'status': 'draft' if is_draft else 'pending',
+            **({'customerNotified': notify_customer_of_quotation(new_order)} if send_quotation else {}),
         }
     }), 201
 
@@ -3570,10 +3968,22 @@ def update_job_order(order_id):
             order.branch_id = branch.id
         if 'estimatedCompletion' in data and data['estimatedCompletion']:
             try:
-                order.estimated_completion = datetime.strptime(
+                new_completion = datetime.strptime(
                     str(data['estimatedCompletion'])[:10], '%Y-%m-%d').date()
             except ValueError:
                 return jsonify({'status': 'error', 'message': 'Invalid estimated completion date'}), 400
+            # Only a changed date is checked, so an old draft can still be saved as-is
+            if new_completion != order.estimated_completion and new_completion < manila_today():
+                return jsonify({'status': 'error', 'message': 'Estimated completion date cannot be in the past'}), 400
+            order.estimated_completion = new_completion
+
+    if any(k in data for k in ('totalPrice', 'discountPercent', 'vatPercent')):
+        price_error = job_order_price_error(
+            data.get('totalPrice', order.total_price),
+            data.get('discountPercent', order.discount_percent),
+            data.get('vatPercent', order.vat_percent))
+        if price_error:
+            return jsonify({'status': 'error', 'message': price_error}), 400
 
     # Update allowed fields
     if 'status' in data:
@@ -3614,6 +4024,21 @@ def update_job_order(order_id):
                 db.session.delete(a)
     if 'slipData' in data:
         order.slip_data = data['slipData']
+
+    # Re-send a quotation (e.g. after revising one the customer rejected)
+    resend_quotation = bool(data.get('sendQuotation')) and order.status == 'draft'
+    if resend_quotation:
+        quote_branch = Branch.query.get(order.branch_id) if order.branch_id else None
+        if not quote_branch or quote_branch.is_warehouse:
+            return jsonify({'status': 'error',
+                            'message': 'Choose the branch where the customer will pay for this quotation.'}), 400
+        order.quote_status = 'sent'
+        order.quote_reject_reason = None
+        order.quote_sent_at = datetime.utcnow()
+        order.quote_responded_at = None
+        notify_customer_of_quotation(order)
+        log_action(request.current_user['id'], request.current_user['fullName'], 'QUOTATION', 'Sales',
+                   f"Re-sent quotation {order.job_order_id} to {order.customer_name}", request.remote_addr or '0.0.0.0')
 
     # Recalculate balance
     if 'downPayment' in data or 'totalPrice' in data:
@@ -3763,6 +4188,156 @@ def void_job_order(order_id):
 
     return jsonify({'status': 'success', 'message': 'Job order voided'})
 
+QUOTE_REASON_MAX = 500
+
+def job_order_quote_fields(jo):
+    """Quotation details shared by every job order serializer."""
+    return {
+        'quoteStatus': jo.quote_status,
+        'quoteRejectReason': jo.quote_reject_reason,
+        'quoteSentAt': to_pht(jo.quote_sent_at) if jo.quote_sent_at else None,
+        'quoteRespondedAt': to_pht(jo.quote_responded_at) if jo.quote_responded_at else None,
+        'appointmentId': jo.appointment_id,
+    }
+
+def confirm_draft_job_order(order):
+    """Turn a draft into a real (pending) job order: the same thing staff
+    confirming a draft does, which also books the workers on its labor lines."""
+    order.status = 'pending'
+    sync_labor_assignments(order, [])
+    order.actual_cost = job_order_cost(order.items)
+    order.updated_at = datetime.now()
+
+def quotation_account(order):
+    """The online account a quotation goes to, or None for walk-in customers."""
+    customer = Customer.query.get(order.customer_id) if order.customer_id else None
+    if not customer or not customer.user_id:
+        return None
+    account = User.query.get(customer.user_id)
+    return account if account and account.is_active else None
+
+def notify_customer_of_quotation(order):
+    """Email the customer that a quotation is waiting. Returns whether they have
+    an online account to accept it from."""
+    account = quotation_account(order)
+    if not account:
+        return False
+    total = f"{float(order.total_price or 0):,.2f}"
+    subject = f"Your quotation {order.job_order_id} is ready"
+    text = (f"Hi {account.full_name},\n\nYour quotation {order.job_order_id} from Seatmakers Avenue is ready. "
+            f"Total: PHP {total}.\n\nSign in and open My Orders > Custom to accept or reject it.\n\n"
+            f"Seatmakers Avenue")
+    html = (f"<p>Hi {escape(account.full_name)},</p><p>Your quotation <b>{escape(order.job_order_id)}</b> from "
+            f"Seatmakers Avenue is ready.</p><p style=\"font-size:20px;font-weight:bold;color:#011c72\">Total: "
+            f"&#8369;{total}</p><p>Sign in and open <b>My Orders &rsaquo; Custom</b> to accept or reject it.</p>"
+            f"<p>Seatmakers Avenue</p>")
+    threading.Thread(target=send_email, args=(account.email, account.full_name, subject, text, html), daemon=True).start()
+    return True
+
+# Slip fields a customer may see, with the labels used on their order
+CUSTOMER_SLIP_FIELDS = (
+    ('materialCenter', 'Center material'),
+    ('materialSides', 'Side material'),
+    ('materialBack', 'Back material'),
+    ('dStitch', 'Double stitch'),
+    ('piping', 'Piping'),
+    ('pockets', 'Pockets'),
+    ('logo', 'Logo'),
+    ('specification', 'Specification'),
+)
+
+def customer_work_details(o):
+    """The work to be done, in customer terms: the specification and work steps
+    from the order slip. Materials, costs, labor hours and worker names stay
+    staff-only."""
+    slip = o.slip_data or {}
+    specs = [{'label': label, 'value': str(slip.get(key)).strip()}
+             for key, label in CUSTOMER_SLIP_FIELDS if str(slip.get(key) or '').strip()]
+    steps = [str(r.get('description')).strip() for r in (slip.get('rows') or [])
+             if isinstance(r, dict) and str(r.get('description') or '').strip()]
+    return {'specs': specs, 'workSteps': steps}
+
+def customer_job_order_dict(o):
+    """What a customer sees of their own job order: the vehicle, the work and
+    the price. Materials, costs, labor and internal notes stay staff-only."""
+    return {
+        **customer_work_details(o),
+        'id': o.id,
+        'jobOrderId': o.job_order_id,
+        'description': o.description,
+        'vehicleInfo': o.vehicle_info,
+        'branchName': o.branch.name if o.branch else '',
+        'status': o.status,
+        'paymentStatus': o.payment_status,
+        'totalPrice': o.total_price or 0,
+        'discountPercent': o.discount_percent,
+        'vatPercent': o.vat_percent,
+        'downPayment': o.down_payment or 0,
+        'balance': o.balance or 0,
+        'estimatedCompletion': o.estimated_completion.strftime('%Y-%m-%d') if o.estimated_completion else None,
+        'completedAt': o.completed_at.strftime('%Y-%m-%d') if o.completed_at else None,
+        'createdAt': o.created_at.strftime('%Y-%m-%d') if o.created_at else None,
+        **job_order_quote_fields(o),
+    }
+
+def my_customer_record_ids():
+    return [c.id for c in Customer.query.filter_by(user_id=request.current_user['id']).all()]
+
+@app.route('/api/job-orders/mine', methods=['GET'])
+@require_auth
+@require_roles('customer')
+def get_my_job_orders():
+    """Job orders (and quotations) for the signed-in customer's linked record.
+    Staff drafts stay hidden; drafts sent as quotations are shown."""
+    ids = my_customer_record_ids()
+    if not ids:
+        return jsonify({'status': 'success', 'data': []})
+    orders = (JobOrder.query
+              .filter(JobOrder.customer_id.in_(ids),
+                      db.or_(JobOrder.status != 'draft', JobOrder.quote_status.in_(('sent', 'rejected'))))
+              .order_by(JobOrder.created_at.desc()).all())
+    return jsonify({'status': 'success', 'data': [customer_job_order_dict(o) for o in orders]})
+
+@app.route('/api/job-orders/<int:order_id>/quotation/respond', methods=['POST'])
+@require_auth
+@require_roles('customer')
+def respond_to_job_order_quotation(order_id):
+    """Customer accepts (becomes a pending job order) or rejects (with a reason) a quotation."""
+    user = request.current_user
+    order = JobOrder.query.get(order_id)
+    if not order or order.customer_id not in my_customer_record_ids():
+        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
+    if order.status != 'draft' or order.quote_status != 'sent':
+        return jsonify({'status': 'error', 'message': 'This quotation is no longer waiting for your reply.'}), 400
+
+    data = request.get_json(silent=True) or {}
+    response = data.get('response')
+    if response not in ('accept', 'reject'):
+        return jsonify({'status': 'error', 'message': 'Invalid response. Use "accept" or "reject"'}), 400
+
+    now = datetime.utcnow()
+    if response == 'accept':
+        confirm_draft_job_order(order)
+        order.quote_status = 'accepted'
+        title, message = 'Quotation accepted', f"{order.customer_name} accepted quotation {order.job_order_id}."
+    else:
+        reason = (data.get('reason') or '').strip()
+        if not reason:
+            return jsonify({'status': 'error', 'message': 'Please tell us why you are rejecting the quotation.'}), 400
+        order.quote_status = 'rejected'
+        order.quote_reject_reason = reason[:QUOTE_REASON_MAX]
+        title, message = 'Quotation rejected', f"{order.customer_name} rejected quotation {order.job_order_id}: {order.quote_reject_reason}"
+    order.quote_responded_at = now
+    # Sales managers send quotations too, so they hear back as well
+    notify_branch_users(order.branch_id, 'quotation_response', title, message,
+                        {'jobOrderId': order.id, 'response': response},
+                        branch_roles=('supervisor', 'sales_manager'))
+    db.session.commit()
+
+    log_action(user['id'], user['fullName'], 'RESPOND', 'Sales',
+               f"Customer {response}ed quotation {order.job_order_id}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': customer_job_order_dict(order)})
+
 @app.route('/api/sales/drafts', methods=['GET'])
 @require_auth
 @require_roles('administrator', 'supervisor', 'sales_manager')
@@ -3794,6 +4369,7 @@ def get_draft_job_orders():
         'status': d.status,
         'createdAt': d.created_at.strftime('%Y-%m-%d'),
         'updatedAt': fmt_dt(d.updated_at),
+        **job_order_quote_fields(d),
     } for d in drafts]})
 
 
@@ -3878,7 +4454,8 @@ def get_all_orders():
             'completedAt': jo.completed_at.strftime('%Y-%m-%d') if jo.completed_at else None,
             'createdAt': jo.created_at.strftime('%Y-%m-%d'),
             'createdBy': jo.created_by,
-            'updatedAt': jo.updated_at.strftime('%Y-%m-%d')
+            'updatedAt': jo.updated_at.strftime('%Y-%m-%d'),
+            **job_order_quote_fields(jo)
         }
 
     job_orders_list = [job_order_to_dict(jo) for jo in job_orders_db]
@@ -4451,7 +5028,18 @@ def appointment_to_dict(appointment):
         'adminNotes': appointment.admin_notes,
         'createdAt': to_pht(appointment.created_at),
         'updatedAt': to_pht(appointment.updated_at),
+        'hasAccount': appointment.user_id is not None,
+        'quotation': appointment_quotation(appointment.id),
     }
+
+def appointment_quotation(appointment_id):
+    """The latest quotation made from an appointment, if any."""
+    jo = (JobOrder.query.filter_by(appointment_id=appointment_id)
+          .order_by(JobOrder.created_at.desc()).first())
+    if not jo:
+        return None
+    return {'id': jo.id, 'jobOrderId': jo.job_order_id, 'status': jo.status,
+            'quoteStatus': jo.quote_status, 'quoteRejectReason': jo.quote_reject_reason}
 
 @app.route('/api/appointments', methods=['POST'])
 def create_appointment():
@@ -4541,9 +5129,23 @@ def create_appointment():
     
     return jsonify({'status': 'success', 'data': appointment_to_dict(new_appointment)}), 201
 
+APPOINTMENT_STAFF = ('administrator', 'supervisor', 'sales_manager')
+
+def appointment_branch_error(user, appointment=None):
+    """Supervisors and sales managers only handle their own branch's
+    appointments; administrators handle every branch. Returns an error
+    response, or None when access is fine."""
+    if user['role'] == 'administrator':
+        return None
+    if not user.get('branchId'):
+        return jsonify({'status': 'error', 'message': 'Your account has no assigned branch'}), 400
+    if appointment is not None and appointment.branch_id != user['branchId']:
+        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+    return None
+
 @app.route('/api/appointments', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_roles(*APPOINTMENT_STAFF)
 def get_appointments():
     """Get all appointments - staff endpoint"""
     user = request.current_user
@@ -4555,19 +5157,33 @@ def get_appointments():
     if status:
         query = query.filter_by(status=status)
     
-    # Supervisors only see appointments for their assigned branch.
-    if user['role'] == 'supervisor':
-        if not user.get('branchId'):
-            return jsonify({'status': 'error', 'message': 'Supervisor account has no assigned branch'}), 400
+    # Supervisors and sales managers only see their own branch
+    error = appointment_branch_error(user)
+    if error:
+        return error
+    if user['role'] != 'administrator':
         query = query.filter(Appointment.branch_id == user['branchId'])
     
     appointments = query.order_by(Appointment.preferred_date.desc()).all()
     
     return jsonify({'status': 'success', 'data': [appointment_to_dict(a) for a in appointments]})
 
+@app.route('/api/appointments/<int:appointment_id>', methods=['GET'])
+@require_auth
+@require_roles(*APPOINTMENT_STAFF)
+def get_appointment(appointment_id):
+    """One appointment, e.g. to pre-fill a quotation from it."""
+    appointment = Appointment.query.get(appointment_id)
+    if not appointment:
+        return jsonify({'status': 'error', 'message': 'Appointment not found'}), 404
+    error = appointment_branch_error(request.current_user, appointment)
+    if error:
+        return error
+    return jsonify({'status': 'success', 'data': appointment_to_dict(appointment)})
+
 @app.route('/api/appointments/<int:appointment_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_roles(*APPOINTMENT_STAFF)
 def update_appointment(appointment_id):
     """Update an appointment status or notes"""
     appointment = Appointment.query.get(appointment_id)
@@ -4575,11 +5191,9 @@ def update_appointment(appointment_id):
         return jsonify({'status': 'error', 'message': 'Appointment not found'}), 404
 
     user = request.current_user
-    if user['role'] == 'supervisor':
-        if not user.get('branchId'):
-            return jsonify({'status': 'error', 'message': 'Supervisor account has no assigned branch'}), 400
-        if appointment.branch_id != user['branchId']:
-            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+    error = appointment_branch_error(user, appointment)
+    if error:
+        return error
     
     data = request.get_json()
 
@@ -4631,7 +5245,7 @@ def get_my_appointments():
 
 @app.route('/api/admin/appointments/<int:appointment_id>/no-show', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_roles(*APPOINTMENT_STAFF)
 def mark_appointment_no_show(appointment_id):
     """Mark a confirmed appointment as no-show and add a strike to the phone number."""
     appointment = Appointment.query.get(appointment_id)
@@ -4639,8 +5253,9 @@ def mark_appointment_no_show(appointment_id):
         return jsonify({'status': 'error', 'message': 'Appointment not found'}), 404
 
     user = request.current_user
-    if user['role'] == 'supervisor' and user.get('branchId') != appointment.branch_id:
-        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+    error = appointment_branch_error(user, appointment)
+    if error:
+        return error
 
     appointment.status = 'cancelled'
     appointment.admin_notes = (appointment.admin_notes or '') + ' [No-Show]'
@@ -4788,13 +5403,15 @@ def fmt_dt(dt):
     return dt.isoformat()     # date only
 
 
-def notify_branch_users(branch_id, notif_type, title, message, data=None):
-    """Push an in-app notification to all active supervisors of a branch + all admins."""
+def notify_branch_users(branch_id, notif_type, title, message, data=None,
+                        branch_roles=('supervisor',)):
+    """Push an in-app notification to all admins plus the given roles at the
+    branch (supervisors by default)."""
     if branch_id is None:
         return
     targets = (User.query
                .join(Role, User.role_id == Role.id)
-               .filter(Role.key.in_(['administrator', 'supervisor']),
+               .filter(Role.key.in_(['administrator', *branch_roles]),
                        User.is_active == True)
                .all())
     for u in targets:
@@ -6090,21 +6707,100 @@ def update_customer_order_status(order_id):
     
     return jsonify({'status': 'success', 'data': customer_order_to_dict(order)})
 
+SIGNUP_CODE_TTL = timedelta(minutes=10)
+
+def _signup_code_hash(email, code):
+    return hashlib.sha256(f"signup:{email.lower()}:{code}".encode()).hexdigest()
+
+def signup_details_error(data):
+    """Why sign-up details can't be used, or None. Checked both before the
+    verification code is sent and again when the account is created."""
+    required = ['username', 'password', 'email', 'fullName', 'phone']
+    if not all((data.get(f) or '').strip() for f in required):
+        return 'Please fill in all the fields.'
+    if not USERNAME_PATTERN.match(data['username'].strip()):
+        return 'Username must be 3 to 50 characters: letters, numbers, dots, dashes or underscores.'
+    if not EMAIL_PATTERN.match(data['email'].strip()):
+        return 'Please enter a valid email address.'
+    if not PHONE_PATTERN.match(data['phone'].strip()):
+        return 'Enter a valid phone number, e.g. 09171234567.'
+    if len(data['password']) < MIN_PASSWORD_LENGTH:
+        return f'Password must be at least {MIN_PASSWORD_LENGTH} characters.'
+    if User.query.filter(db.func.lower(User.username) == data['username'].strip().lower()).first():
+        return 'That username is already taken.'
+    if User.query.filter(db.func.lower(User.email) == data['email'].strip().lower()).first():
+        return 'That email is already used by another account.'
+    return None
+
+@app.route('/api/auth/register/send-code', methods=['POST'])
+def send_signup_code():
+    """Sign-up, step 1: check the details and email a code to the address given."""
+    data = request.get_json(silent=True) or {}
+    error = signup_details_error(data)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 400
+
+    email = data['email'].strip().lower()
+    now = datetime.utcnow()
+    SignupCode.query.filter(SignupCode.created_at < now - timedelta(days=1)).delete(synchronize_session=False)
+    recent = (SignupCode.query.filter(SignupCode.email == email, SignupCode.created_at > now - timedelta(hours=1))
+              .order_by(SignupCode.created_at.desc()).all())
+    db.session.commit()
+    if len(recent) >= RESET_CODE_MAX_PER_HOUR:
+        return jsonify({'status': 'error', 'message': 'Too many code requests for this email. Please try again in an hour.'}), 429
+    if recent and (now - recent[0].created_at).total_seconds() < RESET_CODE_RESEND_SECONDS:
+        return jsonify({'status': 'success',
+                        'message': f'A code was sent to {email} less than a minute ago. Please check your inbox and spam folder.'})
+
+    # Only the newest code works
+    SignupCode.query.filter_by(email=email, used_at=None).update({'used_at': now}, synchronize_session=False)
+    code = f"{secrets.randbelow(10**6):06d}"
+    db.session.add(SignupCode(email=email, code_hash=_signup_code_hash(email, code),
+                              created_at=now, expires_at=now + SIGNUP_CODE_TTL))
+    db.session.commit()
+
+    name = data['fullName'].strip()
+    minutes = int(SIGNUP_CODE_TTL.total_seconds() // 60)
+    subject = f"{code} is your Seatmakers Avenue verification code"
+    text = (f"Hi {name},\n\nUse this code to finish creating your account: {code}\n\n"
+            f"It expires in {minutes} minutes. If you did not sign up, you can ignore this email.\n\n"
+            f"Seatmakers Avenue")
+    html = (f"<p>Hi {escape(name)},</p><p>Use this code to finish creating your account:</p>"
+            f"<p style=\"font-size:28px;font-weight:bold;letter-spacing:6px;color:#011c72\">{code}</p>"
+            f"<p>It expires in {minutes} minutes. If you did not sign up, you can ignore this email.</p>"
+            f"<p>Seatmakers Avenue</p>")
+    threading.Thread(target=send_email, args=(email, name, subject, text, html), daemon=True).start()
+    return jsonify({'status': 'success', 'message': f'A 6-digit code has been sent to {email}.'})
+
 @app.route('/api/auth/register', methods=['POST'])
 def register_customer():
-    """Register a new customer account"""
-    data = request.get_json()
-    
-    required = ['username', 'password', 'email', 'fullName', 'phone']
-    if not all(f in data for f in required):
-        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
-    
-    # Check if username or email already exists
-    if User.query.filter_by(username=data['username']).first():
-        return jsonify({'status': 'error', 'message': 'Username already exists'}), 400
-    
-    if User.query.filter_by(email=data['email']).first():
-        return jsonify({'status': 'error', 'message': 'Email already exists'}), 400
+    """Sign-up, step 2: create the customer account once the emailed code checks out."""
+    data = request.get_json(silent=True) or {}
+    error = signup_details_error(data)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 400
+
+    email = data['email'].strip().lower()
+    code = (data.get('code') or '').strip()
+    if not code:
+        return jsonify({'status': 'error', 'message': 'Enter the 6-digit code we emailed you.'}), 400
+    now = datetime.utcnow()
+    sc = (SignupCode.query.filter(SignupCode.email == email, SignupCode.used_at.is_(None),
+                                  SignupCode.expires_at > now)
+          .order_by(SignupCode.created_at.desc()).first())
+    if not sc:
+        return jsonify({'status': 'error', 'message': 'This code is invalid or has expired. Request a new one.'}), 400
+    if not hmac.compare_digest(sc.code_hash, _signup_code_hash(email, code)):
+        sc.attempts = (sc.attempts or 0) + 1
+        left = RESET_CODE_MAX_ATTEMPTS - sc.attempts
+        if left <= 0:
+            sc.used_at = now
+        db.session.commit()
+        message = (f'Incorrect code. {left} attempt(s) left.' if left > 0
+                   else 'Too many incorrect attempts. Request a new code.')
+        return jsonify({'status': 'error', 'message': message}), 400
+    sc.used_at = now
+    data = {**data, 'username': data['username'].strip(), 'email': email, 'fullName': data['fullName'].strip()}
     
     # Get customer role
     customer_role = Role.query.filter_by(key='customer').first()
@@ -6120,12 +6816,15 @@ def register_customer():
         role_id=customer_role.id,
         branch_id=None,
         branch=None,
-        is_active=True
+        is_active=True,
+        phone=(data.get('phone') or '').strip() or None
     )
     
     db.session.add(new_user)
     db.session.commit()
     
+    link_customer_record(new_user)  # show up in the staff Customers list
+    db.session.commit()
     token = create_session(new_user)
     
     log_action(new_user.id, new_user.full_name, 'REGISTER', 'Auth', 'New customer registered', request.remote_addr or '0.0.0.0')
@@ -6857,8 +7556,23 @@ def update_user(user_id):
     user = User.query.get(user_id)
     if not user:
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
-    
+
     data = request.get_json()
+
+    # Setting someone's password needs the administrator's own password. Checked
+    # before anything else changes, since a wrong guess is saved (lockout count).
+    resetting_password = bool(data.get('password'))
+    if resetting_password:
+        if len(data['password']) < MIN_PASSWORD_LENGTH:
+            return jsonify({'status': 'error',
+                            'message': f'New password must be at least {MIN_PASSWORD_LENGTH} characters.'}), 400
+        admin = User.query.get(request.current_user['id'])
+        error = check_current_password(admin, data.get('adminPassword'))
+        if error:
+            body, status = error
+            if status == 400:
+                return jsonify({'status': 'error', 'message': 'Your password is incorrect.'}), 400
+            return error
     
     old_role_key = user.role.key if user.role else None
     
@@ -6881,8 +7595,23 @@ def update_user(user_id):
         if not role:
             return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
         user.role_id = role.id
-    if 'password' in data and data['password']:
+    if resetting_password:
         user.password = hash_password(data['password'])
+        user.failed_login_attempts = 0
+        user.lockout_until = None
+        end_user_sessions(user.id)  # sign them out everywhere
+        log_action(request.current_user['id'], request.current_user['fullName'], 'PASSWORD_RESET_BY_ADMIN', 'Settings',
+                   f"Changed the password of {user.username}", request.remote_addr or '0.0.0.0')
+        if user.email:
+            notice = (f"Hi {user.full_name},\n\nAn administrator changed the password of your Seatmakers Avenue "
+                      f"account ({user.username}). Ask them for the new password, then change it on My Profile.\n\n"
+                      f"If you did not expect this, contact the shop right away.\n\nSeatmakers Avenue")
+            notice_html = (f"<p>Hi {escape(user.full_name)},</p><p>An administrator changed the password of your "
+                           f"Seatmakers Avenue account (<b>{escape(user.username)}</b>). Ask them for the new password, "
+                           f"then change it on <b>My Profile</b>.</p><p>If you did not expect this, contact the shop "
+                           f"right away.</p><p>Seatmakers Avenue</p>")
+            threading.Thread(target=send_email, args=(user.email, user.full_name, 'Your password was changed',
+                                                      notice, notice_html), daemon=True).start()
     
     db.session.commit()
     
@@ -7069,6 +7798,9 @@ def delete_user(user_id):
         Worker.query.filter_by(user_id=user.id).delete(synchronize_session=False)
         UserSession.query.filter_by(user_id=user.id).delete(synchronize_session=False)
         PasswordResetCode.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+        EmailChangeCode.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+        # The customer record (and its job orders) stays, just without the online account
+        Customer.query.filter_by(user_id=user.id).update({'user_id': None}, synchronize_session=False)
         # Announcements outlive their author — keep the post, drop the byline.
         Announcement.query.filter_by(created_by_id=user.id).update(
             {'created_by_id': None}, synchronize_session=False)
@@ -8149,7 +8881,28 @@ def customer_to_dict(c):
         'promoDiscount': c.promo_discount,
         'notes': c.notes or '',
         'createdAt': c.created_at.strftime('%Y-%m-%d') if c.created_at else None,
+        'userId': c.user_id,
+        'hasAccount': c.user_id is not None,
     }
+
+def customer_order_counts(customers):
+    """{customer id: number of orders}: job orders (not drafts) plus, for customers
+    with an online account, their premade product orders and custom requests."""
+    ids = [c.id for c in customers]
+    user_to_customer = {c.user_id: c.id for c in customers if c.user_id}
+    counts = dict.fromkeys(ids, 0)
+    if ids:
+        for cid, n in (db.session.query(JobOrder.customer_id, db.func.count(JobOrder.id))
+                       .filter(JobOrder.customer_id.in_(ids), JobOrder.status != 'draft')
+                       .group_by(JobOrder.customer_id)):
+            counts[cid] += n
+    if user_to_customer:
+        for model in (ProductOrder, CustomerOrder):
+            for uid, n in (db.session.query(model.user_id, db.func.count(model.id))
+                           .filter(model.user_id.in_(list(user_to_customer)))
+                           .group_by(model.user_id)):
+                counts[user_to_customer[uid]] += n
+    return counts
 
 @app.route('/api/customers/search', methods=['GET'])
 @require_auth
@@ -8184,7 +8937,16 @@ def get_customers():
             )
         )
     customers = query.order_by(Customer.name.asc()).all()
-    return jsonify({'status': 'success', 'data': [customer_to_dict(c) for c in customers]})
+    counts = customer_order_counts(customers)
+    usernames = dict(db.session.query(User.id, User.username)
+                     .filter(User.id.in_([c.user_id for c in customers if c.user_id])))
+    data = []
+    for c in customers:
+        row = customer_to_dict(c)
+        row['orderCount'] = counts.get(c.id, 0)
+        row['username'] = usernames.get(c.user_id)
+        data.append(row)
+    return jsonify({'status': 'success', 'data': data})
 
 @app.route('/api/customers', methods=['POST'])
 @require_auth
@@ -8226,6 +8988,23 @@ def get_customer(customer_id):
     } for o in orders]
     result = customer_to_dict(customer)
     result['orderHistory'] = order_history
+
+    # Orders placed through the customer's online account
+    online = []
+    account = User.query.get(customer.user_id) if customer.user_id else None
+    if account:
+        result['username'] = account.username
+        result['accountActive'] = account.is_active
+        for o in ProductOrder.query.filter_by(user_id=account.id).all():
+            online.append({'id': o.id, 'type': 'product', 'orderNumber': o.order_number,
+                           'status': o.status, 'totalPrice': o.total_amount or 0,
+                           'createdAt': o.created_at.strftime('%Y-%m-%d') if o.created_at else None})
+        for o in CustomerOrder.query.filter_by(user_id=account.id).all():
+            online.append({'id': o.id, 'type': 'custom', 'orderNumber': o.order_number,
+                           'status': o.status, 'totalPrice': o.quotation_total or 0,
+                           'createdAt': o.created_at.strftime('%Y-%m-%d') if o.created_at else None})
+        online.sort(key=lambda o: o['createdAt'] or '', reverse=True)
+    result['onlineOrders'] = online
     return jsonify({'status': 'success', 'data': result})
 
 @app.route('/api/customers/<int:customer_id>', methods=['PUT'])

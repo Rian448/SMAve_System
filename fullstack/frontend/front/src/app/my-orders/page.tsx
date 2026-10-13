@@ -1,12 +1,38 @@
 ﻿'use client';
 import { formatDate } from '@/lib/dateUtils';
-import { useState, useEffect, Suspense } from 'react';
+import { useState, useEffect, Suspense, Fragment } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, Appointment, CustomerOrder, ProductOrder, CartDraft, ApiError } from '@/lib/api';
+import { api, Appointment, CustomerOrder, ProductOrder, CartDraft, ApiError, CustomerJobOrder, jobOrderPriceBreakdown } from '@/lib/api';
+import { useConfirm } from '@/components/ConfirmDialog';
+import RejectQuotationDialog from '@/components/RejectQuotationDialog';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 
 type OrderTab = 'custom' | 'premade' | 'appointments';
+
+const peso = (n: number) =>
+  `₱${(Number(n) || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** A quotation the customer still has to accept or reject */
+const isAwaitingReply = (jo: CustomerJobOrder) => jo.status === 'draft' && jo.quoteStatus === 'sent';
+
+function jobOrderBadge(jo: CustomerJobOrder): { label: string; cls: string } {
+  if (jo.status === 'draft') {
+    return jo.quoteStatus === 'rejected'
+      ? { label: 'Quotation Rejected', cls: 'bg-red-100 text-red-700' }
+      : { label: 'Quotation Ready', cls: 'bg-blue-100 text-blue-800' };
+  }
+  const labels: Record<string, [string, string]> = {
+    pending: ['Pending', 'bg-yellow-100 text-yellow-800'],
+    in_progress: ['In Progress', 'bg-blue-100 text-blue-800'],
+    completed: ['Completed', 'bg-green-100 text-green-800'],
+    delivered: ['Delivered', 'bg-green-100 text-green-800'],
+    cancelled: ['Cancelled', 'bg-red-100 text-red-700'],
+    voided: ['Voided', 'bg-gray-100 text-gray-500'],
+  };
+  const [label, cls] = labels[jo.status] || [jo.status.replace(/_/g, ' '), 'bg-gray-100 text-gray-700'];
+  return { label, cls };
+}
 
 export default function MyOrdersPage() {
   return (
@@ -34,6 +60,20 @@ function MyOrdersContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [customOrders, setCustomOrders] = useState<CustomerOrder[]>([]);
+  // Job orders the shop made for this customer, including quotations to answer
+  const [jobOrders, setJobOrders] = useState<CustomerJobOrder[]>([]);
+  // Ids whose details were toggled from their default (open for quotations awaiting a reply)
+  const [toggledJobIds, setToggledJobIds] = useState<Set<number>>(new Set());
+  const toggleJob = (id: number) => setToggledJobIds(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const [jobBusyId, setJobBusyId] = useState<number | null>(null);
+  const [jobError, setJobError] = useState('');
+  const [rejectingJob, setRejectingJob] = useState<CustomerJobOrder | null>(null);
+  const [rejectError, setRejectError] = useState('');
+  const { confirm, confirmDialog } = useConfirm();
   const [productOrders, setProductOrders] = useState<ProductOrder[]>([]);
   // The customer's saved cart — a draft, not yet an order.
   const [savedCart, setSavedCart] = useState<CartDraft | null>(null);
@@ -64,15 +104,19 @@ function MyOrdersContent() {
   const fetchOrders = async () => {
     try {
       setLoading(true);
-      const [customResponse, productResponse, appointmentResponse, draftResponse] = await Promise.all([
+      const [customResponse, productResponse, appointmentResponse, draftResponse, jobResponse] = await Promise.all([
         api.customerOrders.getMyOrders(),
         api.productOrders.getMyOrders(),
         api.appointments.getMyAppointments(),
         // A saved cart is optional — never let its absence fail the whole page.
         api.productOrders.getCartDraft().catch(() => ({ data: null })),
+        api.myJobOrders.list().catch(() => ({ data: [] as CustomerJobOrder[] })),
       ]);
 
       setCustomOrders(customResponse.data || []);
+      // Quotations waiting for an answer first, then newest
+      setJobOrders([...(jobResponse.data || [])].sort((a, b) =>
+        Number(isAwaitingReply(b)) - Number(isAwaitingReply(a))));
       setProductOrders(productResponse.data || []);
       setAppointments(appointmentResponse.data || []);
       setSavedCart(draftResponse.data || null);
@@ -154,6 +198,44 @@ function MyOrdersContent() {
       case 'unpaid':
       default:
         return 'bg-red-100 text-red-700';
+    }
+  };
+
+  const acceptJobQuotation = async (jo: CustomerJobOrder) => {
+    const ok = await confirm({
+      title: 'Accept this quotation?',
+      message: (
+        <>
+          <b>{jo.jobOrderId}</b> for <b>{peso(jo.totalPrice)}</b> will become a confirmed job order.
+        </>
+      ),
+      warning: 'Please visit the branch to pay the down payment so work can start.',
+      confirmLabel: 'Accept Quotation',
+      variant: 'info',
+    });
+    if (!ok) return;
+    setJobBusyId(jo.id); setJobError('');
+    try {
+      await api.myJobOrders.respondToQuotation(jo.id, 'accept');
+      await fetchOrders();
+    } catch (err) {
+      setJobError(err instanceof Error ? err.message : 'Failed to accept the quotation.');
+    } finally {
+      setJobBusyId(null);
+    }
+  };
+
+  const rejectJobQuotation = async (reason: string) => {
+    if (!rejectingJob) return;
+    setJobBusyId(rejectingJob.id); setRejectError('');
+    try {
+      await api.myJobOrders.respondToQuotation(rejectingJob.id, 'reject', reason);
+      setRejectingJob(null);
+      await fetchOrders();
+    } catch (err) {
+      setRejectError(err instanceof Error ? err.message : 'Failed to reject the quotation.');
+    } finally {
+      setJobBusyId(null);
     }
   };
 
@@ -289,7 +371,11 @@ function MyOrdersContent() {
                 : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50'
             }`}
           >
-            Custom Orders ({customOrders.length})
+            Custom Orders ({customOrders.length + jobOrders.length})
+            {jobOrders.some(isAwaitingReply) && (
+              <span title="A quotation is waiting for your reply"
+                className="ml-1.5 inline-block w-2 h-2 rounded-full bg-yellow-500 align-middle" />
+            )}
           </button>
           <button
             onClick={() => setActiveTab('premade')}
@@ -319,7 +405,173 @@ function MyOrdersContent() {
 
         {activeTab === 'custom' && (
           <>
-            {customOrders.length === 0 ? (
+            {jobError && (
+              <p className="mb-4 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">{jobError}</p>
+            )}
+
+            {/* Job orders and quotations from the shop */}
+            {jobOrders.length > 0 && (
+              <div className="space-y-4 mb-6">
+                {jobOrders.map((jo) => {
+                  const badge = jobOrderBadge(jo);
+                  const price = jobOrderPriceBreakdown(jo.totalPrice || 0, jo.discountPercent, jo.vatPercent);
+                  const awaiting = isAwaitingReply(jo);
+                  const expanded = awaiting ? !toggledJobIds.has(jo.id) : toggledJobIds.has(jo.id);
+                  const v = jo.vehicleInfo;
+                  const isReupholstery = v?.make === 'Reupholstery';
+                  const vehicle = v && v.make && v.make !== 'N/A' && !isReupholstery
+                    ? [v.year, v.make, v.model !== 'N/A' ? v.model : ''].filter(Boolean).join(' ')
+                    : '';
+                  const services = (jo.description || '').split(',').map(x => x.trim()).filter(Boolean);
+                  return (
+                    <div key={`jo-${jo.id}`}
+                      className={`bg-white rounded-xl border p-6 transition-shadow hover:shadow-md ${awaiting ? 'border-[#011c72] ring-1 ring-[#011c72]/20' : 'border-gray-200'}`}>
+                      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-3">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-3 flex-wrap">
+                            <h3 className="text-lg font-semibold text-gray-900">{jo.jobOrderId}</h3>
+                            <span className={`text-xs px-2 py-1 rounded-full font-medium ${badge.cls}`}>{badge.label}</span>
+                          </div>
+                          <p className="text-sm text-gray-600 mt-1">{jo.createdAt ? formatDate(jo.createdAt) : ''}</p>
+                          <p className="text-sm text-gray-500 mt-1">Branch: {jo.branchName || 'N/A'}</p>
+                        </div>
+                        <div className="text-left lg:text-right">
+                          <p className="text-xs text-gray-500">{awaiting ? 'Quoted price' : 'Total'}</p>
+                          <p className="text-xl font-bold text-[#011c72]">{peso(jo.totalPrice)}</p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2">
+                        {(jo.description || '').split(',').map(x => x.trim()).filter(Boolean).map((svc, i) => (
+                          <span key={i} className="text-xs px-2 py-1 bg-gray-100 text-gray-700 rounded-md">
+                            {getServiceLabel(svc.replace(/ \(.*\)$/, ''))}
+                          </span>
+                        ))}
+                      </div>
+
+                      {jo.quoteStatus === 'rejected' && jo.status === 'draft' && (
+                        <p className="mt-3 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+                          You rejected this quotation: “{jo.quoteRejectReason}”. We&apos;ll contact you with a revised offer.
+                        </p>
+                      )}
+
+                      {expanded && (
+                        <div className="mt-4 border-t border-gray-100 pt-4 grid grid-cols-1 md:grid-cols-2 gap-5 text-sm">
+                          {/* Vehicle */}
+                          <section>
+                            <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-1.5">
+                              {isReupholstery ? 'Item' : 'Vehicle'}
+                            </h4>
+                            {isReupholstery ? (
+                              <p className="text-gray-900">{v?.model || 'Item for reupholstery'}</p>
+                            ) : vehicle ? (
+                              <>
+                                <p className="text-gray-900 font-medium">{vehicle}</p>
+                                {v?.plateNumber && <p className="text-gray-600">Plate no. {v.plateNumber}</p>}
+                              </>
+                            ) : (
+                              <p className="text-gray-500">Not specified</p>
+                            )}
+                          </section>
+
+                          {/* Work to be done */}
+                          <section>
+                            <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-1.5">Work to be done</h4>
+                            {services.length > 0 ? (
+                              <ul className="space-y-1">
+                                {services.map((svc, i) => {
+                                  const detail = svc.match(/\(([^)]*)\)$/)?.[1];
+                                  return (
+                                    <li key={i} className="flex items-start gap-2 text-gray-900">
+                                      <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-[#011c72] shrink-0" />
+                                      <span>{getServiceLabel(svc.replace(/ \(.*\)$/, ''))}{detail ? ` — ${detail}` : ''}</span>
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            ) : (
+                              <p className="text-gray-500">Not specified</p>
+                            )}
+                            {jo.workSteps?.length > 0 && (
+                              <ol className="mt-2 list-decimal list-inside space-y-0.5 text-gray-700">
+                                {jo.workSteps.map((step, i) => <li key={i}>{step}</li>)}
+                              </ol>
+                            )}
+                          </section>
+
+                          {/* Specification from the order slip */}
+                          {jo.specs?.length > 0 && (
+                            <section>
+                              <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-1.5">Specifications</h4>
+                              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+                                {jo.specs.map((sp) => (
+                                  <Fragment key={sp.label}>
+                                    <dt className="text-gray-500">{sp.label}</dt>
+                                    <dd className="text-gray-900">{sp.value}</dd>
+                                  </Fragment>
+                                ))}
+                              </dl>
+                            </section>
+                          )}
+
+                          {/* Price */}
+                          <section>
+                            <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-1.5">Price</h4>
+                            <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1">
+                              <dt className="text-gray-500">Price for the work</dt><dd className="text-gray-900 text-right">{peso(price.subtotal)}</dd>
+                              {price.discountPercent > 0 && (<><dt className="text-gray-500">Discount ({price.discountPercent}%)</dt><dd className="text-green-700 text-right">− {peso(price.discount)}</dd></>)}
+                              {price.vatPercent > 0 && (<><dt className="text-gray-500">VAT ({price.vatPercent}%)</dt><dd className="text-gray-900 text-right">+ {peso(price.vat)}</dd></>)}
+                              <dt className="text-gray-900 font-semibold border-t border-gray-100 pt-1">Total</dt>
+                              <dd className="text-gray-900 font-semibold text-right border-t border-gray-100 pt-1">{peso(price.total)}</dd>
+                              {jo.status !== 'draft' && (
+                                <>
+                                  <dt className="text-gray-500">Paid</dt><dd className="text-gray-900 text-right">{peso(jo.downPayment)}</dd>
+                                  <dt className="text-gray-500">Balance</dt><dd className="text-gray-900 text-right">{peso(jo.balance)}</dd>
+                                </>
+                              )}
+                            </dl>
+                          </section>
+
+                          {/* Schedule */}
+                          <section>
+                            <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-1.5">Schedule</h4>
+                            <p className="text-gray-900">
+                              Estimated completion: {jo.estimatedCompletion ? formatDate(jo.estimatedCompletion) : 'To be confirmed'}
+                            </p>
+                            {jo.status === 'draft' && (
+                              <p className="text-gray-600 mt-1">
+                                Once you accept, pay the down payment at {jo.branchName || 'the branch'} so work can start.
+                              </p>
+                            )}
+                          </section>
+                        </div>
+                      )}
+
+                      <div className="mt-4 flex flex-wrap gap-3">
+                        <button type="button" onClick={() => toggleJob(jo.id)}
+                          className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium text-sm">
+                          {expanded ? 'Hide Details' : 'View Details'}
+                        </button>
+                        {awaiting && (
+                          <>
+                            <button type="button" onClick={() => acceptJobQuotation(jo)} disabled={jobBusyId === jo.id}
+                              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-semibold text-sm disabled:opacity-50">
+                              Accept Quotation
+                            </button>
+                            <button type="button" onClick={() => { setRejectError(''); setRejectingJob(jo); }} disabled={jobBusyId === jo.id}
+                              className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-semibold text-sm disabled:opacity-50">
+                              Reject Quotation
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {customOrders.length === 0 && jobOrders.length > 0 ? null : customOrders.length === 0 ? (
               <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
                 <p className="text-gray-600 mb-4">You have no custom service orders yet</p>
               </div>
@@ -405,18 +657,20 @@ function MyOrdersContent() {
 
                 <ul className="divide-y divide-gray-100 border-y border-gray-100">
                   {savedCart.availability.map(row => (
-                    <li key={row.productId} className="py-2.5 flex items-start justify-between gap-3">
+                    <li key={row.productId} className={`py-2.5 flex items-start justify-between gap-3 ${row.issue ? 'bg-gray-50 px-2 -mx-2 rounded-md' : ''}`}>
                       <div className="min-w-0">
-                        <p className="text-sm text-gray-900">
+                        <p className={`text-sm text-gray-900 ${row.issue ? 'opacity-50 grayscale blur-[0.5px]' : ''}`}>
                           {row.requested}× {row.name}
                         </p>
                         {row.issue && (
-                          <p className="text-xs text-yellow-700 mt-0.5">{row.message}</p>
+                          <p className="text-xs text-red-700 mt-0.5">{row.message}</p>
                         )}
                       </div>
                       <div className="text-right shrink-0">
                         {row.issue ? (
-                          <span className="text-xs font-semibold text-yellow-700">Unavailable</span>
+                          <span className="text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                            {row.issue === 'insufficient' ? 'Low stock' : row.issue === 'invalid' ? 'Unavailable' : 'Out of stock'}
+                          </span>
                         ) : (
                           <span className="text-sm text-gray-700">
                             ₱{((row.currentPrice || 0) * row.requested).toLocaleString()}
@@ -618,6 +872,14 @@ function MyOrdersContent() {
           </>
         )}
       </main>
+      <RejectQuotationDialog
+        open={!!rejectingJob}
+        busy={jobBusyId !== null}
+        error={rejectError}
+        onCancel={() => setRejectingJob(null)}
+        onConfirm={rejectJobQuotation}
+      />
+      {confirmDialog}
     </div>
   );
 }
