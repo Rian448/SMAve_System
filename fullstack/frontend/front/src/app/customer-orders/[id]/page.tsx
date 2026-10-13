@@ -1,9 +1,9 @@
 ﻿'use client';
-import { formatDate, formatDateTime } from '@/lib/dateUtils';
+import { formatDateTime } from '@/lib/dateUtils';
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { api, CustomerOrder, QuotationItem } from '@/lib/api';
+import { api, CustomerOrder } from '@/lib/api';
 import { useAuth, hasAccess } from '@/context/AuthContext';
 
 export default function CustomerOrderDetailPage() {

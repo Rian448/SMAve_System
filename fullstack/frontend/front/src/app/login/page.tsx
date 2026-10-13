@@ -69,12 +69,8 @@ export default function LoginPage() {
       // Success — store token and load user
       setAuthToken(data.data.token);
       await checkAuth();
-      const role = data.data.user?.role;
-      if (role === 'seat_maker' || role === 'sewer') {
-        router.push('/worker-dashboard');
-      } else {
-        router.push('/dashboard');
-      }
+      // Worker Management is admin-only, so worker accounts land on the dashboard too
+      router.push('/dashboard');
     } catch {
       setError('Connection error. Please try again.');
     } finally {

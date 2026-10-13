@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { api, type ManagedWorker, type WorkerAssignment, type WorkerAvailabilityEntry, type JobOrder } from '@/lib/api';
+import { useConfirm } from '@/components/ConfirmDialog';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const WORK_TYPES = ['Seat Maker', 'Sewer', 'Upholstery', 'Installer', 'Cutter', 'Finisher', 'Other'];
@@ -245,6 +246,7 @@ function SpecialTaskModal({
 
 // ── Main page ────────────────────────────────────────────────────────────────
 export default function WorkerDashboard() {
+  const { confirm, confirmDialog } = useConfirm();
   const router = useRouter();
   const { user, isLoading: authLoading } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>('assign');
@@ -265,6 +267,11 @@ export default function WorkerDashboard() {
 
   // Assign panel: which worker card is the drop-target highlight
   const [dropTarget, setDropTarget]       = useState<number | null>(null);
+  const [actionError, setActionError]     = useState('');
+  const showError = (err: unknown, fallback: string) => {
+    setActionError(err instanceof Error && err.message ? err.message : fallback);
+    setTimeout(() => setActionError(''), 6000);
+  };
   // Calendar tab: which date cell is the drop-target highlight
   const [calDropTarget, setCalDropTarget] = useState<string | null>(null);
 
@@ -355,7 +362,7 @@ export default function WorkerDashboard() {
     try {
       await api.workerAssignments.create({ workerId: worker.id, jobOrderRef: job.ref, jobOrderDbId: job.id });
       fetchAssignments();
-    } catch { /* ignore */ }
+    } catch (err) { showError(err, `Couldn't assign ${job.ref} to ${worker.name}.`); }
   };
 
   const onDropCalendar = async (dateStr: string) => {
@@ -366,18 +373,26 @@ export default function WorkerDashboard() {
     try {
       await api.workerAssignments.create({ workerId: calWorker, jobOrderRef: job.ref, jobOrderDbId: job.id, scheduledDate: dateStr });
       fetchCalendar();
-    } catch { /* ignore */ }
+    } catch (err) { showError(err, `Couldn't schedule ${job.ref}.`); }
   };
 
   const removeAssignment = async (a: WorkerAssignment) => {
-    if (!confirm(`Remove ${a.jobOrderRef} from ${a.workerName}?`)) return;
-    try { await api.workerAssignments.delete(a.id); fetchAssignments(); } catch { /* ignore */ }
+    const ok = await confirm({
+      title: 'Remove this assignment?',
+      message: <>{a.jobOrderRef} will be unassigned from {a.workerName}.</>,
+      warning: 'Any logged hours and pay for this assignment are removed with it.',
+      confirmLabel: 'Remove',
+      variant: 'danger',
+    });
+    if (!ok) return;
+    try { await api.workerAssignments.delete(a.id); fetchAssignments(); }
+    catch (err) { showError(err, "Couldn't remove the assignment."); }
   };
 
   const startWork = async (a: WorkerAssignment) => {
     setUpdatingId(a.id);
     try { await api.workerAssignments.update(a.id, { status: 'in_progress' }); fetchAssignments(); }
-    catch { /* ignore */ } finally { setUpdatingId(null); }
+    catch (err) { showError(err, "Couldn't start the task."); } finally { setUpdatingId(null); }
   };
 
   const openCompletion = async (a: WorkerAssignment) => {
@@ -401,7 +416,7 @@ export default function WorkerDashboard() {
       });
       setCompletionTarget(null);
       fetchAssignments();
-    } catch { /* ignore */ }
+    } catch (err) { showError(err, "Couldn't mark the task complete."); }
   };
 
   const addSpecialTask = async (title: string, notes: string, scheduledDate: string) => {
@@ -503,6 +518,10 @@ export default function WorkerDashboard() {
             Add Worker
           </button>
         </div>
+
+        {actionError && (
+          <div className="mb-6 p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">{actionError}</div>
+        )}
 
         {/* Tabs */}
         <div className="flex gap-1 bg-white rounded-xl border border-gray-200 p-1 mb-6 w-fit shadow-sm">
@@ -957,6 +976,7 @@ export default function WorkerDashboard() {
           onSave={addSpecialTask}
         />
       )}
+      {confirmDialog}
     </div>
   );
 }

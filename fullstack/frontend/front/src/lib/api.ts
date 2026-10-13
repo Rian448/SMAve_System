@@ -46,10 +46,18 @@ export interface DashboardStats {
   totalFinishedGoods: number;
   totalUsers?: number;
   totalBranches?: number;
+  /** Branch these figures cover; null means the whole company (admins only) */
+  scopeBranchId?: number | null;
+  scopeBranchName?: string | null;
 }
 
 export interface Activity {
+  /** 'job_order' | 'delivery' — decides which record page this row opens. */
   type: string;
+  /** Database id of the underlying record, used to build the link. */
+  id?: number;
+  /** Human-readable reference, e.g. "JO-BA-2026-0001". */
+  reference?: string;
   title: string;
   description: string;
   timestamp: string;
@@ -57,11 +65,14 @@ export interface Activity {
 }
 
 export interface Alert {
+  /** 'low_stock' | 'delivery_due' | 'overdue_order' — decides the link target. */
   type: string;
   severity: 'info' | 'warning' | 'critical';
   title: string;
   description: string;
   itemId: number;
+  /** Only on low_stock: the material name, for deep-linking into inventory. */
+  itemName?: string;
 }
 
 export interface Announcement {
@@ -101,63 +112,6 @@ export interface CustomerOrderSummary {
   balance: number;
   createdAt: string;
   estimatedCompletion?: string | null;
-}
-
-export interface WorkerProfile {
-  id: number;
-  userId: number;
-  userName: string;
-  workerType: 'staff';
-  isAvailable: boolean;
-  specialization?: 'seat_maker' | 'sewer' | 'general' | string;
-  branchId?: number;
-}
-
-export interface WorkTask {
-  id: number;
-  taskNumber: string;
-  jobOrderId: string;
-  workerId?: number;
-  workerName?: string;
-  title: string;
-  description?: string;
-  taskType: string;
-  priority: 'low' | 'normal' | 'high' | 'urgent';
-  status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
-  estimatedHours?: number;
-  actualHours?: number;
-  dueDate?: string;
-  startedAt?: string;
-  completedAt?: string;
-  createdAt: string;
-  notes?: string;
-  queuePosition?: number | null;
-  isOverdue?: boolean;
-  overdueByHours?: number;
-}
-
-export interface WorkerWorkload {
-  workerId: number;
-  workerName: string;
-  workerType: string;
-  isAvailable: boolean;
-  branchId?: number;
-  activeTask: WorkTask | null;
-  queuedCount: number;
-  queuedTasks: WorkTask[];
-  totalRemainingHours: number;
-}
-
-export interface WorkTaskInput {
-  jobOrderId: string;
-  title: string;
-  taskType: string;
-  description?: string;
-  priority?: 'low' | 'normal' | 'high' | 'urgent';
-  estimatedHours?: number;
-  dueDate?: string;
-  workerId?: number;
-  notes?: string;
 }
 
 export interface PhoneBlacklistRecord {
@@ -202,6 +156,43 @@ export interface ProductOrderItem {
   total: number;
   sourceBranchId?: number;
   sourceBranchName?: string;
+}
+
+/** One line of a saved cart re-checked against current stock. */
+export interface AvailabilityRow {
+  productId: number;
+  name: string;
+  sku?: string;
+  requested: number;
+  available: number;
+  currentPrice: number | null;
+  savedPrice?: number;
+  /** null when the line is fine; otherwise why it blocks confirmation. */
+  issue: 'unavailable' | 'out_of_stock' | 'insufficient' | 'invalid' | null;
+  message: string;
+}
+
+/** A customer's saved premade cart, not yet a real order. */
+export interface CartDraft {
+  id: number;
+  kind: 'premade';
+  userId: number;
+  customerName: string;
+  customerPhone: string;
+  customerEmail: string;
+  customerAddress: string;
+  pickupBranchId?: number | null;
+  pickupBranchName?: string | null;
+  notes: string;
+  items: ProductOrderItem[];
+  itemCount: number;
+  /** Total at *current* prices, counting only lines with no issue. */
+  totalAmount: number;
+  availability: AvailabilityRow[];
+  /** False when any line is out of stock or short — confirmation is blocked. */
+  isAvailable: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AppNotification {
@@ -269,18 +260,6 @@ export interface ProductOrder {
   notes?: string;
   createdAt: string;
   updatedAt?: string;
-}
-
-export interface MultiProductOrderResult {
-  groupId: string;
-  pickupBranchName: string;
-  totalAmount: number;
-  orders: ProductOrder[];
-}
-
-export interface IncomingShipmentGroup {
-  groupId: string;
-  orders: ProductOrder[];
 }
 
 export interface ProductOrderTimelineEvent {
@@ -465,16 +444,6 @@ export interface RawMaterialInput {
   sourceJobOrderId?: string;
 }
 
-export interface RawMaterialSummaryGroup {
-  key: string;
-  name: string;
-  color: string;
-  pattern: string;
-  unitPrice: number;
-  totalStockQuantity: number;
-  components: RawMaterial[];
-}
-
 export interface FinishedGood {
   id: number;
   name: string;
@@ -486,8 +455,37 @@ export interface FinishedGood {
   cost: number;
   branchId: number;
   branchName?: string;
+  /** True when this row sits in the warehouse rather than a shop branch. */
+  isWarehouse?: boolean;
+  /** Units already promised to branches but not yet confirmed. */
+  pendingOutgoing?: number;
+  /** quantity - pendingOutgoing: what can still be given out. */
+  availableQuantity?: number;
   isArchived: boolean;
   lastUpdated: string;
+}
+
+/** A hand-over of premade stock from the warehouse to a branch, pending receipt. */
+export interface PremadeTransfer {
+  id: number;
+  productId: number;
+  productName?: string;
+  sku?: string;
+  unit: string;
+  sourceBranchId: number;
+  sourceBranchName?: string;
+  destinationBranchId: number;
+  destinationBranchName?: string;
+  quantity: number;
+  status: 'pending' | 'received' | 'cancelled';
+  batchId?: string | null;
+  notes: string;
+  createdById?: number;
+  createdByName?: string;
+  createdAt: string;
+  resolvedById?: number;
+  resolvedByName?: string;
+  resolvedAt?: string;
 }
 
 export interface PremadeProductInput {
@@ -550,6 +548,46 @@ export interface JobOrderItem {
   notes?: string;
   /** FK to inventory_materials.id — used to deduct stock on job order completion */
   materialId?: number;
+  /** Older orders don't store this; see jobOrderItemCategory() */
+  category?: 'material' | 'labor' | 'expense';
+  /** Worker assignment this labor line is linked to (managed by the server) */
+  assignmentId?: number;
+  /** What the worker was actually paid for this whole line, once their assignment is completed */
+  actualLaborCost?: number;
+  /** Read-only, from the linked worker assignment (not stored on the order) */
+  assignmentStatus?: 'pending' | 'in_progress' | 'completed';
+  scheduledDate?: string | null;
+}
+
+/** Material, labor or other expense. Older orders didn't store it: a line with only labor cost is labor. */
+export function jobOrderItemCategory(item: JobOrderItem): 'material' | 'labor' | 'expense' {
+  if (item.category) return item.category;
+  return Number(item.laborCost) > 0 && Number(item.materialCost) === 0 ? 'labor' : 'material';
+}
+
+/** Standard Philippine VAT rate, used when VAT is switched on for a job order */
+export const DEFAULT_VAT_PERCENT = 12;
+
+/**
+ * Splits a job order's final price into subtotal → discount → VAT → total.
+ * Only the total and the two percentages are stored, so the rest is derived
+ * backwards from them; the parts always add up to the stored total.
+ */
+export function jobOrderPriceBreakdown(total: number, discountPercent?: number | null, vatPercent?: number | null) {
+  const d = Math.min(Math.max(Number(discountPercent) || 0, 0), 100);
+  const v = Math.max(Number(vatPercent) || 0, 0);
+  const round = (n: number) => Math.round(n * 100) / 100;
+  const afterDiscount = round(total / (1 + v / 100));
+  const vat = round(total - afterDiscount);
+  const subtotal = d < 100 ? round(afterDiscount / (1 - d / 100)) : afterDiscount;
+  return { subtotal, discount: round(subtotal - afterDiscount), afterDiscount, vat, total, discountPercent: d, vatPercent: v };
+}
+
+/** Final price from the price before discount, a discount % and a VAT % */
+export function jobOrderTotalFrom(subtotal: number, discountPercent?: number | null, vatPercent?: number | null) {
+  const d = Math.min(Math.max(Number(discountPercent) || 0, 0), 100);
+  const v = Math.max(Number(vatPercent) || 0, 0);
+  return Math.round(subtotal * (1 - d / 100) * (1 + v / 100) * 100) / 100;
 }
 
 export interface ManagedWorker {
@@ -635,6 +673,8 @@ export interface JobOrder {
   estimatedCost: number;
   actualCost: number;
   totalPrice: number;
+  discountPercent?: number | null;
+  vatPercent?: number | null;
   status: 'pending' | 'in_progress' | 'completed' | 'voided' | 'cancelled' | 'delivered';
   paymentStatus: 'unpaid' | 'partial' | 'paid';
   downPayment: number;
@@ -686,26 +726,6 @@ export interface CustomerOrder {
   respondedAt?: string;
 }
 
-export interface LineupSlipItem {
-  description: string;
-  status: 'pending' | 'in_progress' | 'completed';
-}
-
-export interface LineupSlip {
-  id: number;
-  slipNumber: string;
-  jobOrderId: number;
-  jobOrderNumber: string;
-  customerName: string;
-  branchId: number;
-  items: LineupSlipItem[];
-  priority: 'low' | 'normal' | 'high';
-  assignedTo: string;
-  notes: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface PurchaseOrderItem {
   materialId?: number;
   name: string;
@@ -752,6 +772,7 @@ export interface Delivery {
   items: DeliveryItem[];
   status: 'scheduled' | 'in_transit' | 'delivered' | 'cancelled';
   scheduledDate: string;
+  timeSlot?: string;
   estimatedArrival?: string;
   deliveredAt?: string;
   driverName: string;
@@ -765,6 +786,7 @@ export interface Delivery {
 export interface JobOrderCost {
   id: number;
   jobOrderNumber: string;
+  customerName?: string;
   materialsCost: number;
   laborCost: number;
   overheadCost: number;
@@ -773,6 +795,8 @@ export interface JobOrderCost {
 }
 
 export interface CostingData {
+  /** Job order database id (for links); jobOrderId is its display number */
+  id: number;
   jobOrderId: string;
   items: JobOrderItem[];
   estimatedCost: number;
@@ -807,30 +831,6 @@ export interface Receipt {
   downPayment: number;
   balance: number;
   paymentStatus: string;
-}
-
-export interface AnalyticsData {
-  categoryDistribution: Array<{ name: string; count: number; value: number }>;
-  topMaterials: Array<{ name: string; value: number }>;
-  monthlyTrends: Array<{ month: string; purchases: number; sales: number }>;
-}
-
-export interface ForecastItem {
-  month: string;
-  forecastedOrders: number;
-  forecastedRevenue: number;
-  confidence: number;
-}
-
-export interface MaterialForecast {
-  materialId: number;
-  name: string;
-  currentStock: number;
-  reorderPoint: number;
-  dailyUsage: number;
-  daysUntilReorder: number;
-  recommendedOrderQty: number;
-  urgency: 'high' | 'medium' | 'low';
 }
 
 export interface SalesReport {
@@ -959,6 +959,18 @@ export const getAuthToken = (): string | null => {
 // FETCH WRAPPER
 // ============================================
 
+/** An error response from the API, carrying the HTTP status and the parsed body. */
+export class ApiError extends Error {
+  status: number;
+  body: any;
+  constructor(message: string, status: number, body: any) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
 async function fetchApi<T>(
   endpoint: string,
   options?: RequestInit
@@ -989,7 +1001,9 @@ async function fetchApi<T>(
     }
 
     if (!response.ok) {
-      throw new Error(data.message || `HTTP error! status: ${response.status}`);
+      // Keep the whole body on the error — some failures carry structured detail
+      // the UI needs (e.g. a 409 listing which cart items went out of stock).
+      throw new ApiError(data.message || `HTTP error! status: ${response.status}`, response.status, data);
     }
 
     return data;
@@ -1006,9 +1020,6 @@ async function fetchApi<T>(
 export const api = {
   // Health check
   healthCheck: () => fetchApi<null>('/api/health'),
-
-  // Analytics
-  getAnalytics: () => fetchApi<AnalyticsData>('/api/analytics'),
 
   // ==================
   // VEHICLE REFERENCE DATA (makes / models)
@@ -1035,13 +1046,7 @@ export const api = {
       fetchApi<null>('/api/auth/logout', { method: 'POST' }),
     
     me: () => fetchApi<User>('/api/auth/me'),
-    
-    recover: (email: string) =>
-      fetchApi<null>('/api/auth/recover', {
-        method: 'POST',
-        body: JSON.stringify({ email }),
-      }),
-    
+
     register: (data: { username: string; password: string; email: string; fullName: string; phone: string }) =>
       fetchApi<AuthResponse>('/api/auth/register', {
         method: 'POST',
@@ -1053,11 +1058,15 @@ export const api = {
   // DASHBOARD
   // ==================
   dashboard: {
-    getStats: () => fetchApi<DashboardStats>('/api/dashboard/stats'),
+    // branchId is honoured for administrators only; everyone else always gets their own branch
+    getStats: (branchId?: number) =>
+      fetchApi<DashboardStats>(`/api/dashboard/stats${branchId ? `?branchId=${branchId}` : ''}`),
     
-    getRecentActivity: () => fetchApi<Activity[]>('/api/dashboard/recent-activity'),
-    
-    getAlerts: () => fetchApi<Alert[]>('/api/dashboard/alerts'),
+    getRecentActivity: (branchId?: number) =>
+      fetchApi<Activity[]>(`/api/dashboard/recent-activity${branchId ? `?branchId=${branchId}` : ''}`),
+
+    getAlerts: (branchId?: number) =>
+      fetchApi<Alert[]>(`/api/dashboard/alerts${branchId ? `?branchId=${branchId}` : ''}`),
   },
 
   // ==================
@@ -1074,25 +1083,6 @@ export const api = {
       return fetchApi<RawMaterial[]>(`/api/inventory/raw-materials?${query}`);
     },
 
-    getRawMaterialsSummary: (params?: { includeArchived?: boolean; branchId?: number; category?: string; includeComponents?: boolean }) => {
-      const query = new URLSearchParams();
-      if (params?.includeArchived) query.append('includeArchived', 'true');
-      if (params?.branchId) query.append('branchId', params.branchId.toString());
-      if (params?.category) query.append('category', params.category);
-      if (params?.includeComponents) query.append('includeComponents', 'true');
-      return fetchApi<RawMaterialSummaryGroup[]>(`/api/inventory/raw-materials/summary?${query}`);
-    },
-
-    getRawMaterialGroupDetail: (key: string, params?: { includeArchived?: boolean; branchId?: number }) => {
-      const query = new URLSearchParams();
-      query.append('key', key);
-      if (params?.includeArchived) query.append('includeArchived', 'true');
-      if (params?.branchId) query.append('branchId', params.branchId.toString());
-      return fetchApi<RawMaterialSummaryGroup>(`/api/inventory/raw-materials/group-detail?${query}`);
-    },
-    
-    getRawMaterial: (id: number) => fetchApi<RawMaterial>(`/api/inventory/raw-materials/${id}`),
-    
     createRawMaterial: (material: RawMaterialInput) =>
       fetchApi<RawMaterial>('/api/inventory/raw-materials', {
         method: 'POST',
@@ -1104,13 +1094,7 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(material),
       }),
-    
-    archiveRawMaterial: (id: number) =>
-      fetchApi<null>(`/api/inventory/raw-materials/${id}/archive`, { method: 'POST' }),
-    
-    restoreRawMaterial: (id: number) =>
-      fetchApi<null>(`/api/inventory/raw-materials/${id}/restore`, { method: 'POST' }),
-    
+
     // Finished Goods
     getFinishedGoods: (params?: { includeArchived?: boolean; branchId?: number }) => {
       const query = new URLSearchParams();
@@ -1131,6 +1115,35 @@ export const api = {
         body: JSON.stringify(item),
       }),
 
+    /**
+     * Hand warehouse stock to branches as pending deliveries. Pass either
+     * explicit `allocations` or `toAllBranches` with a per-branch quantity.
+     * Rejected outright if the total exceeds what's available.
+     */
+    distributeFinishedGood: (
+      id: number,
+      payload:
+        | { allocations: Array<{ branchId: number; quantity: number }>; notes?: string }
+        | { toAllBranches: true; quantityPerBranch: number; notes?: string },
+    ) =>
+      fetchApi<PremadeTransfer[]>(`/api/inventory/finished-goods/${id}/distribute`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+
+    getPremadeTransfers: (params?: { status?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.status) query.append('status', params.status);
+      return fetchApi<PremadeTransfer[]>(`/api/inventory/premade-transfers?${query}`);
+    },
+
+    /** Accept a delivery — this is what actually moves the stock. */
+    confirmPremadeTransfer: (id: number) =>
+      fetchApi<PremadeTransfer>(`/api/inventory/premade-transfers/${id}/confirm`, { method: 'POST' }),
+
+    cancelPremadeTransfer: (id: number) =>
+      fetchApi<PremadeTransfer>(`/api/inventory/premade-transfers/${id}/cancel`, { method: 'POST' }),
+
     getMaterialUsage: (params?: { branchId?: number; materialId?: number }) => {
       const query = new URLSearchParams();
       if (params?.branchId) query.append('branchId', params.branchId.toString());
@@ -1145,12 +1158,6 @@ export const api = {
       if (params?.category) query.append('category', params.category);
       return fetchApi<PublicProduct[]>(`/api/inventory/finished-goods/public?${query}`);
     },
-    
-    // Categories
-    getCategories: () => fetchApi<{ rawMaterials: string[]; finishedGoods: string[] }>('/api/inventory/categories'),
-    
-    // Low Stock
-    getLowStock: () => fetchApi<RawMaterial[]>('/api/inventory/low-stock'),
 
     // Suppliers
     getSuppliers: (includeInactive?: boolean) => {
@@ -1268,35 +1275,12 @@ export const api = {
         body: JSON.stringify(updates),
       }),
 
-    voidJobOrder: (id: number) =>
-      fetchApi<null>(`/api/sales/job-orders/${id}/void`, { method: 'POST' }),
-
     // Draft job orders — saved but not confirmed; excluded from normal lists/counts
     getDrafts: () => fetchApi<JobOrder[]>('/api/sales/drafts'),
 
     deleteJobOrder: (id: number) =>
       fetchApi<null>(`/api/sales/job-orders/${id}`, { method: 'DELETE' }),
-    
-    // Line-up Slips
-    getLineupSlips: () => fetchApi<LineupSlip[]>('/api/sales/lineup-slips'),
-    
-    createLineupSlip: (slip: {
-      jobOrderId: number;
-      items?: LineupSlipItem[];
-      priority?: string;
-      assignedTo?: string;
-      notes?: string;
-    }) =>
-      fetchApi<LineupSlip>('/api/sales/lineup-slips', {
-        method: 'POST',
-        body: JSON.stringify(slip),
-      }),
-    
-    updateLineupSlip: (id: number, updates: Partial<LineupSlip>) =>
-      fetchApi<LineupSlip>(`/api/sales/lineup-slips/${id}`, {
-        method: 'PUT',
-        body: JSON.stringify(updates),
-      }),
+
   },
 
   // ==================
@@ -1307,24 +1291,7 @@ export const api = {
 
     getJobOrderCosting: (orderId: number) =>
       fetchApi<CostingData>(`/api/costing/job-order/${orderId}`),
-    
-    updateActualCost: (orderId: number, data: { actualCost?: number; items?: JobOrderItem[] }) =>
-      fetchApi<JobOrder>(`/api/costing/job-order/${orderId}/actual`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-    
-    getVarianceReport: () => fetchApi<Array<{
-      jobOrderId: string;
-      customerName: string;
-      estimatedCost: number;
-      actualCost: number;
-      variance: number;
-      variancePercent: number;
-      status: string;
-    }>>('/api/costing/variance-report'),
-    
-    generateReceipt: (orderId: number) => fetchApi<Receipt>(`/api/costing/receipt/${orderId}`),
+
   },
 
   // ==================
@@ -1372,7 +1339,8 @@ export const api = {
     
     create: (delivery: {
       type: string;
-      fromBranchId: number;
+      /** Defaults to the job order's branch */
+      fromBranchId?: number;
       toBranchId?: number;
       customerName?: string;
       customerAddress?: string;
@@ -1381,6 +1349,7 @@ export const api = {
       jobOrderNumber?: string;
       items: DeliveryItem[];
       scheduledDate: string;
+      timeSlot?: string;
       estimatedArrival?: string;
       driverName?: string;
       driverContact?: string;
@@ -1398,53 +1367,12 @@ export const api = {
         body: JSON.stringify({ status }),
       }),
     
-    getReceipt: (id: number) => fetchApi<{
-      receiptNumber: string;
-      date: string;
-      deliveryNumber: string;
-      type: string;
-      from: string;
-      to: string;
-      address: string;
-      items: DeliveryItem[];
-      driver: string;
-      vehicle: string;
-      status: string;
-      deliveredAt?: string;
-    }>(`/api/deliveries/${id}/receipt`),
   },
 
   // ==================
   // CUSTOMER ORDERS
   // ==================
   customerOrders: {
-    placeOrder: (orderData: {
-      customerName: string;
-      customerPhone: string;
-      customerEmail: string;
-      customerAddress: string;
-      vehicleInfo: {
-        make: string;
-        model: string;
-        year: string;
-        plateNumber: string;
-      };
-      services: Array<{
-        type: string;
-        material?: string;
-        design?: string;
-        pocket?: string;
-        others?: string;
-        description?: string;
-      }>;
-      notes: string;
-      orderDate: string;
-      branchId?: number;
-    }) =>
-      fetchApi<{ id: number; orderNumber: string }>('/api/customer-orders', {
-        method: 'POST',
-        body: JSON.stringify(orderData),
-      }),
 
     getOrders: () => fetchApi<CustomerOrder[]>('/api/customer-orders'),
 
@@ -1525,6 +1453,46 @@ export const api = {
   // PRODUCT ORDERS (Premade Products)
   // ==================
   productOrders: {
+    /** The logged-in customer's saved cart, or null if they have none. */
+    getCartDraft: () => fetchApi<CartDraft | null>('/api/product-orders/draft'),
+
+    saveCartDraft: (data: {
+      items: Array<{ productId: number; quantity: number }>;
+      pickupBranchId?: number | null;
+      customerName?: string;
+      customerPhone?: string;
+      customerEmail?: string;
+      customerAddress?: string;
+      notes?: string;
+    }) =>
+      fetchApi<CartDraft>('/api/product-orders/draft', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+
+    deleteCartDraft: () =>
+      fetchApi<{ message: string }>('/api/product-orders/draft', { method: 'DELETE' }),
+
+    /**
+     * Confirms the saved cart into a real order. Rejects with status 409 and an
+     * `availability` report when stock has moved since the cart was saved.
+     */
+    confirmCartDraft: (data?: {
+      customerName?: string;
+      customerPhone?: string;
+      customerEmail?: string;
+      customerAddress?: string;
+      pickupBranchId?: number;
+      notes?: string;
+    }) =>
+      fetchApi<ProductOrder>('/api/product-orders/draft/confirm', {
+        method: 'POST',
+        body: JSON.stringify(data || {}),
+      }),
+
+    /** Staff view of all customers' unconfirmed saved carts. */
+    getPremadeDrafts: () => fetchApi<CartDraft[]>('/api/product-orders/drafts'),
+
     create: (data: {
       customerName: string;
       customerPhone: string;
@@ -1568,8 +1536,6 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-
-    getGroup: (groupId: string) => fetchApi<ProductOrder[]>(`/api/product-orders/group/${groupId}`),
 
     getMyOrders: () => fetchApi<ProductOrder[]>('/api/product-orders/my-orders'),
 
@@ -1616,8 +1582,6 @@ export const api = {
   // FORECASTING
   // ==================
   forecasting: {
-    getDemandForecast: () => fetchApi<ForecastItem[]>('/api/forecasting/demand'),
-    getMaterialForecast: () => fetchApi<MaterialForecast[]>('/api/forecasting/materials'),
     getInventoryForecast: (params?: { period?: string }) => {
       const q = params?.period ? `?period=${params.period}` : '';
       return fetchApi<InventoryForecastData>(`/api/forecasting/inventory${q}`);
@@ -1693,7 +1657,16 @@ export const api = {
     
     restoreUser: (id: number) =>
       fetchApi<null>(`/api/settings/users/${id}/restore`, { method: 'POST' }),
-    
+
+    /** Asks the server whether this account can be permanently deleted, and why not. */
+    checkUserDeletable: (id: number) =>
+      fetchApi<{ canDelete: boolean; reason: string; blockers: string[] }>(
+        `/api/settings/users/${id}/delete-check`,
+      ),
+
+    deleteUser: (id: number) =>
+      fetchApi<null>(`/api/settings/users/${id}`, { method: 'DELETE' }),
+
     // Roles
     getRoles: () => fetchApi<Role[]>('/api/settings/roles'),
     
@@ -1727,57 +1700,6 @@ export const api = {
       }),
   },
 
-  // ==================
-  // WORKERS
-  // ==================
-  workers: {
-    getProfile: () => fetchApi<{ worker: WorkerProfile }>('/api/workers/profile'),
-    
-    toggleAvailability: (isAvailable: boolean) =>
-      fetchApi<{ isAvailable: boolean }>('/api/workers/availability', {
-        method: 'POST',
-        body: JSON.stringify({ isAvailable }),
-      }),
-    
-    getTasks: (status?: string) => {
-      const query = status ? `?status=${status}` : '';
-      return fetchApi<{ tasks: WorkTask[] }>(`/api/workers/tasks${query}`);
-    },
-    
-    getTaskDetail: (taskId: number) =>
-      fetchApi<{ task: WorkTask }>(`/api/workers/tasks/${taskId}`),
-    
-    updateTaskStatus: (taskId: number, data: { status: string; actualHours?: number; notes?: string }) =>
-      fetchApi<{ task: WorkTask }>(`/api/workers/tasks/${taskId}/status`, {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-    
-    createTask: (task: WorkTaskInput) =>
-      fetchApi<{ task: WorkTask }>('/api/workers/tasks', {
-        method: 'POST',
-        body: JSON.stringify(task),
-      }),
-    
-    getAllTasks: (params?: { status?: string; jobOrderId?: string }) => {
-      const query = new URLSearchParams();
-      if (params?.status) query.append('status', params.status);
-      if (params?.jobOrderId) query.append('jobOrderId', params.jobOrderId);
-      return fetchApi<{ tasks: (WorkTask & { workerName?: string })[] }>(`/api/workers/all-tasks?${query}`);
-    },
-    
-    getWorkersList: () =>
-      fetchApi<{ workers: WorkerProfile[] }>('/api/workers/list'),
-
-    getWorkload: () =>
-      fetchApi<{ workload: WorkerWorkload[] }>('/api/workers/workload'),
-    
-    syncWorkerProfiles: () =>
-      fetchApi<{ status: string; message: string; created: number }>('/api/workers/sync', {
-        method: 'POST',
-      }),
-  },
-
   managedWorkers: {
     list: () =>
       fetchApi<{ workers: ManagedWorker[] }>('/api/managed-workers'),
@@ -1791,8 +1713,6 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
-    deactivate: (id: number) =>
-      fetchApi<{ message: string }>(`/api/managed-workers/${id}`, { method: 'DELETE' }),
   },
 
   workerAssignments: {
@@ -1832,7 +1752,11 @@ export const api = {
   },
 
   announcements: {
-    list: () => fetchApi<Announcement[]>('/api/announcements'),
+    /** Archived announcements are returned only for administrators and supervisors. */
+    list: (includeArchived?: boolean) =>
+      fetchApi<Announcement[]>(
+        `/api/announcements${includeArchived ? '?includeArchived=true' : ''}`,
+      ),
     create: (data: { title: string; body: string; priority?: string; isPinned?: boolean }) =>
       fetchApi<Announcement>('/api/announcements', { method: 'POST', body: JSON.stringify(data) }),
     update: (id: number, data: Partial<{ title: string; body: string; priority: string; isPinned: boolean; isActive: boolean }>) =>

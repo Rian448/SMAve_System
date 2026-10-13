@@ -1,20 +1,40 @@
 'use client';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { useNotifications } from '@/context/NotificationContext';
 import { api, TransferDashboardItem, TransferSummary } from '@/lib/api';
 import { formatDateTime } from '@/lib/dateUtils';
+import AuditTrailPanel from '@/components/AuditTrailPanel';
 import Link from 'next/link';
 
-type StatusFilter = 'all' | 'pending' | 'transferred' | 'received';
+// 'overdue' is applied client-side: the server has no overdue filter, only a flag per row.
+type StatusFilter = 'all' | 'pending' | 'transferred' | 'received' | 'overdue';
+type TrailView = 'items' | 'audit';
 
 export default function DeliveryPage() {
+  // useSearchParams needs a Suspense boundary for this route to prerender.
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="animate-spin w-8 h-8 border-4 border-[#011c72] border-t-transparent rounded-full" />
+      </div>
+    }>
+      <ItemTrailContent />
+    </Suspense>
+  );
+}
+
+function ItemTrailContent() {
   const { user } = useAuth();
   const { refresh: refreshNotifs } = useNotifications();
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [transfers, setTransfers] = useState<TransferDashboardItem[]>([]);
   const [summary, setSummary] = useState<TransferSummary>({ pending: 0, inTransit: 0, received: 0, overdue: 0 });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [bulkLoading, setBulkLoading] = useState(false);
@@ -27,33 +47,75 @@ export default function DeliveryPage() {
   // Admin override confirmation
   const [overrideConfirm, setOverrideConfirm] = useState<{ id: number; action: 'mark-sent' | 'confirm-receipt'; transfer: TransferDashboardItem } | null>(null);
 
+  // Pins are kept per user in this browser so each supervisor can flag what they're watching
+  const [pinned, setPinned] = useState<Set<number>>(new Set());
+  const [actionFirst, setActionFirst] = useState(true);
+
   const isAdmin = user?.role === 'administrator';
 
   const canSee = user && ['administrator', 'supervisor'].includes(user.role);
 
-  const load = useCallback(async () => {
-    if (!canSee) return;
-    setLoading(true);
+  // The audit log is administrator-only on the server, so supervisors only get the item trail.
+  const view: TrailView = searchParams.get('view') === 'audit' && isAdmin ? 'audit' : 'items';
+  const setView = (next: TrailView) => {
+    // Kept in the URL so a refresh or a shared link opens the same view.
+    router.replace(next === 'audit' ? '/delivery?view=audit' : '/delivery', { scroll: false });
+  };
+
+  const pinKey = user ? `itemTrailPins:${user.id}` : null;
+
+  useEffect(() => {
+    if (!pinKey) return;
     try {
-      const res = await api.productOrderTransfers.getDashboard(
-        statusFilter !== 'all' ? { status: statusFilter === 'transferred' ? 'transferred' : statusFilter } : undefined
-      );
-      setTransfers((res as any).data ?? []);
-      setSummary((res as any).summary ?? { pending: 0, inTransit: 0, received: 0, overdue: 0 });
-    } catch {
-      // silent
+      const raw = localStorage.getItem(pinKey);
+      setPinned(new Set(raw ? JSON.parse(raw) : []));
+    } catch { /* storage unavailable — pins just won't persist */ }
+  }, [pinKey]);
+
+  const togglePin = (id: number) => {
+    setPinned(prev => {
+      const s = new Set(prev);
+      s.has(id) ? s.delete(id) : s.add(id);
+      if (pinKey) {
+        try { localStorage.setItem(pinKey, JSON.stringify([...s])); } catch { /* ignore */ }
+      }
+      return s;
+    });
+  };
+
+  // `silent` is for the background refresh: it updates the list in place instead
+  // of swapping it for a spinner, which used to wipe the view (and scroll) every minute.
+  const load = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!canSee || view !== 'items') { setLoading(false); return; }
+    if (!opts?.silent) setLoading(true);
+    try {
+      const serverStatus = statusFilter === 'all' || statusFilter === 'overdue' ? undefined : statusFilter;
+      const res = await api.productOrderTransfers.getDashboard(serverStatus ? { status: serverStatus } : undefined);
+      // The endpoint returns `data` and `summary` side by side at the top level.
+      const body = res as unknown as { data?: TransferDashboardItem[]; summary?: TransferSummary };
+      const rows = body.data ?? [];
+      setTransfers(statusFilter === 'overdue' ? rows.filter(t => t.isOverdue) : rows);
+      setSummary(body.summary ?? { pending: 0, inTransit: 0, received: 0, overdue: 0 });
+      setLoadError('');
+    } catch (e) {
+      // A background refresh keeps showing the last good list; only a manual load reports.
+      if (!opts?.silent) setLoadError(e instanceof Error ? e.message : 'Failed to load transfers.');
     } finally {
-      setLoading(false);
+      if (!opts?.silent) setLoading(false);
     }
-  }, [canSee, statusFilter]);
+  }, [canSee, statusFilter, view]);
 
   useEffect(() => { load(); }, [load]);
 
-  // Auto-refresh every 60s
+  // A selection made under one filter must not carry over to rows the user can no longer see.
+  useEffect(() => { setSelected(new Set()); }, [statusFilter]);
+
+  // Auto-refresh every 60s, quietly.
   useEffect(() => {
-    const t = setInterval(load, 60_000);
+    if (view !== 'items') return;
+    const t = setInterval(() => load({ silent: true }), 60_000);
     return () => clearInterval(t);
-  }, [load]);
+  }, [load, view]);
 
   const flash = (msg: string, isError = false) => {
     if (isError) { setActionError(msg); setTimeout(() => setActionError(''), 5000); }
@@ -120,6 +182,22 @@ export default function DeliveryPage() {
 
   const fmt = (iso?: string) => iso ? formatDateTime(iso) : '—';
 
+  const needsAction = (t: TransferDashboardItem) => t.status === 'pending' || t.status === 'transferred';
+
+  // Pinned first; then (if enabled) items needing action — overdue, then oldest — ahead of completed ones.
+  // Array.sort is stable, so ties keep the server's order.
+  const sortedTransfers = [...transfers].sort((a, b) => {
+    const pin = Number(pinned.has(b.id)) - Number(pinned.has(a.id));
+    if (pin !== 0) return pin;
+    if (!actionFirst) return 0;
+    const act = Number(needsAction(b)) - Number(needsAction(a));
+    if (act !== 0) return act;
+    if (!needsAction(a)) return 0;
+    const overdue = Number(b.isOverdue) - Number(a.isOverdue);
+    if (overdue !== 0) return overdue;
+    return b.agingHours - a.agingHours;
+  });
+
   const selectedPending = [...selected].filter(id => transfers.find(t => t.id === id)?.status === 'pending');
   const selectedTransferred = [...selected].filter(id => transfers.find(t => t.id === id)?.status === 'transferred');
 
@@ -128,10 +206,30 @@ export default function DeliveryPage() {
       <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
 
         {/* Header */}
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold text-gray-900">Transfer Dashboard</h1>
-          <p className="text-gray-500 mt-1 text-sm">Track all premade product transfers between branches in real time</p>
+        <div className="mb-6 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">{view === 'audit' ? 'Audit Trail' : 'Item Trail'}</h1>
+            <p className="text-gray-500 mt-1 text-sm">
+              {view === 'audit'
+                ? 'Every recorded action in the system: who did what, and when'
+                : 'Track all premade product transfers between branches in real time'}
+            </p>
+          </div>
+          {isAdmin && (
+            <div role="tablist" aria-label="Trail type" className="inline-flex p-1 bg-gray-100 rounded-xl self-start sm:self-auto">
+              {([['items', 'Item Trail'], ['audit', 'Audit Trail']] as const).map(([id, label]) => (
+                <button key={id} role="tab" aria-selected={view === id} onClick={() => setView(id)}
+                  className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+                    view === id ? 'bg-white text-[#011c72] shadow-sm' : 'text-gray-600 hover:text-gray-900'
+                  }`}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
+
+        {view === 'audit' ? <AuditTrailPanel /> : (<>
 
         {/* Alerts */}
         {actionError && (
@@ -146,19 +244,24 @@ export default function DeliveryPage() {
           <StatCard label="Awaiting Dispatch" value={summary.pending} color="yellow" onClick={() => setStatusFilter('pending')} active={statusFilter === 'pending'} />
           <StatCard label="In Transit" value={summary.inTransit} color="blue" onClick={() => setStatusFilter('transferred')} active={statusFilter === 'transferred'} />
           <StatCard label="Received" value={summary.received} color="green" onClick={() => setStatusFilter('received')} active={statusFilter === 'received'} />
-          <StatCard label="Overdue (>24h)" value={summary.overdue} color="red" onClick={() => setStatusFilter('all')} active={false} />
+          <StatCard label="Overdue (>24h)" value={summary.overdue} color="red" onClick={() => setStatusFilter('overdue')} active={statusFilter === 'overdue'} />
         </div>
 
         {/* Filter bar + QR scan button */}
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-3 mb-4 flex flex-wrap items-center gap-2">
           <span className="text-xs font-medium text-gray-500">Status:</span>
-          {(['all', 'pending', 'transferred', 'received'] as const).map(f => (
+          {(['all', 'pending', 'transferred', 'received', 'overdue'] as const).map(f => (
             <button key={f} onClick={() => setStatusFilter(f)}
               className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${statusFilter === f ? 'bg-[#011c72] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
-              {f === 'all' ? 'All' : f === 'pending' ? 'Awaiting Dispatch' : f === 'transferred' ? 'In Transit' : 'Received'}
+              {f === 'all' ? 'All' : f === 'pending' ? 'Awaiting Dispatch' : f === 'transferred' ? 'In Transit' : f === 'received' ? 'Received' : 'Overdue'}
             </button>
           ))}
           <div className="ml-auto flex items-center gap-2">
+            <label className="flex items-center gap-1.5 px-2 text-sm text-gray-600 cursor-pointer select-none">
+              <input type="checkbox" checked={actionFirst} onChange={e => setActionFirst(e.target.checked)}
+                className="w-4 h-4 rounded border-gray-300 text-[#011c72] cursor-pointer" />
+              Needs action first
+            </label>
             <button onClick={() => setScanning(true)}
               className="px-3 py-1.5 rounded-lg text-sm font-medium bg-purple-100 text-purple-700 hover:bg-purple-200 flex items-center gap-1.5">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -166,7 +269,7 @@ export default function DeliveryPage() {
               </svg>
               Scan QR
             </button>
-            <button onClick={load} className="px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 flex items-center gap-1.5">
+            <button onClick={() => load()} className="px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 flex items-center gap-1.5">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
@@ -281,9 +384,14 @@ export default function DeliveryPage() {
             <div className="animate-spin w-8 h-8 border-4 border-[#011c72] border-t-transparent rounded-full mx-auto" />
             <p className="mt-3 text-gray-500 text-sm">Loading transfers...</p>
           </div>
+        ) : loadError ? (
+          <div className="p-10 text-center bg-white rounded-xl border border-red-200 text-sm">
+            <p className="text-red-600">{loadError}</p>
+            <button onClick={() => load()} className="mt-3 px-4 py-1.5 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200">Try again</button>
+          </div>
         ) : transfers.length === 0 ? (
           <div className="p-10 text-center bg-white rounded-xl border border-gray-200 text-gray-400 text-sm">
-            No transfers found.
+            {statusFilter === 'overdue' ? 'Nothing is overdue.' : 'No transfers found.'}
           </div>
         ) : (
           <div className="space-y-1">
@@ -296,11 +404,13 @@ export default function DeliveryPage() {
               <span className="text-xs text-gray-400">Select actionable</span>
             </div>
 
-            {transfers.map(t => (
+            {sortedTransfers.map(t => (
               <TransferRow
                 key={t.id}
                 transfer={t}
                 selected={selected.has(t.id)}
+                pinned={pinned.has(t.id)}
+                onTogglePin={togglePin}
                 onToggle={toggleSelect}
                 onMarkSent={transfer => triggerAction(transfer, 'mark-sent')}
                 onConfirm={transfer => triggerAction(transfer, 'confirm-receipt')}
@@ -312,6 +422,7 @@ export default function DeliveryPage() {
             ))}
           </div>
         )}
+        </>)}
       </main>
     </div>
   );
@@ -343,6 +454,8 @@ function StatCard({ label, value, color, onClick, active }: {
 interface TransferRowProps {
   transfer: TransferDashboardItem;
   selected: boolean;
+  pinned: boolean;
+  onTogglePin: (id: number) => void;
   onToggle: (id: number) => void;
   onMarkSent: (transfer: TransferDashboardItem) => void;
   onConfirm: (transfer: TransferDashboardItem) => void;
@@ -352,7 +465,7 @@ interface TransferRowProps {
   fmt: (iso?: string) => string;
 }
 
-function TransferRow({ transfer: t, selected, onToggle, onMarkSent, onConfirm, onShowQr, savingId, isAdmin, fmt }: TransferRowProps) {
+function TransferRow({ transfer: t, selected, pinned, onTogglePin, onToggle, onMarkSent, onConfirm, onShowQr, savingId, isAdmin, fmt }: TransferRowProps) {
   const isSaving = savingId === t.id;
   const isActionable = t.status === 'pending' || t.status === 'transferred';
   const total = t.items.reduce((s, i) => s + (i.total ?? i.unitPrice * i.quantity), 0);
@@ -376,7 +489,7 @@ function TransferRow({ transfer: t, selected, onToggle, onMarkSent, onConfirm, o
   const stepReceived = t.status === 'received';
 
   return (
-    <div className={`bg-white rounded-xl border shadow-sm overflow-hidden ${t.isOverdue ? 'border-red-300' : 'border-gray-200'}`}>
+    <div className={`bg-white rounded-xl border shadow-sm overflow-hidden ${t.isOverdue ? 'border-red-300' : pinned ? 'border-[#011c72]/40' : 'border-gray-200'} ${pinned ? 'ring-1 ring-[#011c72]/20' : ''}`}>
       {/* Overdue banner */}
       {t.isOverdue && (
         <div className="px-4 py-1.5 bg-red-50 border-b border-red-200 flex items-center gap-1.5">
@@ -410,6 +523,15 @@ function TransferRow({ transfer: t, selected, onToggle, onMarkSent, onConfirm, o
                 <span className="text-xs text-gray-400">{agingLabel}</span>
               )}
               <span className="ml-auto text-sm font-bold text-gray-900">₱{total.toLocaleString()}</span>
+              <button onClick={() => onTogglePin(t.id)}
+                title={pinned ? 'Unpin' : 'Pin to top'}
+                aria-label={pinned ? 'Unpin transfer' : 'Pin transfer to top'}
+                aria-pressed={pinned}
+                className={`p-1 rounded-md transition-colors ${pinned ? 'text-[#011c72] bg-[#eef1fb] hover:bg-[#dde6ff]' : 'text-gray-300 hover:text-gray-500 hover:bg-gray-100'}`}>
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill={pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16 3l5 5-3 1-4 4 1 5-2 2-4-4-5 5v-1l4-5-4-4 2-2 5 1 4-4 1-3z" />
+                </svg>
+              </button>
             </div>
 
             {/* Branch route */}
@@ -501,7 +623,7 @@ function TransferRow({ transfer: t, selected, onToggle, onMarkSent, onConfirm, o
                 <>
                   <button onClick={() => onShowQr(t.id)}
                     className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 flex items-center gap-1">
-                    <QrIcon /> Scan QR
+                    <QrIcon /> Show QR
                   </button>
                   <button onClick={() => onConfirm(t)} disabled={isSaving}
                     className={`px-4 py-1.5 rounded-lg text-sm font-semibold disabled:opacity-50 flex items-center gap-1.5 ${isAdmin ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-green-600 text-white hover:bg-green-700'}`}>

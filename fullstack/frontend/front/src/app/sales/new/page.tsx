@@ -1,9 +1,12 @@
 'use client';
 import { formatDate } from '@/lib/dateUtils';
-import { useEffect, useRef, useState, type ReactElement } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useRef, useState, Suspense, type ReactElement } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { api, type Customer, type FinishedGood, type RawMaterial } from '@/lib/api';
+import {
+  api, type Customer, type FinishedGood, type RawMaterial,
+  DEFAULT_VAT_PERCENT, jobOrderTotalFrom, jobOrderPriceBreakdown,
+} from '@/lib/api';
 import Combobox from '@/components/Combobox';
 
 interface MaterialItem {
@@ -66,7 +69,25 @@ const SERVICE_ICONS: Record<string, ReactElement> = {
 };
 
 export default function NewJobOrderPage() {
+  // useSearchParams needs a Suspense boundary for this route to prerender.
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="animate-spin w-8 h-8 border-2 border-[#011c72] border-t-transparent rounded-full" />
+      </div>
+    }>
+      <NewJobOrderForm />
+    </Suspense>
+  );
+}
+
+function NewJobOrderForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // When present we are editing an existing draft rather than creating a new order.
+  const draftId = searchParams.get('draftId');
+  const editingDraftId = draftId ? Number(draftId) : null;
+  const [loadingDraft, setLoadingDraft] = useState(!!editingDraftId);
   const { user } = useAuth();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -91,6 +112,7 @@ export default function NewJobOrderPage() {
   const [linkedCustomerId, setLinkedCustomerId] = useState<number | null>(null);
   const [linkedCustomerDiscount, setLinkedCustomerDiscount] = useState<number | null>(null);
   const [orderDiscount, setOrderDiscount] = useState<string>('');  // editable per-order discount %
+  const [vatOn, setVatOn] = useState(false);
   const [customerSuggestions, setCustomerSuggestions] = useState<Customer[]>([]);
   const [searchingCustomer, setSearchingCustomer] = useState(false);
   const customerSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -152,7 +174,6 @@ export default function NewJobOrderPage() {
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [profitMargin, setProfitMargin] = useState(250);
   const [estimatedTotal, setEstimatedTotal] = useState(0);
-  const [downPayment, setDownPayment] = useState(0);
   const [notes, setNotes] = useState('');
 
   useEffect(() => {
@@ -317,11 +338,85 @@ export default function NewJobOrderPage() {
   const orderDiscountPct = Math.min(Math.max(Number(orderDiscount) || 0, 0), 100);
   const discountAmount = estimatedTotal > 0 ? Math.round(estimatedTotal * (orderDiscountPct / 100) * 100) / 100 : 0;
   const discountedTotal = estimatedTotal > 0 ? Math.round((estimatedTotal - discountAmount) * 100) / 100 : 0;
+  // Optional VAT on top of the discounted price; this is what the customer pays
+  const vatPct = vatOn ? DEFAULT_VAT_PERCENT : 0;
+  const finalTotal = estimatedTotal > 0 ? jobOrderTotalFrom(estimatedTotal, orderDiscountPct, vatPct) : 0;
+  const vatAmount = Math.round((finalTotal - discountedTotal) * 100) / 100;
 
   const goNext = () => {
     setError('');
     setStep((s) => s + 1);
   };
+
+  // ── Load an existing draft for editing (?draftId=…) ───────────────────────
+  // saveDraft stores the chosen services as a joined description string, so the
+  // services are parsed back out of it here.
+  useEffect(() => {
+    if (!editingDraftId) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await api.sales.getJobOrder(editingDraftId);
+        const d: any = res.data;
+        if (cancelled || !d) return;
+        if (d.status !== 'draft') {
+          setError('That order is no longer a draft and cannot be edited here.');
+          return;
+        }
+
+        setCustomerName(d.customerName || '');
+        setCustomerPhone(d.customerPhone || '');
+        setCustomerEmail(d.customerEmail || '');
+        if (d.customerId) setLinkedCustomerId(d.customerId);
+        if (d.discountPercent != null) setOrderDiscount(String(d.discountPercent));
+        setVatOn(Number(d.vatPercent) > 0);
+        // Restore the price (it used to be lost when reopening a draft)
+        if (Number(d.totalPrice) > 0) {
+          setEstimatedTotal(jobOrderPriceBreakdown(Number(d.totalPrice), d.discountPercent, d.vatPercent).subtotal);
+        }
+        if (d.notes) setNotes(d.notes);
+        if (d.estimatedCompletion) setEstimatedCompletionDate(String(d.estimatedCompletion).slice(0, 10));
+
+        const v = d.vehicleInfo || {};
+        if (v.make === 'Reupholstery') {
+          setReupholsteryItemType(v.model || '');
+        } else {
+          setVehicleMake(v.make && v.make !== 'N/A' ? v.make : '');
+          setVehicleModel(v.model && v.model !== 'N/A' ? v.model : '');
+          setVehicleYear(v.year ? String(v.year) : '');
+          setVehiclePlate(v.plateNumber || '');
+        }
+
+        const services = String(d.description || '').toLowerCase();
+        if (services.includes('flooring')) setFlooring(s => ({ ...s, selected: true }));
+        if (services.includes('reupholstery')) {
+          setReupholstery(s => ({ ...s, selected: true }));
+          const match = services.match(/reupholstery \(([^)]*)\)/);
+          if (match) setReupholsteryItemType(match[1]);
+        }
+        if (services.includes('ceiling')) setCeiling(s => ({ ...s, selected: true }));
+        if (services.includes('sidings')) setSidings(s => ({ ...s, selected: true }));
+        if (services.includes('seat_covers')) setSeatCovers(s => ({ ...s, selected: true }));
+        if (services.includes('other')) setOtherServices(s => ({ ...s, selected: true }));
+
+        setMaterials((d.items || []).map((it: any, idx: number) => ({
+          id: `draft-${idx}`,
+          materialSource: it.materialId ? 'inventory' : 'custom',
+          materialId: it.materialId ?? '',
+          name: it.name || '',
+          quantity: Number(it.quantity) || 0,
+          unitPrice: Number(it.unitPrice ?? it.materialCost) || 0,
+        })));
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load draft.');
+      } finally {
+        if (!cancelled) setLoadingDraft(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [editingDraftId]);
 
   // Save the current (possibly incomplete) job order as a draft so work isn't lost.
   // Drafts stay out of sales/pending counts until confirmed.
@@ -365,10 +460,17 @@ export default function NewJobOrderPage() {
         items: normalizedItems,
         notes,
         ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
-        ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, totalPrice: discountedTotal } : {}),
+        vatPercent: vatPct || null,
+        ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, totalPrice: finalTotal } : {}),
       };
 
-      await api.sales.createJobOrder(draftData);
+      if (editingDraftId) {
+        // Editing an existing draft — update in place so we don't leave a duplicate.
+        const { isDraft: _isDraft, ...updates } = draftData;
+        await api.sales.updateJobOrder(editingDraftId, updates);
+      } else {
+        await api.sales.createJobOrder(draftData);
+      }
       router.push('/sales');
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : 'Failed to save draft.');
@@ -512,9 +614,32 @@ export default function NewJobOrderPage() {
 
     const branchId = user?.branchId || 1;
 
+    // Add typed-in materials to inventory first (flagged as needed), so the order's
+    // lines carry their inventory id and the stock is deducted when the job completes.
+    const createdIds = new Map<string, number>();
+    for (const m of materials.filter((x) => x.materialSource === 'custom' && x.name.trim())) {
+      const existing = inventoryMaterials.find(
+        (inv) => inv.materialType.trim().toLowerCase() === m.name.trim().toLowerCase());
+      if (existing) { createdIds.set(m.id, existing.id); continue; }
+      try {
+        const res = await api.inventory.createRawMaterial({
+          materialType: m.name.trim(),
+          color: '', pattern: '',
+          unitPrice: Number(m.unitPrice) || 0,
+          stockQuantity: 0,
+          branchId,
+          status: 'needed',
+        });
+        if (res.data) createdIds.set(m.id, res.data.id);
+      } catch (customErr) {
+        console.error('Failed to save needed material:', customErr);
+      }
+    }
+
     const normalizedItems = materials.map((m) => ({
       name: m.name.trim(),
-      materialId: m.materialId ? Number(m.materialId) : undefined,
+      category: 'material' as const,
+      materialId: m.materialId ? Number(m.materialId) : createdIds.get(m.id),
       quantity: Number(m.quantity) || 0,
       unitPrice: Number(m.unitPrice) || 0,
       materialCost: Number(m.unitPrice) || 0,
@@ -522,7 +647,7 @@ export default function NewJobOrderPage() {
     }));
 
     if (normalizedItems.length === 0) {
-      normalizedItems.push({ name: 'Service Package', materialId: undefined, quantity: 1, unitPrice: 0, materialCost: 0, laborCost: 0 });
+      normalizedItems.push({ name: 'Service Package', category: 'material', materialId: undefined, quantity: 1, unitPrice: 0, materialCost: 0, laborCost: 0 });
     }
 
     if (labor.length > 0) {
@@ -554,12 +679,9 @@ export default function NewJobOrderPage() {
       cutterName, sewerName,
     } : undefined;
 
-    const computedTotal = materialTotal > 0 ? materialTotal : (estimatedTotal > 0 ? estimatedTotal : 0);
-    const grossTotal = estimatedTotal > 0 ? estimatedTotal : computedTotal;
-    const finalTotal = orderDiscountPct > 0
-      ? Math.round(grossTotal * (1 - orderDiscountPct / 100) * 100) / 100
-      : grossTotal;
-    const finalDown = estimatedTotal > 0 ? Math.round((finalTotal / 2) * 100) / 100 : 0;
+    const grossTotal = estimatedTotal > 0 ? estimatedTotal : materialTotal;
+    const orderTotal = jobOrderTotalFrom(grossTotal, orderDiscountPct, vatPct);
+    const finalDown = estimatedTotal > 0 ? Math.round((orderTotal / 2) * 100) / 100 : 0;
 
     try {
       const jobOrderData: any = {
@@ -574,34 +696,12 @@ export default function NewJobOrderPage() {
         paymentMethod,
         notes,
         ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
+        ...(vatPct > 0 ? { vatPercent: vatPct } : {}),
         ...(slipData ? { slipData } : {}),
-        ...(finalTotal > 0 ? { estimatedCost: grossTotal, totalPrice: finalTotal } : {}),
+        ...(orderTotal > 0 ? { estimatedCost: grossTotal, totalPrice: orderTotal } : {}),
       };
 
-      const createResponse = await api.sales.createJobOrder(jobOrderData);
-      const createdJobOrderId = (createResponse.data as any)?.jobOrderId || 'PENDING-JO';
-
-      const customNeeded = materials.filter((m) => m.materialSource === 'custom' && m.name.trim());
-      if (customNeeded.length > 0) {
-        try {
-          await Promise.all(
-            customNeeded.map((m) =>
-              api.inventory.createRawMaterial({
-                materialType: m.name.trim(),
-                color: '', pattern: '',
-                unitPrice: Number(m.unitPrice) || 0,
-                stockQuantity: 0,
-                branchId: user?.branchId || 1,
-                status: 'needed',
-                sourceJobOrderId: createdJobOrderId
-              })
-            )
-          );
-        } catch (customErr) {
-          console.error('Failed to save some needed materials:', customErr);
-        }
-      }
-
+      await api.sales.createJobOrder(jobOrderData);
       router.push('/sales');
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : 'Failed to create job order. Please try again.');
@@ -1438,7 +1538,7 @@ export default function NewJobOrderPage() {
                   <span className="font-medium text-gray-900">₱{materialTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                 </div>
                 <div className="flex items-center gap-3">
-                  <label className="text-sm text-gray-600 shrink-0">Profit Margin</label>
+                  <label className="text-sm text-gray-600 shrink-0">Price as % of materials</label>
                   <div className="relative flex-1">
                     <input
                       type="number" min="0" max="1000" step="1"
@@ -1452,7 +1552,9 @@ export default function NewJobOrderPage() {
                 <div className="flex items-center justify-between bg-white border border-[#c7d2f5] rounded-lg px-4 py-3">
                   <div>
                     <p className="text-sm font-medium text-[#011c72]">Suggested Price</p>
-                    <p className="text-xs text-gray-500 mt-0.5">{profitMargin}% of materials cost (100% = break-even)</p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {(profitMargin / 100).toLocaleString('en-PH', { maximumFractionDigits: 2 })}× materials cost (100% = break-even, before labor)
+                    </p>
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="text-lg font-bold text-[#011c72]">
@@ -1460,7 +1562,7 @@ export default function NewJobOrderPage() {
                     </span>
                     <button
                       type="button"
-                      onClick={() => { setEstimatedTotal(suggestedPrice); setDownPayment(suggestedPrice / 2); }}
+                      onClick={() => setEstimatedTotal(suggestedPrice)}
                       className="text-xs font-medium text-white bg-[#011c72] hover:bg-[#022494] px-3 py-1.5 rounded-lg transition-colors shrink-0"
                     >
                       Use This
@@ -1474,7 +1576,7 @@ export default function NewJobOrderPage() {
             <div className="space-y-3">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Total Amount for the Work
+                  Price for the Work <span className="text-xs font-normal text-gray-400">(before discount and VAT)</span>
                 </label>
                 <div className="relative">
                   <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">₱</span>
@@ -1483,7 +1585,6 @@ export default function NewJobOrderPage() {
                     onChange={(e) => {
                       const val = parseFloat(e.target.value) || 0;
                       setEstimatedTotal(val);
-                      setDownPayment(val / 2);
                     }}
                     className="w-full pl-8 pr-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                     placeholder="0.00" />
@@ -1510,15 +1611,33 @@ export default function NewJobOrderPage() {
                 </div>
               </div>
 
-              {estimatedTotal > 0 && orderDiscountPct > 0 && (
-                <div className="bg-green-50 border border-green-200 rounded-xl p-4 space-y-1">
-                  <div className="flex items-center justify-between text-sm text-green-800">
-                    <span>Discount ({orderDiscountPct}%)</span>
-                    <span>− ₱{discountAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+              <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
+                <input type="checkbox" checked={vatOn} onChange={(e) => setVatOn(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300 text-[#011c72]" />
+                Add {DEFAULT_VAT_PERCENT}% VAT
+              </label>
+
+              {estimatedTotal > 0 && (orderDiscountPct > 0 || vatPct > 0) && (
+                <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-1 text-sm">
+                  <div className="flex items-center justify-between text-gray-600">
+                    <span>Price</span>
+                    <span>₱{estimatedTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   </div>
-                  <div className="flex items-center justify-between text-sm font-semibold text-green-900">
-                    <span>Total after discount</span>
-                    <span>₱{discountedTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  {orderDiscountPct > 0 && (
+                    <div className="flex items-center justify-between text-green-700">
+                      <span>Discount ({orderDiscountPct}%)</span>
+                      <span>− ₱{discountAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                  )}
+                  {vatPct > 0 && (
+                    <div className="flex items-center justify-between text-gray-600">
+                      <span>VAT ({vatPct}%)</span>
+                      <span>+ ₱{vatAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between font-semibold text-gray-900 pt-1 border-t border-gray-200">
+                    <span>Total</span>
+                    <span>₱{finalTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   </div>
                 </div>
               )}
@@ -1527,10 +1646,10 @@ export default function NewJobOrderPage() {
                 <div className="bg-[#eef1fb] border border-[#c7d2f5] rounded-xl p-4 flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-[#011c72]">Down Payment (50%)</p>
-                    <p className="text-xs text-[#011c72] mt-0.5">{orderDiscountPct > 0 ? 'Half of total after discount' : 'Half of total'}</p>
+                    <p className="text-xs text-[#011c72] mt-0.5">Half of the total</p>
                   </div>
                   <span className="text-xl font-bold text-[#011c72]">
-                    ₱{(discountedTotal / 2).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    ₱{(finalTotal / 2).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </span>
                 </div>
               )}
@@ -1648,6 +1767,20 @@ export default function NewJobOrderPage() {
           </div>
         )}
 
+        {editingDraftId && (
+          <div className="mb-5 flex items-center gap-3 rounded-xl border border-[#c7d2f5] bg-[#eef1fb] px-4 py-3">
+            <svg className="w-5 h-5 shrink-0 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+            </svg>
+            <p className="text-sm text-[#011c72]">
+              {loadingDraft
+                ? 'Loading draft…'
+                : <>Editing a saved draft. <span className="font-semibold">Update Draft</span> saves your changes; confirming it from the Sales page turns it into a real job order.</>}
+            </p>
+          </div>
+        )}
+
         {/* Form Card */}
         <form onSubmit={handleSubmit}>
           <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-5">
@@ -1668,12 +1801,12 @@ export default function NewJobOrderPage() {
               </button>
               <div className="flex items-center gap-3">
                 <button type="button" onClick={saveDraft} disabled={loading}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Save this order as a draft to finish later">
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  className="inline-flex items-center gap-2.5 px-6 py-3 rounded-xl text-base font-semibold bg-white border-2 border-[#011c72] text-[#011c72] hover:bg-[#eef1fb] transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  title={editingDraftId ? 'Save your changes to this draft' : 'Save this order as a draft to finish later'}>
+                  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h8l4 4v10a2 2 0 01-2 2H7a2 2 0 01-2-2V5z M9 3v4h6" />
                   </svg>
-                  Save as Draft
+                  {loading ? 'Saving…' : editingDraftId ? 'Update Draft' : 'Save as Draft'}
                 </button>
               {step < 5 ? (
                 <button key="next-btn" type="submit"

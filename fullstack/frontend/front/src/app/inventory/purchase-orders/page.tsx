@@ -1,12 +1,10 @@
 ﻿'use client';
-import { formatDate, formatDateTime } from '@/lib/dateUtils';
+import { formatDate } from '@/lib/dateUtils';
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, PurchaseOrder } from '@/lib/api';
 
 export default function PurchaseOrdersPage() {
-  const router = useRouter();
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'pending' | 'approved' | 'received' | 'all'>('all');
