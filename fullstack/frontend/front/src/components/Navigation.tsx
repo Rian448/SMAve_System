@@ -3,13 +3,20 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth, hasAccess } from '@/context/AuthContext';
 import { useNotifications } from '@/context/NotificationContext';
+import { formatDateTime } from '@/lib/dateUtils';
 import { useState } from 'react';
+import { useConfirm } from './ConfirmDialog';
 
 interface NavigationProps {
   collapsed: boolean;
   onToggle: () => void;
 }
 
+const HomeIcon = () => (
+  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+  </svg>
+);
 const DashboardIcon = () => (
   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
@@ -101,10 +108,12 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { user, isAuthenticated, logout, isLoading } = useAuth();
-  const { notifications, unreadCount, markRead, markAllRead } = useNotifications();
+  const { notifications, unreadCount, markRead, markAllRead, archived, loadArchived, archive, restore, remove } = useNotifications();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const { confirm, confirmDialog } = useConfirm();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  const [showArchive, setShowArchive] = useState(false);
 
   const publicRoutes = ['/', '/login', '/register', '/place-order'];
 
@@ -118,12 +127,12 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
       return null;
     }
     const navLinks = [
-      { label: 'Home',         href: '#home' },
-      { label: 'Why Us',       href: '#why-us' },
-      { label: 'How It Works', href: '#process' },
-      { label: 'Catalog',      href: '#catalog' },
-      { label: 'FAQ',          href: '#faq' },
-      { label: 'Contact',      href: '#contact' },
+      { label: 'Home',         href: '/#home' },
+      { label: 'Why Us',       href: '/#why-us' },
+      { label: 'How It Works', href: '/#process' },
+      { label: 'Catalog',      href: '/#catalog' },
+      { label: 'FAQ',          href: '/#faq' },
+      { label: 'Contact',      href: '/#contact' },
     ];
 
     return (
@@ -132,12 +141,12 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
           <div className="flex items-center h-16 gap-4">
 
             {/* Logo */}
-            <a href="#home" className="flex items-center gap-2.5 flex-shrink-0">
+            <Link href="/#home" className="flex items-center gap-2.5 flex-shrink-0">
               <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center">
                 <LogoIcon />
               </div>
               <span className="font-bold text-gray-900 text-sm tracking-wide hidden sm:block">Seatmakers Avenue</span>
-            </a>
+            </Link>
 
             {/* Desktop nav links */}
             <div className="hidden md:flex items-center gap-1 ml-6 flex-1">
@@ -200,15 +209,16 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
   }
 
   const navItems = [
+    { name: 'Home', path: '/', icon: HomeIcon, roles: ['administrator', 'supervisor', 'sales_manager', 'seat_maker', 'sewer', 'customer'] },
     { name: 'My Orders', path: '/my-orders', icon: OrdersIcon, roles: ['customer'] },
     { name: 'Shop Products', path: '/place-order', icon: ShoppingIcon, roles: ['customer'] },
-    { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, roles: ['administrator', 'supervisor', 'sales_manager', 'staff'] },
-    { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, roles: ['administrator', 'supervisor', 'sales_manager', 'staff'] },
+    { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
+    { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
     { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, roles: ['administrator'] },
     { name: 'Sales', path: '/sales', icon: SalesIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
     { name: 'Customers', path: '/customers', icon: CustomersIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
     { name: 'Payments', path: '/payments', icon: PaymentsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Appointments', path: '/appointments', icon: AppointmentsIcon, roles: ['administrator', 'supervisor'] },
+    { name: 'Appointments', path: '/appointments', icon: AppointmentsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
     { name: 'Inventory', path: '/inventory', icon: InventoryIcon, roles: ['administrator', 'supervisor'] },
     { name: 'Product Orders', path: '/product-orders', icon: ShoppingIcon, roles: ['administrator', 'supervisor'] },
     { name: 'Costing', path: '/costing', icon: CostingIcon, roles: ['administrator', 'supervisor'] },
@@ -221,6 +231,13 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
   const filteredNavItems = navItems.filter((item) => hasAccess(user?.role, item.roles));
 
   const handleLogout = async () => {
+    const ok = await confirm({
+      title: 'Log out?',
+      message: 'You will need to log in again to use your account.',
+      confirmLabel: 'Logout',
+      variant: 'warning',
+    });
+    if (!ok) return;
     setIsLoggingOut(true);
     try {
       await logout();
@@ -230,19 +247,8 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
     }
   };
 
-  const getRoleBadgeColor = (role: string) => {
-    switch (role) {
-      case 'administrator': return 'bg-red-100 text-red-700';
-      case 'supervisor': return 'bg-[#dde6ff] text-[#011c72]';
-      case 'sales_manager': return 'bg-green-100 text-green-700';
-      case 'seat_maker': return 'bg-purple-100 text-purple-700';
-      case 'sewer': return 'bg-pink-100 text-pink-700';
-      case 'customer': return 'bg-[#dde6ff] text-[#011c72]';
-      default: return 'bg-gray-100 text-gray-700';
-    }
-  };
-
   return (
+    <>
     <aside
       className={`fixed left-0 top-0 h-full bg-white border-r border-gray-200 z-40 flex flex-col shadow-sm transition-all duration-300 ${
         collapsed ? 'w-16' : 'w-64'
@@ -250,14 +256,16 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
     >
       {/* Header */}
       <div className={`flex items-center h-16 px-3 border-b border-gray-200 shrink-0 ${collapsed ? 'justify-center' : 'gap-2'}`}>
-        <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0">
-          <LogoIcon />
-        </div>
-        {!collapsed && (
-          <span className="font-bold text-gray-900 text-sm flex-1 truncate">
-            Seatmakers Ave
-          </span>
-        )}
+        <Link href="/" title="Go to main website" className={`flex items-center gap-2 min-w-0 ${collapsed ? '' : 'flex-1'}`}>
+          <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0">
+            <LogoIcon />
+          </div>
+          {!collapsed && (
+            <span className="font-bold text-gray-900 text-sm flex-1 truncate">
+              Seatmakers Ave
+            </span>
+          )}
+        </Link>
         <button
           onClick={onToggle}
           className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0"
@@ -272,6 +280,47 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
           </svg>
         </button>
       </div>
+
+      {/* Profile card: opens My Profile */}
+      {collapsed ? (
+        <div className="flex flex-col items-center gap-2 py-3 border-b border-gray-200 bg-[#011c72] shrink-0">
+          <Link href="/profile" title={`${user?.fullName} (My Profile)`}
+            className={`w-9 h-9 bg-white rounded-full flex items-center justify-center ring-2 transition ${pathname === '/profile' ? 'ring-[#4a6aff]' : 'ring-white/30 hover:ring-white'}`}>
+            <span className="text-[#011c72] text-sm font-bold">{user?.fullName?.charAt(0).toUpperCase()}</span>
+          </Link>
+          <button onClick={() => setNotifOpen(o => !o)} title="Notifications"
+            className="relative p-1.5 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors">
+            <BellIcon />
+            {unreadCount > 0 && (
+              <span className="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-red-500" />
+            )}
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-start gap-2 px-4 py-4 border-b border-gray-200 bg-gradient-to-br from-[#011c72] to-[#1a3aa8] shrink-0">
+          <Link href="/profile" title="My Profile" className="group flex items-center gap-3 flex-1 min-w-0">
+            <div className={`w-12 h-12 bg-white rounded-full flex items-center justify-center shrink-0 ring-2 transition ${pathname === '/profile' ? 'ring-[#4a6aff]' : 'ring-white/30 group-hover:ring-white'}`}>
+              <span className="text-[#011c72] text-lg font-bold">{user?.fullName?.charAt(0).toUpperCase()}</span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-white truncate group-hover:underline">{user?.fullName}</p>
+              {user?.email && <p className="text-xs text-white/70 truncate">{user.email}</p>}
+              <span className="inline-block mt-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-white/15 text-white tracking-wide">
+                {user?.role?.replace('_', ' ').toUpperCase()}
+              </span>
+            </div>
+          </Link>
+          <button onClick={() => setNotifOpen(o => !o)} title="Notifications"
+            className="relative p-1.5 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors shrink-0">
+            <BellIcon />
+            {unreadCount > 0 && (
+              <span className="absolute top-0.5 right-0.5 min-w-[14px] h-3.5 px-0.5 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
+                {unreadCount > 9 ? '9+' : unreadCount}
+              </span>
+            )}
+          </button>
+        </div>
+      )}
 
       {/* Nav Items */}
       <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5">
@@ -315,93 +364,155 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
         })}
       </nav>
 
-      {/* User Section */}
+      {/* Logout */}
       <div className="border-t border-gray-200 p-3 shrink-0">
-        {collapsed ? (
-          <div className="flex flex-col items-center gap-2">
-            <div className="w-8 h-8 bg-[#011c72] rounded-full flex items-center justify-center" title={user?.fullName}>
-              <span className="text-white text-sm font-semibold">{user?.fullName?.charAt(0).toUpperCase()}</span>
-            </div>
-            <button onClick={() => setNotifOpen(o => !o)} title="Notifications"
-              className="relative p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 transition-colors">
-              <BellIcon />
-              {unreadCount > 0 && (
-                <span className="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-red-500" />
-              )}
-            </button>
-            <button onClick={handleLogout} disabled={isLoggingOut} title="Sign Out"
-              className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50">
-              <LogoutIcon />
-            </button>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 bg-[#011c72] rounded-full flex items-center justify-center shrink-0">
-                <span className="text-white text-sm font-semibold">{user?.fullName?.charAt(0).toUpperCase()}</span>
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-gray-900 truncate">{user?.fullName}</p>
-                <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${getRoleBadgeColor(user?.role || '')}`}>
-                  {user?.role?.replace('_', ' ').toUpperCase()}
-                </span>
-              </div>
-              <button onClick={() => setNotifOpen(o => !o)} title="Notifications"
-                className="relative p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 transition-colors shrink-0">
-                <BellIcon />
-                {unreadCount > 0 && (
-                  <span className="absolute top-0.5 right-0.5 min-w-[14px] h-3.5 px-0.5 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
-                    {unreadCount > 9 ? '9+' : unreadCount}
-                  </span>
-                )}
-              </button>
-              <button onClick={handleLogout} disabled={isLoggingOut} title="Sign Out"
-                className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50 shrink-0">
-                <LogoutIcon />
-              </button>
-            </div>
-          </div>
-        )}
+        <button onClick={handleLogout} disabled={isLoggingOut} title="Logout"
+          className={`w-full flex items-center justify-center gap-2 rounded-lg border border-red-200 text-red-600 text-sm font-semibold hover:bg-red-50 transition-colors disabled:opacity-50 ${collapsed ? 'p-2' : 'px-3 py-2'}`}>
+          <LogoutIcon />
+          {!collapsed && (isLoggingOut ? 'Logging out…' : 'Logout')}
+        </button>
       </div>
 
       {/* Notification Panel */}
       {notifOpen && (
         <>
-          <div className="fixed inset-0 z-30" onClick={() => setNotifOpen(false)} />
-          <div className={`fixed bottom-20 z-40 w-80 bg-white rounded-xl shadow-xl border border-gray-200 overflow-hidden ${collapsed ? 'left-20' : 'left-68'}`}
+          <div className="fixed inset-0 z-30" onClick={() => { setNotifOpen(false); setShowArchive(false); }} />
+          <div className="fixed top-20 z-40 w-80 bg-white rounded-xl shadow-xl border border-gray-200 overflow-hidden"
             style={{ left: collapsed ? '4.5rem' : '16.5rem' }}>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
-              <p className="text-sm font-bold text-gray-900">Notifications</p>
-              {unreadCount > 0 && (
-                <button onClick={markAllRead} className="text-xs text-[#011c72] hover:underline font-medium">
-                  Mark all read
-                </button>
-              )}
+            <div className="px-4 pt-3 pb-2 border-b border-gray-100">
+              <p className="text-sm font-bold text-gray-900">{showArchive ? 'Archived Notifications' : 'Notifications'}</p>
+              <div className="flex items-center justify-between mt-1.5">
+                {showArchive ? (
+                  <button onClick={() => setShowArchive(false)} className="text-xs text-[#011c72] hover:underline font-medium">
+                    &larr; Back to notifications
+                  </button>
+                ) : (
+                  <>
+                    <button onClick={markAllRead} disabled={unreadCount === 0}
+                      className="text-xs text-[#011c72] hover:underline font-medium disabled:text-gray-300 disabled:no-underline">
+                      Mark all as read
+                    </button>
+                    <button onClick={() => { setShowArchive(true); loadArchived(); }}
+                      className="text-xs text-[#011c72] hover:underline font-medium">
+                      View archive
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
             <div className="max-h-80 overflow-y-auto divide-y divide-gray-50">
-              {notifications.length === 0 ? (
-                <p className="text-center text-gray-400 text-sm py-8">No notifications</p>
-              ) : notifications.map(n => (
-                <button key={n.id} onClick={() => { markRead(n.id); setNotifOpen(false); }}
-                  className={`w-full text-left px-4 py-3 hover:bg-gray-50 transition-colors ${n.isRead ? '' : 'bg-blue-50'}`}>
+              {(showArchive ? archived : notifications).length === 0 ? (
+                <p className="text-center text-gray-400 text-sm py-8">
+                  {showArchive ? 'No archived notifications' : 'No notifications'}
+                </p>
+              ) : (showArchive ? archived : notifications).map(n => {
+                const href = notificationHref(n.type, n.data, user?.role);
+                const unread = !showArchive && !n.isRead;
+                const body = (
                   <div className="flex items-start gap-2">
-                    <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${n.isRead ? 'bg-transparent' : 'bg-blue-500'}`} />
+                    <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${unread ? 'bg-blue-500' : 'bg-transparent'}`} />
                     <div className="flex-1 min-w-0">
                       <p className="text-xs font-semibold text-gray-800 truncate">{n.title}</p>
                       <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{n.message}</p>
                       <p className="text-[10px] text-gray-400 mt-1">
-                        {new Date(n.createdAt).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                        {formatDateTime(n.createdAt)}
                       </p>
                     </div>
                   </div>
-                </button>
-              ))}
+                );
+
+                const handleDelete = async () => {
+                  const ok = await confirm({
+                    title: 'Delete notification?',
+                    message: 'This notification will be removed permanently.',
+                    confirmLabel: 'Delete',
+                    variant: 'danger',
+                  });
+                  if (ok) await remove(n.id);
+                };
+
+                return (
+                  <div key={n.id} className={`flex items-start gap-1 pr-2 transition-colors hover:bg-gray-50 ${unread ? 'bg-blue-50' : ''}`}>
+                    {/* Only a notification with somewhere to go is clickable */}
+                    {href ? (
+                      <button type="button" title="Open"
+                        onClick={() => { if (!n.isRead) markRead(n.id); setNotifOpen(false); setShowArchive(false); router.push(href); }}
+                        className="flex-1 min-w-0 text-left pl-4 py-3 cursor-pointer">
+                        {body}
+                      </button>
+                    ) : (
+                      <div className="flex-1 min-w-0 pl-4 py-3 cursor-default">
+                        {body}
+                        {unread && (
+                          <div className="mt-1 pl-4">
+                            <button type="button" onClick={() => markRead(n.id)}
+                              className="text-[11px] font-medium text-[#011c72] hover:underline">
+                              Mark read
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <div className="flex flex-col gap-0.5 py-2 shrink-0">
+                      {showArchive ? (
+                        <button type="button" title="Restore" onClick={() => restore(n.id)}
+                          className="p-1 rounded text-gray-400 hover:text-[#011c72] hover:bg-white transition-colors">
+                          <RestoreIcon />
+                        </button>
+                      ) : (
+                        <button type="button" title="Archive" onClick={() => archive(n.id)}
+                          className="p-1 rounded text-gray-400 hover:text-[#011c72] hover:bg-white transition-colors">
+                          <ArchiveIcon />
+                        </button>
+                      )}
+                      <button type="button" title="Delete" onClick={handleDelete}
+                        className="p-1 rounded text-gray-400 hover:text-red-600 hover:bg-white transition-colors">
+                        <TrashIcon />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </>
       )}
     </aside>
+    {confirmDialog}
+    </>
   );
+}
+
+/**
+ * Where a notification leads, or null when it has nowhere to go for this role
+ * (the row is then shown as plain text rather than a link).
+ */
+function notificationHref(type: string, data: unknown, role: string | undefined): string | null {
+  const d = (data || {}) as { orderId?: number; jobOrderId?: number; kind?: 'job' | 'product' | 'request' };
+  switch (type) {
+    case 'transfer_request':
+    case 'transfer_dispatched':
+    case 'order_cancelled':
+    case 'order_ready':
+    case 'sale_completed':
+      return d.orderId && hasAccess(role, ['administrator', 'supervisor']) ? `/product-orders/${d.orderId}` : null;
+    case 'premade_delivery':
+      // Incoming premade stock is confirmed on the Finished Goods tab
+      return hasAccess(role, ['administrator', 'supervisor']) ? '/inventory?tab=finished-goods' : null;
+    case 'quotation_response':
+      return d.jobOrderId && hasAccess(role, ['administrator', 'supervisor', 'sales_manager'])
+        ? `/sales/${d.jobOrderId}` : null;
+    case 'order_status':
+    case 'quotation_ready':
+      // The customer's own order: custom requests have a page, the rest open on My Orders
+      if (role !== 'customer' || !d.orderId) return null;
+      if (d.kind === 'request') return `/my-orders/${d.orderId}`;
+      if (d.kind === 'job') return `/my-orders?tab=custom&job=${d.orderId}`;
+      if (d.kind === 'product') return `/my-orders?tab=premade&order=${d.orderId}`;
+      return null;
+    default:
+      return null;
+  }
 }
 
 function BellIcon() {
@@ -409,6 +520,32 @@ function BellIcon() {
     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
         d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+    </svg>
+  );
+}
+
+function ArchiveIcon() {
+  return (
+    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+        d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+    </svg>
+  );
+}
+
+function RestoreIcon() {
+  return (
+    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
     </svg>
   );
 }

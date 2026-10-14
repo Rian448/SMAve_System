@@ -2,11 +2,16 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { api, Branch, User as UserType, Role } from '@/lib/api';
+import { useConfirm } from '@/components/ConfirmDialog';
 
-type TabType = 'general' | 'users' | 'branches' | 'services' | 'notifications';
+type TabType = 'general' | 'users' | 'branches' | 'notifications';
+
+// Roles not offered when adding a user: workers are managed in Worker Management
+const HIDDEN_ROLES = ['seat_maker', 'sewer'];
 
 export default function SettingsPage() {
   const { user } = useAuth();
+  const { confirm, confirmDialog } = useConfirm();
   const [activeTab, setActiveTab] = useState<TabType>('general');
   const [saving, setSaving] = useState(false);
   
@@ -20,16 +25,19 @@ export default function SettingsPage() {
       password: '',
       email: '',
       fullName: '',
-      role: 'staff',
+      role: 'sales_manager',
       branchId: 0
     });
     const [userError, setUserError] = useState('');
+    // Setting someone else's password must be confirmed with the admin's own password
+    const [adminPassword, setAdminPassword] = useState('');
     const [roles, setRoles] = useState<Role[]>([]);
     const [roleFilter, setRoleFilter] = useState('all');
     const filteredUsers = users.filter((u) => {
       if (roleFilter === 'all') return true;
       if (roleFilter === 'group:staff') return u.role !== 'customer';       // all employees
       if (roleFilter === 'group:customers') return u.role === 'customer';
+      if (roleFilter === 'group:workers') return u.role === 'seat_maker' || u.role === 'sewer';
       return u.role === roleFilter;                                          // a specific role
     });
   
@@ -84,6 +92,16 @@ export default function SettingsPage() {
     }
   };
 
+  /**
+   * Reload branches the same way the current tab first loaded them.
+   *
+   * The Branches tab manages inactive branches, so it must include them —
+   * otherwise a branch you just deactivated vanishes from the list and only
+   * reappears on refresh. Everywhere else the list feeds branch pickers, which
+   * should only offer active branches.
+   */
+  const reloadBranches = () => loadBranches(activeTab === 'branches');
+
   const loadBranches = async (includeInactive = false) => {
     setLoadingBranches(true);
     try {
@@ -104,7 +122,7 @@ export default function SettingsPage() {
       password: '', 
       email: '', 
       fullName: '', 
-      role: 'staff',
+      role: 'sales_manager',
       branchId: branches.length > 0 ? branches[0].id : 0
     });
     setEditingUser(null);
@@ -123,6 +141,7 @@ export default function SettingsPage() {
     });
     setEditingUser(user);
     setUserError('');
+    setAdminPassword('');
     setShowUserModal(true);
   };
 
@@ -142,6 +161,30 @@ export default function SettingsPage() {
       return;
     }
 
+    const changingPassword = !!editingUser && !!userFormData.password;
+    if (changingPassword) {
+      if (userFormData.password.length < 8) {
+        setUserError('The new password must be at least 8 characters.');
+        return;
+      }
+      if (!adminPassword) {
+        setUserError('Enter your own password to confirm the password change.');
+        return;
+      }
+      const ok = await confirm({
+        title: `Change ${editingUser.fullName}'s password?`,
+        message: (
+          <>
+            <b>{editingUser.username}</b> will be signed out on every device and will need the new password to
+            sign in. They will get an email telling them their password was changed.
+          </>
+        ),
+        confirmLabel: 'Change Password',
+        variant: 'warning',
+      });
+      if (!ok) return;
+    }
+
       setSaving(true);
       setUserError('');
 
@@ -154,8 +197,9 @@ export default function SettingsPage() {
             role: userFormData.role,
             branchId: userFormData.branchId || null
           };
-          if (userFormData.password) {
+          if (changingPassword) {
             updateData.password = userFormData.password;
+            updateData.adminPassword = adminPassword;
           }
           await api.settings.updateUser(editingUser.id, updateData);
         } else {
@@ -179,16 +223,93 @@ export default function SettingsPage() {
       }
     };
 
-    const handleToggleUserStatus = async (user: UserType) => {
+    /**
+     * Why this account can't be deactivated or deleted, or null if it can.
+     * Mirrors the server's guards so the buttons are disabled with a reason
+     * instead of failing after the user has already confirmed.
+     */
+    const protectedReason = (target: UserType): string | null => {
+      if (target.id === user?.id) return 'This is your own account';
+      const otherActiveAdmins = users.filter(
+        (u) => u.role === 'administrator' && u.isActive && u.id !== target.id,
+      ).length;
+      if (target.role === 'administrator' && target.isActive && otherActiveAdmins === 0) {
+        return 'Last active administrator';
+      }
+      return null;
+    };
+
+    const handleToggleUserStatus = async (target: UserType) => {
+      const archiving = target.isActive;
+      const ok = await confirm({
+        title: archiving ? `Deactivate ${target.fullName}?` : `Reactivate ${target.fullName}?`,
+        message: archiving
+          ? <>This account will no longer be able to sign in. Their past records stay intact.</>
+          : <>This account will be able to sign in again with its existing password.</>,
+        warning: archiving ? 'You can reactivate the account at any time.' : undefined,
+        confirmLabel: archiving ? 'Deactivate' : 'Reactivate',
+        variant: archiving ? 'warning' : 'info',
+      });
+      if (!ok) return;
+
+      setUserError('');
       try {
-        if (user.isActive) {
-          await api.settings.archiveUser(user.id);
+        if (archiving) {
+          await api.settings.archiveUser(target.id);
         } else {
-          await api.settings.restoreUser(user.id);
+          await api.settings.restoreUser(target.id);
         }
         loadUsers();
-      } catch (err) {
-        console.error('Failed to update user status:', err);
+      } catch (err: any) {
+        setUserError(err?.message || 'Failed to update user status');
+      }
+    };
+
+    /**
+     * Permanent delete. The server decides whether the account is safe to remove,
+     * so the dialog can explain up front why it is blocked instead of failing on submit.
+     */
+    const handleDeleteUser = async (target: UserType) => {
+      setUserError('');
+
+      let check: { canDelete: boolean; reason: string; blockers: string[] };
+      try {
+        const response = await api.settings.checkUserDeletable(target.id);
+        check = response.data!;
+      } catch (err: any) {
+        setUserError(err?.message || 'Could not check whether this user can be deleted');
+        return;
+      }
+
+      if (!check.canDelete) {
+        await confirm({
+          title: `Cannot delete ${target.fullName}`,
+          message: check.reason,
+          warning: check.blockers.length > 0
+            ? <>Attached records: {check.blockers.join(', ')}.</>
+            : undefined,
+          confirmLabel: 'Got it',
+          cancelLabel: 'Close',
+          variant: 'warning',
+        });
+        return;
+      }
+
+      const ok = await confirm({
+        title: `Permanently delete ${target.fullName}?`,
+        message: <>The account <span className="font-medium text-gray-900">{target.username}</span> and its login will be erased from the system.</>,
+        warning: 'This cannot be undone. If you only want to block access, deactivate the account instead.',
+        confirmLabel: 'Delete permanently',
+        variant: 'danger',
+        requireText: 'DELETE',
+      });
+      if (!ok) return;
+
+      try {
+        await api.settings.deleteUser(target.id);
+        loadUsers();
+      } catch (err: any) {
+        setUserError(err?.message || 'Failed to delete user');
       }
     };
 
@@ -231,7 +352,7 @@ export default function SettingsPage() {
       }
       
       setShowBranchModal(false);
-      loadBranches();
+      reloadBranches();
     } catch (err: any) {
       setBranchError(err.message || 'Failed to save branch');
     } finally {
@@ -240,13 +361,14 @@ export default function SettingsPage() {
   };
 
   const handleToggleBranchStatus = async (branch: Branch) => {
+    setBranchError('');
     try {
       await api.settings.updateBranch(branch.id, {
         isActive: !branch.isActive
       });
-      loadBranches();
-    } catch (err) {
-      console.error('Failed to update branch status:', err);
+      reloadBranches();
+    } catch (err: any) {
+      setBranchError(err?.message || 'Failed to update branch status');
     }
   };
 
@@ -279,11 +401,6 @@ export default function SettingsPage() {
     { id: 'branches' as TabType, name: 'Branches', icon: (
       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-      </svg>
-    )},
-    { id: 'services' as TabType, name: 'Services', icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
       </svg>
     )},
     { id: 'notifications' as TabType, name: 'Notifications', icon: (
@@ -372,6 +489,12 @@ export default function SettingsPage() {
       case 'users':
         return (
           <div>
+            {/* Errors from row actions (archive / delete) — the modal has its own banner. */}
+            {userError && !showUserModal && (
+              <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {userError}
+              </div>
+            )}
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
               <h3 className="text-lg font-semibold text-gray-900">User Management</h3>
               <div className="flex items-center gap-3">
@@ -389,10 +512,10 @@ export default function SettingsPage() {
                       <option value="sales_manager">Sales Manager</option>
                       <option value="seat_maker">Seat Maker</option>
                       <option value="sewer">Sewer</option>
-                      <option value="staff">Staff</option>
                     </optgroup>
                     <optgroup label="General">
                       <option value="group:staff">All Staff</option>
+                      <option value="group:workers">Workers (Seat Makers &amp; Sewers)</option>
                       <option value="group:customers">Customers</option>
                     </optgroup>
                   </select>
@@ -486,16 +609,30 @@ export default function SettingsPage() {
                               >
                           Edit
                         </button>
-                              <button 
+                              <button
                                 onClick={() => handleToggleUserStatus(u)}
-                                className={`text-sm font-medium ${
+                                disabled={!!protectedReason(u)}
+                                title={protectedReason(u) || undefined}
+                                className={`text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300 ${
                                   u.isActive
-                                    ? 'text-red-600 hover:text-red-700'
+                                    ? 'text-yellow-600 hover:text-yellow-700'
                                     : 'text-green-600 hover:text-green-700'
                                 }`}
                               >
                                 {u.isActive ? 'Deactivate' : 'Activate'}
                         </button>
+                              <button
+                                onClick={() => handleDeleteUser(u)}
+                                disabled={!!protectedReason(u)}
+                                title={protectedReason(u) || undefined}
+                                className="text-sm font-medium text-red-600 hover:text-red-700 disabled:cursor-not-allowed disabled:text-gray-300"
+                              >
+                                Delete
+                              </button>
+                              {/* Say why up front rather than failing after a dialog. */}
+                              {protectedReason(u) && (
+                                <p className="mt-1 text-xs text-gray-400">{protectedReason(u)}</p>
+                              )}
                             </>
                           )}
                       </td>
@@ -511,6 +648,12 @@ export default function SettingsPage() {
       case 'branches':
         return (
           <div>
+            {/* Errors from row actions (activate / deactivate) — the modal has its own banner. */}
+            {branchError && !showBranchModal && (
+              <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {branchError}
+              </div>
+            )}
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-gray-900">Branch Management</h3>
               {user?.role === 'administrator' && (
@@ -608,55 +751,6 @@ export default function SettingsPage() {
                 ))}
               </div>
             )}
-          </div>
-        );
-
-      case 'services':
-        return (
-          <div>
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-lg font-semibold text-gray-900">Service Types</h3>
-              <button className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors">
-                <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                </svg>
-                Add Service
-              </button>
-            </div>
-            <div className="space-y-4">
-              {[
-                { name: 'Full Upholstery', description: 'Complete interior upholstery service', basePrice: 15000, duration: '3-5 days' },
-                { name: 'Seat Cover Installation', description: 'Install custom or pre-made seat covers', basePrice: 5000, duration: '1-2 days' },
-                { name: 'Headliner Replacement', description: 'Replace sagging or damaged headliner', basePrice: 3500, duration: '1 day' },
-                { name: 'Door Panel Repair', description: 'Repair or replace door panel upholstery', basePrice: 2500, duration: '1 day' },
-                { name: 'Dashboard Cover', description: 'Install dashboard cover or repair dashboard', basePrice: 3000, duration: '1 day' },
-                { name: 'Carpet Installation', description: 'Install custom automotive carpet', basePrice: 4000, duration: '1-2 days' },
-                { name: 'Custom Work', description: 'Custom upholstery and modifications', basePrice: 8000, duration: 'Varies' },
-              ].map((service, index) => (
-                <div key={index} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
-                  <div className="flex items-center">
-                    <div className="w-10 h-10 rounded-lg bg-[#dde6ff] flex items-center justify-center mr-4">
-                      <svg className="w-5 h-5 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                      </svg>
-                    </div>
-                    <div>
-                      <h4 className="text-sm font-medium text-gray-900">{service.name}</h4>
-                      <p className="text-xs text-gray-500">{service.description}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-6">
-                    <div className="text-right">
-                      <p className="text-sm font-medium text-gray-900">₱{service.basePrice.toLocaleString()}</p>
-                      <p className="text-xs text-gray-500">{service.duration}</p>
-                    </div>
-                    <button className="text-[#011c72] hover:text-[#011c72] text-sm font-medium">
-                      Edit
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
           </div>
         );
 
@@ -961,6 +1055,25 @@ export default function SettingsPage() {
                   />
                 </div>
 
+                {editingUser && userFormData.password && (
+                  <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-3">
+                    <label className="block text-sm font-medium text-yellow-900 mb-2">
+                      Your password (to confirm) *
+                    </label>
+                    <input
+                      type="password"
+                      autoComplete="current-password"
+                      value={adminPassword}
+                      onChange={(e) => setAdminPassword(e.target.value)}
+                      className="w-full px-4 py-2 rounded-lg border border-yellow-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                      placeholder="Enter your own password"
+                    />
+                    <p className="text-xs text-yellow-800 mt-1">
+                      Changing another user&apos;s password signs them out everywhere.
+                    </p>
+                  </div>
+                )}
+
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Role *
@@ -970,11 +1083,14 @@ export default function SettingsPage() {
                     onChange={(e) => setUserFormData({ ...userFormData, role: e.target.value })}
                     className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   >
-                    {roles.map((role) => (
-                      <option key={role.id} value={role.id}>
-                        {role.name}
-                      </option>
-                    ))}
+                    {/* An existing account keeps its own role in the list so editing it still works */}
+                    {roles
+                      .filter((role) => !HIDDEN_ROLES.includes(role.id) || (editingUser && editingUser.role === role.id))
+                      .map((role) => (
+                        <option key={role.id} value={role.id}>
+                          {role.name}
+                        </option>
+                      ))}
                   </select>
                 </div>
 
@@ -1015,6 +1131,7 @@ export default function SettingsPage() {
             </div>
           </div>
         )}
+      {confirmDialog}
     </div>
   );
 }

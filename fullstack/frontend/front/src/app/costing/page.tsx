@@ -1,11 +1,9 @@
 ﻿'use client';
 import { useState, useEffect } from 'react';
-import { useAuth } from '@/context/AuthContext';
 import { api, JobOrderCost } from '@/lib/api';
 import Link from 'next/link';
 
 export default function CostingPage() {
-  const { user } = useAuth();
   const [costings, setCostings] = useState<JobOrderCost[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -33,13 +31,18 @@ export default function CostingPage() {
     }).format(amount);
   };
 
+  const costOf = (c: JobOrderCost) => c.materialsCost + c.laborCost + c.overheadCost;
+  // Margin %; an unpriced order counts as 0% instead of NaN (which fell into no bucket)
+  const marginOf = (c: JobOrderCost) => (c.totalAmount > 0 ? ((c.totalAmount - costOf(c)) / c.totalAmount) * 100 : 0);
+
   const calculateProfitMargin = (total: number, cost: number) => {
     if (total === 0) return 0;
     return ((total - cost) / total * 100).toFixed(1);
   };
 
   const filteredCostings = costings.filter(costing =>
-    costing.jobOrderNumber.toLowerCase().includes(searchTerm.toLowerCase())
+    costing.jobOrderNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (costing.customerName || '').toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   // Calculate summary stats
@@ -176,9 +179,9 @@ export default function CostingPage() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Job Order</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Materials</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Labor</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Overhead</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Other Expenses</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Cost</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sale Price</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Revenue <span className="normal-case font-normal">(excl. VAT)</span></th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Profit</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Margin</th>
                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
@@ -250,7 +253,7 @@ export default function CostingPage() {
               {[
                 { label: 'Materials', value: costings.reduce((sum, c) => sum + c.materialsCost, 0), color: 'bg-blue-500', percent: 0 },
                 { label: 'Labor', value: costings.reduce((sum, c) => sum + c.laborCost, 0), color: 'bg-[#011c72]', percent: 0 },
-                { label: 'Overhead', value: costings.reduce((sum, c) => sum + c.overheadCost, 0), color: 'bg-purple-500', percent: 0 },
+                { label: 'Other Expenses', value: costings.reduce((sum, c) => sum + c.overheadCost, 0), color: 'bg-purple-500', percent: 0 },
               ].map((item, index) => {
                 const total = costings.reduce((sum, c) => sum + c.materialsCost + c.laborCost + c.overheadCost, 0);
                 item.percent = total > 0 ? (item.value / total * 100) : 0;
@@ -291,8 +294,7 @@ export default function CostingPage() {
                 </div>
                 <span className="text-xl font-bold text-green-800">
                   {costings.filter(c => {
-                    const totalCost = c.materialsCost + c.laborCost + c.overheadCost;
-                    return ((c.totalAmount - totalCost) / c.totalAmount * 100) >= 30;
+                    return marginOf(c) >= 30;
                   }).length}
                 </span>
               </div>
@@ -311,8 +313,7 @@ export default function CostingPage() {
                 </div>
                 <span className="text-xl font-bold text-yellow-800">
                   {costings.filter(c => {
-                    const totalCost = c.materialsCost + c.laborCost + c.overheadCost;
-                    const margin = (c.totalAmount - totalCost) / c.totalAmount * 100;
+                    const margin = marginOf(c);
                     return margin >= 15 && margin < 30;
                   }).length}
                 </span>
@@ -332,8 +333,7 @@ export default function CostingPage() {
                 </div>
                 <span className="text-xl font-bold text-red-800">
                   {costings.filter(c => {
-                    const totalCost = c.materialsCost + c.laborCost + c.overheadCost;
-                    return ((c.totalAmount - totalCost) / c.totalAmount * 100) < 15;
+                    return marginOf(c) < 15;
                   }).length}
                 </span>
               </div>

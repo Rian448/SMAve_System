@@ -1,8 +1,9 @@
 ﻿'use client';
+import Link from 'next/link';
 import { useState, useEffect } from 'react';
 import { api, Appointment } from '@/lib/api';
 import { formatDate as fmtDate, formatDateTime } from '@/lib/dateUtils';
-import { useAuth, hasAccess } from '@/context/AuthContext';
+import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 
 const TIME_RANGES: Record<string, [number, number]> = {
@@ -470,7 +471,44 @@ export default function AppointmentsPage() {
                         )}
                       </>
                     )}
-                    {(appointment.status === 'completed' || appointment.status === 'cancelled') && (
+                    {/* A quotation is prepared once the customer has been seen */}
+                    {(appointment.status === 'confirmed' || appointment.status === 'completed') && (
+                      appointment.quotation ? (
+                        <div className="p-2 rounded-lg border border-[#c7d2f5] bg-[#eef1fb] text-center space-y-1">
+                          <p className="text-xs text-[#011c72]">
+                            Quotation <span className="font-semibold">{appointment.quotation.jobOrderId}</span>
+                          </p>
+                          <span className={`inline-block text-[11px] font-semibold px-2 py-0.5 rounded-full ${
+                            appointment.quotation.quoteStatus === 'accepted' ? 'bg-green-100 text-green-700'
+                            : appointment.quotation.quoteStatus === 'rejected' ? 'bg-red-100 text-red-700'
+                            : 'bg-blue-100 text-blue-800'}`}>
+                            {appointment.quotation.quoteStatus === 'accepted' ? 'Accepted'
+                              : appointment.quotation.quoteStatus === 'rejected' ? 'Rejected'
+                              : 'Waiting for customer'}
+                          </span>
+                          {appointment.quotation.quoteStatus === 'rejected' && appointment.quotation.quoteRejectReason && (
+                            <p className="text-[11px] text-red-700 leading-tight">“{appointment.quotation.quoteRejectReason}”</p>
+                          )}
+                          <Link
+                            href={appointment.quotation.status === 'draft'
+                              ? `/sales/new?draftId=${appointment.quotation.id}`
+                              : `/sales/${appointment.quotation.id}`}
+                            className="block text-xs font-medium text-[#011c72] hover:underline">
+                            {appointment.quotation.status === 'draft'
+                              ? (appointment.quotation.quoteStatus === 'rejected' ? 'Revise & Resend' : 'Edit Quotation')
+                              : 'View Job Order'}
+                          </Link>
+                        </div>
+                      ) : (
+                        <Link
+                          href={`/sales/new?appointmentId=${appointment.id}`}
+                          className="px-4 py-2 rounded-lg bg-[#011c72] text-white text-sm font-medium text-center hover:bg-[#022494] transition-colors"
+                        >
+                          Give Quotation
+                        </Link>
+                      )
+                    )}
+                    {appointment.status === 'cancelled' && (
                       <span className="text-center text-sm text-gray-500">No actions available</span>
                     )}
                   </div>

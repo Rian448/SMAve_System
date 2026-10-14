@@ -9,6 +9,11 @@ interface NotificationContextValue {
   refresh: () => Promise<void>;
   markRead: (id: number) => Promise<void>;
   markAllRead: () => Promise<void>;
+  archived: AppNotification[];
+  loadArchived: () => Promise<void>;
+  archive: (id: number) => Promise<void>;
+  restore: (id: number) => Promise<void>;
+  remove: (id: number) => Promise<void>;
 }
 
 const NotificationContext = createContext<NotificationContextValue>({
@@ -17,15 +22,22 @@ const NotificationContext = createContext<NotificationContextValue>({
   refresh: async () => {},
   markRead: async () => {},
   markAllRead: async () => {},
+  archived: [],
+  loadArchived: async () => {},
+  archive: async () => {},
+  restore: async () => {},
+  remove: async () => {},
 });
 
 export function NotificationProvider({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, user } = useAuth();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [archived, setArchived] = useState<AppNotification[]>([]);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const canReceive = isAuthenticated && user && ['administrator', 'supervisor'].includes(user.role);
+  // Every signed-in user has a bell; customers get updates on their own orders
+  const canReceive = isAuthenticated && !!user;
 
   const refresh = useCallback(async () => {
     if (!canReceive) return;
@@ -58,8 +70,40 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     setUnreadCount(0);
   }, []);
 
+  const loadArchived = useCallback(async () => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const res = await api.notifications.getAll(50, true) as any;
+      setArchived(res.data ?? []);
+    } catch {
+      // keep whatever was shown before
+    }
+  }, []);
+
+  const archive = useCallback(async (id: number) => {
+    await api.notifications.archive(id);
+    const n = notifications.find(x => x.id === id);
+    setNotifications(prev => prev.filter(x => x.id !== id));
+    if (n && !n.isRead) setUnreadCount(prev => Math.max(0, prev - 1));
+    if (n) setArchived(prev => [{ ...n, isRead: true, isArchived: true }, ...prev]);
+  }, [notifications]);
+
+  const restore = useCallback(async (id: number) => {
+    await api.notifications.archive(id, false);
+    setArchived(prev => prev.filter(x => x.id !== id));
+    await refresh();
+  }, [refresh]);
+
+  const remove = useCallback(async (id: number) => {
+    await api.notifications.delete(id);
+    const n = notifications.find(x => x.id === id);
+    setNotifications(prev => prev.filter(x => x.id !== id));
+    setArchived(prev => prev.filter(x => x.id !== id));
+    if (n && !n.isRead) setUnreadCount(prev => Math.max(0, prev - 1));
+  }, [notifications]);
+
   return (
-    <NotificationContext.Provider value={{ notifications, unreadCount, refresh, markRead, markAllRead }}>
+    <NotificationContext.Provider value={{ notifications, unreadCount, refresh, markRead, markAllRead, archived, loadArchived, archive, restore, remove }}>
       {children}
     </NotificationContext.Provider>
   );

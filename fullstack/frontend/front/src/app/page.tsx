@@ -4,6 +4,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { useAuth } from '@/context/AuthContext';
 import { getAuthToken } from '@/lib/api';
+import { useConfirm } from '@/components/ConfirmDialog';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
@@ -12,41 +13,47 @@ interface CatalogItem {
   title: string;
   description: string;
   tag: string;
+  category: string;
   imageUrl: string;
   sortOrder: number;
 }
+
+// Matches CATALOG_CATEGORIES on the server; used until the catalog loads
+const DEFAULT_CATEGORIES = ['Automotive', 'Sofas', 'Chairs', 'Commercial', 'Custom Projects'];
+// Tiles shown at first, and added by each "See More" click
+const GALLERY_PAGE = 8;
 
 interface EditState {
   title: string;
   description: string;
   tag: string;
+  category: string;
 }
 
 function CatalogCard({
   item,
   isAdmin,
+  categories,
   onSave,
   onDelete,
   onImageUpload,
 }: {
   item: CatalogItem;
   isAdmin: boolean;
+  categories: string[];
   onSave: (id: number, data: EditState) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
   onImageUpload: (id: number, file: File) => Promise<void>;
 }) {
+  const toForm = (): EditState => ({ title: item.title, description: item.description, tag: item.tag, category: item.category });
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState<EditState>({ title: item.title, description: item.description, tag: item.tag });
+  const [form, setForm] = useState<EditState>(toForm);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const imageUrl = item.imageUrl
-    ? item.imageUrl.startsWith('http') || item.imageUrl.startsWith('/')
-      ? item.imageUrl.startsWith('/api/')
-        ? `${API_BASE}${item.imageUrl}`
-        : item.imageUrl
-      : item.imageUrl
+    ? item.imageUrl.startsWith('/api/') ? `${API_BASE}${item.imageUrl}` : item.imageUrl
     : null;
 
   async function handleSave() {
@@ -64,12 +71,15 @@ function CatalogCard({
     setUploading(false);
   }
 
+  const inputCls = 'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#011c72] focus:border-transparent';
+
   return (
-    <div className="group bg-white rounded-xl shadow-md overflow-hidden flex flex-col hover:shadow-xl transition-all duration-300">
-      {/* Image with gallery overlay */}
-      <div className="relative h-64 bg-gray-100 overflow-hidden">
+    <div className="flex flex-col">
+      {/* Photo tile */}
+      <div className="group relative aspect-square rounded-xl overflow-hidden bg-gray-100 shadow-sm">
         {imageUrl ? (
-          <Image src={imageUrl} alt={item.title} fill className="object-cover group-hover:scale-105 transition-transform duration-500" unoptimized />
+          <Image src={imageUrl} alt={item.title} fill sizes="(min-width: 1024px) 25vw, 50vw"
+            className="object-cover group-hover:scale-105 transition-transform duration-500" unoptimized />
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-gray-300 gap-2">
             <svg className="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -79,19 +89,17 @@ function CatalogCard({
           </div>
         )}
 
-        {/* Hover overlay */}
-        {!editing && (
-          <div className="absolute inset-0 bg-[#011c72]/85 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col items-center justify-center gap-4 px-6">
-            <h3 className="text-white font-bold text-lg text-center leading-snug">{item.title}</h3>
-            <span className="px-5 py-2 border-2 border-white text-white text-xs font-bold uppercase tracking-widest hover:bg-white hover:text-[#011c72] transition-colors cursor-default">
-              View Details
-            </span>
-          </div>
-        )}
+        {/* Details slide up on hover (always shown on touch screens without hover) */}
+        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent p-4 pt-10 translate-y-2 opacity-0 group-hover:translate-y-0 group-hover:opacity-100 [@media(hover:none)]:translate-y-0 [@media(hover:none)]:opacity-100 transition-all duration-300">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-white/70">{item.category}</p>
+          <h3 className="text-white font-bold text-sm sm:text-base leading-snug">{item.title}</h3>
+          {item.description && (
+            <p className="text-white/80 text-xs mt-1 line-clamp-2 hidden sm:block">{item.description}</p>
+          )}
+        </div>
 
-        {/* Tag badge */}
-        {item.tag && !editing && (
-          <span className="absolute top-0 left-0 text-xs px-3 py-1.5 bg-[#011c72] text-white font-semibold uppercase tracking-wider">
+        {item.tag && (
+          <span className="absolute top-2 left-2 text-[10px] px-2.5 py-1 rounded-full bg-[#011c72] text-white font-semibold uppercase tracking-wider">
             {item.tag}
           </span>
         )}
@@ -100,7 +108,7 @@ function CatalogCard({
           <button
             onClick={() => fileRef.current?.click()}
             disabled={uploading}
-            className="absolute bottom-2 right-2 bg-black/60 hover:bg-black/80 text-white text-xs px-3 py-1.5 rounded-md transition-colors z-10"
+            className="absolute top-2 right-2 bg-black/60 hover:bg-black/80 text-white text-xs px-2.5 py-1 rounded-md transition-colors z-10"
           >
             {uploading ? 'Uploading…' : 'Change Photo'}
           </button>
@@ -108,68 +116,44 @@ function CatalogCard({
         <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleImageChange} />
       </div>
 
-      {/* Content */}
-      <div className="flex flex-col flex-1">
-        {editing ? (
-          <div className="p-5 flex flex-col flex-1 gap-3">
-            <input
-              className="w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm font-semibold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-              value={form.title}
-              onChange={e => setForm(f => ({ ...f, title: e.target.value }))}
-              placeholder="Title"
-            />
-            <input
-              className="w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-xs text-gray-500 focus:outline-none focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-              value={form.tag}
-              onChange={e => setForm(f => ({ ...f, tag: e.target.value }))}
-              placeholder="Tag (e.g. New Arrival, Best Seller)"
-            />
-            <textarea
-              className="w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-600 focus:outline-none focus:ring-2 focus:ring-[#011c72] focus:border-transparent resize-none"
-              rows={3}
-              value={form.description}
-              onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
-              placeholder="Description"
-            />
-            <div className="flex gap-2 mt-auto">
-              <button
-                onClick={handleSave}
-                disabled={saving || !form.title.trim()}
-                className="flex-1 py-2 rounded-lg bg-[#011c72] hover:bg-[#01268c] text-white text-sm font-semibold transition-colors disabled:opacity-50"
-              >
-                {saving ? 'Saving…' : 'Save'}
-              </button>
-              <button
-                onClick={() => { setEditing(false); setForm({ title: item.title, description: item.description, tag: item.tag }); }}
-                className="flex-1 py-2 rounded-lg border border-gray-300 text-sm text-gray-600 hover:bg-gray-50 transition-colors"
-              >
-                Cancel
-              </button>
-            </div>
+      {/* Admin tools under the tile */}
+      {isAdmin && (editing ? (
+        <div className="mt-3 flex flex-col gap-2">
+          <input className={inputCls} value={form.title} placeholder="Title"
+            onChange={e => setForm(f => ({ ...f, title: e.target.value }))} />
+          <div className="grid grid-cols-2 gap-2">
+            <select className={inputCls} value={form.category}
+              onChange={e => setForm(f => ({ ...f, category: e.target.value }))}>
+              {categories.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <input className={inputCls} value={form.tag} placeholder="Tag (optional)"
+              onChange={e => setForm(f => ({ ...f, tag: e.target.value }))} />
           </div>
-        ) : (
-          <div className="border-l-4 border-[#011c72] p-5 flex flex-col flex-1 gap-2">
-            <h3 className="text-base font-bold text-gray-900 leading-tight">{item.title}</h3>
-            <p className="text-sm text-gray-500 flex-1 leading-relaxed">{item.description || <span className="italic">No description</span>}</p>
-            {isAdmin && (
-              <div className="flex gap-2 mt-3">
-                <button
-                  onClick={() => { setForm({ title: item.title, description: item.description, tag: item.tag }); setEditing(true); }}
-                  className="flex-1 py-1.5 rounded-lg border border-gray-300 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors"
-                >
-                  Edit
-                </button>
-                <button
-                  onClick={() => onDelete(item.id)}
-                  className="py-1.5 px-3 rounded-lg border border-red-200 text-xs font-medium text-red-600 hover:bg-red-50 transition-colors"
-                >
-                  Remove
-                </button>
-              </div>
-            )}
+          <textarea className={`${inputCls} resize-none`} rows={2} value={form.description} placeholder="Description"
+            onChange={e => setForm(f => ({ ...f, description: e.target.value }))} />
+          <div className="flex gap-2">
+            <button onClick={handleSave} disabled={saving || !form.title.trim()}
+              className="flex-1 py-1.5 rounded-lg bg-[#011c72] hover:bg-[#01268c] text-white text-xs font-semibold transition-colors disabled:opacity-50">
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button onClick={() => { setEditing(false); setForm(toForm()); }}
+              className="flex-1 py-1.5 rounded-lg border border-gray-300 text-xs text-gray-600 hover:bg-gray-50 transition-colors">
+              Cancel
+            </button>
           </div>
-        )}
-      </div>
+        </div>
+      ) : (
+        <div className="mt-2 flex gap-2">
+          <button onClick={() => { setForm(toForm()); setEditing(true); }}
+            className="flex-1 py-1.5 rounded-lg border border-gray-300 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors">
+            Edit
+          </button>
+          <button onClick={() => onDelete(item.id)}
+            className="py-1.5 px-3 rounded-lg border border-red-200 text-xs font-medium text-red-600 hover:bg-red-50 transition-colors">
+            Remove
+          </button>
+        </div>
+      ))}
     </div>
   );
 }
@@ -184,46 +168,35 @@ const faqs = [
 
 export default function LandingPage() {
   const { user } = useAuth();
+  const { confirm, confirmDialog } = useConfirm();
   const isAdmin = user?.role === 'administrator';
 
   const [items, setItems] = useState<CatalogItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
-  const [newForm, setNewForm] = useState<EditState>({ title: '', description: '', tag: '' });
+  const [newForm, setNewForm] = useState<EditState>({ title: '', description: '', tag: '', category: DEFAULT_CATEGORIES[0] });
   const [submitting, setSubmitting] = useState(false);
   const [heroTitle, setHeroTitle] = useState('Crafted for Comfort. Built to Last.');
   const [heroDesc, setHeroDesc] = useState('Explore our collection of premium seat covers, upholstery styles, and interior designs — each made to fit your vehicle perfectly.');
   const [editingHero, setEditingHero] = useState(false);
   const [heroForm, setHeroForm] = useState({ title: heroTitle, desc: heroDesc });
   const [openFaq, setOpenFaq] = useState<number | null>(null);
-  const [carouselIndex, setCarouselIndex] = useState(0);
-  const [cardsPerView, setCardsPerView] = useState(3);
+  const [categories, setCategories] = useState<string[]>(DEFAULT_CATEGORIES);
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(GALLERY_PAGE);
 
   useEffect(() => {
     fetchCatalog();
   }, []);
 
-  useEffect(() => {
-    function updateCardsPerView() {
-      if (window.innerWidth < 640) setCardsPerView(1);
-      else if (window.innerWidth < 1024) setCardsPerView(2);
-      else setCardsPerView(3);
-    }
-    updateCardsPerView();
-    window.addEventListener('resize', updateCardsPerView);
-    return () => window.removeEventListener('resize', updateCardsPerView);
-  }, []);
-
-  useEffect(() => {
-    const maxIdx = Math.max(0, items.length - cardsPerView);
-    if (carouselIndex > maxIdx) setCarouselIndex(maxIdx);
-  }, [items.length, cardsPerView]);
-
   async function fetchCatalog() {
     try {
       const res = await fetch(`${API_BASE}/api/catalog`);
       const data = await res.json();
-      if (data.status === 'success') setItems(data.data);
+      if (data.status === 'success') {
+        setItems(data.data);
+        if (Array.isArray(data.categories)) setCategories(data.categories);
+      }
     } catch {
       // silently fail — catalog just shows empty
     } finally {
@@ -236,7 +209,7 @@ export default function LandingPage() {
     const res = await fetch(`${API_BASE}/api/catalog/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ title: form.title, description: form.description, tag: form.tag }),
+      body: JSON.stringify({ title: form.title, description: form.description, tag: form.tag, category: form.category }),
     });
     const data = await res.json();
     if (data.status === 'success') {
@@ -245,7 +218,14 @@ export default function LandingPage() {
   }
 
   async function handleDelete(id: number) {
-    if (!confirm('Remove this item from the catalog?')) return;
+    const ok = await confirm({
+      title: 'Remove this catalog item?',
+      message: 'It will no longer appear on the public catalog.',
+      warning: 'This cannot be undone.',
+      confirmLabel: 'Remove item',
+      variant: 'danger',
+    });
+    if (!ok) return;
     const token = getAuthToken();
     const res = await fetch(`${API_BASE}/api/catalog/${id}`, {
       method: 'DELETE',
@@ -277,12 +257,12 @@ export default function LandingPage() {
     const res = await fetch(`${API_BASE}/api/catalog`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ title: newForm.title, description: newForm.description, tag: newForm.tag }),
+      body: JSON.stringify({ title: newForm.title, description: newForm.description, tag: newForm.tag, category: newForm.category }),
     });
     const data = await res.json();
     if (data.status === 'success') {
       setItems(prev => [...prev, data.data]);
-      setNewForm({ title: '', description: '', tag: '' });
+      setNewForm({ title: '', description: '', tag: '', category: newForm.category });
       setAdding(false);
     }
     setSubmitting(false);
@@ -445,17 +425,18 @@ export default function LandingPage() {
       {/* ── Catalog ── */}
       <section id="catalog" className="py-20 bg-white">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col sm:flex-row sm:items-end justify-between mb-14 gap-4">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.25em] text-[#011c72] mb-3">Portfolio</p>
-              <h2 className="text-3xl sm:text-4xl font-bold text-gray-900 mb-4">Our Catalog</h2>
-              <div className="w-16 h-1 bg-[#011c72] rounded-full" />
-              <p className="text-gray-500 mt-4 text-base">Browse our available styles and designs.</p>
-            </div>
+          <div className="text-center mb-10">
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-[#4a6aff] mb-3">Our Work</p>
+            <h2 className="text-3xl sm:text-4xl font-bold text-gray-900">
+              Our <span className="text-[#011c72]">Catalog</span>
+            </h2>
+            <p className="text-gray-500 mt-4 text-base max-w-xl mx-auto leading-relaxed">
+              Browse our completed upholstery projects showcasing our craftsmanship and attention to detail.
+            </p>
             {isAdmin && (
               <button
                 onClick={() => setAdding(true)}
-                className="inline-flex items-center gap-2 px-5 py-3 rounded-md bg-[#011c72] hover:bg-[#01268c] text-white text-sm font-semibold uppercase tracking-wide transition-colors shadow-md self-start sm:self-auto"
+                className="mt-6 inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-[#011c72] hover:bg-[#01268c] text-white text-sm font-semibold transition-colors shadow-md"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
                 Add Item
@@ -467,13 +448,20 @@ export default function LandingPage() {
           {adding && isAdmin && (
             <div className="mb-10 rounded-xl border border-[#dde6ff] bg-[#eef2ff] p-6">
               <h3 className="text-sm font-bold text-[#011c72] mb-4 uppercase tracking-wide">New Catalog Item</h3>
-              <div className="grid sm:grid-cols-2 gap-3">
+              <div className="grid sm:grid-cols-3 gap-3">
                 <input
                   className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#011c72]"
                   placeholder="Title *"
                   value={newForm.title}
                   onChange={e => setNewForm(f => ({ ...f, title: e.target.value }))}
                 />
+                <select
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#011c72]"
+                  value={newForm.category}
+                  onChange={e => setNewForm(f => ({ ...f, category: e.target.value }))}
+                >
+                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
                 <input
                   className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#011c72]"
                   placeholder="Tag (e.g. New Arrival)"
@@ -481,7 +469,7 @@ export default function LandingPage() {
                   onChange={e => setNewForm(f => ({ ...f, tag: e.target.value }))}
                 />
                 <textarea
-                  className="sm:col-span-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#011c72] resize-none"
+                  className="sm:col-span-3 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#011c72] resize-none"
                   rows={2}
                   placeholder="Description"
                   value={newForm.description}
@@ -498,7 +486,7 @@ export default function LandingPage() {
                   {submitting ? 'Adding…' : 'Add to Catalog'}
                 </button>
                 <button
-                  onClick={() => { setAdding(false); setNewForm({ title: '', description: '', tag: '' }); }}
+                  onClick={() => { setAdding(false); setNewForm({ title: '', description: '', tag: '', category: categories[0] }); }}
                   className="px-5 py-2 rounded-lg border border-gray-300 text-sm text-gray-600 hover:bg-white transition-colors"
                 >
                   Cancel
@@ -507,87 +495,71 @@ export default function LandingPage() {
             </div>
           )}
 
-          {/* Carousel */}
+          {/* Category filters */}
+          <div className="flex flex-wrap justify-center gap-2 sm:gap-3 mb-10">
+            {[null, ...categories].map(c => {
+              const active = categoryFilter === c;
+              return (
+                <button
+                  key={c ?? 'all'}
+                  onClick={() => { setCategoryFilter(c); setVisibleCount(GALLERY_PAGE); }}
+                  className={`px-4 sm:px-5 py-2 rounded-full text-sm font-semibold border transition-colors ${
+                    active
+                      ? 'bg-[#011c72] border-[#011c72] text-white shadow-sm'
+                      : 'bg-white border-gray-300 text-gray-700 hover:border-[#011c72] hover:text-[#011c72]'
+                  }`}
+                >
+                  {c ?? 'All'}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Gallery */}
           {loading ? (
-            <div className="flex gap-6 overflow-hidden">
-              {[...Array(3)].map((_, i) => (
-                <div key={i} className="flex-shrink-0 rounded-xl border border-gray-100 bg-white shadow-md overflow-hidden" style={{ width: `calc(${100 / cardsPerView}% - 1.5rem)` }}>
-                  <div className="h-52 bg-gray-100 animate-pulse" />
-                  <div className="p-5 space-y-3">
-                    <div className="h-4 bg-gray-100 rounded animate-pulse w-3/4" />
-                    <div className="h-3 bg-gray-100 rounded animate-pulse w-full" />
-                    <div className="h-3 bg-gray-100 rounded animate-pulse w-2/3" />
-                  </div>
-                </div>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-5">
+              {[...Array(GALLERY_PAGE)].map((_, i) => (
+                <div key={i} className="aspect-square rounded-xl bg-gray-100 animate-pulse" />
               ))}
             </div>
-          ) : items.length === 0 ? (
-            <div className="text-center py-24 text-gray-300">
-              <svg className="w-14 h-14 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-              <p className="text-lg font-medium text-gray-400">No catalog items yet.</p>
-              {isAdmin && <p className="text-sm mt-1 text-gray-400">Click &ldquo;Add Item&rdquo; to get started.</p>}
-            </div>
           ) : (() => {
-            const maxIdx = Math.max(0, items.length - cardsPerView);
-            const cardWidthPct = 100 / cardsPerView;
+            const shown = categoryFilter ? items.filter(i => i.category === categoryFilter) : items;
+            if (shown.length === 0) return (
+              <div className="text-center py-20 text-gray-300">
+                <svg className="w-14 h-14 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                <p className="text-lg font-medium text-gray-400">
+                  {categoryFilter ? `No ${categoryFilter.toLowerCase()} projects yet.` : 'No catalog items yet.'}
+                </p>
+                {isAdmin && <p className="text-sm mt-1 text-gray-400">Click &ldquo;Add Item&rdquo; to get started.</p>}
+              </div>
+            );
             return (
-              <div>
-                <div className="relative">
-                  <button
-                    onClick={() => setCarouselIndex(i => Math.max(0, i - 1))}
-                    disabled={carouselIndex === 0}
-                    className="absolute -left-5 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-white border border-gray-200 shadow-md flex items-center justify-center text-gray-600 hover:bg-[#011c72] hover:text-white hover:border-[#011c72] disabled:opacity-30 disabled:cursor-not-allowed transition-all"
-                    aria-label="Previous"
-                  >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
-                  </button>
-
-                  <div className="overflow-hidden">
-                    <div
-                      className="flex transition-transform duration-300 ease-in-out"
-                      style={{ transform: `translateX(-${carouselIndex * cardWidthPct}%)` }}
-                    >
-                      {items.map(item => (
-                        <div
-                          key={item.id}
-                          className="flex-shrink-0 px-3"
-                          style={{ width: `${cardWidthPct}%` }}
-                        >
-                          <CatalogCard
-                            item={item}
-                            isAdmin={isAdmin}
-                            onSave={handleSave}
-                            onDelete={handleDelete}
-                            onImageUpload={handleImageUpload}
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => setCarouselIndex(i => Math.min(maxIdx, i + 1))}
-                    disabled={carouselIndex >= maxIdx}
-                    className="absolute -right-5 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-white border border-gray-200 shadow-md flex items-center justify-center text-gray-600 hover:bg-[#011c72] hover:text-white hover:border-[#011c72] disabled:opacity-30 disabled:cursor-not-allowed transition-all"
-                    aria-label="Next"
-                  >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
-                  </button>
+              <>
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-5">
+                  {shown.slice(0, visibleCount).map(item => (
+                    <CatalogCard
+                      key={item.id}
+                      item={item}
+                      isAdmin={isAdmin}
+                      categories={categories}
+                      onSave={handleSave}
+                      onDelete={handleDelete}
+                      onImageUpload={handleImageUpload}
+                    />
+                  ))}
                 </div>
-
-                {items.length > cardsPerView && (
-                  <div className="flex justify-center gap-2 mt-8">
-                    {Array.from({ length: maxIdx + 1 }).map((_, i) => (
-                      <button
-                        key={i}
-                        onClick={() => setCarouselIndex(i)}
-                        className={`rounded-full transition-all duration-200 ${i === carouselIndex ? 'w-7 h-2.5 bg-[#011c72]' : 'w-2.5 h-2.5 bg-gray-300 hover:bg-[#4a6aff]'}`}
-                        aria-label={`Go to slide ${i + 1}`}
-                      />
-                    ))}
+                {shown.length > visibleCount && (
+                  <div className="text-center mt-10">
+                    <button
+                      onClick={() => setVisibleCount(n => n + GALLERY_PAGE)}
+                      className="inline-flex items-center gap-2 px-7 py-3 rounded-md bg-[#011c72] hover:bg-[#01268c] text-white text-sm font-semibold shadow-md transition-colors"
+                    >
+                      See More Projects
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" /></svg>
+                    </button>
                   </div>
                 )}
-              </div>
+              </>
             );
           })()}
         </div>
@@ -710,6 +682,7 @@ export default function LandingPage() {
           </div>
         </div>
       </footer>
+      {confirmDialog}
     </div>
   );
 }

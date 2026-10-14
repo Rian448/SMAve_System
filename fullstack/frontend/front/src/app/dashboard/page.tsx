@@ -8,9 +8,23 @@ import Link from 'next/link';
 export default function Dashboard() {
   const { user, isLoading: authLoading } = useAuth();
   const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [alerts, setAlerts] = useState<Array<Alert & { id: string }>>([]);
-  const [activities, setActivities] = useState<Array<Activity & { id: string; user: string; action: string; details: string }>>([]);
+  const [alerts, setAlerts] = useState<Array<Alert & { rowKey: string }>>([]);
+  const [activities, setActivities] = useState<Array<Activity & { rowKey: string; user: string; action: string; details: string }>>([]);
   const [loading, setLoading] = useState(true);
+  // Administrators can narrow the dashboard to one branch ('' = whole company);
+  // everyone else always sees only their own branch.
+  const isAdmin = user?.role === 'administrator';
+  const isStaff = hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager']);
+  const isWorkerAccount = user?.role === 'seat_maker' || user?.role === 'sewer';
+  const [branchFilter, setBranchFilter] = useState('');
+  const [branches, setBranches] = useState<{ id: number; name: string; isWarehouse: boolean }[]>([]);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    api.settings.getBranches().then(r => {
+      if (r.data) setBranches(r.data.filter(b => b.isActive));
+    }).catch(() => {});
+  }, [isAdmin]);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -18,29 +32,39 @@ export default function Dashboard() {
       return;
     }
 
+    // Customers and worker accounts get a simple dashboard and no company figures
+    if (!authLoading && user && !isStaff) {
+      setLoading(false);
+      return;
+    }
+
     if (!authLoading && user) {
       fetchDashboardData();
     }
-  }, [authLoading, user]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, user, branchFilter]);
 
   const fetchDashboardData = async () => {
+    const branchId = isAdmin && branchFilter ? Number(branchFilter) : undefined;
     try {
       const [statsData, alertsData, activitiesData] = await Promise.all([
-        api.dashboard.getStats(),
-        api.dashboard.getAlerts(),
-        api.dashboard.getRecentActivity()
+        api.dashboard.getStats(branchId),
+        api.dashboard.getAlerts(branchId),
+        api.dashboard.getRecentActivity(branchId)
       ]);
       setStats(statsData.data || null);
+      // rowKey is only a React key — it must not shadow `id`/`itemId`, which
+      // carry the real record ids the rows link to.
       setAlerts(
         (alertsData.data || []).map((alert, index) => ({
           ...alert,
-          id: `${alert.type}-${index}`
+          rowKey: `${alert.type}-${index}`
         }))
       );
       setActivities(
         (activitiesData.data || []).map((activity, index) => ({
           ...activity,
-          id: `${activity.type}-${index}`,
+          rowKey: `${activity.type}-${index}`,
           user: activity.status ? activity.status.replace('_', ' ').toUpperCase() : 'SYSTEM',
           action: activity.title,
           details: activity.description
@@ -62,6 +86,44 @@ export default function Dashboard() {
     }).format(amount);
   };
 
+
+  /**
+   * Where an alert row should take you. Returns null when this user's role
+   * can't reach the destination, in which case the row stays non-clickable
+   * rather than linking somewhere that would bounce them.
+   */
+  const getAlertHref = (alert: Alert): string | null => {
+    switch (alert.type) {
+      case 'low_stock':
+        if (!hasAccess(user?.role, ['administrator', 'supervisor'])) return null;
+        // Land on the raw-materials tab, filtered to low stock and this material.
+        return `/inventory?tab=raw-materials&status=low-stock${
+          alert.itemName ? `&q=${encodeURIComponent(alert.itemName)}` : ''
+        }`;
+      case 'delivery_due':
+        if (!hasAccess(user?.role, ['administrator', 'supervisor'])) return null;
+        return alert.itemId ? `/delivery/${alert.itemId}` : '/delivery';
+      case 'overdue_order':
+        if (!hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager'])) return null;
+        return alert.itemId ? `/sales/${alert.itemId}` : '/sales';
+      default:
+        return null;
+    }
+  };
+
+  /** Where a recent-activity row should take you, with the same role gating. */
+  const getActivityHref = (activity: Activity): string | null => {
+    switch (activity.type) {
+      case 'job_order':
+        if (!hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager'])) return null;
+        return activity.id ? `/sales/${activity.id}` : '/sales';
+      case 'delivery':
+        if (!hasAccess(user?.role, ['administrator', 'supervisor'])) return null;
+        return activity.id ? `/delivery/${activity.id}` : '/delivery';
+      default:
+        return null;
+    }
+  };
 
   const getAlertIcon = (type: string) => {
     switch (type) {
@@ -129,15 +191,36 @@ export default function Dashboard() {
               Back to website
             </Link>
           )}
-          <h1 className="text-2xl font-bold text-gray-900">
-            Welcome back, {user?.fullName?.split(' ')[0]}!
-          </h1>
-          <p className="text-gray-500 mt-1">
-            {user?.role === 'customer'
-              ? 'Track your orders and view quotations here.'
-              : `Here's what's happening at ${user?.branch || 'your branch'} today.`
-            }
-          </p>
+          <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">
+                Welcome back, {user?.fullName?.split(' ')[0]}!
+              </h1>
+              <p className="text-gray-500 mt-1">
+                {user?.role === 'customer'
+                  ? 'Track your orders and view quotations here.'
+                  : `Here's what's happening at ${
+                      isAdmin
+                        ? (stats?.scopeBranchName || 'all branches')
+                        : (stats?.scopeBranchName || user?.branch || 'your branch')
+                    } today.`
+                }
+              </p>
+            </div>
+            {isAdmin && (
+              <select
+                value={branchFilter}
+                onChange={(e) => { setLoading(true); setBranchFilter(e.target.value); }}
+                aria-label="Branch"
+                className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
+              >
+                <option value="">All Branches</option>
+                {branches.map(b => (
+                  <option key={b.id} value={b.id}>{b.name}{b.isWarehouse ? ' (Warehouse)' : ''}</option>
+                ))}
+              </select>
+            )}
+          </div>
         </div>
 
         {/* Customer Dashboard */}
@@ -198,8 +281,20 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* Worker accounts: their tasks are run from Worker Management by an admin */}
+        {isWorkerAccount && (
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-8 max-w-2xl">
+            <h2 className="text-lg font-semibold text-gray-900">Your work assignments</h2>
+            <p className="text-sm text-gray-600 mt-2">
+              Jobs are assigned to you by your supervisor or administrator through Worker Management.
+              Ask them for your schedule, and let them know when you start and finish a task so your
+              hours and pay are recorded.
+            </p>
+          </div>
+        )}
+
         {/* Stats Cards - For staff only */}
-        {user?.role !== 'customer' && (
+        {isStaff && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-6 mb-8">
           {/* Pending Orders */}
           <Link href="/sales" className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:border-[#011c72] hover:shadow-md transition-all block">
@@ -331,7 +426,7 @@ export default function Dashboard() {
         )}
 
         {/* Main Content Grid - For staff only */}
-        {user?.role !== 'customer' && (
+        {isStaff && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Alerts Section */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
@@ -352,28 +447,49 @@ export default function Dashboard() {
                   <p>All caught up! No alerts at the moment.</p>
                 </div>
               ) : (
-                alerts.map((alert) => (
-                  <div key={alert.id} className="px-6 py-4 flex items-start space-x-4 hover:bg-gray-50 transition-colors">
-                    {getAlertIcon(alert.type)}
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900">
-                        {alert.title}
-                      </p>
-                      <p className="text-sm text-gray-500 mt-1">
-                        {alert.description}
-                      </p>
+                alerts.map((alert) => {
+                  const href = getAlertHref(alert);
+                  const body = (
+                    <>
+                      {getAlertIcon(alert.type)}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-900">
+                          {alert.title}
+                        </p>
+                        <p className="text-sm text-gray-500 mt-1">
+                          {alert.description}
+                        </p>
+                      </div>
+                      <span className={`text-xs px-2 py-1 rounded-full shrink-0 ${
+                        alert.severity === 'critical'
+                          ? 'bg-red-100 text-red-700'
+                          : alert.severity === 'warning'
+                          ? 'bg-[#dde6ff] text-[#011c72]'
+                          : 'bg-blue-100 text-blue-700'
+                      }`}>
+                        {alert.severity}
+                      </span>
+                      {href && (
+                        <svg className="w-4 h-4 text-gray-300 shrink-0 self-center" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                        </svg>
+                      )}
+                    </>
+                  );
+
+                  // Rows this user can't act on stay as plain text instead of
+                  // linking somewhere their role would be refused.
+                  return href ? (
+                    <Link key={alert.rowKey} href={href}
+                      className="px-6 py-4 flex items-start space-x-4 hover:bg-[#f5f7ff] transition-colors cursor-pointer group">
+                      {body}
+                    </Link>
+                  ) : (
+                    <div key={alert.rowKey} className="px-6 py-4 flex items-start space-x-4">
+                      {body}
                     </div>
-                    <span className={`text-xs px-2 py-1 rounded-full ${
-                      alert.severity === 'critical' 
-                        ? 'bg-red-100 text-red-700'
-                        : alert.severity === 'warning'
-                        ? 'bg-[#dde6ff] text-[#011c72]'
-                        : 'bg-blue-100 text-blue-700'
-                    }`}>
-                      {alert.severity}
-                    </span>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
@@ -397,21 +513,35 @@ export default function Dashboard() {
                   <p>No recent activity to show.</p>
                 </div>
               ) : (
-                activities.map((activity) => (
-                  <div key={activity.id} className="px-6 py-4 hover:bg-gray-50 transition-colors">
-                    <div className="flex items-center justify-between">
-                      <p className="text-sm font-medium text-gray-900">
-                        {activity.action}
+                activities.map((activity) => {
+                  const href = getActivityHref(activity);
+                  const body = (
+                    <>
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-medium text-gray-900 min-w-0 truncate">
+                          {activity.action}
+                        </p>
+                        <span className="text-xs text-gray-500 shrink-0">
+                          {formatDate(activity.timestamp)}
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-500 mt-1">
+                        {activity.details} • <span className="text-gray-400">{activity.user}</span>
                       </p>
-                      <span className="text-xs text-gray-500">
-                        {formatDate(activity.timestamp)}
-                      </span>
+                    </>
+                  );
+
+                  return href ? (
+                    <Link key={activity.rowKey} href={href}
+                      className="block px-6 py-4 hover:bg-[#f5f7ff] transition-colors cursor-pointer">
+                      {body}
+                    </Link>
+                  ) : (
+                    <div key={activity.rowKey} className="px-6 py-4">
+                      {body}
                     </div>
-                    <p className="text-sm text-gray-500 mt-1">
-                      {activity.details} • <span className="text-gray-400">{activity.user}</span>
-                    </p>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
