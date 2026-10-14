@@ -23,9 +23,10 @@ interface CartItem {
 }
 
 /** Why a cart line can't be ordered right now, or null when it can. */
-function cartLineIssue(item: CartItem): string | null {
-  if (item.product.quantity <= 0) return 'Out of stock';
-  if (item.quantity > item.product.quantity) return `Only ${item.product.quantity} left`;
+/** Why a cart line can't be ordered: none left at all, or fewer left than asked for */
+function cartLineIssue(item: CartItem): 'out_of_stock' | 'insufficient' | null {
+  if (item.product.quantity <= 0) return 'out_of_stock';
+  if (item.quantity > item.product.quantity) return 'insufficient';
   return null;
 }
 
@@ -64,7 +65,7 @@ function PlaceOrderContent() {
   const [branchFilter, setBranchFilter] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   // Shoppers start on what they can actually buy
-  const [stockFilter, setStockFilter] = useState<'available' | 'all' | 'unavailable'>('available');
+  const [stockFilter, setStockFilter] = useState<'available' | 'all' | 'unavailable'>('all');
 
   // Saved cart (premade draft) — logged-in customers only, since it is stored
   // against their account.
@@ -348,8 +349,10 @@ function PlaceOrderContent() {
         pickupBranchId: pickupBranchId as number,
         notes,
       });
-      // The cart is now a real order, so a leftover saved cart would be a duplicate.
-      if (savedDraft) {
+      // The saved cart is used up only when this order included everything in it;
+      // a different order leaves it in place (out-of-stock lines get flagged there).
+      const orderedIds = new Set(cart.map(i => i.product.id));
+      if (savedDraft && savedDraft.items.every(line => orderedIds.has(line.productId))) {
         try { await api.productOrders.deleteCartDraft(); } catch { /* best effort */ }
         setSavedDraft(null);
       }
@@ -652,8 +655,8 @@ function PlaceOrderContent() {
                     : stockFilter === 'unavailable' ? outOfStock
                     : [...inStock, ...outOfStock];
                   const stockTabs = [
-                    { key: 'available' as const, label: 'Available', count: inStock.length },
                     { key: 'all' as const, label: 'All', count: filtered.length },
+                    { key: 'available' as const, label: 'Available', count: inStock.length },
                     { key: 'unavailable' as const, label: 'Out of Stock', count: outOfStock.length },
                   ];
                   const stockFilterBar = (
@@ -754,14 +757,25 @@ function PlaceOrderContent() {
                         {group.items.map(item => {
                           const issue = cartLineIssue(item);
                           return (
-                          <div key={item.product.id} className={`flex justify-between items-start border-b border-gray-100 pb-2 mb-1 ${issue ? 'bg-gray-50 rounded-md px-2 pt-2 -mx-2' : ''}`}>
-                            <div className={`flex-1 ${issue ? 'opacity-50 grayscale blur-[0.5px]' : ''}`}>
-                              <p className="font-medium text-gray-900 text-sm">{item.product.name}</p>
-                              <p className="text-xs text-gray-500">₱{item.product.price.toLocaleString()} × {item.quantity}</p>
+                          <div key={item.product.id} className={`flex justify-between items-start border-b border-gray-100 pb-2 mb-1 ${issue === 'out_of_stock' ? 'bg-gray-50 rounded-md px-2 pt-2 -mx-2' : issue === 'insufficient' ? 'bg-amber-50 rounded-md px-2 pt-2 -mx-2' : ''}`}>
+                            <div className="flex-1 min-w-0">
+                              <p className={`font-medium text-sm ${issue === 'out_of_stock' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>{item.product.name}</p>
+                              <p className={`text-xs ${issue === 'out_of_stock' ? 'text-gray-400 line-through' : 'text-gray-500'}`}>₱{item.product.price.toLocaleString()} × {item.quantity}</p>
+                              {issue === 'insufficient' && (
+                                <p className="text-xs text-amber-800 mt-0.5">Only {item.product.quantity} left — you have {item.quantity}.</p>
+                              )}
                             </div>
                             {issue ? (
                               <div className="ml-2 flex flex-col items-end gap-1 shrink-0">
-                                <span className="text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-red-100 text-red-700">{issue}</span>
+                                {issue === 'out_of_stock' ? (
+                                  <span className="text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-gray-200 text-gray-600">Out of Stock</span>
+                                ) : (
+                                  <>
+                                    <span className="text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Not Enough Stock</span>
+                                    <button type="button" onClick={() => updateCartQuantity(item.product.id, item.product.quantity)}
+                                      className="text-xs text-[#011c72] hover:underline">Change to {item.product.quantity}</button>
+                                  </>
+                                )}
                                 <button type="button" onClick={() => removeFromCart(item.product.id)}
                                   className="text-xs text-red-600 hover:underline">Remove</button>
                               </div>
@@ -779,8 +793,9 @@ function PlaceOrderContent() {
                     </div>
                     {unavailableInCart.length > 0 && (
                       <p className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
-                        {unavailableInCart.length === 1 ? '1 item is' : `${unavailableInCart.length} items are`} unavailable
-                        and not counted in the total. Remove {unavailableInCart.length === 1 ? 'it' : 'them'} (or lower the quantity) to check out.
+                        {unavailableInCart.length === 1 ? '1 item is' : `${unavailableInCart.length} items are`} out of stock
+                        or short on stock and not counted in the total. Remove {unavailableInCart.length === 1 ? 'it' : 'them'} (or lower the quantity),
+                        or wait until it is back in stock, to place your order.
                       </p>
                     )}
                   </div>
@@ -1142,7 +1157,7 @@ function PlaceOrderContent() {
                 <button onClick={() => setShowCheckout(false)} className="flex-1 px-4 py-2 rounded-lg border border-gray-200 text-gray-700 font-medium hover:bg-gray-50 transition-colors">
                   Back
                 </button>
-                <button onClick={handleProductOrderSubmit} disabled={loading || !pickupBranchId}
+                <button onClick={handleProductOrderSubmit} disabled={loading || !pickupBranchId || unavailableInCart.length > 0}
                   className="flex-1 px-4 py-3 rounded-lg bg-[#011c72] text-white font-semibold hover:bg-[#01268c] disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
                   {loading ? 'Placing Order...' : 'Confirm Order'}
                 </button>

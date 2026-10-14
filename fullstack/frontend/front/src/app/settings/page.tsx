@@ -6,6 +6,9 @@ import { useConfirm } from '@/components/ConfirmDialog';
 
 type TabType = 'general' | 'users' | 'branches' | 'notifications';
 
+// Roles not offered when adding a user: workers are managed in Worker Management
+const HIDDEN_ROLES = ['seat_maker', 'sewer'];
+
 export default function SettingsPage() {
   const { user } = useAuth();
   const { confirm, confirmDialog } = useConfirm();
@@ -1080,11 +1083,14 @@ export default function SettingsPage() {
                     onChange={(e) => setUserFormData({ ...userFormData, role: e.target.value })}
                     className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   >
-                    {roles.map((role) => (
-                      <option key={role.id} value={role.id}>
-                        {role.name}
-                      </option>
-                    ))}
+                    {/* An existing account keeps its own role in the list so editing it still works */}
+                    {roles
+                      .filter((role) => !HIDDEN_ROLES.includes(role.id) || (editingUser && editingUser.role === role.id))
+                      .map((role) => (
+                        <option key={role.id} value={role.id}>
+                          {role.name}
+                        </option>
+                      ))}
                   </select>
                 </div>
 
