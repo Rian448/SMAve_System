@@ -12,6 +12,8 @@ export default function CustomersPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
+  const [accountFilter, setAccountFilter] = useState<'all' | 'online' | 'walkin'>('all');
+  const [orderFilter, setOrderFilter] = useState<'all' | 'with' | 'without'>('all');
 
   // Manual customer creation
   const [showCreate, setShowCreate] = useState(false);
@@ -33,6 +35,15 @@ export default function CustomersPage() {
   }, [query]);
 
   useEffect(() => { loadCustomers(); }, [loadCustomers]);
+
+  const filtered = customers.filter((c) => {
+    if (accountFilter === 'online' && !c.hasAccount) return false;
+    if (accountFilter === 'walkin' && c.hasAccount) return false;
+    if (orderFilter === 'with' && !(c.orderCount && c.orderCount > 0)) return false;
+    if (orderFilter === 'without' && (c.orderCount || 0) > 0) return false;
+    return true;
+  });
+  const filtersOn = accountFilter !== 'all' || orderFilter !== 'all';
 
   const handleCreate = async () => {
     if (!form.name.trim()) { setCreateError('Customer name is required.'); return; }
@@ -63,7 +74,7 @@ export default function CustomersPage() {
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Customers</h1>
-            <p className="text-sm text-gray-500 mt-1">All customer accounts</p>
+            <p className="text-sm text-gray-500 mt-1">Walk-in customers and customers who signed up online</p>
           </div>
           {canCreate && (
             <button onClick={() => { setShowCreate(true); setCreateError(''); }}
@@ -76,8 +87,9 @@ export default function CustomersPage() {
           )}
         </div>
 
-        {/* Search */}
-        <div className="relative mb-6">
+        {/* Search + filters */}
+        <div className="flex flex-col sm:flex-row gap-3 mb-6">
+        <div className="relative flex-1">
           <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
@@ -89,29 +101,54 @@ export default function CustomersPage() {
             className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm"
           />
         </div>
+          <select value={accountFilter} onChange={(e) => setAccountFilter(e.target.value as typeof accountFilter)}
+            aria-label="Filter by account"
+            className="px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
+            <option value="all">All customers</option>
+            <option value="online">Signed up online</option>
+            <option value="walkin">Walk-in only</option>
+          </select>
+          <select value={orderFilter} onChange={(e) => setOrderFilter(e.target.value as typeof orderFilter)}
+            aria-label="Filter by orders"
+            className="px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
+            <option value="all">Any orders</option>
+            <option value="with">Has orders</option>
+            <option value="without">No orders yet</option>
+          </select>
+        </div>
+
+        {!loading && customers.length > 0 && (
+          <p className="text-xs text-gray-500 mb-3">
+            Showing {filtered.length} of {customers.length} customer{customers.length === 1 ? '' : 's'}
+          </p>
+        )}
 
         {/* List */}
         {loading ? (
           <div className="text-center py-16 text-gray-400 text-sm">Loading…</div>
-        ) : customers.length === 0 ? (
+        ) : filtered.length === 0 ? (
           <div className="text-center py-16 text-gray-400 text-sm">
-            {query ? 'No customers match your search.' : 'No customers yet. They are created automatically when job orders are made.'}
+            {query || filtersOn
+              ? 'No customers match your search or filters.'
+              : 'No customers yet. They appear when they sign up online or when a job order is made for them.'}
           </div>
         ) : (
-          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="text-left px-5 py-3 font-semibold text-gray-600">Name</th>
                   <th className="text-left px-5 py-3 font-semibold text-gray-600">Phone</th>
                   <th className="text-left px-5 py-3 font-semibold text-gray-600">Email</th>
+                  <th className="text-left px-5 py-3 font-semibold text-gray-600">Account</th>
+                  <th className="text-left px-5 py-3 font-semibold text-gray-600">Orders</th>
                   <th className="text-left px-5 py-3 font-semibold text-gray-600">Discount</th>
                   <th className="text-left px-5 py-3 font-semibold text-gray-600">Promo</th>
                   <th className="text-left px-5 py-3 font-semibold text-gray-600">Since</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {customers.map((c) => (
+                {filtered.map((c) => (
                   <tr
                     key={c.id}
                     onClick={() => router.push(`/customers/${c.id}`)}
@@ -120,6 +157,19 @@ export default function CustomersPage() {
                     <td className="px-5 py-3 font-medium text-gray-900">{c.name}</td>
                     <td className="px-5 py-3 text-gray-600">{c.phone || '—'}</td>
                     <td className="px-5 py-3 text-gray-600">{c.email || '—'}</td>
+                    <td className="px-5 py-3">
+                      {c.hasAccount ? (
+                        <span title={c.username ? `@${c.username}` : undefined}
+                          className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                          Online
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
+                          Walk-in
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-5 py-3 text-gray-600">{c.orderCount || 0}</td>
                     <td className="px-5 py-3">
                       {c.discountPercent != null ? (
                         <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">

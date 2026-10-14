@@ -43,6 +43,8 @@ export default function SalesPage() {
   const [transferDateFilter, setTransferDateFilter] = useState<'all' | 'day' | 'week' | 'month' | 'year'>('all');
 
   const canSeePremadeFeatures = user && ['administrator', 'supervisor'].includes(user.role);
+  // Customers' saved carts are read-only here, so sales staff see them too
+  const canSeeCartDrafts = !!user && ['administrator', 'supervisor', 'sales_manager'].includes(user.role);
 
   const fetchOrders = useCallback(async () => {
     try {
@@ -101,14 +103,14 @@ export default function SalesPage() {
   }, []);
 
   const fetchPremadeDrafts = useCallback(async () => {
-    if (!canSeePremadeFeatures) { setPremadeDrafts([]); return; }
+    if (!canSeeCartDrafts) { setPremadeDrafts([]); return; }
     try {
       const res = await api.productOrders.getPremadeDrafts();
       setPremadeDrafts(res.data || []);
     } catch {
       setPremadeDrafts([]);
     }
-  }, [canSeePremadeFeatures]);
+  }, [canSeeCartDrafts]);
 
   useEffect(() => { fetchOrders(); }, [fetchOrders]);
   useEffect(() => { fetchTabData(); }, [fetchTabData]);
@@ -1168,13 +1170,24 @@ export default function SalesPage() {
                   ) : drafts.map(d => (
                     <div key={d.id} className="px-6 py-4 flex items-center justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="text-sm font-medium text-gray-900 truncate">{d.customerName || 'Unnamed customer'}</p>
+                        <p className="text-sm font-medium text-gray-900 truncate">
+                          {d.customerName || 'Unnamed customer'}
+                          {d.quoteStatus && (
+                            <span className={`ml-2 align-middle text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${
+                              d.quoteStatus === 'rejected' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-800'}`}>
+                              {d.quoteStatus === 'rejected' ? 'Quotation rejected' : 'Quotation sent'}
+                            </span>
+                          )}
+                        </p>
                         <p className="text-xs text-gray-500 truncate">{d.description || '—'} · {formatDate(d.createdAt)}</p>
+                        {d.quoteStatus === 'rejected' && d.quoteRejectReason && (
+                          <p className="text-xs text-red-700 truncate" title={d.quoteRejectReason}>Reason: {d.quoteRejectReason}</p>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         <Link href={`/sales/new?draftId=${d.id}`}
                           className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#eef1fb] text-[#011c72] hover:bg-[#dde3f7]">
-                          Edit
+                          {d.quoteStatus === 'rejected' ? 'Revise' : 'Edit'}
                         </Link>
                         <Link href={`/sales/${d.id}`}
                           className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200">

@@ -26,6 +26,14 @@ export interface User {
   phone?: string;
 }
 
+export interface SignupDetails {
+  username: string;
+  password: string;
+  email: string;
+  fullName: string;
+  phone: string;
+}
+
 export interface AuthResponse {
   token: string;
   user: User;
@@ -100,6 +108,24 @@ export interface Customer {
   notes: string;
   createdAt?: string;
   orderHistory?: CustomerOrderSummary[];
+  /** Set when the customer signed up online; walk-ins have no account */
+  userId?: number | null;
+  hasAccount?: boolean;
+  username?: string | null;
+  accountActive?: boolean;
+  /** List only: job orders plus online product orders and custom requests */
+  orderCount?: number;
+  /** Detail only: orders placed through the online account */
+  onlineOrders?: CustomerOnlineOrder[];
+}
+
+export interface CustomerOnlineOrder {
+  id: number;
+  type: 'product' | 'custom';
+  orderNumber: string;
+  status: string;
+  totalPrice: number;
+  createdAt: string | null;
 }
 
 export interface CustomerOrderSummary {
@@ -145,6 +171,52 @@ export interface Appointment {
   adminNotes?: string;
   createdAt: string;
   updatedAt?: string;
+  /** Booked from a signed-in customer account (a quotation can be sent to it) */
+  hasAccount?: boolean;
+  /** The latest quotation made from this appointment */
+  quotation?: AppointmentQuotation | null;
+}
+
+export interface AppointmentQuotation {
+  id: number;
+  jobOrderId: string;
+  status: string;
+  quoteStatus: QuoteStatus | null;
+  quoteRejectReason?: string | null;
+}
+
+/** A job order sent to the customer as a quotation: sent → accepted | rejected */
+export type QuoteStatus = 'sent' | 'accepted' | 'rejected';
+
+export interface QuoteFields {
+  quoteStatus?: QuoteStatus | null;
+  quoteRejectReason?: string | null;
+  quoteSentAt?: string | null;
+  quoteRespondedAt?: string | null;
+  appointmentId?: number | null;
+}
+
+/** A customer's own job order or quotation, as shown in My Orders (no costs) */
+export interface CustomerJobOrder extends QuoteFields {
+  id: number;
+  jobOrderId: string;
+  description: string;
+  vehicleInfo?: VehicleInfo | null;
+  branchName: string;
+  status: string;
+  paymentStatus: string;
+  totalPrice: number;
+  discountPercent?: number | null;
+  vatPercent?: number | null;
+  downPayment: number;
+  balance: number;
+  estimatedCompletion: string | null;
+  completedAt?: string | null;
+  createdAt: string | null;
+  /** Specification from the order slip, e.g. center/side/back material, stitching */
+  specs: { label: string; value: string }[];
+  /** Work steps written on the order slip */
+  workSteps: string[];
 }
 
 export interface ProductOrderItem {
@@ -202,6 +274,7 @@ export interface AppNotification {
   message: string;
   data?: Record<string, unknown>;
   isRead: boolean;
+  isArchived?: boolean;
   createdAt: string;
 }
 
@@ -228,7 +301,7 @@ export interface ProductOrderTransfer {
   sourceBranchId: number;
   sourceBranchName?: string;
   items: ProductOrderItem[];
-  status: 'pending' | 'transferred' | 'received';
+  status: 'pending' | 'transferred' | 'received' | 'cancelled';
   transferredByName?: string;
   transferredAt?: string;
   receivedByName?: string;
@@ -280,6 +353,8 @@ export interface PublicProduct {
   price: number;
   branchId: number;
   branchName?: string;
+  /** False when out of stock (only sent with includeUnavailable) */
+  isAvailable?: boolean;
 }
 
 export interface RawMaterial {
@@ -583,6 +658,14 @@ export function jobOrderPriceBreakdown(total: number, discountPercent?: number |
   return { subtotal, discount: round(subtotal - afterDiscount), afterDiscount, vat, total, discountPercent: d, vatPercent: v };
 }
 
+/** Highest price for the work (before discount and VAT): 8 digits, under ₱100M */
+export const MAX_JOB_ORDER_PRICE = 99_999_999.99;
+
+/** Whether a typed price fits: up to 8 digits before the decimal point and 2 after */
+export function isValidPriceInput(raw: string) {
+  return raw === '' || /^\d{0,8}(\.\d{0,2})?$/.test(raw);
+}
+
 /** Final price from the price before discount, a discount % and a VAT % */
 export function jobOrderTotalFrom(subtotal: number, discountPercent?: number | null, vatPercent?: number | null) {
   const d = Math.min(Math.max(Number(discountPercent) || 0, 0), 100);
@@ -684,6 +767,11 @@ export interface JobOrder {
   createdAt: string;
   createdBy: number;
   updatedAt: string;
+  quoteStatus?: QuoteStatus | null;
+  quoteRejectReason?: string | null;
+  quoteSentAt?: string | null;
+  quoteRespondedAt?: string | null;
+  appointmentId?: number | null;
 }
 
 export interface QuotationItem {
@@ -1047,10 +1135,60 @@ export const api = {
     
     me: () => fetchApi<User>('/api/auth/me'),
 
-    register: (data: { username: string; password: string; email: string; fullName: string; phone: string }) =>
+    /** Sign-up step 1: checks the details and emails a 6-digit code */
+    sendSignupCode: (data: SignupDetails) =>
+      fetchApi<null>('/api/auth/register/send-code', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /** Sign-up step 2: creates the account once the emailed code checks out */
+    register: (data: SignupDetails & { code: string }) =>
       fetchApi<AuthResponse>('/api/auth/register', {
         method: 'POST',
         body: JSON.stringify(data),
+      }),
+  },
+
+  // ==================
+  // MY PROFILE (the signed-in user's own account)
+  // ==================
+  profile: {
+    get: () => fetchApi<User>('/api/profile'),
+
+    /** A new username also needs currentPassword */
+    update: (data: { fullName?: string; phone?: string; username?: string; currentPassword?: string }) =>
+      fetchApi<User>('/api/profile', { method: 'PUT', body: JSON.stringify(data) }),
+
+    /** Returns a fresh token: every other session is signed out */
+    changePassword: (currentPassword: string, newPassword: string) =>
+      fetchApi<{ token: string }>('/api/profile/password', {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword, newPassword }),
+      }),
+
+    /** Sends a code to the new address; the email only changes once it is confirmed */
+    requestEmailChange: (newEmail: string, currentPassword: string) =>
+      fetchApi<null>('/api/profile/email/request', {
+        method: 'POST',
+        body: JSON.stringify({ newEmail, currentPassword }),
+      }),
+
+    confirmEmailChange: (code: string) =>
+      fetchApi<User>('/api/profile/email/confirm', { method: 'POST', body: JSON.stringify({ code }) }),
+  },
+
+  // ==================
+  // MY JOB ORDERS (customer side: staff-made job orders and quotations)
+  // ==================
+  myJobOrders: {
+    list: () => fetchApi<CustomerJobOrder[]>('/api/job-orders/mine'),
+
+    /** Accept turns the quotation into a job order; reject needs a reason */
+    respondToQuotation: (id: number, response: 'accept' | 'reject', reason?: string) =>
+      fetchApi<CustomerJobOrder>(`/api/job-orders/${id}/quotation/respond`, {
+        method: 'POST',
+        body: JSON.stringify({ response, reason }),
       }),
   },
 
@@ -1152,10 +1290,11 @@ export const api = {
     },
     
     // Public Products (for customer ordering)
-    getPublicProducts: (params?: { branchId?: number; category?: string }) => {
+    getPublicProducts: (params?: { branchId?: number; category?: string; includeUnavailable?: boolean }) => {
       const query = new URLSearchParams();
       if (params?.branchId) query.append('branchId', params.branchId.toString());
       if (params?.category) query.append('category', params.category);
+      if (params?.includeUnavailable) query.append('includeUnavailable', 'true');
       return fetchApi<PublicProduct[]>(`/api/inventory/finished-goods/public?${query}`);
     },
 
@@ -1438,6 +1577,7 @@ export const api = {
       }),
 
     getMyAppointments: () => fetchApi<Appointment[]>('/api/appointments/my-appointments'),
+    get: (id: number) => fetchApi<Appointment>(`/api/appointments/${id}`),
     markNoShow: (id: number) =>
       fetchApi<{ strikeCount: number; isBlocked: boolean }>(`/api/admin/appointments/${id}/no-show`, { method: 'POST' }),
   },
@@ -1538,6 +1678,9 @@ export const api = {
       }),
 
     getMyOrders: () => fetchApi<ProductOrder[]>('/api/product-orders/my-orders'),
+    /** Customer cancels their own order; only allowed while it is pending */
+    cancelMyOrder: (id: number) =>
+      fetchApi<ProductOrder>(`/api/product-orders/my-orders/${id}/cancel`, { method: 'POST' }),
 
     getPickupQueue: () => fetchApi<ProductOrder[]>('/api/product-orders/pickup-queue'),
 
@@ -1573,9 +1716,14 @@ export const api = {
   // NOTIFICATIONS
   // ==================
   notifications: {
-    getAll: (limit = 30) => fetchApi<{ data: AppNotification[]; unreadCount: number }>(`/api/notifications?limit=${limit}`),
+    getAll: (limit = 30, archived = false) =>
+      fetchApi<{ data: AppNotification[]; unreadCount: number }>(`/api/notifications?limit=${limit}${archived ? '&archived=1' : ''}`),
     markRead: (id: number) => fetchApi<void>(`/api/notifications/${id}/read`, { method: 'POST' }),
     markAllRead: () => fetchApi<void>('/api/notifications/read-all', { method: 'POST' }),
+    /** Move to the archive, or back to the bell with archived = false */
+    archive: (id: number, archived = true) =>
+      fetchApi<void>(`/api/notifications/${id}/archive`, { method: 'POST', body: JSON.stringify({ archived }) }),
+    delete: (id: number) => fetchApi<void>(`/api/notifications/${id}`, { method: 'DELETE' }),
   },
 
   // ==================
@@ -1646,7 +1794,8 @@ export const api = {
         body: JSON.stringify(user),
       }),
     
-    updateUser: (id: number, updates: Partial<User & { password?: string }>) =>
+    /** A new password needs adminPassword (the signed-in administrator's own password) */
+    updateUser: (id: number, updates: Partial<User & { password?: string; adminPassword?: string }>) =>
       fetchApi<User>(`/api/settings/users/${id}`, {
         method: 'PUT',
         body: JSON.stringify(updates),

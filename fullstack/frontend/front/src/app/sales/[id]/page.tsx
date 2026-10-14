@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord, ManagedWorker, PaymentOverride,
-  jobOrderItemCategory, jobOrderPriceBreakdown, jobOrderTotalFrom, DEFAULT_VAT_PERCENT,
+  jobOrderItemCategory, jobOrderPriceBreakdown, jobOrderTotalFrom, DEFAULT_VAT_PERCENT, MAX_JOB_ORDER_PRICE, isValidPriceInput,
 } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 
@@ -438,6 +438,10 @@ export default function JobOrderDetailPage() {
     if (!subtotal && !(jobOrder.totalPrice > 0)) {
       subtotal = normalizedItems.reduce(
         (sum, item) => sum + item.quantity * ((Number(item.materialCost) || 0) + (Number(item.laborCost) || 0)), 0);
+    }
+    if (subtotal > MAX_JOB_ORDER_PRICE) {
+      setError('Price for the work must be less than ₱100,000,000 (up to 8 digits).');
+      return;
     }
     const totalPrice = jobOrderTotalFrom(subtotal, discountPercent, vatPercent);
 
@@ -1472,13 +1476,16 @@ export default function JobOrderDetailPage() {
                     <div className="relative">
                       <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">₱</span>
                       <input
-                        type="number" min="0" step="0.01"
+                        type="number" min="0" max={MAX_JOB_ORDER_PRICE} step="0.01"
                         value={editedSubtotal}
-                        onChange={(e) => setEditedSubtotal(e.target.value)}
+                        onChange={(e) => {
+                          // Up to 8 digits (under ₱100M): longer input is ignored
+                          if (isValidPriceInput(e.target.value)) setEditedSubtotal(e.target.value);
+                        }}
                         className="w-full pl-7 pr-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm"
                       />
                     </div>
-                    <p className="text-xs text-gray-400 mt-1">Before discount and VAT</p>
+                    <p className="text-xs text-gray-400 mt-1">Before discount and VAT, up to ₱99,999,999.99</p>
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1.5">Discount</label>
@@ -2123,18 +2130,6 @@ export default function JobOrderDetailPage() {
             </svg>
             Print Receipt
           </button>
-          {canEditParts && (
-            <button
-              onClick={saveOrderParts}
-              disabled={savingParts}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 hover:border-[#011c72] text-gray-700 rounded-lg font-medium text-sm transition-colors disabled:opacity-50"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
-              {savingParts ? 'Saving...' : 'Save Parts'}
-            </button>
-          )}
           {canEditParts && jobOrder.status !== 'cancelled' && jobOrder.status !== 'delivered' && (
             <button
               onClick={() => updateStatus('cancelled')}
