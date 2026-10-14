@@ -1,6 +1,6 @@
 ﻿'use client';
 import { formatDate } from '@/lib/dateUtils';
-import { useState, useEffect, Suspense, Fragment } from 'react';
+import { useState, useEffect, useRef, Suspense, Fragment } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { api, Appointment, CustomerOrder, ProductOrder, CartDraft, ApiError, CustomerJobOrder, jobOrderPriceBreakdown } from '@/lib/api';
 import { useConfirm } from '@/components/ConfirmDialog';
@@ -75,6 +75,14 @@ function MyOrdersContent() {
   const [rejectError, setRejectError] = useState('');
   const { confirm, confirmDialog } = useConfirm();
   const [productOrders, setProductOrders] = useState<ProductOrder[]>([]);
+  const [openProductIds, setOpenProductIds] = useState<Set<number>>(new Set());
+  const toggleProduct = (id: number) => setOpenProductIds(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const [cancellingId, setCancellingId] = useState<number | null>(null);
+  const [productError, setProductError] = useState<{ id: number; message: string } | null>(null);
   // The customer's saved cart — a draft, not yet an order.
   const [savedCart, setSavedCart] = useState<CartDraft | null>(null);
   const [cartBusy, setCartBusy] = useState(false);
@@ -90,6 +98,37 @@ function MyOrdersContent() {
       setActiveTab(tabParam as OrderTab);
     }
   }, [searchParams]);
+
+  // Opened from a notification: open that order's details and bring it into view
+  const [highlightKey, setHighlightKey] = useState<string | null>(null);
+  // The link already acted on, so reloading the orders doesn't jump back to it
+  const focusedLink = useRef('');
+  useEffect(() => {
+    if (loading || searchParams.toString() === focusedLink.current) return;
+    const jobId = Number(searchParams.get('job'));
+    const orderId = Number(searchParams.get('order'));
+    let key: string | null = null;
+    if (jobId) {
+      const jo = jobOrders.find(j => j.id === jobId);
+      if (!jo) return;
+      key = `jo-${jobId}`;
+      // Details start open for a quotation awaiting a reply and closed otherwise
+      setToggledJobIds(prev => {
+        const next = new Set(prev);
+        if (isAwaitingReply(jo)) next.delete(jobId); else next.add(jobId);
+        return next;
+      });
+    } else if (orderId) {
+      key = `po-${orderId}`;
+      setOpenProductIds(prev => new Set(prev).add(orderId));
+    }
+    if (!key) return;
+    focusedLink.current = searchParams.toString();
+    setHighlightKey(key);
+    const target = key;
+    requestAnimationFrame(() => document.getElementById(target)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    setTimeout(() => setHighlightKey(k => (k === target ? null : k)), 4000);
+  }, [searchParams, loading, jobOrders]);
 
   useEffect(() => {
     if (!authLoading) {
@@ -164,6 +203,26 @@ function MyOrdersContent() {
       setCartError(err instanceof Error ? err.message : 'Could not discard your saved cart.');
     } finally {
       setCartBusy(false);
+    }
+  };
+
+  const handleCancelProductOrder = async (order: ProductOrder) => {
+    const ok = await confirm({
+      title: `Cancel order ${order.orderNumber}?`,
+      message: 'The items will be released and this order cannot be restored. You can place a new order any time.',
+      confirmLabel: 'Cancel Order',
+      cancelLabel: 'Keep Order',
+      variant: 'danger',
+    });
+    if (!ok) return;
+    setCancellingId(order.id); setProductError(null);
+    try {
+      const res = await api.productOrders.cancelMyOrder(order.id);
+      if (res.data) setProductOrders(prev => prev.map(o => (o.id === order.id ? res.data! : o)));
+    } catch (err) {
+      setProductError({ id: order.id, message: err instanceof Error ? err.message : 'Could not cancel this order.' });
+    } finally {
+      setCancellingId(null);
     }
   };
 
@@ -424,8 +483,8 @@ function MyOrdersContent() {
                     : '';
                   const services = (jo.description || '').split(',').map(x => x.trim()).filter(Boolean);
                   return (
-                    <div key={`jo-${jo.id}`}
-                      className={`bg-white rounded-xl border p-6 transition-shadow hover:shadow-md ${awaiting ? 'border-[#011c72] ring-1 ring-[#011c72]/20' : 'border-gray-200'}`}>
+                    <div key={`jo-${jo.id}`} id={`jo-${jo.id}`}
+                      className={`bg-white rounded-xl border p-6 transition-shadow hover:shadow-md scroll-mt-24 ${highlightKey === `jo-${jo.id}` ? 'border-[#011c72] ring-2 ring-[#4a6aff]' : awaiting ? 'border-[#011c72] ring-1 ring-[#011c72]/20' : 'border-gray-200'}`}>
                       <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-3">
                         <div className="flex-1">
                           <div className="flex items-center gap-3 flex-wrap">
@@ -656,20 +715,27 @@ function MyOrdersContent() {
                 </div>
 
                 <ul className="divide-y divide-gray-100 border-y border-gray-100">
-                  {savedCart.availability.map(row => (
-                    <li key={row.productId} className={`py-2.5 flex items-start justify-between gap-3 ${row.issue ? 'bg-gray-50 px-2 -mx-2 rounded-md' : ''}`}>
+                  {savedCart.availability.map(row => {
+                    // Short on stock can still be fixed by lowering the quantity; anything else can't be bought
+                    const short = row.issue === 'insufficient';
+                    const blocked = !!row.issue && !short;
+                    return (
+                    <li key={row.productId} className={`py-2.5 flex items-start justify-between gap-3 ${blocked ? 'bg-gray-50 px-2 -mx-2 rounded-md' : short ? 'bg-amber-50 px-2 -mx-2 rounded-md' : ''}`}>
                       <div className="min-w-0">
-                        <p className={`text-sm text-gray-900 ${row.issue ? 'opacity-50 grayscale blur-[0.5px]' : ''}`}>
+                        <p className={`text-sm ${blocked ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
                           {row.requested}× {row.name}
                         </p>
-                        {row.issue && (
-                          <p className="text-xs text-red-700 mt-0.5">{row.message}</p>
+                        {short && (
+                          <p className="text-xs text-amber-800 mt-0.5">Only {row.available} left — you saved {row.requested}.</p>
+                        )}
+                        {blocked && row.issue !== 'out_of_stock' && (
+                          <p className="text-xs text-gray-500 mt-0.5">{row.message}</p>
                         )}
                       </div>
                       <div className="text-right shrink-0">
                         {row.issue ? (
-                          <span className="text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-red-100 text-red-700">
-                            {row.issue === 'insufficient' ? 'Low stock' : row.issue === 'invalid' ? 'Unavailable' : 'Out of stock'}
+                          <span className={`text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full ${short ? 'bg-amber-100 text-amber-800' : 'bg-gray-200 text-gray-600'}`}>
+                            {short ? 'Not Enough Stock' : row.issue === 'out_of_stock' ? 'Out of Stock' : 'Unavailable'}
                           </span>
                         ) : (
                           <span className="text-sm text-gray-700">
@@ -678,7 +744,8 @@ function MyOrdersContent() {
                         )}
                       </div>
                     </li>
-                  ))}
+                    );
+                  })}
                 </ul>
 
                 {cartError && (
@@ -689,8 +756,8 @@ function MyOrdersContent() {
 
                 {!savedCart.isAvailable && (
                   <p className="mt-4 rounded-lg bg-yellow-50 border border-yellow-200 px-3 py-2 text-sm text-yellow-800">
-                    Some items are no longer available in the quantity you saved. Update your cart
-                    before placing the order.
+                    Your cart has items that are out of stock or short on stock. Click <b>Edit Cart</b> to
+                    remove them or lower the quantity, or wait until they are back in stock, to place this order.
                   </p>
                 )}
 
@@ -699,7 +766,8 @@ function MyOrdersContent() {
                     type="button"
                     onClick={handleConfirmSavedCart}
                     disabled={cartBusy || !savedCart.isAvailable || !savedCart.pickupBranchId}
-                    title={!savedCart.pickupBranchId ? 'Choose a pickup branch in your cart first' : undefined}
+                    title={!savedCart.isAvailable ? 'Remove the out-of-stock items first'
+                      : !savedCart.pickupBranchId ? 'Choose a pickup branch in your cart first' : undefined}
                     className="px-5 py-2.5 rounded-xl bg-[#011c72] text-white font-semibold hover:bg-[#01268c] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     {cartBusy ? 'Placing…' : 'Place This Order'}
@@ -733,7 +801,8 @@ function MyOrdersContent() {
                 {productOrders.map((order) => (
                   <div
                     key={order.id}
-                    className="bg-white rounded-xl border border-gray-200 p-6"
+                    id={`po-${order.id}`}
+                    className={`bg-white rounded-xl border p-6 scroll-mt-24 transition-shadow ${highlightKey === `po-${order.id}` ? 'border-[#011c72] ring-2 ring-[#4a6aff]' : 'border-gray-200'}`}
                   >
                     <div className="flex items-start justify-between gap-4 mb-4">
                       <div>
@@ -781,6 +850,26 @@ function MyOrdersContent() {
                           <span className="text-gray-600">₱{item.total.toLocaleString()}</span>
                         </div>
                       ))}
+                    </div>
+
+                    {openProductIds.has(order.id) && <PremadeOrderDetails order={order} />}
+
+                    {productError?.id === order.id && (
+                      <p className="mt-4 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">{productError.message}</p>
+                    )}
+
+                    <div className="mt-4 pt-4 border-t border-gray-100 flex flex-wrap items-center gap-3">
+                      <button type="button" onClick={() => toggleProduct(order.id)}
+                        className="inline-flex items-center px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium text-sm">
+                        {openProductIds.has(order.id) ? 'Hide Details' : 'View Details'}
+                      </button>
+                      {order.status === 'pending' && (
+                        <button type="button" onClick={() => handleCancelProductOrder(order)}
+                          disabled={cancellingId === order.id}
+                          className="inline-flex items-center px-4 py-2 rounded-lg text-red-600 font-medium text-sm hover:bg-red-50 disabled:opacity-50 transition-colors">
+                          {cancellingId === order.id ? 'Cancelling…' : 'Cancel Order'}
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -880,6 +969,74 @@ function MyOrdersContent() {
         onConfirm={rejectJobQuotation}
       />
       {confirmDialog}
+    </div>
+  );
+}
+
+const TRANSFER_LABELS: Record<string, string> = {
+  pending: 'Being prepared',
+  transferred: 'On the way',
+  received: 'Arrived at pickup branch',
+  cancelled: 'Cancelled',
+};
+
+/** Everything about a premade order the customer may want to check */
+function PremadeOrderDetails({ order }: { order: ProductOrder }) {
+  const paid = order.amountPaid ?? 0;
+  const balance = order.remainingBalance ?? Math.max(0, order.totalAmount - paid);
+  return (
+    <div className="mt-4 pt-4 border-t border-gray-100 grid gap-5 sm:grid-cols-2 text-sm">
+      <div>
+        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Items</p>
+        <div className="space-y-1.5">
+          {order.items.map((item, i) => (
+            <div key={i} className="flex justify-between gap-3">
+              <span className="text-gray-700">
+                {item.name}
+                <span className="block text-xs text-gray-400">
+                  ₱{(item.unitPrice ?? 0).toLocaleString()} × {item.quantity}
+                  {item.sourceBranchName ? ` · from ${item.sourceBranchName}` : ''}
+                </span>
+              </span>
+              <span className="text-gray-700 shrink-0">₱{item.total.toLocaleString()}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Payment</p>
+        <div className="space-y-1">
+          <div className="flex justify-between"><span className="text-gray-500">Total</span><span className="font-medium text-gray-900">₱{order.totalAmount.toLocaleString()}</span></div>
+          <div className="flex justify-between"><span className="text-gray-500">Paid</span><span className="text-gray-900">₱{paid.toLocaleString()}</span></div>
+          <div className="flex justify-between"><span className="text-gray-500">Balance</span><span className="font-semibold text-[#011c72]">₱{balance.toLocaleString()}</span></div>
+        </div>
+      </div>
+
+      <div>
+        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Pickup</p>
+        <p className="text-gray-900">{order.pickupBranchName || order.branchName || 'N/A'}</p>
+        {order.transfers && order.transfers.length > 0 && (
+          <ul className="mt-2 space-y-1">
+            {order.transfers.map(t => (
+              <li key={t.id} className="text-xs text-gray-600">
+                Items from {t.sourceBranchName || 'another branch'}: <span className="font-medium">{TRANSFER_LABELS[t.status] || t.status}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div>
+        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Contact &amp; Notes</p>
+        <p className="text-gray-900">{order.customerName}</p>
+        <p className="text-gray-600">{order.customerPhone}</p>
+        {order.customerEmail && <p className="text-gray-600">{order.customerEmail}</p>}
+        {order.notes && <p className="mt-2 text-gray-600 whitespace-pre-line">{order.notes}</p>}
+        {order.updatedAt && (
+          <p className="mt-2 text-xs text-gray-400">Last updated {formatDate(order.updatedAt)}</p>
+        )}
+      </div>
     </div>
   );
 }

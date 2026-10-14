@@ -274,6 +274,7 @@ export interface AppNotification {
   message: string;
   data?: Record<string, unknown>;
   isRead: boolean;
+  isArchived?: boolean;
   createdAt: string;
 }
 
@@ -300,7 +301,7 @@ export interface ProductOrderTransfer {
   sourceBranchId: number;
   sourceBranchName?: string;
   items: ProductOrderItem[];
-  status: 'pending' | 'transferred' | 'received';
+  status: 'pending' | 'transferred' | 'received' | 'cancelled';
   transferredByName?: string;
   transferredAt?: string;
   receivedByName?: string;
@@ -1677,6 +1678,9 @@ export const api = {
       }),
 
     getMyOrders: () => fetchApi<ProductOrder[]>('/api/product-orders/my-orders'),
+    /** Customer cancels their own order; only allowed while it is pending */
+    cancelMyOrder: (id: number) =>
+      fetchApi<ProductOrder>(`/api/product-orders/my-orders/${id}/cancel`, { method: 'POST' }),
 
     getPickupQueue: () => fetchApi<ProductOrder[]>('/api/product-orders/pickup-queue'),
 
@@ -1712,9 +1716,14 @@ export const api = {
   // NOTIFICATIONS
   // ==================
   notifications: {
-    getAll: (limit = 30) => fetchApi<{ data: AppNotification[]; unreadCount: number }>(`/api/notifications?limit=${limit}`),
+    getAll: (limit = 30, archived = false) =>
+      fetchApi<{ data: AppNotification[]; unreadCount: number }>(`/api/notifications?limit=${limit}${archived ? '&archived=1' : ''}`),
     markRead: (id: number) => fetchApi<void>(`/api/notifications/${id}/read`, { method: 'POST' }),
     markAllRead: () => fetchApi<void>('/api/notifications/read-all', { method: 'POST' }),
+    /** Move to the archive, or back to the bell with archived = false */
+    archive: (id: number, archived = true) =>
+      fetchApi<void>(`/api/notifications/${id}/archive`, { method: 'POST', body: JSON.stringify({ archived }) }),
+    delete: (id: number) => fetchApi<void>(`/api/notifications/${id}`, { method: 'DELETE' }),
   },
 
   // ==================

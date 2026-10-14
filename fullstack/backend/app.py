@@ -1,8 +1,9 @@
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, has_request_context
 from flask_cors import CORS
 from datetime import datetime, timedelta
 from functools import wraps
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -373,6 +374,7 @@ class Notification(db.Model):
     message = db.Column(db.Text, nullable=False)
     data = db.Column(db.JSON, nullable=True)
     is_read = db.Column(db.Boolean, default=False)
+    is_archived = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     user = db.relationship('User', backref='notifications')
 
@@ -480,6 +482,8 @@ class CatalogItem(db.Model):
     title = db.Column(db.String(255), nullable=False)
     description = db.Column(db.Text, default='')
     tag = db.Column(db.String(100), default='')
+    # Which gallery filter the item appears under (see CATALOG_CATEGORIES)
+    category = db.Column(db.String(50), default='Automotive')
     image_url = db.Column(db.String(500), default='')
     sort_order = db.Column(db.Integer, default=0)
     is_active = db.Column(db.Boolean, default=True)
@@ -1062,6 +1066,10 @@ def run_migrations():
         "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS quote_sent_at TIMESTAMP",
         "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS quote_responded_at TIMESTAMP",
         "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS appointment_id INTEGER",
+        # Gallery filter for catalog items; existing items were all vehicle work
+        "ALTER TABLE catalog_items ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT 'Automotive'",
+        # Notifications a user has moved out of the bell into their archive
+        "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
     ]
     is_sqlite = db.engine.dialect.name == 'sqlite'
     for sql in migrations:
@@ -5424,6 +5432,104 @@ def notify_branch_users(branch_id, notif_type, title, message, data=None,
                 data=data or {},
             ))
 
+# Notification types a customer sees: changes to their own orders only
+CUSTOMER_NOTIFICATION_TYPES = ('order_status', 'quotation_ready')
+
+# What each status means to the customer, per kind of order
+CUSTOMER_STATUS_PHRASES = {
+    'job': {
+        'pending': 'has been confirmed',
+        'in_progress': 'is now in progress',
+        'completed': 'is completed',
+        'delivered': 'has been delivered',
+        'cancelled': 'has been cancelled',
+        'voided': 'has been voided',
+    },
+    'product': {
+        'pending': 'is pending',
+        'processing': 'is being prepared',
+        'ready': 'is ready for pickup',
+        'completed': 'is completed',
+        'cancelled': 'has been cancelled',
+    },
+    'request': {
+        'pending': 'is pending',
+        'processing': 'is being processed',
+        'in_progress': 'is now in progress',
+        'ready_for_installation': 'is ready for installation',
+        'completed': 'is completed',
+        'delivered': 'has been delivered',
+        'cancelled': 'has been cancelled',
+    },
+}
+
+def _order_account_id(order):
+    """(kind, number, customer account id) for an order a customer can follow."""
+    if isinstance(order, JobOrder):
+        customer = Customer.query.get(order.customer_id) if order.customer_id else None
+        return 'job', order.job_order_id, customer.user_id if customer else None
+    if isinstance(order, ProductOrder):
+        return 'product', order.order_number, order.user_id
+    return 'request', order.order_number, order.user_id
+
+def _changed_to(obj, attr):
+    """The new value of attr if this flush changes it, else None."""
+    hist = db.inspect(obj).attrs[attr].history
+    return hist.added[0] if hist.added and hist.added[0] not in hist.deleted else None
+
+@event.listens_for(db.session, 'after_flush')
+def notify_customers_of_order_changes(session, flush_context):
+    """Tell a customer when one of their orders changes status or gets a
+    quotation, whichever endpoint made the change. Changes the customer made
+    themselves (accepting a quotation, cancelling) are not echoed back.
+    Runs after the flush so new orders already have ids; attribute history
+    still shows what this flush changed."""
+    actor_id = request.current_user['id'] if has_request_context() and hasattr(request, 'current_user') else None
+    pending = session.info.setdefault('customer_notifications', [])
+    with session.no_autoflush:
+        for obj in list(session.new) + list(session.dirty):
+            if not isinstance(obj, (JobOrder, ProductOrder, CustomerOrder)):
+                continue
+            is_new = obj in session.new
+            kind, number, account_id = _order_account_id(obj)
+            if not account_id or account_id == actor_id:
+                continue
+
+            quote_attr = {'job': 'quote_status', 'request': 'quotation_status'}.get(kind)
+            if quote_attr:
+                new_quote = getattr(obj, quote_attr) if is_new else _changed_to(obj, quote_attr)
+                if new_quote == {'job': 'sent', 'request': 'quoted'}[kind]:
+                    pending.append(Notification(
+                        user_id=account_id, type='quotation_ready',
+                        title=f"Quotation ready: {number}",
+                        message=f"Your quotation for {number} is ready. Open it to accept or reject.",
+                        data={'kind': kind, 'orderId': obj.id, 'orderNumber': number},
+                    ))
+                    continue
+
+            # Only status changes on existing orders; a staff draft is not visible to the customer yet
+            new_status = None if is_new else _changed_to(obj, 'status')
+            if not new_status or new_status == 'draft':
+                continue
+            phrase = CUSTOMER_STATUS_PHRASES[kind].get(new_status, f"is now {new_status.replace('_', ' ')}")
+            pending.append(Notification(
+                user_id=account_id, type='order_status',
+                title=f"Order {number} updated",
+                message=f"Your order {number} {phrase}.",
+                data={'kind': kind, 'orderId': obj.id, 'orderNumber': number, 'status': new_status},
+            ))
+
+@event.listens_for(db.session, 'after_flush_postexec')
+def add_customer_notifications(session, flush_context):
+    # Objects can't be added mid-flush; commit flushes these in its next pass
+    pending = session.info.pop('customer_notifications', None)
+    if pending:
+        session.add_all(pending)
+
+@event.listens_for(db.session, 'after_rollback')
+def drop_customer_notifications(session):
+    session.info.pop('customer_notifications', None)
+
 def transfer_to_dict(transfer):
     order = transfer.order
     return {
@@ -6384,26 +6490,81 @@ def get_my_product_orders():
     orders = ProductOrder.query.filter_by(user_id=user_id).order_by(ProductOrder.created_at.desc()).all()
     return jsonify({'status': 'success', 'data': [product_order_to_dict(o) for o in orders]})
 
+@app.route('/api/product-orders/my-orders/<int:order_id>/cancel', methods=['POST'])
+@require_auth
+@require_roles('customer')
+def cancel_my_product_order(order_id):
+    """A customer cancels their own premade order while it is still pending.
+    The stock taken when the order was placed goes back on the shelf and any
+    transfer requests still waiting to be sent are called off."""
+    user = request.current_user
+    order = ProductOrder.query.filter_by(id=order_id, user_id=user['id']).first()
+    if not order:
+        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
+    if order.status != 'pending':
+        return jsonify({'status': 'error',
+                        'message': 'Only pending orders can be cancelled. Please contact the shop.'}), 400
+    if any(t.status != 'pending' for t in (order.transfers or [])):
+        return jsonify({'status': 'error',
+                        'message': 'Some items are already on their way to your pickup branch. Please contact the shop to cancel.'}), 400
+
+    for item in order.items or []:
+        product = PremadeProduct.query.get(item.get('productId'))
+        if product:
+            product.quantity = float(product.quantity or 0) + float(item.get('quantity') or 0)
+    for t in order.transfers or []:
+        t.status = 'cancelled'
+    order.status = 'cancelled'
+
+    notify_branch_users(
+        order.branch_id, 'order_cancelled',
+        f'Order cancelled — {order.order_number}',
+        f'{order.customer_name} cancelled their order {order.order_number}. The items were returned to stock.',
+        {'orderId': order.id, 'orderNumber': order.order_number},
+    )
+    for src_branch_id in {t.source_branch_id for t in (order.transfers or [])}:
+        notify_branch_users(
+            src_branch_id, 'order_cancelled',
+            f'Transfer cancelled — {order.order_number}',
+            f'{order.order_number} was cancelled by the customer. Do not send its items.',
+            {'orderId': order.id, 'orderNumber': order.order_number},
+        )
+    db.session.commit()
+
+    log_action(user['id'], user['fullName'], 'CANCEL', 'Product Orders',
+               f"Customer cancelled order {order.order_number}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': product_order_to_dict(order)})
+
 # ============================================
 # NOTIFICATIONS
 # ============================================
 
+def my_notifications_query(archived=False):
+    """The signed-in user's notifications in the bell (or the archive).
+    Customers only ever see updates about their own orders."""
+    user = request.current_user
+    q = Notification.query.filter(Notification.user_id == user['id'])
+    q = q.filter(Notification.is_archived == True) if archived else q.filter(Notification.is_archived.isnot(True))
+    if user['role'] == 'customer':
+        q = q.filter(Notification.type.in_(CUSTOMER_NOTIFICATION_TYPES))
+    return q
+
 @app.route('/api/notifications', methods=['GET'])
 @require_auth
 def get_notifications():
-    uid = request.current_user['id']
     limit = min(int(request.args.get('limit', 30)), 100)
-    notifs = (Notification.query
-              .filter_by(user_id=uid)
+    archived = request.args.get('archived') in ('1', 'true')
+    notifs = (my_notifications_query(archived)
               .order_by(Notification.created_at.desc())
               .limit(limit).all())
-    unread = Notification.query.filter_by(user_id=uid, is_read=False).count()
+    unread = my_notifications_query().filter(Notification.is_read == False).count()
     return jsonify({
         'status': 'success',
         'data': [{
             'id': n.id, 'type': n.type, 'title': n.title,
             'message': n.message, 'data': n.data,
             'isRead': n.is_read,
+            'isArchived': bool(n.is_archived),
             'createdAt': fmt_dt(n.created_at),
         } for n in notifs],
         'unreadCount': unread,
@@ -6416,13 +6577,39 @@ def mark_all_notifications_read():
     db.session.commit()
     return jsonify({'status': 'success'})
 
+def _my_notification(notif_id):
+    return Notification.query.filter_by(id=notif_id, user_id=request.current_user['id']).first()
+
 @app.route('/api/notifications/<int:notif_id>/read', methods=['POST'])
 @require_auth
 def mark_notification_read(notif_id):
-    n = Notification.query.filter_by(id=notif_id, user_id=request.current_user['id']).first()
+    n = _my_notification(notif_id)
     if n:
         n.is_read = True
         db.session.commit()
+    return jsonify({'status': 'success'})
+
+@app.route('/api/notifications/<int:notif_id>/archive', methods=['POST'])
+@require_auth
+def archive_notification(notif_id):
+    """Move a notification to the archive (or back with {"archived": false})."""
+    n = _my_notification(notif_id)
+    if not n:
+        return jsonify({'status': 'error', 'message': 'Notification not found'}), 404
+    n.is_archived = (request.get_json(silent=True) or {}).get('archived', True) is not False
+    if n.is_archived:
+        n.is_read = True
+    db.session.commit()
+    return jsonify({'status': 'success'})
+
+@app.route('/api/notifications/<int:notif_id>', methods=['DELETE'])
+@require_auth
+def delete_notification(notif_id):
+    n = _my_notification(notif_id)
+    if not n:
+        return jsonify({'status': 'error', 'message': 'Notification not found'}), 404
+    db.session.delete(n)
+    db.session.commit()
     return jsonify({'status': 'success'})
 
 # ============================================
@@ -8438,14 +8625,23 @@ def health_check():
 # CATALOG ROUTES
 # ============================================================
 
+# Filters on the public catalog, in display order
+CATALOG_CATEGORIES = ('Automotive', 'Sofas', 'Chairs', 'Commercial', 'Custom Projects')
+
+def catalog_item_dict(i):
+    return {'id': i.id, 'title': i.title, 'description': i.description, 'tag': i.tag,
+            'category': i.category or 'Automotive', 'imageUrl': i.image_url, 'sortOrder': i.sort_order}
+
+def _catalog_category(value):
+    """The category if it is one of ours, else None."""
+    value = (value or '').strip()
+    return value if value in CATALOG_CATEGORIES else None
+
 @app.route('/api/catalog', methods=['GET'])
 def get_catalog():
     items = CatalogItem.query.filter_by(is_active=True).order_by(CatalogItem.sort_order, CatalogItem.id).all()
-    return jsonify({'status': 'success', 'data': [
-        {'id': i.id, 'title': i.title, 'description': i.description, 'tag': i.tag,
-         'imageUrl': i.image_url, 'sortOrder': i.sort_order}
-        for i in items
-    ]})
+    return jsonify({'status': 'success', 'data': [catalog_item_dict(i) for i in items],
+                    'categories': list(CATALOG_CATEGORIES)})
 
 @app.route('/api/catalog', methods=['POST'])
 @require_auth
@@ -8454,20 +8650,21 @@ def create_catalog_item():
     data = request.get_json()
     if not data or not data.get('title', '').strip():
         return jsonify({'status': 'error', 'message': 'Title is required'}), 400
+    category = _catalog_category(data.get('category', 'Automotive'))
+    if not category:
+        return jsonify({'status': 'error', 'message': 'Invalid category'}), 400
     max_order = db.session.query(db.func.max(CatalogItem.sort_order)).scalar() or 0
     item = CatalogItem(
         title=data['title'].strip(),
         description=data.get('description', '').strip(),
         tag=data.get('tag', '').strip(),
+        category=category,
         image_url=data.get('imageUrl', ''),
         sort_order=max_order + 1,
     )
     db.session.add(item)
     db.session.commit()
-    return jsonify({'status': 'success', 'data': {
-        'id': item.id, 'title': item.title, 'description': item.description,
-        'tag': item.tag, 'imageUrl': item.image_url, 'sortOrder': item.sort_order
-    }}), 201
+    return jsonify({'status': 'success', 'data': catalog_item_dict(item)}), 201
 
 @app.route('/api/catalog/<int:item_id>', methods=['PUT'])
 @require_auth
@@ -8483,14 +8680,16 @@ def update_catalog_item(item_id):
         item.description = data['description'].strip()
     if 'tag' in data:
         item.tag = data['tag'].strip()
+    if 'category' in data:
+        category = _catalog_category(data['category'])
+        if not category:
+            return jsonify({'status': 'error', 'message': 'Invalid category'}), 400
+        item.category = category
     if 'sortOrder' in data:
         item.sort_order = int(data['sortOrder'])
     item.updated_at = datetime.utcnow()
     db.session.commit()
-    return jsonify({'status': 'success', 'data': {
-        'id': item.id, 'title': item.title, 'description': item.description,
-        'tag': item.tag, 'imageUrl': item.image_url, 'sortOrder': item.sort_order
-    }})
+    return jsonify({'status': 'success', 'data': catalog_item_dict(item)})
 
 @app.route('/api/catalog/<int:item_id>', methods=['DELETE'])
 @require_auth
