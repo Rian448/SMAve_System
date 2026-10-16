@@ -17,13 +17,44 @@ export interface User {
   username: string;
   email: string;
   fullName: string;
-  role: 'administrator' | 'supervisor' | 'sales_manager' | 'seat_maker' | 'sewer' | 'customer';
+  role: 'administrator' | 'supervisor' | 'sales_manager' | 'seat_maker' | 'sewer' | 'customer' | 'owner';
   roleName?: string;
   branch: string;
   branchId?: number;
   branchName?: string;
+  /** Based at the warehouse: picks the branch each job order is for */
+  atWarehouse?: boolean;
   isActive?: boolean;
   phone?: string;
+  /** Effective permissions (role defaults + grants − revokes), e.g. 'inventory.add' */
+  permissions?: string[];
+}
+
+export interface PermissionModule {
+  key: string;
+  label: string;
+  permissions: { key: string; action: string; label: string }[];
+}
+
+export interface PermissionCatalogue {
+  modules: PermissionModule[];
+  roleDefaults: Record<string, string[]>;
+}
+
+export interface UserPermissions {
+  userId: number;
+  role: string;
+  roleDefaults: string[];
+  grants: string[];
+  revokes: string[];
+  effective: string[];
+  /** Fingerprint of what was loaded; sent back on save so stale saves are refused */
+  version: string;
+  /** False for customer accounts, and for accounts the signed-in user may not change */
+  editable: boolean;
+  readOnlyReason: string | null;
+  /** Permissions the signed-in user may not grant or remove */
+  locked: string[];
 }
 
 export interface SignupDetails {
@@ -208,6 +239,10 @@ export interface CustomerJobOrder extends QuoteFields {
   totalPrice: number;
   discountPercent?: number | null;
   vatPercent?: number | null;
+  /** True if the price was entered with VAT included (VAT not added on top) */
+  vatInclusive?: boolean;
+  /** VAT inside totalPrice, as worked out by the server */
+  vatAmount?: number;
   downPayment: number;
   balance: number;
   estimatedCompletion: string | null;
@@ -319,6 +354,9 @@ export interface ProductOrder {
   customerAddress?: string;
   items: ProductOrderItem[];
   totalAmount: number;
+  /** VAT rate included in the prices (12 on orders from before it was recorded) */
+  vatPercent?: number;
+  vatAmount?: number;
   branchId: number;
   branchName?: string;
   groupId?: string;
@@ -640,25 +678,56 @@ export function jobOrderItemCategory(item: JobOrderItem): 'material' | 'labor' |
   return Number(item.laborCost) > 0 && Number(item.materialCost) === 0 ? 'labor' : 'material';
 }
 
-/** Standard Philippine VAT rate, used when VAT is switched on for a job order */
+/** Standard Philippine VAT rate: the default in Settings, and the rate older product
+ *  orders were receipted at. New orders use the rate saved in Settings. */
 export const DEFAULT_VAT_PERCENT = 12;
 
-/**
- * Splits a job order's final price into subtotal → discount → VAT → total.
- * Only the total and the two percentages are stored, so the rest is derived
- * backwards from them; the parts always add up to the stored total.
- */
-export function jobOrderPriceBreakdown(total: number, discountPercent?: number | null, vatPercent?: number | null) {
-  const d = Math.min(Math.max(Number(discountPercent) || 0, 0), 100);
-  const v = Math.max(Number(vatPercent) || 0, 0);
-  const round = (n: number) => Math.round(n * 100) / 100;
-  const afterDiscount = round(total / (1 + v / 100));
-  const vat = round(total - afterDiscount);
-  const subtotal = d < 100 ? round(afterDiscount / (1 - d / 100)) : afterDiscount;
-  return { subtotal, discount: round(subtotal - afterDiscount), afterDiscount, vat, total, discountPercent: d, vatPercent: v };
+/** Round to the centavo (halves up), the same way the server does. */
+export function roundMoney(n: number) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
-/** Highest price for the work (before discount and VAT): 8 digits, under ₱100M */
+/** Split a VAT-inclusive amount into its net and VAT parts; net + vat = gross. */
+export function vatBreakdown(gross: number, vatPercent?: number | null) {
+  const v = Math.max(Number(vatPercent) || 0, 0);
+  const total = roundMoney(Number(gross) || 0);
+  const net = v > 0 ? roundMoney(total / (1 + v / 100)) : total;
+  return { total, net, vat: roundMoney(total - net), vatPercent: v };
+}
+
+/**
+ * Splits a job order's stored final price into its parts.
+ * - VAT-inclusive orders (vatInclusive): subtotal is the price entered (VAT
+ *   included, before discount); total = subtotal − discount; `vat` is the VAT
+ *   already inside the total.
+ * - Older orders: subtotal is the price before discount and VAT, and VAT was
+ *   added on top: total = subtotal − discount + vat.
+ * Either way `net` is the total without VAT and the parts add up to the total.
+ */
+export function jobOrderPriceBreakdown(total: number, discountPercent?: number | null, vatPercent?: number | null,
+                                       vatInclusive = false) {
+  const d = Math.min(Math.max(Number(discountPercent) || 0, 0), 100);
+  const { net, vat, vatPercent: v } = vatBreakdown(total, vatPercent);
+  if (vatInclusive) {
+    const subtotal = d < 100 ? roundMoney(total / (1 - d / 100)) : total;
+    return { subtotal, discount: roundMoney(subtotal - total), afterDiscount: total, vat, net, total,
+             discountPercent: d, vatPercent: v, vatInclusive };
+  }
+  const subtotal = d < 100 ? roundMoney(net / (1 - d / 100)) : net;
+  return { subtotal, discount: roundMoney(subtotal - net), afterDiscount: net, vat, net, total,
+           discountPercent: d, vatPercent: v, vatInclusive };
+}
+
+/** What a job order's price is saved from. The server works out the total and the
+ *  VAT from these (using the rate in Settings) and ignores any total sent. */
+export interface JobOrderPriceInput {
+  /** Price for the work, VAT included, before discount */
+  priceForWork?: number;
+  /** Whether the price includes VAT (false for a sale without VAT) */
+  vatIncluded?: boolean;
+}
+
+/** Highest price for the work (VAT included, before discount): 8 digits, under ₱100M */
 export const MAX_JOB_ORDER_PRICE = 99_999_999.99;
 
 /** Whether a typed price fits: up to 8 digits before the decimal point and 2 after */
@@ -666,11 +735,12 @@ export function isValidPriceInput(raw: string) {
   return raw === '' || /^\d{0,8}(\.\d{0,2})?$/.test(raw);
 }
 
-/** Final price from the price before discount, a discount % and a VAT % */
-export function jobOrderTotalFrom(subtotal: number, discountPercent?: number | null, vatPercent?: number | null) {
+/** Final price from the VAT-inclusive price for the work and a discount %.
+ *  VAT is already inside the price, so it never changes the total. The server
+ *  works this out again and its figure is the one saved. */
+export function jobOrderTotalFrom(price: number, discountPercent?: number | null) {
   const d = Math.min(Math.max(Number(discountPercent) || 0, 0), 100);
-  const v = Math.max(Number(vatPercent) || 0, 0);
-  return Math.round(subtotal * (1 - d / 100) * (1 + v / 100) * 100) / 100;
+  return roundMoney(price * (1 - d / 100));
 }
 
 export interface ManagedWorker {
@@ -758,6 +828,10 @@ export interface JobOrder {
   totalPrice: number;
   discountPercent?: number | null;
   vatPercent?: number | null;
+  /** True if the price was entered with VAT included (VAT not added on top) */
+  vatInclusive?: boolean;
+  /** VAT inside totalPrice, as worked out by the server */
+  vatAmount?: number;
   status: 'pending' | 'in_progress' | 'completed' | 'voided' | 'cancelled' | 'delivered';
   paymentStatus: 'unpaid' | 'partial' | 'paid';
   downPayment: number;
@@ -1059,6 +1133,92 @@ export class ApiError extends Error {
   }
 }
 
+// ============================================
+// OWNER DASHBOARD & EXPENSES
+// ============================================
+
+export interface MonthlyFinancials { month: string; sales: number; expenses: number; netIncome: number }
+export interface MethodAmount { method: string; amount: number }
+
+export interface OwnerSummary {
+  period: { startDate: string; endDate: string };
+  ytd: { sales: number; totalExpenses: number; netIncome: number; profitMargin: number; grossProfit: number; vatCollected: number };
+  thisMonth: { sales: number; totalExpenses: number; netIncome: number };
+  receivables: number;
+  monthly: MonthlyFinancials[];
+  cashflowByMethod: { in: MethodAmount[]; out: MethodAmount[]; totalIn: number; totalOut: number };
+}
+
+export interface ProfitAndLoss {
+  period: { startDate: string; endDate: string; branchId: number | null };
+  sales: number; jobSales: number; premadeSales: number;
+  cogs: { materials: number; labor: number; otherJobCosts: number; premadeProducts: number; total: number };
+  grossProfit: number;
+  operatingExpenses: { byCategory: { category: string; amount: number }[]; total: number };
+  totalExpenses: number; netIncome: number; profitMargin: number; vatCollected: number;
+  orderCounts: { jobOrders: number; premadeOrders: number };
+  monthly: MonthlyFinancials[];
+}
+
+export interface JobCostingRow {
+  id: number; jobOrderId: string; customerName: string; description: string; branchName: string | null;
+  finishedOn: string; status: string;
+  customerPrice: number; vat: number; sellingPrice: number;
+  materials: number; labor: number; otherCosts: number; grossMargin: number; marginPercent: number;
+  lines: { name: string; category: 'material' | 'labor' | 'expense'; quantity: number; unitCost: number; cost: number }[];
+}
+
+export interface OwnerJobCosting {
+  jobs: JobCostingRow[];
+  totals: { sellingPrice: number; materials: number; labor: number; otherCosts: number; grossMargin: number; marginPercent: number };
+}
+
+export interface ReceivableInvoice {
+  type: 'job_order' | 'product_order'; id: number; reference: string; customerName: string;
+  branchName: string | null; orderStatus: string; date: string | null;
+  subtotal: number; vat: number; totalPaid: number; balance: number;
+  paymentStatus: 'paid' | 'partial' | 'unpaid';
+  payments: { date: string | null; amount: number; method: string; reference: string | null; recordedBy: string | null }[];
+}
+
+export interface OwnerReceivables {
+  invoices: ReceivableInvoice[];
+  totals: { subtotal: number; totalPaid: number; balance: number };
+}
+
+export interface OwnerInventory {
+  materialsValue: number; premadeValue: number; totalValue: number;
+  cogsYtd: ProfitAndLoss['cogs'];
+  restock: { id: number; name: string; color: string | null; branchName: string | null; stock: number; threshold: number; status: 'out' | 'low' }[];
+  outOfStock: number; lowStock: number;
+  movements: { date: string | null; direction: 'in' | 'out'; item: string; quantity: number; reason: string; branchName: string | null }[];
+}
+
+export interface Expense {
+  id: number; date: string; category: string; particulars: string; amount: number;
+  paymentMethod: string; notes: string | null; branchId: number | null; branchName: string | null;
+  createdBy: string | null; createdAt: string | null;
+}
+
+export interface ExpenseList { expenses: Expense[]; total: number; categories: string[]; paymentMethods: string[] }
+
+/** How a payment method key reads on screen */
+export const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  cash: 'Cash', gcash: 'GCash', maya: 'Maya', bank_transfer: 'Bank Transfer', credit_card: 'Credit Card',
+  debit_card: 'Debit Card', check: 'Cheque', other: 'Other', not_recorded: 'Premade sales (method not recorded)',
+};
+
+const periodQuery = (p?: { startDate?: string; endDate?: string; branchId?: number | '' }) => {
+  const q = new URLSearchParams();
+  if (p?.startDate) q.set('startDate', p.startDate);
+  if (p?.endDate) q.set('endDate', p.endDate);
+  if (p?.branchId) q.set('branchId', String(p.branchId));
+  const s = q.toString();
+  return s ? `?${s}` : '';
+};
+
+export const PERMISSIONS_STALE_EVENT = 'auth:permissions-stale';
+
 async function fetchApi<T>(
   endpoint: string,
   options?: RequestInit
@@ -1086,6 +1246,12 @@ async function fetchApi<T>(
         window.location.href = '/login';
       }
       throw new Error('Session expired. Please login again.');
+    }
+
+    // A refusal usually means our copy of the user's permissions is out of date
+    // (an administrator changed them); AuthContext reloads them on this event.
+    if (response.status === 403 && typeof window !== 'undefined') {
+      window.dispatchEvent(new Event(PERMISSIONS_STALE_EVENT));
     }
 
     if (!response.ok) {
@@ -1398,17 +1564,16 @@ export const api = {
       items: JobOrderItem[];
       estimatedCompletion: string;
       downPayment?: number;
-      totalPrice?: number;
       discountPercent?: number;
       notes?: string;
       isDraft?: boolean;
-    }) =>
+    } & JobOrderPriceInput) =>
       fetchApi<JobOrder>('/api/sales/job-orders', {
         method: 'POST',
         body: JSON.stringify(order),
       }),
 
-    updateJobOrder: (id: number, updates: Partial<JobOrder>) =>
+    updateJobOrder: (id: number, updates: Partial<JobOrder> & JobOrderPriceInput) =>
       fetchApi<JobOrder>(`/api/sales/job-orders/${id}`, {
         method: 'PUT',
         body: JSON.stringify(updates),
@@ -1773,6 +1938,37 @@ export const api = {
   // ==================
   // SETTINGS
   // ==================
+  owner: {
+    summary: () => fetchApi<OwnerSummary>('/api/owner/summary'),
+    pnl: (p?: { startDate?: string; endDate?: string; branchId?: number | '' }) =>
+      fetchApi<ProfitAndLoss>(`/api/owner/pnl${periodQuery(p)}`),
+    jobCosting: (p?: { startDate?: string; endDate?: string }) =>
+      fetchApi<OwnerJobCosting>(`/api/owner/job-costing${periodQuery(p)}`),
+    receivables: (status?: string) =>
+      fetchApi<OwnerReceivables>(`/api/owner/receivables${status ? `?status=${status}` : ''}`),
+    inventory: () => fetchApi<OwnerInventory>('/api/owner/inventory'),
+  },
+
+  expenses: {
+    list: (p?: { startDate?: string; endDate?: string; category?: string }) => {
+      const q = periodQuery(p);
+      const cat = p?.category ? `${q ? '&' : '?'}category=${encodeURIComponent(p.category)}` : '';
+      return fetchApi<ExpenseList>(`/api/expenses${q}${cat}`);
+    },
+    create: (data: { date: string; category: string; particulars: string; amount: number; paymentMethod: string; notes?: string; branchId?: number }) =>
+      fetchApi<Expense>('/api/expenses', { method: 'POST', body: JSON.stringify(data) }),
+    remove: (id: number) => fetchApi<void>(`/api/expenses/${id}`, { method: 'DELETE' }),
+  },
+
+  permissions: {
+    catalogue: () => fetchApi<PermissionCatalogue>('/api/permissions'),
+    getForUser: (userId: number) => fetchApi<UserPermissions>(`/api/users/${userId}/permissions`),
+    /** Replaces the user's overrides; empty lists reset them to their role's defaults.
+     *  Fails with 409 if they changed since `version` was loaded. */
+    setForUser: (userId: number, data: { grants: string[]; revokes: string[]; version: string }) =>
+      fetchApi<UserPermissions>(`/api/users/${userId}/permissions`, { method: 'PUT', body: JSON.stringify(data) }),
+  },
+
   settings: {
     // Users
     getUsers: (includeInactive?: boolean) => {

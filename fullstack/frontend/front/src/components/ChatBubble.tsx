@@ -27,7 +27,7 @@ function formatDay(iso: string) {
 }
 
 export default function ChatBubble() {
-  const { user } = useAuth();
+  const { user, can } = useAuth();
 
   // ── All hooks unconditionally at the top ──────────────────────────────────
   const [open, setOpen]         = useState(false);
@@ -93,7 +93,7 @@ export default function ChatBubble() {
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Early return AFTER all hooks ─────────────────────────────────────────
-  const allowed = user?.role === 'administrator' || user?.role === 'supervisor';
+  const allowed = !!user && can('chat.use');
   if (!allowed) return null;
 
   // ── Handlers ──────────────────────────────────────────────────────────────

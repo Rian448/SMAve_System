@@ -473,7 +473,7 @@ function MyOrdersContent() {
               <div className="space-y-4 mb-6">
                 {jobOrders.map((jo) => {
                   const badge = jobOrderBadge(jo);
-                  const price = jobOrderPriceBreakdown(jo.totalPrice || 0, jo.discountPercent, jo.vatPercent);
+                  const price = jobOrderPriceBreakdown(jo.totalPrice || 0, jo.discountPercent, jo.vatPercent, !!jo.vatInclusive);
                   const awaiting = isAwaitingReply(jo);
                   const expanded = awaiting ? !toggledJobIds.has(jo.id) : toggledJobIds.has(jo.id);
                   const v = jo.vehicleInfo;
@@ -577,11 +577,12 @@ function MyOrdersContent() {
                           <section>
                             <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-1.5">Price</h4>
                             <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1">
-                              <dt className="text-gray-500">Price for the work</dt><dd className="text-gray-900 text-right">{peso(price.subtotal)}</dd>
+                              <dt className="text-gray-500">Price for the work{price.vatInclusive && price.vatPercent > 0 ? ' (VAT included)' : ''}</dt><dd className="text-gray-900 text-right">{peso(price.subtotal)}</dd>
                               {price.discountPercent > 0 && (<><dt className="text-gray-500">Discount ({price.discountPercent}%)</dt><dd className="text-green-700 text-right">− {peso(price.discount)}</dd></>)}
-                              {price.vatPercent > 0 && (<><dt className="text-gray-500">VAT ({price.vatPercent}%)</dt><dd className="text-gray-900 text-right">+ {peso(price.vat)}</dd></>)}
+                              {price.vatPercent > 0 && !price.vatInclusive && (<><dt className="text-gray-500">VAT ({price.vatPercent}%)</dt><dd className="text-gray-900 text-right">+ {peso(price.vat)}</dd></>)}
                               <dt className="text-gray-900 font-semibold border-t border-gray-100 pt-1">Total</dt>
                               <dd className="text-gray-900 font-semibold text-right border-t border-gray-100 pt-1">{peso(price.total)}</dd>
+                              {price.vatPercent > 0 && price.vatInclusive && (<><dt className="text-xs text-gray-500">Includes VAT ({price.vatPercent}%)</dt><dd className="text-xs text-gray-500 text-right">{peso(price.vat)}</dd></>)}
                               {jo.status !== 'draft' && (
                                 <>
                                   <dt className="text-gray-500">Paid</dt><dd className="text-gray-900 text-right">{peso(jo.downPayment)}</dd>
