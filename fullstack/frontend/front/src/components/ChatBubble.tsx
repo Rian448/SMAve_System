@@ -188,13 +188,14 @@ export default function ChatBubble() {
                             </div>
                           )}
                         </div>
-                        <div className={`flex flex-col max-w-50 ${isMe ? 'items-end' : 'items-start'}`}>
+                        <div className={`flex flex-col min-w-0 max-w-50 ${isMe ? 'items-end' : 'items-start'}`}>
                           {!prevSame && (
                             <span className="text-[10px] text-gray-400 mb-0.5 px-1">
                               {isMe ? 'You' : m.senderName}
                             </span>
                           )}
-                          <div className={`px-3 py-2 rounded-2xl text-sm leading-snug whitespace-pre-wrap wrap-break-word
+                          {/* wrap-anywhere: an unbroken word (a long link, "ahhhh…") wraps inside the bubble */}
+                          <div className={`max-w-full px-3 py-2 rounded-2xl text-sm leading-snug whitespace-pre-wrap wrap-anywhere
                             ${isMe ? 'bg-[#011c72] text-white rounded-br-sm' : 'bg-gray-100 text-gray-900 rounded-bl-sm'}`}>
                             {m.content}
                           </div>
