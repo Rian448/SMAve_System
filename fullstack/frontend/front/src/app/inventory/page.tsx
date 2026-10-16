@@ -2,7 +2,7 @@
 import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect, useMemo, useRef, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { useAuth, hasAccess } from '@/context/AuthContext';
+import { useAuth } from '@/context/AuthContext';
 import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus, PremadeTransfer } from '@/lib/api';
 import { useConfirm } from '@/components/ConfirmDialog';
 import Link from 'next/link';
@@ -25,7 +25,7 @@ export default function InventoryPage() {
 }
 
 function InventoryContent() {
-  const { user } = useAuth();
+  const { user, can } = useAuth();
   const { confirm, confirmDialog } = useConfirm();
   const searchParams = useSearchParams();
   // Deep links from the dashboard's low-stock alerts arrive as
@@ -136,9 +136,9 @@ function InventoryContent() {
   // Which location's finished goods to show: 'all', or a branch/warehouse id.
   const [premadeBranchFilter, setPremadeBranchFilter] = useState<string>('all');
 
-  const canDistribute = hasAccess(user?.role, ['administrator', 'supervisor']);
+  const canDistribute = can('premade.distribute');
   /** Admin/supervisor approve on someone's behalf, so they get a confirm step first. */
-  const confirmsViaDialog = hasAccess(user?.role, ['administrator', 'supervisor']);
+  const confirmsViaDialog = can('branches.all', 'premade.distribute');
 
   useEffect(() => {
     if (activeTab !== 'ai-predictions') fetchInventory();
@@ -851,8 +851,8 @@ function InventoryContent() {
             <p className="text-gray-500 mt-1">Manage raw materials and finished goods</p>
           </div>
           <div className="mt-4 sm:mt-0 flex flex-wrap items-center gap-3">
-            {/* Global Low Stock Threshold Setting — admin/supervisor only */}
-            {(user?.role === 'administrator' || user?.role === 'supervisor') && (
+            {/* Global Low Stock Threshold Setting */}
+            {can('settings.edit') && (
               <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-50 border border-orange-200">
                 <svg className="w-4 h-4 text-orange-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
@@ -1261,7 +1261,7 @@ function InventoryContent() {
         )}
 
         {/* Add Supplier Form */}
-        {activeTab === 'suppliers' && (user?.role === 'administrator' || user?.role === 'supervisor') && (
+        {activeTab === 'suppliers' && can('suppliers.view') && (
           <form onSubmit={handleCreateSupplier} className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Add Supplier</h2>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -1334,7 +1334,7 @@ function InventoryContent() {
         })()}
 
         {/* AI Historical Upload */}
-        {activeTab === 'ai-predictions' && (user?.role === 'administrator' || user?.role === 'supervisor') && (
+        {activeTab === 'ai-predictions' && can('forecasting.view') && (
           <div className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
               <div>
@@ -1402,7 +1402,7 @@ function InventoryContent() {
         )}
 
         {/* Add Waste Log Form */}
-        {activeTab === 'waste-log' && (user?.role === 'administrator' || user?.role === 'supervisor') && (
+        {activeTab === 'waste-log' && can('inventory.view') && (
           <form onSubmit={handleCreateWasteLog} className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Log Waste / Scrap</h2>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -1754,7 +1754,7 @@ function InventoryContent() {
                   <ul className="space-y-2">
                     {transfers.map((t) => {
                       const mine = user?.branchId === t.destinationBranchId;
-                      const canAct = canDistribute || (user?.role === 'sales_manager' && mine);
+                      const canAct = canDistribute || can('branches.all') || (can('premade.receive') && mine);
                       return (
                         <li key={t.id}
                           className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3">
@@ -2093,7 +2093,7 @@ function InventoryContent() {
                           ) : (
                             <div className="flex items-center justify-end gap-3">
                               <button onClick={() => startEditSupplier(s)} className="text-[#011c72] text-sm font-medium">Edit</button>
-                              {s.isActive && (user?.role === 'administrator' || user?.role === 'supervisor') && (
+                              {s.isActive && can('suppliers.edit') && (
                                 <button onClick={() => handleDeactivateSupplier(s.id)} className="text-red-500 text-sm font-medium">Deactivate</button>
                               )}
                             </div>

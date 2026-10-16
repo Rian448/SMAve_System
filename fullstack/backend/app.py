@@ -378,6 +378,18 @@ class Notification(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     user = db.relationship('User', backref='notifications')
 
+class UserPermissionOverride(db.Model):
+    """A permission granted to or revoked from one user on top of their role's
+    defaults (see ROLE_DEFAULT_PERMISSIONS)."""
+    __tablename__ = 'user_permission_overrides'
+    __table_args__ = (db.UniqueConstraint('user_id', 'permission', name='uq_user_permission'),)
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    permission = db.Column(db.String(64), nullable=False)
+    effect = db.Column(db.String(10), nullable=False)  # grant | revoke
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+
 class InventoryMaterial(db.Model):
     __tablename__ = 'inventory_materials'
     id = db.Column(db.Integer, primary_key=True)
@@ -791,19 +803,120 @@ finished_goods = [
 
 db_initialized = False
 
+# ============================================
+# PERMISSIONS
+# ============================================
+# Every feature as module.action. A role only supplies defaults; an admin can
+# grant or revoke any permission for an individual user (user_permission_overrides).
+# branches.all is the cross-branch scope: without it a user only sees and acts on
+# their own branch.
+PERMISSION_MODULES = [
+    ('dashboard', 'Dashboard', [('view', 'View')]),
+    ('sales', 'Sales / Job Orders', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'), ('delete', 'Delete'),
+                                     ('void', 'Void'), ('quote', 'Send quotations')]),
+    ('custom_requests', 'Custom Requests', [('view', 'View'), ('edit', 'Edit'), ('quote', 'Send quotations')]),
+    ('customers', 'Customers', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit')]),
+    ('payments', 'Payments', [('view', 'View'), ('add', 'Add'), ('request_override', 'Request override'),
+                              ('approve_override', 'Approve overrides')]),
+    ('appointments', 'Appointments', [('view', 'View'), ('edit', 'Edit')]),
+    ('inventory', 'Inventory', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'), ('delete', 'Archive'),
+                                ('log_waste', 'Log waste')]),
+    ('premade', 'Premade Products', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'),
+                                     ('distribute', 'Distribute'), ('receive', 'Receive deliveries')]),
+    ('suppliers', 'Suppliers', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit')]),
+    ('purchase_orders', 'Purchase Orders', [('view', 'View'), ('add', 'Add'), ('approve', 'Approve'),
+                                            ('receive', 'Receive')]),
+    ('product_orders', 'Product Orders', [('view', 'View'), ('edit', 'Edit'), ('payment', 'Record payments'),
+                                          ('transfer', 'Transfers'), ('flag_spam', 'Flag spam')]),
+    ('costing', 'Costing', [('view', 'View'), ('edit', 'Edit')]),
+    ('forecasting', 'Forecasting', [('view', 'View'), ('manage', 'Manage AI data')]),
+    ('item_trail', 'Item Trail', [('view', 'View'), ('add', 'Add'), ('update_status', 'Update status')]),
+    ('reports', 'Reports', [('sales', 'Sales'), ('inventory', 'Inventory'), ('settlement', 'Branch settlement'),
+                            ('audit_trail', 'Audit trail')]),
+    ('announcements', 'Announcements', [('view', 'View'), ('manage', 'Manage')]),
+    ('workers', 'Worker Management', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'), ('delete', 'Delete'),
+                                      ('assign', 'Assign work'), ('delete_assignment', 'Delete assignments')]),
+    ('catalog', 'Catalog', [('manage', 'Manage')]),
+    ('blacklist', 'Spam Blacklist', [('manage', 'Manage')]),
+    ('chat', 'Staff Chat', [('use', 'Use')]),
+    ('settings', 'System Settings', [('edit', 'Edit')]),
+    ('branches', 'Branches', [('manage', 'Manage'), ('all', 'Access all branches')]),
+    ('users', 'Users', [('manage', 'Manage users & permissions')]),
+]
+PERMISSIONS = {
+    f'{module}.{action}': {'module': module, 'moduleLabel': module_label, 'action': action, 'label': label}
+    for module, module_label, actions in PERMISSION_MODULES
+    for action, label in actions
+}
+
+_SUPERVISOR_EXCLUDED = {
+    'payments.approve_override', 'purchase_orders.approve', 'reports.audit_trail',
+    'workers.add', 'workers.edit', 'workers.delete', 'workers.delete_assignment',
+    'catalog.manage', 'blacklist.manage', 'branches.manage', 'branches.all', 'users.manage',
+}
+# Defaults reproduce what each role could do before permissions existed
+ROLE_DEFAULT_PERMISSIONS = {
+    'administrator': frozenset(PERMISSIONS),
+    'supervisor': frozenset(set(PERMISSIONS) - _SUPERVISOR_EXCLUDED),
+    'sales_manager': frozenset({
+        'dashboard.view',
+        'sales.view', 'sales.add', 'sales.edit', 'sales.delete', 'sales.quote',
+        'custom_requests.view', 'custom_requests.edit', 'custom_requests.quote',
+        'customers.view', 'customers.edit',
+        'payments.view', 'payments.add', 'payments.request_override',
+        'appointments.view', 'appointments.edit',
+        'premade.receive',
+        'reports.sales',
+        'announcements.view',
+        'workers.view', 'workers.assign',
+    }),
+    # Worker accounts only use their profile; Worker Management tracks their work
+    'seat_maker': frozenset(),
+    'sewer': frozenset(),
+    # Customers are self-service: their own orders, cart and profile, no staff features
+    'customer': frozenset(),
+}
+
+def effective_permissions(user_id, role_key, overrides=None):
+    """Role defaults plus this user's grants, minus their revokes."""
+    perms = set(ROLE_DEFAULT_PERMISSIONS.get(role_key, ()))
+    if role_key == 'customer':
+        return perms
+    if overrides is None:
+        overrides = UserPermissionOverride.query.filter_by(user_id=user_id).all()
+    for o in overrides:
+        if o.permission not in PERMISSIONS:
+            continue
+        if o.effect == 'grant':
+            perms.add(o.permission)
+        elif o.effect == 'revoke':
+            perms.discard(o.permission)
+    return perms
+
+def has_perm(user, *permissions):
+    """True if the signed-in user (request.current_user) has any of these."""
+    granted = user.get('permissions') or ()
+    return any(p in granted for p in permissions)
+
+def all_branches(user):
+    """Whether the user sees every branch rather than only their own."""
+    return has_perm(user, 'branches.all')
+
 def user_to_dict(user):
+    role_key = user.role.key if user.role else None
     return {
         'id': user.id,
         'username': user.username,
         'email': user.email,
         'fullName': user.full_name,
-        'role': user.role.key if user.role else None,
+        'role': role_key,
         'roleName': user.role.name if user.role else None,
         'branch': user.branch,
         'branchId': user.branch_id,
         'branchName': user.branch_rel.name if user.branch_rel else user.branch,
         'isActive': user.is_active,
-        'phone': user.phone
+        'phone': user.phone,
+        'permissions': sorted(effective_permissions(user.id, role_key)),
     }
 
 def customer_order_to_dict(order):
@@ -1165,6 +1278,12 @@ def end_user_sessions(user_id):
     for t in [t for t, (u, _) in _session_cache.items() if u['id'] == user_id]:
         _session_cache.pop(t, None)
 
+def forget_cached_sessions(user_id):
+    """Drop a user's cached session data so role or permission changes apply on
+    their very next request."""
+    for t in [t for t, (u, _) in _session_cache.items() if u['id'] == user_id]:
+        _session_cache.pop(t, None)
+
 def create_session(user):
     """Start a session and return its token. One login at a time: any other
     session the user has is ended. Commits."""
@@ -1217,18 +1336,40 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated
 
-def require_roles(*roles):
-    """Decorator for role-based access"""
+def require_permission(*permissions):
+    """Decorator: the signed-in user needs at least one of these permissions."""
     def decorator(f):
         @wraps(f)
         def decorated(*args, **kwargs):
             if not hasattr(request, 'current_user'):
                 return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-            if request.current_user['role'] not in roles:
-                return jsonify({'status': 'error', 'message': 'Forbidden - Insufficient permissions'}), 403
+            if not has_perm(request.current_user, *permissions):
+                return jsonify({'status': 'error', 'message': 'You do not have permission to do this'}), 403
             return f(*args, **kwargs)
         return decorated
     return decorator
+
+def require_staff(f):
+    """Decorator: any staff account (lookups shared by several modules)."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not hasattr(request, 'current_user'):
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+        if request.current_user['role'] == 'customer':
+            return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+        return f(*args, **kwargs)
+    return decorated
+
+def require_customer(f):
+    """Decorator: customer self-service routes (their own orders, quotations)."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not hasattr(request, 'current_user'):
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+        if request.current_user['role'] != 'customer':
+            return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+        return f(*args, **kwargs)
+    return decorated
 
 PH_OFFSET = timedelta(hours=8)
 
@@ -1447,7 +1588,7 @@ def delivery_to_dict(d):
 
 
 def can_see_delivery(user, d):
-    if user['role'] == 'administrator':
+    if all_branches(user):
         return True
     bid = user_branch_id(user)
     return bid is not None and bid in (d.from_branch_id, d.to_branch_id)
@@ -1543,7 +1684,8 @@ def get_current_user():
             'fullName': user['fullName'],
             'role': user['role'],
             'branch': user['branch'],
-            'phone': user.get('phone')
+            'phone': user.get('phone'),
+            'permissions': user.get('permissions', []),
         }
     })
 
@@ -1922,7 +2064,7 @@ def dashboard_scope():
     Administrators see the whole company and may pick one branch with
     ?branchId=; everyone else only ever sees their own branch."""
     user = request.current_user
-    if user['role'] == 'administrator':
+    if all_branches(user):
         raw = request.args.get('branchId')
         if not raw:
             return None, None
@@ -1939,9 +2081,9 @@ def dashboard_scope():
 
 @app.route('/api/dashboard/stats', methods=['GET'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('dashboard.view')
 def get_dashboard_stats():
-    role = request.current_user['role']
+    user = request.current_user
     bid, err = dashboard_scope()
     if err:
         return err
@@ -1996,7 +2138,7 @@ def get_dashboard_stats():
         'scopeBranchName': scope_branch.name if scope_branch else None,
     }
 
-    if role == 'administrator':
+    if all_branches(user):
         stats['totalUsers'] = User.query.filter_by(is_active=True).count()
         stats['totalBranches'] = Branch.query.filter_by(is_active=True).count()
 
@@ -2004,7 +2146,7 @@ def get_dashboard_stats():
 
 @app.route('/api/dashboard/recent-activity', methods=['GET'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('dashboard.view')
 def get_recent_activity():
     bid, err = dashboard_scope()
     if err:
@@ -2046,7 +2188,7 @@ def get_recent_activity():
 
 @app.route('/api/dashboard/alerts', methods=['GET'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('dashboard.view')
 def get_alerts():
     bid, err = dashboard_scope()
     if err:
@@ -2216,14 +2358,11 @@ def premade_transfer_to_dict(transfer):
     }
 
 def can_resolve_premade_transfer(user, transfer):
-    """Admins and supervisors may act on any transfer; a sales manager only on
-    deliveries addressed to their own branch."""
-    role = user.get('role')
-    if role in ('administrator', 'supervisor'):
+    """Anyone who sees every branch or distributes premade stock may act on any
+    delivery; others only on deliveries addressed to their own branch."""
+    if has_perm(user, 'branches.all', 'premade.distribute'):
         return True
-    if role == 'sales_manager':
-        return user.get('branchId') == transfer.destination_branch_id
-    return False
+    return has_perm(user, 'premade.receive') and user.get('branchId') == transfer.destination_branch_id
 
 def material_usage_to_dict(log):
     return {
@@ -2285,6 +2424,7 @@ def get_vehicle_models():
 
 @app.route('/api/inventory/raw-materials', methods=['GET'])
 @require_auth
+@require_permission('inventory.view', 'sales.add', 'sales.edit', 'purchase_orders.add')
 def get_raw_materials():
     include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
     branch_id = request.args.get('branchId')
@@ -2319,6 +2459,7 @@ def get_raw_materials():
 
 @app.route('/api/inventory/raw-materials/summary', methods=['GET'])
 @require_auth
+@require_permission('inventory.view')
 def get_raw_materials_summary():
     include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
     include_components = request.args.get('includeComponents', 'false').lower() == 'true'
@@ -2346,6 +2487,7 @@ def get_raw_materials_summary():
 
 @app.route('/api/inventory/raw-materials/group-detail', methods=['GET'])
 @require_auth
+@require_permission('inventory.view')
 def get_raw_material_group_detail():
     include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
     branch_id = request.args.get('branchId')
@@ -2370,6 +2512,7 @@ def get_raw_material_group_detail():
 
 @app.route('/api/inventory/raw-materials/<int:material_id>', methods=['GET'])
 @require_auth
+@require_permission('inventory.view', 'sales.add', 'sales.edit', 'purchase_orders.add')
 def get_raw_material(material_id):
     material = InventoryMaterial.query.get(material_id)
     if not material:
@@ -2378,7 +2521,7 @@ def get_raw_material(material_id):
 
 @app.route('/api/inventory/raw-materials', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('inventory.add')
 def create_raw_material():
     data = request.get_json()
 
@@ -2443,7 +2586,7 @@ def create_raw_material():
 
 @app.route('/api/inventory/raw-materials/<int:material_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('inventory.edit')
 def update_raw_material(material_id):
     material = InventoryMaterial.query.get(material_id)
     if not material:
@@ -2488,7 +2631,7 @@ def update_raw_material(material_id):
 
 @app.route('/api/inventory/raw-materials/<int:material_id>/archive', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('inventory.delete')
 def archive_raw_material(material_id):
     material = InventoryMaterial.query.get(material_id)
     if not material:
@@ -2503,7 +2646,7 @@ def archive_raw_material(material_id):
 
 @app.route('/api/inventory/raw-materials/<int:material_id>/restore', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('inventory.delete')
 def restore_raw_material(material_id):
     material = InventoryMaterial.query.get(material_id)
     if not material:
@@ -2522,6 +2665,7 @@ def restore_raw_material(material_id):
 
 @app.route('/api/inventory/finished-goods', methods=['GET'])
 @require_auth
+@require_permission('premade.view', 'sales.add')
 def get_finished_goods():
     include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
     branch_id = request.args.get('branchId')
@@ -2543,7 +2687,7 @@ def get_finished_goods():
 
 @app.route('/api/inventory/finished-goods', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('premade.add')
 def create_finished_good():
     data = request.get_json()
 
@@ -2670,7 +2814,7 @@ def create_finished_good():
 
 @app.route('/api/inventory/finished-goods/<int:item_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('premade.edit')
 def update_finished_good(item_id):
     product = PremadeProduct.query.get(item_id)
     if not product:
@@ -2814,7 +2958,7 @@ def create_premade_transfers(product, allocations, actor, notes='', batch_id=Non
 
 @app.route('/api/inventory/finished-goods/<int:item_id>/distribute', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('premade.distribute')
 def distribute_finished_good(item_id):
     """Give warehouse stock to one or more branches as pending deliveries.
 
@@ -2871,6 +3015,7 @@ def distribute_finished_good(item_id):
 
 @app.route('/api/inventory/premade-transfers', methods=['GET'])
 @require_auth
+@require_permission('premade.view', 'premade.receive')
 def get_premade_transfers():
     """Premade deliveries. Sales managers only see their own branch."""
     status = request.args.get('status')
@@ -2879,7 +3024,7 @@ def get_premade_transfers():
     query = PremadeStockTransfer.query
     if status:
         query = query.filter(PremadeStockTransfer.status == status)
-    if user.get('role') not in ('administrator', 'supervisor'):
+    if not has_perm(user, 'branches.all', 'premade.distribute'):
         if not user.get('branchId'):
             return jsonify({'status': 'success', 'data': []})
         query = query.filter(PremadeStockTransfer.destination_branch_id == user['branchId'])
@@ -2889,7 +3034,7 @@ def get_premade_transfers():
 
 @app.route('/api/inventory/premade-transfers/<int:transfer_id>/confirm', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('premade.receive')
 def confirm_premade_transfer(transfer_id):
     """Accept a delivery: only now does stock leave the warehouse and appear
     in the destination branch's own row."""
@@ -2941,7 +3086,7 @@ def confirm_premade_transfer(transfer_id):
 
 @app.route('/api/inventory/premade-transfers/<int:transfer_id>/cancel', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('premade.receive')
 def cancel_premade_transfer(transfer_id):
     """Reject a delivery. Nothing moved, so the warehouse simply keeps the stock."""
     transfer = PremadeStockTransfer.query.get(transfer_id)
@@ -2966,6 +3111,7 @@ def cancel_premade_transfer(transfer_id):
 
 @app.route('/api/inventory/material-usage', methods=['GET'])
 @require_auth
+@require_permission('inventory.view')
 def get_material_usage_logs():
     branch_id = request.args.get('branchId')
     material_id = request.args.get('materialId')
@@ -3024,6 +3170,7 @@ def get_finished_goods_public():
 
 @app.route('/api/inventory/categories', methods=['GET'])
 @require_auth
+@require_staff
 def get_categories():
     rm_categories = sorted({m.material_type for m in InventoryMaterial.query.filter_by(is_archived=False).all() if m.material_type})
     fg_categories = sorted({p.category for p in PremadeProduct.query.filter_by(is_archived=False).all() if p.category})
@@ -3038,6 +3185,7 @@ def get_categories():
 
 @app.route('/api/inventory/low-stock', methods=['GET'])
 @require_auth
+@require_permission('inventory.view')
 def get_low_stock_items():
     threshold_setting = SystemSetting.query.filter_by(key='inventory_low_stock_threshold').first()
     threshold = float(threshold_setting.value) if threshold_setting and threshold_setting.value else 0
@@ -3079,6 +3227,7 @@ def supplier_to_dict(s):
 
 @app.route('/api/inventory/suppliers', methods=['GET'])
 @require_auth
+@require_permission('suppliers.view', 'purchase_orders.add')
 def get_suppliers():
     include_inactive = request.args.get('includeInactive', 'false').lower() == 'true'
     query = Supplier.query
@@ -3089,7 +3238,7 @@ def get_suppliers():
 
 @app.route('/api/inventory/suppliers', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('suppliers.add')
 def create_supplier():
     data = request.get_json()
     if not data.get('name', '').strip():
@@ -3110,7 +3259,7 @@ def create_supplier():
 
 @app.route('/api/inventory/suppliers/<int:supplier_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('suppliers.edit')
 def update_supplier(supplier_id):
     supplier = Supplier.query.get(supplier_id)
     if not supplier:
@@ -3151,6 +3300,7 @@ def waste_log_to_dict(log):
 
 @app.route('/api/inventory/waste-logs', methods=['GET'])
 @require_auth
+@require_permission('inventory.view')
 def get_waste_logs():
     branch_id = request.args.get('branchId')
     query = MaterialWasteLog.query
@@ -3161,7 +3311,7 @@ def get_waste_logs():
 
 @app.route('/api/inventory/waste-logs', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('inventory.log_waste')
 def create_waste_log():
     data = request.get_json()
     if not data.get('materialId') or not data.get('quantity') or not data.get('reason', '').strip():
@@ -3208,13 +3358,14 @@ def payment_record_to_dict(p):
 
 @app.route('/api/payments', methods=['GET'])
 @require_auth
+@require_permission('payments.view', 'sales.view')
 def get_payments():
     user = request.current_user
     job_order_id = request.args.get('jobOrderId')
     query = PaymentRecord.query
     if job_order_id:
         query = query.filter_by(job_order_id=int(job_order_id))
-    elif user['role'] != 'administrator':
+    elif not all_branches(user):
         # Non-admins: only show payments for their branch's job orders
         branch_id = user.get('branchId')
         if branch_id:
@@ -3225,7 +3376,7 @@ def get_payments():
 
 @app.route('/api/payments', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('payments.add')
 def create_payment():
     data = request.get_json()
     if not data.get('jobOrderId') or not data.get('amount'):
@@ -3262,12 +3413,12 @@ def create_payment():
 
 @app.route('/api/payments/summary', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('payments.view')
 def get_payment_summary():
     user = request.current_user
     jo_query = JobOrder.query
     # Non-admins only ever see their own branch (no branch on the account = nothing)
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         jo_query = jo_query.filter_by(branch_id=user_branch_id(user) or -1)
     orders = jo_query.all()
     total_revenue = sum(float(o.total_price or 0) for o in orders if o.status not in ('voided', 'cancelled', 'draft'))
@@ -3312,7 +3463,7 @@ def payment_override_to_dict(r):
 
 @app.route('/api/payment-overrides', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('payments.request_override')
 def create_payment_override():
     """Supervisor submits a payment override for admin approval. Nothing is
     applied to the job order until an administrator approves it."""
@@ -3341,14 +3492,14 @@ def create_payment_override():
 
 @app.route('/api/payment-overrides', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('payments.view')
 def list_payment_overrides():
     """Admins see all requests; supervisors see the ones they submitted."""
     user = request.current_user
     status = request.args.get('status')
     job_order_id = request.args.get('jobOrderId')
     query = PaymentOverrideRequest.query
-    if user['role'] != 'administrator':
+    if not has_perm(user, 'payments.approve_override'):
         query = query.filter_by(requested_by=user['id'])
     if status:
         query = query.filter_by(status=status)
@@ -3359,7 +3510,7 @@ def list_payment_overrides():
 
 @app.route('/api/payment-overrides/<int:req_id>/approve', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('payments.approve_override')
 def approve_payment_override(req_id):
     req = PaymentOverrideRequest.query.get(req_id)
     if not req:
@@ -3386,7 +3537,7 @@ def approve_payment_override(req_id):
 
 @app.route('/api/payment-overrides/<int:req_id>/reject', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('payments.approve_override')
 def reject_payment_override(req_id):
     req = PaymentOverrideRequest.query.get(req_id)
     if not req:
@@ -3603,6 +3754,7 @@ def record_assignment_pay(assignment):
 
 @app.route('/api/sales/job-orders', methods=['GET'])
 @require_auth
+@require_permission('sales.view', 'item_trail.add', 'workers.assign')
 def get_job_orders():
     user = request.current_user
     status = request.args.get('status')
@@ -3610,7 +3762,7 @@ def get_job_orders():
     # Branch-level access control with database
     query = JobOrder.query
     
-    if user['role'] == 'administrator':
+    if all_branches(user):
         # Admins see all job orders
         pass
     else:
@@ -3671,6 +3823,7 @@ def get_job_orders():
 
 @app.route('/api/sales/job-orders/<int:order_id>', methods=['GET'])
 @require_auth
+@require_permission('sales.view', 'item_trail.add', 'workers.assign')
 def get_job_order(order_id):
     user = request.current_user
     order = JobOrder.query.get(order_id)
@@ -3678,7 +3831,7 @@ def get_job_order(order_id):
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
     
     # Branch-level access control
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         # Use branch_id directly from user if available, otherwise look up by name
         user_branch_id = None
         if user.get('branchId'):
@@ -3748,7 +3901,7 @@ def job_order_price_error(total_price, discount_percent, vat_percent):
 
 @app.route('/api/sales/job-orders', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.add')
 def create_job_order():
     data = request.get_json()
     is_draft = bool(data.get('isDraft'))
@@ -3766,6 +3919,8 @@ def create_job_order():
     # It is kept as a draft until then, so it stays out of sales figures and
     # worker schedules exactly like any other draft.
     send_quotation = bool(data.get('sendQuotation'))
+    if send_quotation and not has_perm(request.current_user, 'sales.quote'):
+        return jsonify({'status': 'error', 'message': 'You do not have permission to send quotations'}), 403
     appointment = None
     if send_quotation:
         if not all(f in data for f in required):
@@ -3933,7 +4088,7 @@ def create_job_order():
 
 @app.route('/api/sales/job-orders/<int:order_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.edit')
 def update_job_order(order_id):
     # Use database instead of in-memory list
     order = JobOrder.query.get(order_id)
@@ -3948,6 +4103,8 @@ def update_job_order(order_id):
         return jsonify({'status': 'error', 'message': 'Down payment is required before sales managers can edit this job order'}), 403
 
     data = request.get_json()
+    if data.get('sendQuotation') and not has_perm(user, 'sales.quote'):
+        return jsonify({'status': 'error', 'message': 'You do not have permission to send quotations'}), 403
 
     # Capture previous status BEFORE any updates
     prev_status = order.status
@@ -4168,13 +4325,13 @@ def update_job_order(order_id):
 
 @app.route('/api/sales/job-orders/<int:order_id>/void', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('sales.void')
 def void_job_order(order_id):
     user = request.current_user
     order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    if user['role'] != 'administrator' and order.branch_id != user_branch_id(user):
+    if not all_branches(user) and order.branch_id != user_branch_id(user):
         return jsonify({'status': 'error', 'message': 'Access denied'}), 403
     if order.status in ('voided', 'cancelled', 'draft'):
         return jsonify({'status': 'error', 'message': f'A {order.status} order cannot be voided'}), 400
@@ -4293,7 +4450,7 @@ def my_customer_record_ids():
 
 @app.route('/api/job-orders/mine', methods=['GET'])
 @require_auth
-@require_roles('customer')
+@require_customer
 def get_my_job_orders():
     """Job orders (and quotations) for the signed-in customer's linked record.
     Staff drafts stay hidden; drafts sent as quotations are shown."""
@@ -4308,7 +4465,7 @@ def get_my_job_orders():
 
 @app.route('/api/job-orders/<int:order_id>/quotation/respond', methods=['POST'])
 @require_auth
-@require_roles('customer')
+@require_customer
 def respond_to_job_order_quotation(order_id):
     """Customer accepts (becomes a pending job order) or rejects (with a reason) a quotation."""
     user = request.current_user
@@ -4338,8 +4495,7 @@ def respond_to_job_order_quotation(order_id):
     order.quote_responded_at = now
     # Sales managers send quotations too, so they hear back as well
     notify_branch_users(order.branch_id, 'quotation_response', title, message,
-                        {'jobOrderId': order.id, 'response': response},
-                        branch_roles=('supervisor', 'sales_manager'))
+                        {'jobOrderId': order.id, 'response': response})
     db.session.commit()
 
     log_action(user['id'], user['fullName'], 'RESPOND', 'Sales',
@@ -4348,13 +4504,13 @@ def respond_to_job_order_quotation(order_id):
 
 @app.route('/api/sales/drafts', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.view')
 def get_draft_job_orders():
     """Draft job orders — saved but not yet confirmed. Kept out of all normal
     order lists and sales/pending counts until confirmed."""
     user = request.current_user
     query = JobOrder.query.filter(JobOrder.status == 'draft')
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         if user.get('branchId'):
             query = query.filter(JobOrder.branch_id == user['branchId'])
         elif user.get('branch'):
@@ -4383,7 +4539,7 @@ def get_draft_job_orders():
 
 @app.route('/api/sales/job-orders/<int:order_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.delete')
 def delete_job_order(order_id):
     """Delete a job order. Only drafts may be deleted; confirmed orders must be
     voided instead so their history is preserved."""
@@ -4401,7 +4557,7 @@ def delete_job_order(order_id):
 
 @app.route('/api/sales/all-orders', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.view')
 def get_all_orders():
     """Get both job orders and customer orders - filtered by branch for non-admin users"""
     user = request.current_user
@@ -4412,7 +4568,7 @@ def get_all_orders():
     co_base = CustomerOrder.query.options(joinedload(CustomerOrder.branch))
 
     # Get job orders from database
-    if user['role'] == 'administrator':
+    if all_branches(user):
         # Administrators can see all orders (drafts are excluded — they live in /api/sales/drafts)
         job_orders_db = jo_base.filter(JobOrder.status != 'draft').order_by(JobOrder.created_at.desc()).all()
         customer_orders_db = co_base.order_by(CustomerOrder.created_at.desc()).all()
@@ -4500,23 +4656,23 @@ def lineup_slip_to_dict(slip):
 
 
 def can_use_lineup_slip(user, branch_id):
-    return user['role'] == 'administrator' or (branch_id is not None and branch_id == user_branch_id(user))
+    return all_branches(user) or (branch_id is not None and branch_id == user_branch_id(user))
 
 
 @app.route('/api/sales/lineup-slips', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.view')
 def get_lineup_slips():
     user = request.current_user
     query = LineupSlip.query
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         query = query.filter(LineupSlip.branch_id == (user_branch_id(user) or -1))
     slips = query.order_by(LineupSlip.created_at.desc()).all()
     return jsonify({'status': 'success', 'data': [lineup_slip_to_dict(s) for s in slips]})
 
 @app.route('/api/sales/lineup-slips', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.add')
 def create_lineup_slip():
     user = request.current_user
     data = request.get_json() or {}
@@ -4549,7 +4705,7 @@ def create_lineup_slip():
 
 @app.route('/api/sales/lineup-slips/<int:slip_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.edit')
 def update_lineup_slip(slip_id):
     user = request.current_user
     slip = LineupSlip.query.get(slip_id)
@@ -4589,7 +4745,7 @@ def user_branch_id(user):
 def costed_job_orders(user):
     """Job orders the user may see for costing: real orders, not drafts or dead ones."""
     query = JobOrder.query.filter(~JobOrder.status.in_(('draft', 'voided', 'cancelled')))
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         query = query.filter(JobOrder.branch_id == (user_branch_id(user) or -1))
     return query
 
@@ -4630,7 +4786,7 @@ def job_order_costing(order):
 
 @app.route('/api/costing/all', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('costing.view')
 def get_all_costings():
     orders = costed_job_orders(request.current_user).order_by(JobOrder.created_at.desc()).all()
     result = []
@@ -4651,7 +4807,7 @@ def get_all_costings():
 
 @app.route('/api/costing/job-order/<int:order_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('costing.view')
 def get_job_order_costing(order_id):
     order = costed_job_orders(request.current_user).filter(JobOrder.id == order_id).first()
     if not order:
@@ -4676,7 +4832,7 @@ def get_job_order_costing(order_id):
 
 @app.route('/api/costing/job-order/<int:order_id>/actual', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('costing.edit')
 def update_actual_cost(order_id):
     # Actual cost is now worked out from the order's lines and its workers'
     # pay, so it can't be typed in; edit the order's parts instead.
@@ -4685,7 +4841,7 @@ def update_actual_cost(order_id):
 
 @app.route('/api/costing/variance-report', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('costing.view')
 def get_variance_report():
     orders = costed_job_orders(request.current_user).filter(JobOrder.status == 'completed').all()
     report = []
@@ -4707,13 +4863,13 @@ def get_variance_report():
 
 @app.route('/api/costing/receipt/<int:order_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.view', 'costing.view')
 def generate_receipt(order_id):
     user = request.current_user
     order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    if user['role'] != 'administrator' and order.branch_id != user_branch_id(user):
+    if not all_branches(user) and order.branch_id != user_branch_id(user):
         return jsonify({'status': 'error', 'message': 'Access denied'}), 403
 
     receipt = {
@@ -4749,7 +4905,7 @@ def generate_receipt(order_id):
 
 @app.route('/api/purchase-orders', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('purchase_orders.view')
 def get_purchase_orders():
     status = request.args.get('status')
     query = PurchaseOrder.query
@@ -4780,7 +4936,7 @@ def purchase_order_to_dict(po):
 
 @app.route('/api/purchase-orders/<int:po_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('purchase_orders.view')
 def get_purchase_order(po_id):
     po = PurchaseOrder.query.get(po_id)
     if not po:
@@ -4789,7 +4945,7 @@ def get_purchase_order(po_id):
 
 @app.route('/api/purchase-orders', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('purchase_orders.add')
 def create_purchase_order():
     data = request.get_json() or {}
 
@@ -4830,7 +4986,7 @@ def create_purchase_order():
 
 @app.route('/api/purchase-orders/<int:po_id>/approve', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('purchase_orders.approve')
 def approve_purchase_order(po_id):
     po = PurchaseOrder.query.get(po_id)
     if not po:
@@ -4849,7 +5005,7 @@ def approve_purchase_order(po_id):
 
 @app.route('/api/purchase-orders/<int:po_id>/receive', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('purchase_orders.receive')
 def receive_purchase_order(po_id):
     po = PurchaseOrder.query.get(po_id)
     if not po:
@@ -4880,11 +5036,11 @@ def receive_purchase_order(po_id):
 
 @app.route('/api/deliveries', methods=['GET'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('item_trail.view')
 def get_deliveries():
     user = request.current_user
     query = Delivery.query
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         bid = user_branch_id(user) or -1
         query = query.filter(db.or_(Delivery.from_branch_id == bid, Delivery.to_branch_id == bid))
     if request.args.get('status'):
@@ -4896,7 +5052,7 @@ def get_deliveries():
 
 @app.route('/api/deliveries/<int:delivery_id>', methods=['GET'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('item_trail.view')
 def get_delivery(delivery_id):
     d = Delivery.query.get(delivery_id)
     if not d:
@@ -4907,7 +5063,7 @@ def get_delivery(delivery_id):
 
 @app.route('/api/deliveries', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('item_trail.add')
 def create_delivery():
     data = request.get_json() or {}
     if not data.get('type') or not data.get('scheduledDate'):
@@ -4952,7 +5108,7 @@ def create_delivery():
 
 @app.route('/api/deliveries/<int:delivery_id>/status', methods=['PUT'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('item_trail.update_status')
 def update_delivery_status(delivery_id):
     user = request.current_user
     d = Delivery.query.get(delivery_id)
@@ -4980,7 +5136,7 @@ def update_delivery_status(delivery_id):
 
 @app.route('/api/deliveries/<int:delivery_id>/receipt', methods=['GET'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('item_trail.view')
 def generate_delivery_receipt(delivery_id):
     d = Delivery.query.get(delivery_id)
     if not d:
@@ -5143,7 +5299,7 @@ def appointment_branch_error(user, appointment=None):
     """Supervisors and sales managers only handle their own branch's
     appointments; administrators handle every branch. Returns an error
     response, or None when access is fine."""
-    if user['role'] == 'administrator':
+    if all_branches(user):
         return None
     if not user.get('branchId'):
         return jsonify({'status': 'error', 'message': 'Your account has no assigned branch'}), 400
@@ -5153,7 +5309,7 @@ def appointment_branch_error(user, appointment=None):
 
 @app.route('/api/appointments', methods=['GET'])
 @require_auth
-@require_roles(*APPOINTMENT_STAFF)
+@require_permission('appointments.view')
 def get_appointments():
     """Get all appointments - staff endpoint"""
     user = request.current_user
@@ -5169,7 +5325,7 @@ def get_appointments():
     error = appointment_branch_error(user)
     if error:
         return error
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         query = query.filter(Appointment.branch_id == user['branchId'])
     
     appointments = query.order_by(Appointment.preferred_date.desc()).all()
@@ -5178,7 +5334,7 @@ def get_appointments():
 
 @app.route('/api/appointments/<int:appointment_id>', methods=['GET'])
 @require_auth
-@require_roles(*APPOINTMENT_STAFF)
+@require_permission('appointments.view')
 def get_appointment(appointment_id):
     """One appointment, e.g. to pre-fill a quotation from it."""
     appointment = Appointment.query.get(appointment_id)
@@ -5191,7 +5347,7 @@ def get_appointment(appointment_id):
 
 @app.route('/api/appointments/<int:appointment_id>', methods=['PUT'])
 @require_auth
-@require_roles(*APPOINTMENT_STAFF)
+@require_permission('appointments.edit')
 def update_appointment(appointment_id):
     """Update an appointment status or notes"""
     appointment = Appointment.query.get(appointment_id)
@@ -5253,7 +5409,7 @@ def get_my_appointments():
 
 @app.route('/api/admin/appointments/<int:appointment_id>/no-show', methods=['POST'])
 @require_auth
-@require_roles(*APPOINTMENT_STAFF)
+@require_permission('appointments.edit')
 def mark_appointment_no_show(appointment_id):
     """Mark a confirmed appointment as no-show and add a strike to the phone number."""
     appointment = Appointment.query.get(appointment_id)
@@ -5289,7 +5445,7 @@ def mark_appointment_no_show(appointment_id):
 
 @app.route('/api/admin/product-orders/<int:order_id>/flag-spam', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.flag_spam')
 def flag_order_spam(order_id):
     """Flag a product order as fake/spam and add a strike to the phone number."""
     order = ProductOrder.query.get(order_id)
@@ -5320,7 +5476,7 @@ def flag_order_spam(order_id):
 
 @app.route('/api/admin/phone-blacklist', methods=['GET'])
 @require_auth
-@require_roles('administrator')
+@require_permission('blacklist.manage')
 def get_phone_blacklist():
     """Get all phone numbers with strikes or blocks."""
     records = PhoneBlacklist.query.order_by(
@@ -5342,7 +5498,7 @@ def get_phone_blacklist():
 
 @app.route('/api/admin/phone-blacklist/<int:record_id>/unblock', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('blacklist.manage')
 def unblock_phone(record_id):
     """Admin unblocks a phone number and resets its strike count."""
     record = PhoneBlacklist.query.get(record_id)
@@ -5365,7 +5521,7 @@ def unblock_phone(record_id):
 
 @app.route('/api/admin/phone-blacklist/<int:record_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator')
+@require_permission('blacklist.manage')
 def delete_phone_record(record_id):
     """Completely remove a phone record from the list."""
     record = PhoneBlacklist.query.get(record_id)
@@ -5411,19 +5567,33 @@ def fmt_dt(dt):
     return dt.isoformat()     # date only
 
 
-def notify_branch_users(branch_id, notif_type, title, message, data=None,
-                        branch_roles=('supervisor',)):
-    """Push an in-app notification to all admins plus the given roles at the
-    branch (supervisors by default)."""
+# Who receives each staff notification: holders of this permission who work at
+# the branch concerned, or who have access to every branch
+NOTIFICATION_PERMISSIONS = {
+    'premade_delivery': 'premade.view',
+    'quotation_response': 'sales.view',
+    'transfer_request': 'product_orders.transfer',
+    'transfer_dispatched': 'product_orders.transfer',
+    'order_ready': 'product_orders.view',
+    'sale_completed': 'product_orders.view',
+    'order_cancelled': 'product_orders.view',
+}
+
+def notify_branch_users(branch_id, notif_type, title, message, data=None):
+    """Push an in-app notification to the staff who handle this kind of event
+    at the branch (see NOTIFICATION_PERMISSIONS)."""
     if branch_id is None:
         return
-    targets = (User.query
-               .join(Role, User.role_id == Role.id)
-               .filter(Role.key.in_(['administrator', *branch_roles]),
-                       User.is_active == True)
-               .all())
-    for u in targets:
-        if u.role.key == 'administrator' or u.branch_id == branch_id:
+    needed = NOTIFICATION_PERMISSIONS[notif_type]
+    staff = (User.query.join(Role, User.role_id == Role.id)
+             .filter(Role.key != 'customer', User.is_active == True).all())
+    overrides = {}
+    for o in UserPermissionOverride.query.filter(
+            UserPermissionOverride.user_id.in_([u.id for u in staff] or [-1])).all():
+        overrides.setdefault(o.user_id, []).append(o)
+    for u in staff:
+        perms = effective_permissions(u.id, u.role.key, overrides.get(u.id, []))
+        if needed in perms and ('branches.all' in perms or u.branch_id == branch_id):
             db.session.add(Notification(
                 user_id=u.id,
                 type=notif_type,
@@ -5588,17 +5758,13 @@ def product_order_to_dict(order):
 
 def can_manage_product_order(user, order):
     """Check if current user can manage this product order."""
-    if user['role'] == 'administrator':
+    if all_branches(user):
         return True
-
-    if user['role'] == 'supervisor':
-        user_branch_id = user.get('branchId')
-        if not user_branch_id:
-            return False
-        # Source branch supervisor OR pickup branch supervisor can manage
-        return order.branch_id == user_branch_id or order.pickup_branch_id == user_branch_id
-
-    return False
+    user_branch_id = user.get('branchId')
+    if not user_branch_id:
+        return False
+    # Staff at the source or the pickup branch can manage it
+    return order.branch_id == user_branch_id or order.pickup_branch_id == user_branch_id
 
 def build_product_order_timeline(order):
     """Build timeline events for a product order using order fields and audit logs."""
@@ -5824,9 +5990,11 @@ def create_multi_branch_product_order():
 
 @app.route('/api/product-orders/group/<group_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator')
+@require_permission('product_orders.view')
+@require_permission('branches.all')
 def get_product_order_group(group_id):
-    """Get all orders belonging to the same multi-branch group (admin only)."""
+    """Get all orders belonging to the same multi-branch group (spans branches,
+    so it needs cross-branch access)."""
     orders = ProductOrder.query.filter_by(group_id=group_id).order_by(ProductOrder.created_at.asc()).all()
     if not orders:
         return jsonify({'status': 'error', 'message': 'Group not found'}), 404
@@ -5835,11 +6003,11 @@ def get_product_order_group(group_id):
 
 @app.route('/api/product-orders/my-transfer-requests', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_my_transfer_requests():
     """Source branch supervisors see transfer requests assigned to their branch."""
     user = request.current_user
-    if user['role'] == 'supervisor':
+    if not all_branches(user):
         branch_id = user.get('branchId')
         if not branch_id:
             return jsonify({'status': 'success', 'data': []})
@@ -5855,11 +6023,11 @@ def get_my_transfer_requests():
 
 @app.route('/api/product-orders/pickup-queue', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_pickup_queue():
     """Orders where this branch is the pickup location and items come from other branches."""
     user = request.current_user
-    if user['role'] == 'supervisor':
+    if not all_branches(user):
         branch_id = user.get('branchId')
         if not branch_id:
             return jsonify({'status': 'success', 'data': []})
@@ -5881,12 +6049,12 @@ def get_pickup_queue():
 
 @app.route('/api/product-orders/direct-sales', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_direct_sales():
     """Single-branch premade orders where this branch is both the supplier and pickup.
     These don't generate transfers — they're direct sales from the branch's own stock."""
     user = request.current_user
-    if user['role'] == 'supervisor':
+    if not all_branches(user):
         branch_id = user.get('branchId')
         if not branch_id:
             return jsonify({'status': 'success', 'data': []})
@@ -5904,7 +6072,7 @@ def get_direct_sales():
 
 @app.route('/api/product-order-transfers/<int:transfer_id>/mark-transferred', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.transfer')
 def mark_transfer_sent(transfer_id):
     """Source branch marks their items as sent to the pickup branch."""
     transfer = ProductOrderTransfer.query.get(transfer_id)
@@ -5912,7 +6080,7 @@ def mark_transfer_sent(transfer_id):
         return jsonify({'status': 'error', 'message': 'Transfer request not found'}), 404
 
     user = request.current_user
-    if user['role'] == 'supervisor' and user.get('branchId') != transfer.source_branch_id:
+    if not all_branches(user) and user.get('branchId') != transfer.source_branch_id:
         return jsonify({'status': 'error', 'message': 'Only the source branch can mark this transfer as sent'}), 403
 
     if transfer.status != 'pending':
@@ -5933,7 +6101,7 @@ def mark_transfer_sent(transfer_id):
     )
     db.session.commit()
 
-    is_override = user['role'] == 'administrator' and user.get('branchId') != transfer.source_branch_id
+    is_override = all_branches(user) and user.get('branchId') != transfer.source_branch_id
     log_action(user['id'], user['fullName'], 'TRANSFER', 'Product Orders',
         f"{'[ADMIN OVERRIDE] ' if is_override else ''}Transfer {transfer_id} for order {transfer.order.order_number if transfer.order else '?'} dispatched from {transfer.source_branch.name if transfer.source_branch else 'N/A'} to {transfer.order.branch.name if (transfer.order and transfer.order.branch) else 'N/A'}.",
         request.remote_addr or '0.0.0.0')
@@ -5943,7 +6111,7 @@ def mark_transfer_sent(transfer_id):
 
 @app.route('/api/product-order-transfers/<int:transfer_id>/confirm-receipt', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.transfer')
 def confirm_transfer_receipt(transfer_id):
     """Pickup branch confirms they received the transferred items; adds to their inventory."""
     transfer = ProductOrderTransfer.query.get(transfer_id)
@@ -5952,7 +6120,7 @@ def confirm_transfer_receipt(transfer_id):
 
     user = request.current_user
     order = transfer.order
-    if user['role'] == 'supervisor' and user.get('branchId') != (order.branch_id if order else None):
+    if not all_branches(user) and user.get('branchId') != (order.branch_id if order else None):
         return jsonify({'status': 'error', 'message': 'Only the pickup branch can confirm receipt'}), 403
 
     if transfer.status != 'transferred':
@@ -6004,7 +6172,7 @@ def confirm_transfer_receipt(transfer_id):
 
     db.session.commit()
 
-    is_override = user['role'] == 'administrator' and user.get('branchId') != (order.branch_id if order else None)
+    is_override = all_branches(user) and user.get('branchId') != (order.branch_id if order else None)
     log_action(user['id'], user['fullName'], 'RECEIVE', 'Product Orders',
         f"{'[ADMIN OVERRIDE] ' if is_override else ''}Transfer {transfer_id} received at {pickup_branch.name if pickup_branch else 'N/A'}. Items added to inventory.",
         request.remote_addr or '0.0.0.0')
@@ -6116,7 +6284,7 @@ def create_product_order():
 
 @app.route('/api/product-orders', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_product_orders():
     """Get all product orders - staff endpoint"""
     user = request.current_user
@@ -6128,9 +6296,9 @@ def get_product_orders():
         query = query.filter_by(status=status)
     
     # Supervisors only see orders assigned to their branch.
-    if user['role'] == 'supervisor':
+    if not all_branches(user):
         if not user.get('branchId'):
-            return jsonify({'status': 'error', 'message': 'Supervisor account has no assigned branch'}), 400
+            return jsonify({'status': 'error', 'message': 'Your account has no assigned branch'}), 400
         query = query.filter_by(branch_id=user['branchId'])
     
     orders = query.order_by(ProductOrder.created_at.desc()).all()
@@ -6139,7 +6307,7 @@ def get_product_orders():
 
 @app.route('/api/product-orders/<int:order_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.edit', 'product_orders.payment')
 def update_product_order(order_id):
     """Update a product order status"""
     order = ProductOrder.query.get(order_id)
@@ -6151,6 +6319,10 @@ def update_product_order(order_id):
         return jsonify({'status': 'error', 'message': 'Access denied'}), 403
 
     data = request.get_json()
+    if ('status' in data or 'notes' in data) and not has_perm(user, 'product_orders.edit'):
+        return jsonify({'status': 'error', 'message': 'You do not have permission to edit product orders'}), 403
+    if ('addPayment' in data or 'paymentStatus' in data) and not has_perm(user, 'product_orders.payment'):
+        return jsonify({'status': 'error', 'message': 'You do not have permission to record payments'}), 403
 
     valid_statuses = {'pending', 'processing', 'ready', 'completed', 'cancelled'}
     valid_payment_statuses = {'unpaid', 'partial', 'paid'}
@@ -6276,7 +6448,7 @@ def update_product_order(order_id):
 
 @app.route('/api/product-orders/<int:order_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_product_order(order_id):
     """Get detailed product order by ID for branch admin/supervisor."""
     order = ProductOrder.query.get(order_id)
@@ -6291,7 +6463,7 @@ def get_product_order(order_id):
 
 @app.route('/api/product-orders/<int:order_id>/timeline', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_product_order_timeline(order_id):
     """Get timeline events for a product order."""
     order = ProductOrder.query.get(order_id)
@@ -6476,7 +6648,7 @@ def confirm_my_cart_draft():
 
 @app.route('/api/product-orders/drafts', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.view')
 def get_premade_drafts():
     """Staff view of customers' saved carts that haven't been confirmed yet."""
     drafts = CartDraft.query.order_by(CartDraft.updated_at.desc()).all()
@@ -6492,7 +6664,7 @@ def get_my_product_orders():
 
 @app.route('/api/product-orders/my-orders/<int:order_id>/cancel', methods=['POST'])
 @require_auth
-@require_roles('customer')
+@require_customer
 def cancel_my_product_order(order_id):
     """A customer cancels their own premade order while it is still pending.
     The stock taken when the order was placed goes back on the shelf and any
@@ -6618,13 +6790,13 @@ def delete_notification(notif_id):
 
 @app.route('/api/product-orders/transfer-dashboard', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_transfer_dashboard():
     user = request.current_user
     now = datetime.utcnow()
     status_filter = request.args.get('status')
 
-    if user['role'] == 'supervisor':
+    if not all_branches(user):
         branch_id = user.get('branchId')
         outgoing = ProductOrderTransfer.query.filter_by(source_branch_id=branch_id).all()
         pickup_ids = [r[0] for r in db.session.query(ProductOrder.id).filter_by(branch_id=branch_id).all()]
@@ -6664,7 +6836,7 @@ def get_transfer_dashboard():
 
 @app.route('/api/product-order-transfers/bulk-action', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.transfer')
 def bulk_transfer_action():
     user = request.current_user
     data = request.get_json()
@@ -6680,7 +6852,7 @@ def bulk_transfer_action():
             failed.append({'id': tid, 'reason': 'Not found'}); continue
 
         if action == 'mark-sent':
-            if user['role'] == 'supervisor' and user.get('branchId') != transfer.source_branch_id:
+            if not all_branches(user) and user.get('branchId') != transfer.source_branch_id:
                 failed.append({'id': tid, 'reason': 'Not your branch'}); continue
             if transfer.status != 'pending':
                 failed.append({'id': tid, 'reason': f'Already {transfer.status}'}); continue
@@ -6699,7 +6871,7 @@ def bulk_transfer_action():
 
         elif action == 'confirm-receipt':
             order = transfer.order
-            if user['role'] == 'supervisor' and user.get('branchId') != (order.branch_id if order else None):
+            if not all_branches(user) and user.get('branchId') != (order.branch_id if order else None):
                 failed.append({'id': tid, 'reason': 'Not your branch'}); continue
             if transfer.status != 'transferred':
                 failed.append({'id': tid, 'reason': f'Status is {transfer.status}'}); continue
@@ -6811,13 +6983,13 @@ def place_customer_order():
 
 @app.route('/api/customer-orders', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('custom_requests.view')
 def get_customer_orders():
     """Get customer orders - filtered by branch for non-admin users"""
     user = request.current_user
     
     # Administrators can see all orders
-    if user['role'] == 'administrator':
+    if all_branches(user):
         orders = CustomerOrder.query.order_by(CustomerOrder.created_at.desc()).all()
     else:
         # Other users can only see orders from their branch
@@ -6839,7 +7011,7 @@ def get_customer_orders():
 
 @app.route('/api/customer-orders/<int:order_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('custom_requests.view')
 def get_customer_order(order_id):
     """Get a specific customer order"""
     user = request.current_user
@@ -6848,7 +7020,7 @@ def get_customer_order(order_id):
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     
     # Branch-level access control
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         # Use branch_id directly from user if available, otherwise look up by name
         user_branch_id = None
         if user.get('branchId'):
@@ -6865,7 +7037,7 @@ def get_customer_order(order_id):
 
 @app.route('/api/customer-orders/<int:order_id>/status', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('custom_requests.edit')
 def update_customer_order_status(order_id):
     """Update customer order status"""
     user = request.current_user
@@ -6874,7 +7046,7 @@ def update_customer_order_status(order_id):
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     
     # Branch-level access control
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         user_branch = Branch.query.filter_by(name=user['branch']).first()
         if not user_branch or order.branch_id != user_branch.id:
             return jsonify({'status': 'error', 'message': 'Access denied'}), 403
@@ -7026,7 +7198,7 @@ def register_customer():
 
 @app.route('/api/customer-orders/my-orders', methods=['GET'])
 @require_auth
-@require_roles('customer')
+@require_customer
 def get_my_customer_orders():
     """Get orders for the logged-in customer"""
     user = request.current_user
@@ -7037,7 +7209,7 @@ def get_my_customer_orders():
 
 @app.route('/api/customer-orders/my-orders/<int:order_id>', methods=['GET'])
 @require_auth
-@require_roles('customer')
+@require_customer
 def get_my_customer_order(order_id):
     """Get a specific order for the logged-in customer"""
     user = request.current_user
@@ -7050,7 +7222,7 @@ def get_my_customer_order(order_id):
 
 @app.route('/api/customer-orders/<int:order_id>/quotation', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('custom_requests.quote')
 def set_customer_order_quotation(order_id):
     """Set quotation for a customer order"""
     user = request.current_user
@@ -7060,7 +7232,7 @@ def set_customer_order_quotation(order_id):
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     
     # Branch-level access control
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         user_branch_id = user.get('branchId')
         if not user_branch_id and user.get('branch'):
             user_branch = Branch.query.filter_by(name=user['branch']).first()
@@ -7097,7 +7269,7 @@ def set_customer_order_quotation(order_id):
 
 @app.route('/api/customer-orders/<int:order_id>/respond', methods=['PUT'])
 @require_auth
-@require_roles('customer')
+@require_customer
 def respond_to_quotation(order_id):
     """Customer responds to quotation (accept/reject)"""
     user = request.current_user
@@ -7135,7 +7307,7 @@ def respond_to_quotation(order_id):
 
 @app.route('/api/forecasting/inventory', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('forecasting.view')
 def get_inventory_forecast():
     from sqlalchemy import func
     period = request.args.get('period', 'month')
@@ -7216,14 +7388,14 @@ def get_inventory_forecast():
 def forecast_branch_id():
     """Admins forecast the whole company (or ?branchId=); supervisors their own branch."""
     user = request.current_user
-    if user['role'] == 'administrator':
+    if all_branches(user):
         return request.args.get('branchId', type=int)
     return user_branch_id(user) or -1
 
 
 @app.route('/api/forecasting/demand', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('forecasting.view')
 def get_demand_forecast():
     """Next six months of job orders, projected from the last six months of real
     orders: the average of the latest three months, nudged by the recent trend."""
@@ -7269,7 +7441,7 @@ def get_demand_forecast():
 
 @app.route('/api/forecasting/materials', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('forecasting.view')
 def get_material_forecast():
     """When each material will hit its reorder point, from the last 30 days of real usage."""
     bid = forecast_branch_id()
@@ -7310,7 +7482,7 @@ def get_material_forecast():
 
 @app.route('/api/reports/sales', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('reports.sales')
 def get_sales_report():
     user = request.current_user
     start_date = request.args.get('startDate', (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
@@ -7331,7 +7503,7 @@ def get_sales_report():
     )
 
     user_branch = None
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         user_branch = Branch.query.filter_by(name=user['branch']).first()
         if user_branch:
             jo_query = jo_query.filter(JobOrder.branch_id == user_branch.id)
@@ -7381,7 +7553,7 @@ def get_sales_report():
 
     for po in all_product_orders:
         # Determine how much of this order is attributed to the current branch
-        if user['role'] != 'administrator':
+        if not all_branches(user):
             if not user_branch:
                 continue
             attributed_total = sum(
@@ -7449,13 +7621,13 @@ def get_sales_report():
 
 @app.route('/api/reports/inventory', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('reports.inventory')
 def get_inventory_report():
     user = request.current_user
     branch_id = request.args.get('branchId')
 
     # Branch-level access control
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         user_branch = Branch.query.filter_by(name=user['branch']).first()
         if user_branch:
             branch_id = user_branch.id
@@ -7521,7 +7693,7 @@ def get_inventory_report():
 
 @app.route('/api/reports/branch-settlement', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('reports.settlement')
 def get_branch_settlement():
     """Inter-branch settlement ledger.
     For every completed multi-branch order, records how much each source branch
@@ -7544,7 +7716,7 @@ def get_branch_settlement():
               .filter(ProductOrder.shipment_status != 'not_needed')
               .all())
 
-    user_branch_id = user.get('branchId') if user['role'] != 'administrator' else None
+    user_branch_id = user.get('branchId') if not all_branches(user) else None
 
     entries = []
     # branch_pair_totals: (source_branch_id, pickup_branch_id) -> {owed, settled}
@@ -7622,7 +7794,7 @@ def get_branch_settlement():
 
 @app.route('/api/reports/audit-trail', methods=['GET'])
 @require_auth
-@require_roles('administrator')
+@require_permission('reports.audit_trail')
 def get_audit_trail():
     start_date = request.args.get('startDate')
     end_date = request.args.get('endDate')
@@ -7652,7 +7824,7 @@ def get_audit_trail():
 
 @app.route('/api/settings/users', methods=['GET'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def get_users():
     include_inactive = request.args.get('includeInactive', 'false').lower() == 'true'
     
@@ -7665,7 +7837,7 @@ def get_users():
 
 @app.route('/api/settings/users', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def create_user():
     data = request.get_json()
     
@@ -7738,7 +7910,7 @@ def create_user():
 
 @app.route('/api/settings/users/<int:user_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def update_user(user_id):
     user = User.query.get(user_id)
     if not user:
@@ -7781,7 +7953,14 @@ def update_user(user_id):
         role = Role.query.filter_by(key=data['role']).first()
         if not role:
             return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
-        user.role_id = role.id
+        perms_after = effective_permissions(user.id, role.key)
+        if user.id == request.current_user['id'] and 'users.manage' not in perms_after:
+            return jsonify({'status': 'error', 'message': "You can't remove your own access to user management"}), 400
+        if user.is_active and would_leave_no_user_manager(user.id, perms_after):
+            return jsonify({'status': 'error', 'message': 'At least one active account must be able to manage users'}), 400
+        if role.id != user.role_id:
+            user.role_id = role.id
+            prune_redundant_overrides(user.id, role.key)
     if resetting_password:
         user.password = hash_password(data['password'])
         user.failed_login_attempts = 0
@@ -7801,7 +7980,8 @@ def update_user(user_id):
                                                       notice, notice_html), daemon=True).start()
     
     db.session.commit()
-    
+    forget_cached_sessions(user.id)
+
     # Handle Worker profile when role changes
     worker_roles = ['seat_maker', 'sewer']
     new_role_key = user.role.key if user.role else None
@@ -7837,7 +8017,7 @@ def update_user(user_id):
 
 @app.route('/api/settings/users/<int:user_id>/archive', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def archive_user(user_id):
     user = User.query.get(user_id)
     if not user:
@@ -7850,6 +8030,9 @@ def archive_user(user_id):
     if user.role and user.role.key == 'administrator' and last_active_administrator(user):
         return jsonify({'status': 'error',
                         'message': 'Cannot archive the last active administrator'}), 400
+    if would_leave_no_user_manager(user.id, set()):
+        return jsonify({'status': 'error',
+                        'message': 'Cannot archive the last account that can manage users'}), 400
 
     user.is_active = False
     db.session.commit()
@@ -7860,7 +8043,7 @@ def archive_user(user_id):
 
 @app.route('/api/settings/users/<int:user_id>/restore', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def restore_user(user_id):
     user = User.query.get(user_id)
     if not user:
@@ -7911,7 +8094,7 @@ def user_history_blockers(user_id):
 
 @app.route('/api/settings/users/<int:user_id>/delete-check', methods=['GET'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def check_user_deletable(user_id):
     """Tell the UI whether this account can be permanently deleted, and why not.
 
@@ -7940,6 +8123,116 @@ def check_user_deletable(user_id):
 
     return jsonify({'status': 'success', 'data': {'canDelete': True, 'reason': '', 'blockers': []}})
 
+def would_leave_no_user_manager(user_id, perms_after):
+    """True if user_id ending up with perms_after would leave no active account
+    able to manage users (nobody could then fix permissions again)."""
+    if 'users.manage' in perms_after:
+        return False
+    others = (User.query.join(Role, User.role_id == Role.id)
+              .filter(User.is_active == True, User.id != user_id, Role.key != 'customer').all())
+    return not any('users.manage' in effective_permissions(u.id, u.role.key) for u in others)
+
+def prune_redundant_overrides(user_id, role_key):
+    """After a role change, drop grants the new role already has and revokes of
+    things it doesn't have, so the overrides list stays meaningful."""
+    defaults = ROLE_DEFAULT_PERMISSIONS.get(role_key, frozenset())
+    for o in UserPermissionOverride.query.filter_by(user_id=user_id).all():
+        if role_key == 'customer' or (o.effect == 'grant') == (o.permission in defaults):
+            db.session.delete(o)
+
+def user_permissions_payload(user):
+    role_key = user.role.key if user.role else None
+    overrides = UserPermissionOverride.query.filter_by(user_id=user.id).all()
+    return {
+        'userId': user.id,
+        'role': role_key,
+        'roleDefaults': sorted(ROLE_DEFAULT_PERMISSIONS.get(role_key, ())),
+        'grants': sorted(o.permission for o in overrides if o.effect == 'grant'),
+        'revokes': sorted(o.permission for o in overrides if o.effect == 'revoke'),
+        'effective': sorted(effective_permissions(user.id, role_key, overrides)),
+        # Customer accounts are self-service only
+        'editable': role_key != 'customer',
+    }
+
+@app.route('/api/permissions', methods=['GET'])
+@require_auth
+@require_permission('users.manage')
+def get_permission_catalogue():
+    """Every permission grouped by module, plus each role's defaults."""
+    modules = [{
+        'key': module,
+        'label': label,
+        'permissions': [{'key': f'{module}.{action}', 'action': action, 'label': action_label}
+                        for action, action_label in actions],
+    } for module, label, actions in PERMISSION_MODULES]
+    return jsonify({'status': 'success', 'data': {
+        'modules': modules,
+        'roleDefaults': {role: sorted(perms) for role, perms in ROLE_DEFAULT_PERMISSIONS.items()},
+    }})
+
+@app.route('/api/users/<int:user_id>/permissions', methods=['GET'])
+@require_auth
+@require_permission('users.manage')
+def get_user_permissions(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'status': 'error', 'message': 'User not found'}), 404
+    return jsonify({'status': 'success', 'data': user_permissions_payload(user)})
+
+@app.route('/api/users/<int:user_id>/permissions', methods=['PUT'])
+@require_auth
+@require_permission('users.manage')
+def set_user_permissions(user_id):
+    """Replace a user's overrides. Body: {grants: [...], revokes: [...]}; an empty
+    body resets them to their role's defaults."""
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'status': 'error', 'message': 'User not found'}), 404
+    role_key = user.role.key if user.role else None
+    if role_key == 'customer':
+        return jsonify({'status': 'error', 'message': 'Customer accounts cannot be given staff permissions'}), 400
+
+    data = request.get_json(silent=True) or {}
+    grants, revokes = data.get('grants') or [], data.get('revokes') or []
+    if not isinstance(grants, list) or not isinstance(revokes, list):
+        return jsonify({'status': 'error', 'message': 'grants and revokes must be lists'}), 400
+    grants, revokes = {str(g) for g in grants}, {str(r) for r in revokes}
+    unknown = (grants | revokes) - set(PERMISSIONS)
+    if unknown:
+        return jsonify({'status': 'error', 'message': f"Unknown permission(s): {', '.join(sorted(unknown))}"}), 400
+    if grants & revokes:
+        return jsonify({'status': 'error', 'message': 'A permission cannot be both granted and revoked'}), 400
+
+    defaults = ROLE_DEFAULT_PERMISSIONS.get(role_key, frozenset())
+    # Granting what the role already has, or revoking what it lacks, changes nothing
+    grants -= defaults
+    revokes &= defaults
+    perms_after = (set(defaults) | grants) - revokes
+
+    me = request.current_user
+    if user.id == me['id'] and 'users.manage' not in perms_after:
+        return jsonify({'status': 'error', 'message': "You can't remove your own access to user management"}), 400
+    if user.is_active and would_leave_no_user_manager(user.id, perms_after):
+        return jsonify({'status': 'error', 'message': 'At least one active account must be able to manage users'}), 400
+
+    UserPermissionOverride.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+    for perm in grants:
+        db.session.add(UserPermissionOverride(user_id=user.id, permission=perm, effect='grant', created_by=me['id']))
+    for perm in revokes:
+        db.session.add(UserPermissionOverride(user_id=user.id, permission=perm, effect='revoke', created_by=me['id']))
+    db.session.commit()
+    forget_cached_sessions(user.id)
+
+    summary = []
+    if grants:
+        summary.append(f"granted {', '.join(sorted(grants))}")
+    if revokes:
+        summary.append(f"revoked {', '.join(sorted(revokes))}")
+    log_action(me['id'], me['fullName'], 'PERMISSIONS', 'Settings',
+               f"Set permissions of {user.username}: {'; '.join(summary) or 'reset to role defaults'}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': user_permissions_payload(user)})
+
 def last_active_administrator(user):
     """True if removing/deactivating `user` would leave no active administrator."""
     return User.query.join(Role).filter(
@@ -7950,7 +8243,7 @@ def last_active_administrator(user):
 
 @app.route('/api/settings/users/<int:user_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def delete_user(user_id):
     """Permanently delete a user account.
 
@@ -7967,6 +8260,9 @@ def delete_user(user_id):
     if user.role and user.role.key == 'administrator' and last_active_administrator(user):
         return jsonify({'status': 'error',
                         'message': 'Cannot delete the last active administrator'}), 400
+    if user.is_active and would_leave_no_user_manager(user.id, set()):
+        return jsonify({'status': 'error',
+                        'message': 'Cannot delete the last account that can manage users'}), 400
 
     blockers = user_history_blockers(user.id)
     if blockers:
@@ -8013,6 +8309,7 @@ def delete_user(user_id):
 
 @app.route('/api/settings/roles', methods=['GET'])
 @require_auth
+@require_permission('users.manage')
 def get_roles():
     roles = Role.query.all()
     role_list = [
@@ -8027,6 +8324,7 @@ def get_roles():
 
 @app.route('/api/settings/branches', methods=['GET'])
 @require_auth
+@require_staff
 def get_branches():
     """Get all branches from database"""
     include_inactive = request.args.get('includeInactive', 'false').lower() == 'true'
@@ -8046,7 +8344,7 @@ def get_branches_public():
 
 @app.route('/api/settings/branches', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('branches.manage')
 def create_branch():
     """Create a new branch"""
     data = request.get_json()
@@ -8078,7 +8376,7 @@ def create_branch():
 
 @app.route('/api/settings/branches/<int:branch_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator')
+@require_permission('branches.manage')
 def update_branch(branch_id):
     """Update a branch"""
     branch = Branch.query.get(branch_id)
@@ -8112,13 +8410,14 @@ def update_branch(branch_id):
 
 @app.route('/api/settings/system', methods=['GET'])
 @require_auth
+@require_staff
 def get_system_settings():
     settings = SystemSetting.query.all()
     return jsonify({'status': 'success', 'data': {s.key: s.value for s in settings}})
 
 @app.route('/api/settings/system/<key>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('settings.edit')
 def update_system_setting(key):
     data = request.get_json()
     value = str(data.get('value', ''))
@@ -8138,7 +8437,7 @@ def update_system_setting(key):
 
 @app.route('/api/managed-workers', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.view', 'sales.edit')
 def list_managed_workers():
     workers = ManagedWorker.query.order_by(ManagedWorker.name).all()
     return jsonify({
@@ -8161,7 +8460,7 @@ def list_managed_workers():
 
 @app.route('/api/managed-workers', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('workers.add')
 def create_managed_worker():
     data = request.get_json()
     name = (data.get('name') or '').strip()
@@ -8191,7 +8490,7 @@ def create_managed_worker():
 
 @app.route('/api/managed-workers/<int:worker_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator')
+@require_permission('workers.edit')
 def update_managed_worker(worker_id):
     worker = ManagedWorker.query.get(worker_id)
     if not worker:
@@ -8224,7 +8523,7 @@ def update_managed_worker(worker_id):
 
 @app.route('/api/managed-workers/<int:worker_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator')
+@require_permission('workers.delete')
 def deactivate_managed_worker(worker_id):
     worker = ManagedWorker.query.get(worker_id)
     if not worker:
@@ -8235,7 +8534,7 @@ def deactivate_managed_worker(worker_id):
 
 @app.route('/api/worker-assignments', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.view')
 def list_worker_assignments():
     worker_id = request.args.get('workerId', type=int)
     query = WorkerAssignment.query
@@ -8281,7 +8580,7 @@ def list_worker_assignments():
 
 @app.route('/api/worker-assignments', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.assign')
 def create_worker_assignment():
     data = request.get_json()
     worker_id = data.get('workerId')
@@ -8370,7 +8669,7 @@ def create_worker_assignment():
 
 @app.route('/api/worker-assignments/<int:assignment_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.assign')
 def update_worker_assignment(assignment_id):
     assignment = WorkerAssignment.query.get(assignment_id)
     if not assignment:
@@ -8455,7 +8754,7 @@ def update_worker_assignment(assignment_id):
 
 @app.route('/api/worker-assignments/calendar', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.view')
 def get_assignments_calendar():
     """Return all assignments for a worker in a given month, keyed by date."""
     worker_id = request.args.get('workerId', type=int)
@@ -8491,7 +8790,7 @@ def get_assignments_calendar():
 
 @app.route('/api/worker-assignments/<int:assignment_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator')
+@require_permission('workers.delete_assignment')
 def delete_worker_assignment(assignment_id):
     assignment = WorkerAssignment.query.get(assignment_id)
     if not assignment:
@@ -8513,7 +8812,7 @@ def delete_worker_assignment(assignment_id):
 
 @app.route('/api/worker-availability', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.view')
 def get_worker_availability():
     """Get availability schedule entries for a worker, optionally filtered by month (YYYY-MM)."""
     worker_id = request.args.get('workerId', type=int)
@@ -8552,7 +8851,7 @@ def get_worker_availability():
 
 @app.route('/api/worker-availability', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.assign')
 def set_worker_availability():
     """Upsert an availability entry. Send isAvailable=null or omit to delete."""
     data = request.get_json()
@@ -8645,7 +8944,7 @@ def get_catalog():
 
 @app.route('/api/catalog', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('catalog.manage')
 def create_catalog_item():
     data = request.get_json()
     if not data or not data.get('title', '').strip():
@@ -8668,7 +8967,7 @@ def create_catalog_item():
 
 @app.route('/api/catalog/<int:item_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator')
+@require_permission('catalog.manage')
 def update_catalog_item(item_id):
     item = CatalogItem.query.get(item_id)
     if not item:
@@ -8693,7 +8992,7 @@ def update_catalog_item(item_id):
 
 @app.route('/api/catalog/<int:item_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator')
+@require_permission('catalog.manage')
 def delete_catalog_item(item_id):
     item = CatalogItem.query.get(item_id)
     if not item:
@@ -8705,7 +9004,7 @@ def delete_catalog_item(item_id):
 
 @app.route('/api/catalog/<int:item_id>/image', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('catalog.manage')
 def upload_catalog_image(item_id):
     item = CatalogItem.query.get(item_id)
     if not item:
@@ -8894,7 +9193,7 @@ def _run_predictions_background(app_obj):
 
 @app.route('/api/inventory/ai/upload-historical', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('forecasting.manage')
 def upload_historical_inventory():
     try:
         import pandas as pd
@@ -9010,6 +9309,7 @@ def upload_historical_inventory():
 
 @app.route('/api/inventory/ai/predictions', methods=['GET'])
 @require_auth
+@require_permission('forecasting.view', 'inventory.view')
 def get_ai_predictions():
     cache = AIPredictionCache.query.first()
     if not cache:
@@ -9044,7 +9344,7 @@ def get_ai_predictions():
 
 @app.route('/api/inventory/ai/recompute', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('forecasting.manage')
 def recompute_ai_predictions():
     cache = AIPredictionCache.query.first()
     if not cache or cache.upload_rows == 0:
@@ -9105,7 +9405,7 @@ def customer_order_counts(customers):
 
 @app.route('/api/customers/search', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('customers.view')
 def search_customers():
     q = request.args.get('q', '').strip()
     if len(q) < 2:
@@ -9122,7 +9422,7 @@ def search_customers():
 
 @app.route('/api/customers', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('customers.view')
 def get_customers():
     q = request.args.get('q', '').strip()
     query = Customer.query
@@ -9149,7 +9449,7 @@ def get_customers():
 
 @app.route('/api/customers', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('customers.add')
 def create_customer():
     data = request.get_json()
     if not data.get('name'):
@@ -9170,7 +9470,7 @@ def create_customer():
 
 @app.route('/api/customers/<int:customer_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('customers.view')
 def get_customer(customer_id):
     customer = Customer.query.get_or_404(customer_id)
     orders = JobOrder.query.filter_by(customer_id=customer_id).order_by(JobOrder.created_at.desc()).all()
@@ -9208,7 +9508,7 @@ def get_customer(customer_id):
 
 @app.route('/api/customers/<int:customer_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('customers.edit')
 def update_customer(customer_id):
     customer = Customer.query.get_or_404(customer_id)
     data = request.get_json()
@@ -9258,15 +9558,13 @@ def announcement_to_dict(a):
 
 @app.route('/api/announcements', methods=['GET'])
 @require_auth
+@require_permission('announcements.view')
 def get_announcements():
-    # Only staff can see announcements — customers are excluded via require_auth + role check
-    if request.current_user.get('role') == 'customer':
-        return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
-    # Archived announcements are an admin view only: ordinary staff always see the
-    # active board, so an archived notice can never resurface for them.
+    # Archived announcements are for those who manage the board: everyone else
+    # always sees the active board, so an archived notice can never resurface.
     include_archived = (
         request.args.get('includeArchived', 'false').lower() == 'true'
-        and request.current_user.get('role') in ('administrator', 'supervisor')
+        and has_perm(request.current_user, 'announcements.manage')
     )
     query = Announcement.query
     if not include_archived:
@@ -9276,7 +9574,7 @@ def get_announcements():
 
 @app.route('/api/announcements', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('announcements.manage')
 def create_announcement():
     data = request.get_json()
     if not data.get('title', '').strip():
@@ -9302,7 +9600,7 @@ def create_announcement():
 
 @app.route('/api/announcements/<int:ann_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('announcements.manage')
 def update_announcement(ann_id):
     a = Announcement.query.get(ann_id)
     if not a:
@@ -9321,7 +9619,7 @@ def update_announcement(ann_id):
 
 @app.route('/api/announcements/<int:ann_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('announcements.manage')
 def delete_announcement(ann_id):
     a = Announcement.query.get(ann_id)
     if not a:
@@ -9355,7 +9653,7 @@ def chat_message_to_dict(m):
 
 @app.route('/api/chat/messages', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('chat.use')
 def get_chat_messages():
     since = request.args.get('since')
     query = ChatMessage.query
@@ -9370,7 +9668,7 @@ def get_chat_messages():
 
 @app.route('/api/chat/messages', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('chat.use')
 def send_chat_message():
     data = request.get_json()
     content = (data.get('content') or '').strip()

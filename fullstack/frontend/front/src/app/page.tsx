@@ -167,9 +167,9 @@ const faqs = [
 ];
 
 export default function LandingPage() {
-  const { user } = useAuth();
+  const { can } = useAuth();
   const { confirm, confirmDialog } = useConfirm();
-  const isAdmin = user?.role === 'administrator';
+  const isAdmin = can('catalog.manage');
 
   const [items, setItems] = useState<CatalogItem[]>([]);
   const [loading, setLoading] = useState(true);

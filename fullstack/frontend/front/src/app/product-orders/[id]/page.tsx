@@ -4,15 +4,15 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { api, ProductOrder, ProductOrderTransfer, ProductOrderTimelineEvent } from '@/lib/api';
-import { useAuth, hasAccess } from '@/context/AuthContext';
+import { useAuth } from '@/context/AuthContext';
 
 type SaveState = 'idle' | 'saving';
 
 export default function ProductOrderDetailPage() {
   const params = useParams();
   const router = useRouter();
-  const { user } = useAuth();
-  const isAdmin = user ? hasAccess(user.role, ['administrator']) : false;
+  const { user, can } = useAuth();
+  const isAdmin = can('branches.all');
   const [order, setOrder] = useState<ProductOrder | null>(null);
   const [timeline, setTimeline] = useState<ProductOrderTimelineEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -809,7 +809,7 @@ export default function ProductOrderDetailPage() {
                         </p>
                       ))}
                     </div>
-                    {transfer.status === 'pending' && (user?.role === 'administrator' || user?.branchId === transfer.sourceBranchId) && (
+                    {transfer.status === 'pending' && can('product_orders.transfer') && (isAdmin || user?.branchId === transfer.sourceBranchId) && (
                       <button
                         onClick={() => markTransferred(transfer.id)}
                         disabled={transferSavingId === transfer.id}
@@ -818,7 +818,7 @@ export default function ProductOrderDetailPage() {
                         {transferSavingId === transfer.id ? 'Saving…' : 'Mark as Transferred'}
                       </button>
                     )}
-                    {transfer.status === 'transferred' && (user?.role === 'administrator' || user?.branchId === transfer.pickupBranchId) && (
+                    {transfer.status === 'transferred' && can('product_orders.transfer') && (isAdmin || user?.branchId === transfer.pickupBranchId) && (
                       <button
                         onClick={() => confirmTransferReceipt(transfer.id)}
                         disabled={transferSavingId === transfer.id}

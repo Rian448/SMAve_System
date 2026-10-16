@@ -16,9 +16,9 @@ export default function CustomerProfilePage() {
   const router = useRouter();
   const params = useParams();
   const id = Number(params.id);
-  const { user } = useAuth();
+  const { can } = useAuth();
   // Premade product orders are only viewable by administrators and supervisors
-  const canOpenProductOrders = ['administrator', 'supervisor'].includes(user?.role || '');
+  const canOpenProductOrders = can('product_orders.view');
 
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [orders, setOrders] = useState<CustomerOrderSummary[]>([]);

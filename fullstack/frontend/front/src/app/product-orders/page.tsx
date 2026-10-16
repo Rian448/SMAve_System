@@ -1,7 +1,7 @@
 ﻿'use client';
 import { formatDate } from '@/lib/dateUtils';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useAuth, hasAccess } from '@/context/AuthContext';
+import { useAuth } from '@/context/AuthContext';
 import { api, ProductOrder, ProductOrderTransfer } from '@/lib/api';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -9,7 +9,7 @@ import Link from 'next/link';
 type StatusFilter = 'all' | 'pending' | 'processing' | 'ready' | 'completed' | 'cancelled';
 
 export default function ProductOrdersPage() {
-  const { user, isLoading: authLoading } = useAuth();
+  const { user, isLoading: authLoading, can } = useAuth();
   const router = useRouter();
 
   const [orders, setOrders] = useState<ProductOrder[]>([]);
@@ -42,13 +42,13 @@ export default function ProductOrdersPage() {
 
   useEffect(() => {
     if (!authLoading) {
-      if (!user || !hasAccess(user.role, ['administrator', 'supervisor'])) {
+      if (!user || !can('product_orders.view')) {
         router.push('/');
         return;
       }
       fetchOrders();
     }
-  }, [authLoading, user, router, fetchOrders]);
+  }, [authLoading, user, router, fetchOrders, can]);
 
   const updateOrder = async (orderId: number, data: { status?: ProductOrder['status']; paymentStatus?: ProductOrder['paymentStatus']; notes?: string }) => {
     try {
@@ -140,9 +140,9 @@ export default function ProductOrdersPage() {
 
   // Admin sees all
   const allPendingTransfers = useMemo(() => {
-    if (user?.role !== 'administrator') return [];
+    if (!can('branches.all')) return [];
     return transferRequests.filter((t) => t.status !== 'received');
-  }, [transferRequests, user]);
+  }, [transferRequests, can]);
 
   if (authLoading || loading) {
     return (
@@ -345,7 +345,7 @@ export default function ProductOrdersPage() {
             </div>
 
             <div className="space-y-4">
-              {(user?.role === 'administrator' ? allPendingTransfers : outgoingTransfers).map((transfer) => (
+              {(can('branches.all') ? allPendingTransfers : outgoingTransfers).map((transfer) => (
                 <div key={transfer.id} className="bg-white rounded-xl border-2 border-orange-200 p-5">
                   <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-3">
                     <div>

@@ -26,7 +26,7 @@ export default function DeliveryPage() {
 }
 
 function ItemTrailContent() {
-  const { user } = useAuth();
+  const { user, can } = useAuth();
   const { refresh: refreshNotifs } = useNotifications();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -51,12 +51,14 @@ function ItemTrailContent() {
   const [pinned, setPinned] = useState<Set<number>>(new Set());
   const [actionFirst, setActionFirst] = useState(true);
 
-  const isAdmin = user?.role === 'administrator';
+  // Cross-branch staff act on other branches' transfers as an override
+  const isAdmin = can('branches.all');
+  const canSeeAudit = can('reports.audit_trail');
 
-  const canSee = user && ['administrator', 'supervisor'].includes(user.role);
+  const canSee = !!user && can('item_trail.view');
 
   // The audit log is administrator-only on the server, so supervisors only get the item trail.
-  const view: TrailView = searchParams.get('view') === 'audit' && isAdmin ? 'audit' : 'items';
+  const view: TrailView = searchParams.get('view') === 'audit' && canSeeAudit ? 'audit' : 'items';
   const setView = (next: TrailView) => {
     // Kept in the URL so a refresh or a shared link opens the same view.
     router.replace(next === 'audit' ? '/delivery?view=audit' : '/delivery', { scroll: false });
@@ -215,7 +217,7 @@ function ItemTrailContent() {
                 : 'Track all premade product transfers between branches in real time'}
             </p>
           </div>
-          {isAdmin && (
+          {canSeeAudit && (
             <div role="tablist" aria-label="Trail type" className="inline-flex p-1 bg-gray-100 rounded-xl self-start sm:self-auto">
               {([['items', 'Item Trail'], ['audit', 'Audit Trail']] as const).map(([id, label]) => (
                 <button key={id} role="tab" aria-selected={view === id} onClick={() => setView(id)}

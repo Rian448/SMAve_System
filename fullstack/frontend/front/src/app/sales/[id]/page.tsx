@@ -59,7 +59,7 @@ function CostDonut({ parts, formatCurrency }: {
 export default function JobOrderDetailPage() {
   const params = useParams();
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, can } = useAuth();
   const [jobOrder, setJobOrder] = useState<JobOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
@@ -97,7 +97,7 @@ export default function JobOrderDetailPage() {
 
   // Workers on the job are Worker Management assignments; this page shows and edits
   // the same ones. Sales managers can see them; admins and supervisors can change them.
-  const canViewLabor = user && ['administrator', 'supervisor', 'sales_manager'].includes(user.role);
+  const canViewLabor = !!user && can('workers.view');
 
   useEffect(() => {
     api.managedWorkers.list().then(res => {
@@ -231,11 +231,13 @@ export default function JobOrderDetailPage() {
     }
   };
 
-  const canEditParts = ['administrator', 'supervisor'].includes(user?.role || '');
-  const canUpdatePaymentStatus = ['administrator', 'supervisor', 'sales_manager'].includes(user?.role || '');
-  // Supervisors/sales managers can request a payment override, but it needs admin approval
-  const canRequestOverride = ['supervisor', 'sales_manager'].includes(user?.role || '');
-  const canCreateNewMaterial = ['administrator', 'supervisor'].includes(user?.role || '');
+  // Production changes (parts, status, workers) stay with senior staff: sales managers
+  // edit order details only, a business rule the server applies too.
+  const canEditParts = can('sales.edit') && user?.role !== 'sales_manager';
+  const canUpdatePaymentStatus = can('payments.add');
+  // Those who can't approve overrides themselves send a request for approval instead
+  const canRequestOverride = can('payments.request_override') && !can('payments.approve_override');
+  const canCreateNewMaterial = can('inventory.add');
 
   useEffect(() => {
     const isFinished = jobOrder?.status === 'completed' || jobOrder?.status === 'delivered';
@@ -1049,7 +1051,7 @@ export default function JobOrderDetailPage() {
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                {user?.role === 'administrator' && (
+                {can('workers.add', 'workers.edit', 'workers.delete') && (
                   <button type="button" onClick={() => router.push('/worker-dashboard')}
                     className="px-3 py-1.5 rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 text-xs font-medium transition-colors">
                     Open Worker Management

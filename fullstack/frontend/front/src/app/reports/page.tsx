@@ -52,7 +52,7 @@ function SummaryCard({ label, value, sub, color }: { label: string; value: strin
 }
 
 export default function ReportsPage() {
-  const { user } = useAuth();
+  const { user, can } = useAuth();
   const [loading, setLoading]           = useState(true);
   const [error, setError]               = useState<string | null>(null);
   const [reportType, setReportType]     = useState('sales');
@@ -66,8 +66,9 @@ export default function ReportsPage() {
   const [salesBranchId, setSalesBranchId]   = useState('');
   const [branches, setBranches]             = useState<{ id: number; name: string; isWarehouse: boolean }[]>([]);
 
-  const isAdmin        = user?.role === 'administrator';
-  const canViewInventory = isAdmin || user?.role === 'supervisor';
+  // Cross-branch staff pick a branch; everyone else sees their own
+  const isAdmin        = can('branches.all');
+  const canViewInventory = can('reports.inventory');
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -145,14 +146,14 @@ export default function ReportsPage() {
   };
 
   const reportTypes = [
-    {
+    ...(can('reports.sales') ? [{
       id: 'sales', name: 'Sales Report',
       icon: (
         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
       ),
-    },
+    }] : []),
     ...(canViewInventory ? [{
       id: 'inventory', name: 'Inventory Report',
       icon: (
@@ -161,14 +162,14 @@ export default function ReportsPage() {
         </svg>
       ),
     }] : []),
-    {
+    ...(can('reports.settlement') ? [{
       id: 'settlement', name: 'Branch Settlement',
       icon: (
         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
         </svg>
       ),
-    },
+    }] : []),
   ];
 
   const showDateFilter = reportType !== 'inventory';

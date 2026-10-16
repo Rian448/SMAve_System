@@ -1,14 +1,14 @@
 ﻿'use client';
 import { formatDate } from '@/lib/dateUtils';
 import { useState, useEffect } from 'react';
-import { useAuth, hasAccess } from '@/context/AuthContext';
+import { useAuth } from '@/context/AuthContext';
 import { api, CustomerOrder } from '@/lib/api';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 
 export default function CustomerOrdersPage() {
-  const { user, isLoading: authLoading } = useAuth();
+  const { user, isLoading: authLoading, can } = useAuth();
   const router = useRouter();
   const [orders, setOrders] = useState<CustomerOrder[]>([]);
   const [loading, setLoading] = useState(true);
@@ -17,13 +17,13 @@ export default function CustomerOrdersPage() {
 
   useEffect(() => {
     if (!authLoading) {
-      if (!user || !hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager'])) {
+      if (!user || !can('custom_requests.view')) {
         router.push('/');
         return;
       }
       fetchOrders();
     }
-  }, [authLoading, user, router]);
+  }, [authLoading, user, router, can]);
 
   const fetchOrders = async () => {
     try {

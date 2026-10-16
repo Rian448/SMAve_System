@@ -24,6 +24,30 @@ export interface User {
   branchName?: string;
   isActive?: boolean;
   phone?: string;
+  /** Effective permissions (role defaults + grants − revokes), e.g. 'inventory.add' */
+  permissions?: string[];
+}
+
+export interface PermissionModule {
+  key: string;
+  label: string;
+  permissions: { key: string; action: string; label: string }[];
+}
+
+export interface PermissionCatalogue {
+  modules: PermissionModule[];
+  roleDefaults: Record<string, string[]>;
+}
+
+export interface UserPermissions {
+  userId: number;
+  role: string;
+  roleDefaults: string[];
+  grants: string[];
+  revokes: string[];
+  effective: string[];
+  /** False for customer accounts, which can't be given staff permissions */
+  editable: boolean;
 }
 
 export interface SignupDetails {
@@ -1773,6 +1797,14 @@ export const api = {
   // ==================
   // SETTINGS
   // ==================
+  permissions: {
+    catalogue: () => fetchApi<PermissionCatalogue>('/api/permissions'),
+    getForUser: (userId: number) => fetchApi<UserPermissions>(`/api/users/${userId}/permissions`),
+    /** Replaces the user's overrides; empty lists reset them to their role's defaults */
+    setForUser: (userId: number, data: { grants: string[]; revokes: string[] }) =>
+      fetchApi<UserPermissions>(`/api/users/${userId}/permissions`, { method: 'PUT', body: JSON.stringify(data) }),
+  },
+
   settings: {
     // Users
     getUsers: (includeInactive?: boolean) => {
