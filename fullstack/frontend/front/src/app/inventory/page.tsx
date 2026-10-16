@@ -156,7 +156,10 @@ function InventoryContent() {
   // Which location's finished goods to show: 'all', or a branch/warehouse id.
   const [premadeBranchFilter, setPremadeBranchFilter] = useState<string>('all');
 
-  const canDistribute = can('premade.distribute');
+  // Administrators and warehouse accounts manage every branch's stock; others only
+  // their own. Premade stock is produced and sent out from the warehouse.
+  const managesAllInventory = can('branches.all') || !!user?.atWarehouse;
+  const canDistribute = can('premade.distribute') && managesAllInventory;
   /** Admin/supervisor approve on someone's behalf, so they get a confirm step first. */
   const confirmsViaDialog = can('branches.all', 'premade.distribute');
 
@@ -1172,7 +1175,7 @@ function InventoryContent() {
         )}
 
         {/* Add Premade Form */}
-        {activeTab === 'finished-goods' && (
+        {activeTab === 'finished-goods' && can('premade.add') && managesAllInventory && (
           <form onSubmit={handleCreatePremade} className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Add Premade Product</h2>
             <div className="grid grid-cols-1 md:grid-cols-6 gap-3">

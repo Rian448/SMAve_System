@@ -22,6 +22,8 @@ export interface User {
   branch: string;
   branchId?: number;
   branchName?: string;
+  /** Based at the warehouse: picks the branch each job order is for */
+  atWarehouse?: boolean;
   isActive?: boolean;
   phone?: string;
   /** Effective permissions (role defaults + grants − revokes), e.g. 'inventory.add' */

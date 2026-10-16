@@ -55,7 +55,8 @@ export default function ProductOrderDetailPage() {
       await api.productOrders.update(order.id, data);
       await loadData();
     } catch (err) {
-      setError('Failed to update order');
+      // The server says why (e.g. items still in transit, or not enough stock)
+      setError(err instanceof Error && err.message ? err.message : 'Failed to update order');
       console.error(err);
     } finally {
       setSaveState('idle');

@@ -914,6 +914,24 @@ def all_branches(user):
     """Whether the user sees every branch rather than only their own."""
     return has_perm(user, 'branches.all')
 
+def all_inventory_branches(user):
+    """Inventory of every branch: administrators (all-branch access) and accounts
+    based at the warehouse. Everyone else changes only their own branch's stock."""
+    return all_branches(user) or bool(user.get('atWarehouse'))
+
+def inventory_branch_error(user, branch_id):
+    """403 response if the user may not change stock held at branch_id, else None.
+    Pass the branch stored on the record (or the one it is moving to)."""
+    if all_inventory_branches(user) or (branch_id is not None and branch_id == user_branch_id(user)):
+        return None
+    return jsonify({'status': 'error', 'message': 'You can only change inventory for your own branch'}), 403
+
+def all_job_order_branches(user):
+    """Job orders (and their payments and lineup slips) of every branch. Accounts
+    based at the warehouse are general: they take orders for any branch and keep
+    managing them. Other modules still follow all_branches."""
+    return all_branches(user) or bool(user.get('atWarehouse'))
+
 # Delegation policy. Administrators may change anyone's access. Anyone else who
 # manages users can't change their own account, can't touch administrator
 # accounts or hand out the administrator role, and can only grant or remove
@@ -962,6 +980,8 @@ def user_to_dict(user):
         'branch': user.branch,
         'branchId': user.branch_id,
         'branchName': user.branch_rel.name if user.branch_rel else user.branch,
+        # Warehouse-based accounts pick the branch a job order is for
+        'atWarehouse': bool(user.branch_rel and user.branch_rel.is_warehouse),
         'isActive': user.is_active,
         'phone': user.phone,
         'permissions': sorted(effective_permissions(user.id, role_key)),
@@ -1785,20 +1805,9 @@ def logout():
 @app.route('/api/auth/me', methods=['GET'])
 @require_auth
 def get_current_user():
-    user = request.current_user
-    return jsonify({
-        'status': 'success',
-        'data': {
-            'id': user['id'],
-            'username': user['username'],
-            'email': user['email'],
-            'fullName': user['fullName'],
-            'role': user['role'],
-            'branch': user['branch'],
-            'phone': user.get('phone'),
-            'permissions': user.get('permissions', []),
-        }
-    })
+    # The same details login returns (branch included), so a page reload or the
+    # periodic permission refresh doesn't lose the user's branch
+    return jsonify({'status': 'success', 'data': request.current_user})
 
 # ============================================
 # EMAIL + PASSWORD RESET CODES
@@ -2166,6 +2175,9 @@ def confirm_email_change():
 
 STAFF_ROLES = ('administrator', 'supervisor', 'sales_manager')
 
+# Finished work: a delivered order was completed first, so it counts as earned too
+EARNED_STATUSES = ('completed', 'delivered')
+
 # Revenue excludes VAT: it is collected for the government, not earned
 REVENUE_EX_VAT = JobOrder.total_price / (1 + db.func.coalesce(JobOrder.vat_percent, 0) / 100.0)
 
@@ -2210,12 +2222,12 @@ def get_dashboard_stats():
     total_job_orders = live_orders.count()
     pending_orders = live_orders.filter(JobOrder.status == 'pending').count()
     in_progress_orders = live_orders.filter(JobOrder.status == 'in_progress').count()
-    completed_orders = live_orders.filter(JobOrder.status == 'completed').count()
+    completed_orders = live_orders.filter(JobOrder.status.in_(EARNED_STATUSES)).count()
 
     revenue_row = scoped(db.session.query(
         db.func.coalesce(db.func.sum(REVENUE_EX_VAT), 0.0),
         db.func.coalesce(db.func.sum(JobOrder.actual_cost), 0.0),
-    ).filter(JobOrder.status == 'completed'), JobOrder.branch_id).one()
+    ).filter(JobOrder.status.in_(EARNED_STATUSES)), JobOrder.branch_id).one()
     total_revenue = float(revenue_row[0] or 0)
     total_cost = float(revenue_row[1] or 0)
     profit = total_revenue - total_cost
@@ -2646,6 +2658,9 @@ def create_raw_material():
     branch = Branch.query.get(data['branchId'])
     if not branch or not branch.is_active:
         return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+    error = inventory_branch_error(request.current_user, branch.id)
+    if error:
+        return error
 
     custom_item_id = data.get('itemId', '').strip() if data.get('itemId') else None
     if custom_item_id:
@@ -2702,6 +2717,9 @@ def update_raw_material(material_id):
     material = InventoryMaterial.query.get(material_id)
     if not material:
         return jsonify({'status': 'error', 'message': 'Material not found'}), 404
+    error = inventory_branch_error(request.current_user, material.branch_id)
+    if error:
+        return error
 
     data = request.get_json()
 
@@ -2723,7 +2741,13 @@ def update_raw_material(material_id):
     elif 'costPerUnit' in data or 'markupPercent' in data:
         material.unit_price = round((material.cost_per_unit or 0) * (1 + (material.markup_percent if material.markup_percent is not None else 25) / 100), 2)
     if 'stockQuantity' in data:
-        material.stock_quantity = float(data['stockQuantity'])
+        try:
+            new_stock = float(data['stockQuantity'])
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'Stock quantity must be a number'}), 400
+        if not new_stock >= 0:
+            return jsonify({'status': 'error', 'message': 'Stock quantity cannot be negative'}), 400
+        material.stock_quantity = new_stock
     if 'lowStockThreshold' in data:
         material.low_stock_threshold = float(data['lowStockThreshold'] or 0)
     if 'supplierId' in data:
@@ -2732,6 +2756,9 @@ def update_raw_material(material_id):
         branch = Branch.query.get(data['branchId'])
         if not branch or not branch.is_active:
             return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+        error = inventory_branch_error(request.current_user, branch.id)
+        if error:
+            return error
         material.branch_id = int(data['branchId'])
 
     db.session.commit()
@@ -2747,6 +2774,9 @@ def archive_raw_material(material_id):
     material = InventoryMaterial.query.get(material_id)
     if not material:
         return jsonify({'status': 'error', 'message': 'Material not found'}), 404
+    error = inventory_branch_error(request.current_user, material.branch_id)
+    if error:
+        return error
 
     material.is_archived = True
     db.session.commit()
@@ -2762,6 +2792,9 @@ def restore_raw_material(material_id):
     material = InventoryMaterial.query.get(material_id)
     if not material:
         return jsonify({'status': 'error', 'message': 'Material not found'}), 404
+    error = inventory_branch_error(request.current_user, material.branch_id)
+    if error:
+        return error
 
     material.is_archived = False
     db.session.commit()
@@ -2812,6 +2845,9 @@ def create_finished_good():
     branch = Branch.query.get(data['branchId'])
     if not branch or not branch.is_active:
         return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+    error = inventory_branch_error(request.current_user, branch.id)
+    if error:
+        return error
 
     # Premade stock is always produced at the warehouse. Choosing a shop branch
     # does not put stock there directly — it raises a delivery that branch must
@@ -2820,6 +2856,12 @@ def create_finished_good():
     if not warehouse:
         return jsonify({'status': 'error',
                         'message': 'No warehouse branch is configured. Add one in Settings first.'}), 400
+
+    # Production uses warehouse materials, so only warehouse accounts and
+    # administrators add premade stock
+    error = inventory_branch_error(request.current_user, warehouse.id)
+    if error:
+        return error
 
     production_branch = warehouse
     deliver_to = None if branch.id == warehouse.id else branch
@@ -2930,6 +2972,9 @@ def update_finished_good(item_id):
     product = PremadeProduct.query.get(item_id)
     if not product:
         return jsonify({'status': 'error', 'message': 'Premade product not found'}), 404
+    error = inventory_branch_error(request.current_user, product.branch_id)
+    if error:
+        return error
 
     data = request.get_json()
 
@@ -3079,6 +3124,9 @@ def distribute_finished_good(item_id):
     product = PremadeProduct.query.get(item_id)
     if not product:
         return jsonify({'status': 'error', 'message': 'Premade product not found'}), 404
+    error = inventory_branch_error(request.current_user, product.branch_id)
+    if error:
+        return error
     if product.is_archived:
         return jsonify({'status': 'error', 'message': 'This product is archived'}), 400
 
@@ -3430,17 +3478,27 @@ def create_waste_log():
     material = InventoryMaterial.query.get(int(data['materialId']))
     if not material:
         return jsonify({'status': 'error', 'message': 'Material not found'}), 404
-    qty = float(data['quantity'])
-    if qty <= 0:
+    error = inventory_branch_error(request.current_user, material.branch_id)
+    if error:
+        return error
+    try:
+        qty = float(data['quantity'])
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Quantity must be a number'}), 400
+    if not qty > 0:
         return jsonify({'status': 'error', 'message': 'Quantity must be positive'}), 400
+    on_hand = float(material.stock_quantity or 0)
+    if qty > on_hand:
+        return jsonify({'status': 'error',
+                        'message': f'Only {on_hand:g} in stock; waste cannot exceed what is on hand'}), 400
     # Deduct from stock
-    material.stock_quantity = max(0, float(material.stock_quantity) - qty)
+    material.stock_quantity = on_hand - qty
     log = MaterialWasteLog(
         material_id=material.id,
         quantity=qty,
         reason=data['reason'].strip(),
         notes=data.get('notes', '').strip() or None,
-        branch_id=int(data.get('branchId', material.branch_id)),
+        branch_id=material.branch_id,  # where the stock was, not what the request says
         logged_by=request.current_user['id'],
     )
     db.session.add(log)
@@ -3451,6 +3509,19 @@ def create_waste_log():
 # ============================================
 # PAYMENTS
 # ============================================
+
+def refresh_job_order_balance(order):
+    """Balance and payment status from what the order costs and what has been
+    paid (down_payment holds the total paid)."""
+    total = float(order.total_price or 0)
+    paid = float(order.down_payment or 0)
+    order.balance = money(max(total - paid, 0))
+    if paid > 0 and paid >= total:
+        order.payment_status = 'paid'
+    elif paid > 0:
+        order.payment_status = 'partial'
+    else:
+        order.payment_status = 'unpaid'
 
 def payment_record_to_dict(p):
     return {
@@ -3476,7 +3547,7 @@ def get_payments():
     query = PaymentRecord.query
     if job_order_id:
         query = query.filter_by(job_order_id=int(job_order_id))
-    elif not all_branches(user):
+    elif not all_job_order_branches(user):
         # Non-admins: only show payments for their branch's job orders
         branch_id = user.get('branchId')
         if branch_id:
@@ -3493,7 +3564,8 @@ def create_payment():
     if not data.get('jobOrderId') or not data.get('amount'):
         return jsonify({'status': 'error', 'message': 'jobOrderId and amount are required'}), 400
     try:
-        job_order = JobOrder.query.get(int(data['jobOrderId']))
+        # Row lock: payments for one order are added one at a time
+        job_order = JobOrder.query.filter_by(id=int(data['jobOrderId'])).with_for_update().first()
         amount = float(data['amount'])
     except (TypeError, ValueError):
         return jsonify({'status': 'error', 'message': 'jobOrderId and amount must be numbers'}), 400
@@ -3504,6 +3576,12 @@ def create_payment():
         return error
     if amount <= 0:
         return jsonify({'status': 'error', 'message': 'Amount must be positive'}), 400
+    amount = money(amount)
+    remaining = money(max(float(job_order.total_price or 0) - float(job_order.down_payment or 0), 0))
+    if amount > remaining:
+        return jsonify({'status': 'error',
+                        'message': f'Payment can\'t be more than the remaining balance of ₱{remaining:,.2f}'
+                                   if remaining > 0 else 'This order is already fully paid'}), 400
     payment = PaymentRecord(
         job_order_id=job_order.id,
         amount=amount,
@@ -3513,17 +3591,12 @@ def create_payment():
         recorded_by=request.current_user['id'],
     )
     db.session.add(payment)
-    # Recompute job order totals
-    total_paid = sum(float(p.amount) for p in job_order.payment_records) + amount
-    balance = max(0, float(job_order.total_price or 0) - total_paid)
-    if balance <= 0:
-        job_order.payment_status = 'paid'
-    elif total_paid > 0:
-        job_order.payment_status = 'partial'
-    else:
-        job_order.payment_status = 'unpaid'
-    job_order.down_payment = total_paid
-    job_order.balance = balance
+    db.session.flush()
+    # Total paid = every payment record, the new one included (it is already in
+    # the session, so adding `amount` on top would count it twice)
+    job_order.down_payment = money(db.session.query(db.func.coalesce(db.func.sum(PaymentRecord.amount), 0))
+                                   .filter(PaymentRecord.job_order_id == job_order.id).scalar())
+    refresh_job_order_balance(job_order)
     db.session.commit()
     log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Payment', f"Recorded payment of {amount} for {job_order.job_order_id}", request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': payment_record_to_dict(payment)}), 201
@@ -3535,7 +3608,7 @@ def get_payment_summary():
     user = request.current_user
     jo_query = JobOrder.query
     # Non-admins only ever see their own branch (no branch on the account = nothing)
-    if not all_branches(user):
+    if not all_job_order_branches(user):
         jo_query = jo_query.filter_by(branch_id=user_branch_id(user) or -1)
     orders = jo_query.all()
     total_revenue = sum(float(o.total_price or 0) for o in orders if o.status not in ('voided', 'cancelled', 'draft'))
@@ -3892,7 +3965,7 @@ def get_job_orders():
     # Branch-level access control with database
     query = JobOrder.query
     
-    if all_branches(user):
+    if all_job_order_branches(user):
         # Admins see all job orders
         pass
     else:
@@ -3964,7 +4037,7 @@ def get_job_order(order_id):
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
     
     # Branch-level access control
-    if not all_branches(user):
+    if not all_job_order_branches(user):
         # Use branch_id directly from user if available, otherwise look up by name
         user_branch_id = None
         if user.get('branchId'):
@@ -4136,7 +4209,14 @@ def create_job_order():
     total_price = pricing['total_price']
     computed_cost = sum(item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0)) for item in items)
     estimated_cost = data.get('estimatedCost') if data.get('estimatedCost') is not None else computed_cost
-    down_payment = 0 if is_draft else data.get('downPayment', 0)
+    try:
+        down_payment = 0 if is_draft else money(float(data.get('downPayment') or 0))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Down payment must be a number'}), 400
+    if down_payment < 0 or down_payment > total_price:
+        return jsonify({'status': 'error', 'message': 'Down payment must be between ₱0 and the order total'}), 400
+    if down_payment > 0 and not has_perm(request.current_user, 'payments.add'):
+        return jsonify({'status': 'error', 'message': 'You do not have permission to record payments'}), 403
     balance = max(total_price - down_payment, 0) if total_price > 0 else 0
     
     # Determine payment status
@@ -4268,12 +4348,22 @@ def create_job_order():
         }
     }), 201
 
+# Status changes the job order page offers. Delivered is set by Deliveries and
+# voided by the void action; cancelled, delivered and voided orders are final.
+JOB_ORDER_TRANSITIONS = {
+    'draft': {'pending', 'cancelled'},
+    'pending': {'in_progress', 'cancelled'},
+    'in_progress': {'pending', 'completed', 'cancelled'},
+    'completed': {'in_progress', 'cancelled'},
+}
+
 @app.route('/api/sales/job-orders/<int:order_id>', methods=['PUT'])
 @require_auth
 @require_permission('sales.edit')
 def update_job_order(order_id):
-    # Use database instead of in-memory list
-    order = JobOrder.query.get(order_id)
+    # Row lock: concurrent edits of one order (e.g. two "Complete" clicks) run one
+    # after the other, so the second sees the first's stock deduction
+    order = JobOrder.query.filter_by(id=order_id).with_for_update().first()
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
 
@@ -4288,12 +4378,24 @@ def update_job_order(order_id):
     if not is_draft and (order.down_payment or 0) <= 0 and not has_perm(user, 'sales.edit_unpaid'):
         return jsonify({'status': 'error', 'message': 'A down payment is required before you can edit this job order'}), 403
 
-    data = request.get_json()
+    data = request.get_json() or {}
     if data.get('sendQuotation') and not has_perm(user, 'sales.quote'):
         return jsonify({'status': 'error', 'message': 'You do not have permission to send quotations'}), 403
+    # Money received goes through Payments (and overrides through their approval);
+    # the cost is worked out from the order's lines
+    locked_fields = [f for f in ('downPayment', 'balance', 'paymentStatus', 'actualCost') if f in data]
+    if locked_fields:
+        return jsonify({'status': 'error', 'message': f"{', '.join(locked_fields)} can't be set here. Record payments "
+                                                      f"on the Payments panel or request a payment override."}), 400
 
     # Capture previous status BEFORE any updates
     prev_status = order.status
+    if 'status' in data and data['status'] != prev_status:
+        allowed = JOB_ORDER_TRANSITIONS.get(prev_status, set())
+        if data['status'] not in allowed:
+            return jsonify({'status': 'error',
+                            'message': f"A {prev_status.replace('_', ' ')} job order can't be changed to "
+                                       f"{str(data['status']).replace('_', ' ')}"}), 400
 
     # While still a draft the whole order is editable — customer details and
     # branch included. Once confirmed these are locked and only the fields
@@ -4341,12 +4443,6 @@ def update_job_order(order_id):
     # Update allowed fields
     if 'status' in data:
         order.status = data['status']
-    if 'paymentStatus' in data:
-        order.payment_status = data['paymentStatus']
-    if 'downPayment' in data:
-        order.down_payment = data['downPayment']
-    if 'actualCost' in data:
-        order.actual_cost = data['actualCost']
     if pricing:
         order.total_price = pricing['total_price']
         order.discount_percent = pricing['discount_percent']
@@ -4392,19 +4488,11 @@ def update_job_order(order_id):
         log_action(request.current_user['id'], request.current_user['fullName'], 'QUOTATION', 'Sales',
                    f"Re-sent quotation {order.job_order_id} to {order.customer_name}", request.remote_addr or '0.0.0.0')
 
-    # Recalculate balance
-    if 'downPayment' in data or 'totalPrice' in data:
-        order.balance = max(order.total_price - order.down_payment, 0)
-        if order.total_price > 0 and order.down_payment >= order.total_price:
-            order.payment_status = 'paid'
-        elif order.down_payment > 0:
-            order.payment_status = 'partial'
-        elif order.total_price <= 0 and order.down_payment > 0:
-            order.payment_status = 'partial'
-        elif order.total_price <= 0:
-            order.payment_status = 'unpaid'
+    # A new price changes what is still owed
+    if pricing:
+        refresh_job_order_balance(order)
 
-    if data.get('status') == 'completed':
+    if data.get('status') == 'completed' and prev_status != 'completed':
         order.completed_at = datetime.now()
 
     order.updated_at = datetime.now()
@@ -4521,7 +4609,7 @@ def void_job_order(order_id):
     order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    if not all_branches(user) and order.branch_id != user_branch_id(user):
+    if not all_job_order_branches(user) and order.branch_id != user_branch_id(user):
         return jsonify({'status': 'error', 'message': 'Access denied'}), 403
     if order.status in ('voided', 'cancelled', 'draft'):
         return jsonify({'status': 'error', 'message': f'A {order.status} order cannot be voided'}), 400
@@ -4703,7 +4791,7 @@ def get_draft_job_orders():
     order lists and sales/pending counts until confirmed."""
     user = request.current_user
     query = JobOrder.query.filter(JobOrder.status == 'draft')
-    if not all_branches(user):
+    if not all_job_order_branches(user):
         if user.get('branchId'):
             query = query.filter(JobOrder.branch_id == user['branchId'])
         elif user.get('branch'):
@@ -4764,7 +4852,7 @@ def get_all_orders():
     co_base = CustomerOrder.query.options(joinedload(CustomerOrder.branch))
 
     # Get job orders from database
-    if all_branches(user):
+    if all_job_order_branches(user):
         # Administrators can see all orders (drafts are excluded — they live in /api/sales/drafts)
         job_orders_db = jo_base.filter(JobOrder.status != 'draft').order_by(JobOrder.created_at.desc()).all()
         customer_orders_db = co_base.order_by(CustomerOrder.created_at.desc()).all()
@@ -4855,7 +4943,7 @@ def lineup_slip_to_dict(slip):
 
 
 def can_use_lineup_slip(user, branch_id):
-    return all_branches(user) or (branch_id is not None and branch_id == user_branch_id(user))
+    return all_job_order_branches(user) or (branch_id is not None and branch_id == user_branch_id(user))
 
 
 @app.route('/api/sales/lineup-slips', methods=['GET'])
@@ -4864,7 +4952,7 @@ def can_use_lineup_slip(user, branch_id):
 def get_lineup_slips():
     user = request.current_user
     query = LineupSlip.query
-    if not all_branches(user):
+    if not all_job_order_branches(user):
         query = query.filter(LineupSlip.branch_id == (user_branch_id(user) or -1))
     slips = query.order_by(LineupSlip.created_at.desc()).all()
     return jsonify({'status': 'success', 'data': [lineup_slip_to_dict(s) for s in slips]})
@@ -4944,7 +5032,7 @@ def branch_access_error(user, branch_id, what='job order'):
     """403 response if the user is limited to their own branch and branch_id is
     another one, else None. Always pass the branch stored on the record, never
     one taken from the request."""
-    if all_branches(user) or (branch_id is not None and branch_id == user_branch_id(user)):
+    if all_job_order_branches(user) or (branch_id is not None and branch_id == user_branch_id(user)):
         return None
     return jsonify({'status': 'error', 'message': f'This {what} belongs to another branch'}), 403
 
@@ -5049,7 +5137,7 @@ def update_actual_cost(order_id):
 @require_auth
 @require_permission('costing.view')
 def get_variance_report():
-    orders = costed_job_orders(request.current_user).filter(JobOrder.status == 'completed').all()
+    orders = costed_job_orders(request.current_user).filter(JobOrder.status.in_(EARNED_STATUSES)).all()
     report = []
     for order in orders:
         c = job_order_costing(order)
@@ -5075,7 +5163,7 @@ def generate_receipt(order_id):
     order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    if not all_branches(user) and order.branch_id != user_branch_id(user):
+    if not all_job_order_branches(user) and order.branch_id != user_branch_id(user):
         return jsonify({'status': 'error', 'message': 'Access denied'}), 403
 
     receipt = {
@@ -5173,6 +5261,8 @@ def create_purchase_order():
     } for it in data['items']]
     if any(it['quantity'] <= 0 for it in items):
         return jsonify({'status': 'error', 'message': 'Every item needs a quantity above zero'}), 400
+    if any(it['unitPrice'] < 0 for it in items):
+        return jsonify({'status': 'error', 'message': 'Unit prices cannot be negative'}), 400
 
     supplier_id = data.get('supplierId')
     if supplier_id and not Supplier.query.get(supplier_id):
@@ -5218,7 +5308,8 @@ def approve_purchase_order(po_id):
 @require_auth
 @require_permission('purchase_orders.receive')
 def receive_purchase_order(po_id):
-    po = PurchaseOrder.query.get(po_id)
+    # Row lock: a second "Receive" waits and then sees the PO already received
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
     if not po:
         return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
 
@@ -6085,6 +6176,44 @@ def check_items_availability(items):
 
     return all_ok, report
 
+def order_quantity(raw):
+    """A whole number of units above zero, or None."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value != value or value <= 0 or value != int(value) or value > 1_000_000:
+        return None
+    return int(value)
+
+def stock_taken_at_placement(item):
+    """Checkout orders (place_multi_branch_order) take each item's stock when the
+    order is placed and record the branch it came from; walk-in orders
+    (create_product_order) take it when the order is completed."""
+    return 'sourceBranchId' in item
+
+def return_placement_stock(order):
+    """Put back the stock a checkout order took when it was placed, when the order
+    is cancelled. Items whose transfer already arrived stay at the pickup branch.
+    Returns an error message if items are still in transit, else None."""
+    transfers = {t.source_branch_id: t for t in (order.transfers or []) if t.status != 'cancelled'}
+    if any(t.status == 'transferred' for t in transfers.values()):
+        return 'Some items are on their way to the pickup branch. Receive them first, then cancel.'
+    for item in order.items or []:
+        if not stock_taken_at_placement(item):
+            continue
+        source = item.get('sourceBranchId')
+        transfer = transfers.get(source) if source != order.branch_id else None
+        if transfer is not None and transfer.status == 'received':
+            continue
+        product = PremadeProduct.query.filter_by(id=item.get('productId')).with_for_update().first()
+        if product:
+            product.quantity = float(product.quantity or 0) + float(item.get('quantity') or 0)
+    for transfer in transfers.values():
+        if transfer.status == 'pending':
+            transfer.status = 'cancelled'
+    return None
+
 def place_multi_branch_order(data, user_id):
     """Create one order at the pickup branch, with transfer requests for items
     held at other branches. Shared by the public checkout and draft confirm.
@@ -6107,13 +6236,19 @@ def place_multi_branch_order(data, user_id):
     all_items = []
     items_by_source = {}
     all_deductions = []
+    requested_by_product = {}
     for item_data in data['items']:
         product_id = item_data.get('productId')
-        quantity = int(item_data.get('quantity', 1))
-        product = PremadeProduct.query.filter_by(id=product_id, is_archived=False).first()
+        quantity = order_quantity(item_data.get('quantity', 1))
+        if quantity is None:
+            return None, ({'status': 'error', 'message': 'Each quantity must be a whole number above zero'}, 400)
+        # Row lock: two checkouts for the last units can't both take them
+        product = PremadeProduct.query.filter_by(id=product_id, is_archived=False).with_for_update().first()
         if not product:
             return None, ({'status': 'error', 'message': f'Product {product_id} not found'}, 400)
-        if float(product.quantity) < quantity:
+        # The same product listed twice is checked against its stock once, in total
+        requested_by_product[product.id] = requested_by_product.get(product.id, 0) + quantity
+        if float(product.quantity) < requested_by_product[product.id]:
             return None, ({'status': 'error', 'message': f'Insufficient stock for {product.name}'}, 400)
 
         item_dict = {
@@ -6436,16 +6571,22 @@ def create_product_order():
     total_amount = 0
     validated_items = []
     
+    requested_by_product = {}
+    stock_deductions = []
     for item in data['items']:
         product_id = item.get('productId')
-        quantity = item.get('quantity', 1)
+        quantity = order_quantity(item.get('quantity', 1))
+        if quantity is None:
+            return jsonify({'status': 'error', 'message': 'Each quantity must be a whole number above zero'}), 400
 
-        # Find product in database-backed premade products
-        product = PremadeProduct.query.filter_by(id=product_id, is_archived=False).first()
+        # Find product in database-backed premade products. Row lock: two orders
+        # for the last units can't both take them
+        product = PremadeProduct.query.filter_by(id=product_id, is_archived=False).with_for_update().first()
         if not product:
             return jsonify({'status': 'error', 'message': f'Product with ID {product_id} not found'}), 400
 
-        if float(product.quantity) < quantity:
+        requested_by_product[product.id] = requested_by_product.get(product.id, 0) + quantity
+        if float(product.quantity) < requested_by_product[product.id]:
             return jsonify({'status': 'error', 'message': f'Insufficient stock for {product.name}'}), 400
 
         # Enforce that all products come from the selected pickup branch.
@@ -6461,10 +6602,24 @@ def create_product_order():
             'sku': product.sku,
             'quantity': quantity,
             'unitPrice': float(product.price),
-            'total': item_total
+            'total': item_total,
+            # Taken from this branch's stock now, like checkout (stock_taken_at_placement)
+            'sourceBranchId': int(product.branch_id),
         })
+        stock_deductions.append((product, quantity))
     
-    payment_amount = float(data.get('paymentAmount') or 0)
+    try:
+        payment_amount = money(float(data.get('paymentAmount') or 0))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Payment amount must be a number'}), 400
+    # Money taken at the counter is recorded by staff who may take payments,
+    # and can't be more than the order costs
+    payer = get_user_from_token(token) if token else None
+    if payment_amount > 0 and not (payer and has_perm(payer, 'product_orders.payment')):
+        return jsonify({'status': 'error', 'message': 'You do not have permission to record payments'}), 403
+    if payment_amount < 0 or payment_amount > money(total_amount):
+        return jsonify({'status': 'error',
+                        'message': f'Payment must be between ₱0 and the order total of ₱{total_amount:,.2f}'}), 400
     if payment_amount >= total_amount and total_amount > 0:
         initial_payment_status = 'paid'
     elif payment_amount > 0:
@@ -6490,6 +6645,9 @@ def create_product_order():
     )
     
     db.session.add(new_order)
+    # The units are taken off the shelf now, so another order can't promise them
+    for product, qty in stock_deductions:
+        product.quantity = float(product.quantity) - qty
     db.session.commit()
 
     log_action(
@@ -6531,7 +6689,8 @@ def get_product_orders():
 @require_permission('product_orders.edit', 'product_orders.payment')
 def update_product_order(order_id):
     """Update a product order status"""
-    order = ProductOrder.query.get(order_id)
+    # Row lock: a double-clicked status change can't take or return stock twice
+    order = ProductOrder.query.filter_by(id=order_id).with_for_update().first()
     if not order:
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     
@@ -6571,6 +6730,16 @@ def update_product_order(order_id):
                 }), 400
 
         previous_status = order.status
+        placed_stock = any(stock_taken_at_placement(it) for it in (order.items or []))
+        if previous_status == 'completed' and incoming_status != 'completed':
+            return jsonify({'status': 'error', 'message': "A completed order is final and can't be reopened"}), 400
+        if previous_status == 'cancelled' and incoming_status != 'cancelled' and placed_stock:
+            return jsonify({'status': 'error', 'message': "This order's items went back to stock when it was "
+                                                          "cancelled. Place a new order instead."}), 400
+        if incoming_status == 'cancelled' and previous_status != 'cancelled':
+            error = return_placement_stock(order)
+            if error:
+                return jsonify({'status': 'error', 'message': error}), 400
         if previous_status != incoming_status:
             updated_fields.append(f"status: {previous_status} -> {incoming_status}")
         order.status = incoming_status
@@ -6583,6 +6752,9 @@ def update_product_order(order_id):
                 source_branch_id = item.get('sourceBranchId', order.branch_id)
                 item_sku = item.get('sku', '')
 
+                if source_branch_id == order.branch_id and stock_taken_at_placement(item):
+                    # Checkout order: this item's stock was taken when it was placed
+                    continue
                 if source_branch_id == order.branch_id:
                     # Local item — deduct from the original product at the pickup branch
                     product = PremadeProduct.query.get(item.get('productId'))
@@ -6634,12 +6806,21 @@ def update_product_order(order_id):
         order.payment_status = data['paymentStatus']
     
     if 'addPayment' in data:
-        add_amount = float(data.get('addPayment') or 0)
+        try:
+            add_amount = money(float(data.get('addPayment') or 0))
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'Payment amount must be a number'}), 400
+        remaining = money(max(float(order.total_amount or 0) - float(order.amount_paid or 0), 0))
+        if add_amount < 0:
+            return jsonify({'status': 'error', 'message': 'Payment amount must be positive'}), 400
+        if add_amount > remaining:
+            return jsonify({'status': 'error',
+                            'message': f"Payment can't be more than the remaining balance of ₱{remaining:,.2f}"
+                                       if remaining > 0 else 'This order is already fully paid'}), 400
         if add_amount > 0:
             current_paid = order.amount_paid or 0.0
-            order.amount_paid = current_paid + add_amount
+            order.amount_paid = money(current_paid + add_amount)
             if order.amount_paid >= order.total_amount:
-                order.amount_paid = order.total_amount
                 prev = order.payment_status
                 order.payment_status = 'paid'
                 updated_fields.append(f"payment: {prev} -> paid (added ₱{add_amount:,.2f})")
@@ -6891,7 +7072,8 @@ def cancel_my_product_order(order_id):
     The stock taken when the order was placed goes back on the shelf and any
     transfer requests still waiting to be sent are called off."""
     user = request.current_user
-    order = ProductOrder.query.filter_by(id=order_id, user_id=user['id']).first()
+    # Row lock: a repeated cancel waits, then sees the order already cancelled
+    order = ProductOrder.query.filter_by(id=order_id, user_id=user['id']).with_for_update().first()
     if not order:
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     if order.status != 'pending':
@@ -6901,12 +7083,10 @@ def cancel_my_product_order(order_id):
         return jsonify({'status': 'error',
                         'message': 'Some items are already on their way to your pickup branch. Please contact the shop to cancel.'}), 400
 
-    for item in order.items or []:
-        product = PremadeProduct.query.get(item.get('productId'))
-        if product:
-            product.quantity = float(product.quantity or 0) + float(item.get('quantity') or 0)
-    for t in order.transfers or []:
-        t.status = 'cancelled'
+    # Only stock the order actually took goes back (a walk-in order takes none until completed)
+    error = return_placement_stock(order)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 400
     order.status = 'cancelled'
 
     notify_branch_users(
@@ -7737,7 +7917,7 @@ def get_sales_report():
 
     total_orders = len(orders)
     # Revenue excludes VAT (collected for the government); pending balances below stay as billed
-    total_revenue = sum(revenue_ex_vat(o) for o in orders if o.status == 'completed')
+    total_revenue = sum(revenue_ex_vat(o) for o in orders if o.status in EARNED_STATUSES)
     total_pending_revenue = sum(float(o.balance) for o in orders if o.payment_status != 'paid')
 
     status_breakdown = {}
@@ -7755,7 +7935,7 @@ def get_sales_report():
             if date not in daily_sales:
                 daily_sales[date] = {'orders': 0, 'revenue': 0}
             daily_sales[date]['orders'] += 1
-            if o.status == 'completed':
+            if o.status in EARNED_STATUSES:
                 daily_sales[date]['revenue'] += revenue_ex_vat(o)
 
     # ── Premade Product Orders ──
@@ -7814,7 +7994,7 @@ def get_sales_report():
         'period': {'startDate': start_date, 'endDate': end_date},
         'summary': {
             'totalOrders': total_orders,
-            'completedOrders': sum(1 for o in orders if o.status == 'completed'),
+            'completedOrders': sum(1 for o in orders if o.status in EARNED_STATUSES),
             'totalRevenue': total_revenue,
             'pendingRevenue': total_pending_revenue,
             'averageOrderValue': round(total_revenue / total_orders, 2) if total_orders > 0 else 0

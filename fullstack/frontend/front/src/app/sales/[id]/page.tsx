@@ -550,6 +550,8 @@ export default function JobOrderDetailPage() {
       setShowPaymentForm(false);
     } catch (err) {
       console.error(err);
+      // e.g. more than the remaining balance
+      setError(err instanceof Error && err.message ? err.message : 'Failed to record payment.');
     } finally {
       setSavingPayment(false);
     }
