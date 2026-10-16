@@ -2842,6 +2842,13 @@ def create_finished_good():
     if not isinstance(data.get('materialsUsed'), list) or len(data.get('materialsUsed')) == 0:
         return jsonify({'status': 'error', 'message': 'Please provide materials used for this premade product'}), 400
 
+    try:
+        made_qty, price = float(data['quantity']), float(data['price'])
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Quantity and price must be numbers'}), 400
+    if not made_qty > 0 or not price >= 0:
+        return jsonify({'status': 'error', 'message': 'Quantity must be above zero and price cannot be negative'}), 400
+
     branch = Branch.query.get(data['branchId'])
     if not branch or not branch.is_active:
         return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
@@ -2891,7 +2898,9 @@ def create_finished_good():
         if not material:
             return jsonify({'status': 'error', 'message': f'Material not found or unavailable at row {idx + 1}'}), 400
 
-        if float(material.stock_quantity) < quantity_used:
+        # The same material on several rows is checked against its stock in total
+        needed = quantity_used + sum(e['quantityUsed'] for e in usage_entries if e['material'].id == material.id)
+        if float(material.stock_quantity) < needed:
             return jsonify({'status': 'error', 'message': f'Insufficient stock for {material.material_type}. Available: {float(material.stock_quantity)}'}), 400
 
         usage_entries.append({'material': material, 'quantityUsed': quantity_used})
@@ -3197,7 +3206,8 @@ def get_premade_transfers():
 def confirm_premade_transfer(transfer_id):
     """Accept a delivery: only now does stock leave the warehouse and appear
     in the destination branch's own row."""
-    transfer = PremadeStockTransfer.query.get(transfer_id)
+    # Row lock: a second confirm waits, then sees it already received
+    transfer = PremadeStockTransfer.query.filter_by(id=transfer_id).with_for_update().first()
     if not transfer:
         return jsonify({'status': 'error', 'message': 'Delivery not found'}), 404
     if transfer.status != 'pending':
@@ -3248,7 +3258,7 @@ def confirm_premade_transfer(transfer_id):
 @require_permission('premade.receive')
 def cancel_premade_transfer(transfer_id):
     """Reject a delivery. Nothing moved, so the warehouse simply keeps the stock."""
-    transfer = PremadeStockTransfer.query.get(transfer_id)
+    transfer = PremadeStockTransfer.query.filter_by(id=transfer_id).with_for_update().first()
     if not transfer:
         return jsonify({'status': 'error', 'message': 'Delivery not found'}), 404
     if transfer.status != 'pending':
@@ -3574,6 +3584,8 @@ def create_payment():
     error = branch_access_error(request.current_user, job_order.branch_id)
     if error:
         return error
+    if job_order.status in ('draft', 'cancelled', 'voided'):
+        return jsonify({'status': 'error', 'message': f'A {job_order.status} job order cannot take payments'}), 400
     if amount <= 0:
         return jsonify({'status': 'error', 'message': 'Amount must be positive'}), 400
     amount = money(amount)
@@ -3726,9 +3738,14 @@ def approve_payment_override(req_id):
         job_order.balance = req.new_balance
     if req.new_down_payment is not None:
         job_order.down_payment = req.new_down_payment
+        if req.new_balance is None:
+            # A new amount paid changes what is still owed
+            job_order.balance = money(max(float(job_order.total_price or 0) - float(job_order.down_payment or 0), 0))
+            if not req.new_payment_status:
+                refresh_job_order_balance(job_order)
     req.status = 'approved'
     req.reviewed_by = request.current_user['id']
-    req.review_notes = ((request.get_json() or {}).get('notes') or '').strip() or None
+    req.review_notes = ((request.get_json(silent=True) or {}).get('notes') or '').strip() or None
     req.reviewed_at = datetime.utcnow()
     db.session.commit()
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Payment', f"Approved payment override for {job_order.job_order_id}", request.remote_addr or '0.0.0.0')
@@ -3749,7 +3766,7 @@ def reject_payment_override(req_id):
             return error
     req.status = 'rejected'
     req.reviewed_by = request.current_user['id']
-    req.review_notes = ((request.get_json() or {}).get('notes') or '').strip() or None
+    req.review_notes = ((request.get_json(silent=True) or {}).get('notes') or '').strip() or None
     req.reviewed_at = datetime.utcnow()
     db.session.commit()
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Payment', f"Rejected payment override #{req.id}", request.remote_addr or '0.0.0.0')
@@ -3773,6 +3790,17 @@ def item_category(item):
         return 'labor'
     return 'material'
 
+
+def material_quantities(items):
+    """{material key: total quantity} over an order's material lines, to tell
+    whether an edit changes what the order takes from stock."""
+    totals = {}
+    for it in items or []:
+        if item_category(it) != 'material':
+            continue
+        key = f"id:{it['materialId']}" if it.get('materialId') else f"name:{(it.get('name') or '').strip().lower()}"
+        totals[key] = round(totals.get(key, 0) + float(it.get('quantity') or 0), 4)
+    return {k: v for k, v in totals.items() if v}
 
 def job_order_cost(items):
     """What the job costs us: materials + other expenses + labor, where a labor
@@ -4390,6 +4418,13 @@ def update_job_order(order_id):
 
     # Capture previous status BEFORE any updates
     prev_status = order.status
+    # A finished order's materials have left stock; changing them here would make
+    # stock and costing disagree. Revert it to In Progress first (completing it
+    # again then takes or returns the difference).
+    if prev_status in ('completed', 'delivered') and 'items' in data and \
+            material_quantities(data['items'] or []) != material_quantities(order.items or []):
+        return jsonify({'status': 'error', 'message': 'This order is finished, so its materials have already left stock. '
+                                                      'Revert it to In Progress to change them.'}), 400
     if 'status' in data and data['status'] != prev_status:
         allowed = JOB_ORDER_TRANSITIONS.get(prev_status, set())
         if data['status'] not in allowed:
@@ -4499,9 +4534,10 @@ def update_job_order(order_id):
 
     # ── Deduct inventory when a job order is completed ──────────────────────
     if data.get('status') == 'completed' and prev_status != 'completed':
-        # Total each material across lines first, then deduct only what earlier
-        # completions haven't — an order reverted to in-progress and completed
-        # again must not take its stock twice.
+        # Total each material across lines first, then take (or give back) only
+        # the difference from what earlier completions took — an order reverted
+        # to in-progress and completed again must not take its stock twice, and
+        # one whose materials were lowered meanwhile returns the difference.
         to_use = {}  # inventory material id -> [material, qty]
         for item in (order.items or []):
             qty = float(item.get('quantity', 0))
@@ -4545,6 +4581,17 @@ def update_job_order(order_id):
         sole_worker_id = next(iter(worker_ids)) if len(worker_ids) == 1 else None
         worker_names = ', '.join(sorted({a.worker.name for a in done if a.worker}))
 
+        # Materials an earlier completion took that are no longer on the order
+        taken_ids = [mid for (mid,) in db.session.query(MaterialUsageLog.material_id).filter(
+            MaterialUsageLog.used_in_type == 'job_order',
+            MaterialUsageLog.used_in_reference == order.job_order_id,
+            MaterialUsageLog.used_by.isnot(None)).distinct()]
+        for mid in taken_ids:
+            if mid not in to_use:
+                gone = InventoryMaterial.query.get(mid)
+                if gone:
+                    to_use[mid] = [gone, 0.0]
+
         for inv_material, qty in to_use.values():
             # Logs with used_by set are the ones written here (and that took stock)
             already = db.session.query(db.func.coalesce(db.func.sum(MaterialUsageLog.quantity_used), 0)).filter(
@@ -4554,15 +4601,18 @@ def update_job_order(order_id):
                 MaterialUsageLog.used_by.isnot(None),
             ).scalar()
             qty = round(qty - float(already or 0), 4)
-            if qty <= 0:
+            if qty == 0:
                 continue
 
+            # A negative qty gives back what the order no longer uses
             inv_material.stock_quantity = float(inv_material.stock_quantity) - qty
-            inv_material.status = 'available'   # clear 'needed' flag
+            if qty > 0:
+                inv_material.status = 'available'   # clear 'needed' flag
             inv_material.updated_at = datetime.now()
 
-            notes = f"Used in job order {order.job_order_id} — {order.customer_name}"
-            if worker_names:
+            notes = (f"Used in job order {order.job_order_id} — {order.customer_name}" if qty > 0 else
+                     f"Returned from job order {order.job_order_id} — materials lowered")
+            if worker_names and qty > 0:
                 notes += f" (by {worker_names})"
             db.session.add(MaterialUsageLog(
                 material_id=inv_material.id,
@@ -6430,7 +6480,7 @@ def get_direct_sales():
 @require_permission('product_orders.transfer')
 def mark_transfer_sent(transfer_id):
     """Source branch marks their items as sent to the pickup branch."""
-    transfer = ProductOrderTransfer.query.get(transfer_id)
+    transfer = ProductOrderTransfer.query.filter_by(id=transfer_id).with_for_update().first()
     if not transfer:
         return jsonify({'status': 'error', 'message': 'Transfer request not found'}), 404
 
@@ -6469,7 +6519,8 @@ def mark_transfer_sent(transfer_id):
 @require_permission('product_orders.transfer')
 def confirm_transfer_receipt(transfer_id):
     """Pickup branch confirms they received the transferred items; adds to their inventory."""
-    transfer = ProductOrderTransfer.query.get(transfer_id)
+    # Row lock: a second confirm waits, then sees it already received
+    transfer = ProductOrderTransfer.query.filter_by(id=transfer_id).with_for_update().first()
     if not transfer:
         return jsonify({'status': 'error', 'message': 'Transfer request not found'}), 404
 
@@ -6801,6 +6852,15 @@ def update_product_order(order_id):
     if 'paymentStatus' in data:
         if data['paymentStatus'] not in valid_payment_statuses:
             return jsonify({'status': 'error', 'message': 'Invalid payment status'}), 400
+        paid, total = float(order.amount_paid or 0), float(order.total_amount or 0)
+        # Status and amount paid must agree: "paid" records the rest as received;
+        # the others only describe what is already recorded
+        if data['paymentStatus'] == 'paid':
+            order.amount_paid = money(total)
+        elif data['paymentStatus'] == 'unpaid' and paid > 0:
+            return jsonify({'status': 'error', 'message': f'₱{paid:,.2f} is already recorded as paid on this order'}), 400
+        elif data['paymentStatus'] == 'partial' and not (0 < paid < total):
+            return jsonify({'status': 'error', 'message': 'Add the amount received to mark this order partly paid'}), 400
         if order.payment_status != data['paymentStatus']:
             updated_fields.append(f"payment: {order.payment_status} -> {data['paymentStatus']}")
         order.payment_status = data['paymentStatus']
@@ -7248,7 +7308,7 @@ def bulk_transfer_action():
 
     ok, failed = [], []
     for tid in transfer_ids:
-        transfer = ProductOrderTransfer.query.get(int(tid))
+        transfer = ProductOrderTransfer.query.filter_by(id=int(tid)).with_for_update().first()
         if not transfer:
             failed.append({'id': tid, 'reason': 'Not found'}); continue
 
