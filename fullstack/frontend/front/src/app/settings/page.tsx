@@ -3,6 +3,8 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { api, Branch, User as UserType, Role } from '@/lib/api';
 import { useConfirm } from '@/components/ConfirmDialog';
+import PermissionsDialog from '@/components/PermissionsDialog';
+import VatRateSetting from '@/components/VatRateSetting';
 
 type TabType = 'general' | 'users' | 'branches' | 'notifications';
 
@@ -10,7 +12,7 @@ type TabType = 'general' | 'users' | 'branches' | 'notifications';
 const HIDDEN_ROLES = ['seat_maker', 'sewer'];
 
 export default function SettingsPage() {
-  const { user } = useAuth();
+  const { user, can, checkAuth } = useAuth();
   const { confirm, confirmDialog } = useConfirm();
   const [activeTab, setActiveTab] = useState<TabType>('general');
   const [saving, setSaving] = useState(false);
@@ -20,6 +22,8 @@ export default function SettingsPage() {
     const [loadingUsers, setLoadingUsers] = useState(false);
     const [showUserModal, setShowUserModal] = useState(false);
     const [editingUser, setEditingUser] = useState<UserType | null>(null);
+    // User whose permissions are being edited
+    const [permTarget, setPermTarget] = useState<UserType | null>(null);
     const [userFormData, setUserFormData] = useState({
       username: '',
       password: '',
@@ -223,6 +227,16 @@ export default function SettingsPage() {
       }
     };
 
+    // Mirrors the server's delegation rule: only administrators manage their own
+    // account here or any administrator account
+    const isAdministrator = user?.role === 'administrator';
+    const offLimitsReason = (target: UserType): string | null => {
+      if (isAdministrator) return null;
+      if (target.id === user?.id) return 'Only an administrator can change your own account here';
+      if (target.role === 'administrator') return 'Only an administrator can change an administrator account';
+      return null;
+    };
+
     /**
      * Why this account can't be deactivated or deleted, or null if it can.
      * Mirrors the server's guards so the buttons are disabled with a reason
@@ -230,6 +244,8 @@ export default function SettingsPage() {
      */
     const protectedReason = (target: UserType): string | null => {
       if (target.id === user?.id) return 'This is your own account';
+      const offLimits = offLimitsReason(target);
+      if (offLimits) return offLimits;
       const otherActiveAdmins = users.filter(
         (u) => u.role === 'administrator' && u.isActive && u.id !== target.id,
       ).length;
@@ -386,7 +402,7 @@ export default function SettingsPage() {
     setSaving(false);
   };
 
-  const tabs = [
+  const allTabs = [
     { id: 'general' as TabType, name: 'General', icon: (
       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -410,11 +426,14 @@ export default function SettingsPage() {
     )},
   ];
 
+  const tabs = allTabs.filter(t => t.id !== 'users' || can('users.manage'));
+
   const renderContent = () => {
     switch (activeTab) {
       case 'general':
         return (
           <div className="space-y-6">
+            <VatRateSetting canEdit={can('settings.edit')} />
             <div>
               <h3 className="text-lg font-semibold text-gray-900 mb-4">Company Information</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -520,7 +539,7 @@ export default function SettingsPage() {
                     </optgroup>
                   </select>
                 </div>
-                {user?.role === 'administrator' && (
+                {can('users.manage') && (
                   <button
                     onClick={handleAddUser}
                     className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors whitespace-nowrap"
@@ -601,14 +620,26 @@ export default function SettingsPage() {
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right">
-                          {user?.role === 'administrator' && (
+                          {can('users.manage') && (
                             <>
                               <button 
                                 onClick={() => handleEditUser(u)}
-                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3"
+                                disabled={!!offLimitsReason(u)}
+                                title={offLimitsReason(u) || undefined}
+                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300"
                               >
                           Edit
                         </button>
+                              {u.role !== 'customer' && (
+                                <button
+                                  onClick={() => setPermTarget(u)}
+                                  disabled={!!offLimitsReason(u)}
+                                  title={offLimitsReason(u) || undefined}
+                                  className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300"
+                                >
+                                  Permissions
+                                </button>
+                              )}
                               <button
                                 onClick={() => handleToggleUserStatus(u)}
                                 disabled={!!protectedReason(u)}
@@ -656,7 +687,7 @@ export default function SettingsPage() {
             )}
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-gray-900">Branch Management</h3>
-              {user?.role === 'administrator' && (
+              {can('branches.manage') && (
                 <button 
                   onClick={handleAddBranch}
                   className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors"
@@ -709,7 +740,7 @@ export default function SettingsPage() {
                           </span>
                         </div>
                       </div>
-                      {user?.role === 'administrator' && (
+                      {can('branches.manage') && (
                         <button 
                           onClick={() => handleEditBranch(branch)}
                           className="text-[#011c72] hover:text-[#011c72] text-sm font-medium"
@@ -733,7 +764,7 @@ export default function SettingsPage() {
                         {branch.address}
                       </div>
                     </div>
-                    {user?.role === 'administrator' && (
+                    {can('branches.manage') && (
                       <div className="mt-4 pt-4 border-t border-gray-200">
                         <button
                           onClick={() => handleToggleBranchStatus(branch)}
@@ -972,6 +1003,18 @@ export default function SettingsPage() {
         </div>
       )}
 
+        {permTarget && (
+          <PermissionsDialog
+            target={permTarget}
+            onClose={() => setPermTarget(null)}
+            onSaved={() => {
+              // Your own menu and buttons follow your permissions right away
+              if (permTarget.id === user?.id) checkAuth();
+              setPermTarget(null);
+            }}
+          />
+        )}
+
         {/* User Modal */}
         {showUserModal && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -1086,6 +1129,8 @@ export default function SettingsPage() {
                     {/* An existing account keeps its own role in the list so editing it still works */}
                     {roles
                       .filter((role) => !HIDDEN_ROLES.includes(role.id) || (editingUser && editingUser.role === role.id))
+                      // Only administrators can give out the administrator role
+                      .filter((role) => role.id !== 'administrator' || user?.role === 'administrator')
                       .map((role) => (
                         <option key={role.id} value={role.id}>
                           {role.name}

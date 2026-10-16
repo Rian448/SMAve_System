@@ -16,7 +16,7 @@ type UnifiedOrder = (JobOrder | CustomerOrder | ProductOrder) & {
 
 export default function SalesPage() {
   const { confirm, confirmDialog } = useConfirm();
-  const { user } = useAuth();
+  const { user, can } = useAuth();
   const [activeTab, setActiveTab] = useState<SalesTab>('all');
   const [orders, setOrders] = useState<UnifiedOrder[]>([]);
   const [loading, setLoading] = useState(true);
@@ -42,9 +42,9 @@ export default function SalesPage() {
 
   const [transferDateFilter, setTransferDateFilter] = useState<'all' | 'day' | 'week' | 'month' | 'year'>('all');
 
-  const canSeePremadeFeatures = user && ['administrator', 'supervisor'].includes(user.role);
+  const canSeePremadeFeatures = !!user && can('product_orders.view');
   // Customers' saved carts are read-only here, so sales staff see them too
-  const canSeeCartDrafts = !!user && ['administrator', 'supervisor', 'sales_manager'].includes(user.role);
+  const canSeeCartDrafts = !!user && can('sales.view');
 
   const fetchOrders = useCallback(async () => {
     try {

@@ -27,8 +27,9 @@ function getTimeSlots(preferredTime?: string): string[] {
 
 export default function AppointmentsPage() {
   const router = useRouter();
-  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
-  const isAdmin = user?.role === 'administrator';
+  const { isAuthenticated, isLoading: authLoading, can } = useAuth();
+  // Cross-branch staff confirm other branches' appointments as an override
+  const isAdmin = can('branches.all');
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');

@@ -4,12 +4,12 @@ import { formatDateTime } from '@/lib/dateUtils';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api, CustomerOrder } from '@/lib/api';
-import { useAuth, hasAccess } from '@/context/AuthContext';
+import { useAuth } from '@/context/AuthContext';
 
 export default function CustomerOrderDetailPage() {
   const params = useParams();
   const router = useRouter();
-  const { user, isLoading: authLoading } = useAuth();
+  const { user, isLoading: authLoading, can } = useAuth();
   const [order, setOrder] = useState<CustomerOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -31,7 +31,7 @@ export default function CustomerOrderDetailPage() {
 
   useEffect(() => {
     if (!authLoading) {
-      if (!user || !hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager'])) {
+      if (!user || !can('custom_requests.view')) {
         router.push('/');
         return;
       }

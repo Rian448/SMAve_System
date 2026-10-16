@@ -73,8 +73,9 @@ function PostForm({ f, setF, onSubmit, onCancel, submitLabel, saving, formError 
 }
 
 export default function AnnouncementsPage() {
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'administrator' || user?.role === 'supervisor';
+  const { can } = useAuth();
+  // Those who manage the board can post, edit, archive and see archived notices
+  const isAdmin = can('announcements.manage');
   const { confirm, confirmDialog } = useConfirm();
 
   const [items, setItems] = useState<Announcement[]>([]);

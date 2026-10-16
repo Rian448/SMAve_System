@@ -22,6 +22,16 @@ const DashboardIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
   </svg>
 );
+const OwnerIcon = () => (
+  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+  </svg>
+);
+const ExpensesIcon = () => (
+  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z" />
+  </svg>
+);
 const SalesIcon = () => (
   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
@@ -107,7 +117,7 @@ const LogoutIcon = () => (
 export default function Navigation({ collapsed, onToggle }: NavigationProps) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, isAuthenticated, logout, isLoading } = useAuth();
+  const { user, isAuthenticated, logout, isLoading, can } = useAuth();
   const { notifications, unreadCount, markRead, markAllRead, archived, loadArchived, archive, restore, remove } = useNotifications();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const { confirm, confirmDialog } = useConfirm();
@@ -208,27 +218,31 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
     );
   }
 
-  const navItems = [
-    { name: 'Home', path: '/', icon: HomeIcon, roles: ['administrator', 'supervisor', 'sales_manager', 'seat_maker', 'sewer', 'customer'] },
+  // Staff items need any one of their permissions; customer pages are by account type
+  const navItems: { name: string; path: string; icon: () => React.JSX.Element; perms?: string[]; roles?: string[] }[] = [
+    { name: 'Home', path: '/', icon: HomeIcon },
     { name: 'My Orders', path: '/my-orders', icon: OrdersIcon, roles: ['customer'] },
     { name: 'Shop Products', path: '/place-order', icon: ShoppingIcon, roles: ['customer'] },
-    { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, roles: ['administrator'] },
-    { name: 'Sales', path: '/sales', icon: SalesIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Customers', path: '/customers', icon: CustomersIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Payments', path: '/payments', icon: PaymentsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Appointments', path: '/appointments', icon: AppointmentsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Inventory', path: '/inventory', icon: InventoryIcon, roles: ['administrator', 'supervisor'] },
-    { name: 'Product Orders', path: '/product-orders', icon: ShoppingIcon, roles: ['administrator', 'supervisor'] },
-    { name: 'Costing', path: '/costing', icon: CostingIcon, roles: ['administrator', 'supervisor'] },
-    { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, roles: ['administrator', 'supervisor'] },
-    { name: 'Item Trail', path: '/delivery', icon: DeliveryIcon, roles: ['administrator', 'supervisor'] },
-    { name: 'Reports', path: '/reports', icon: ReportsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Settings', path: '/settings', icon: SettingsIcon, roles: ['administrator', 'supervisor'] },
+    { name: 'Owner Dashboard', path: '/owner', icon: OwnerIcon, perms: ['owner.view'] },
+    { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, perms: ['dashboard.view'] },
+    { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, perms: ['announcements.view'] },
+    { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, perms: ['workers.add', 'workers.edit', 'workers.delete'] },
+    { name: 'Sales', path: '/sales', icon: SalesIcon, perms: ['sales.view'] },
+    { name: 'Customers', path: '/customers', icon: CustomersIcon, perms: ['customers.view'] },
+    { name: 'Payments', path: '/payments', icon: PaymentsIcon, perms: ['payments.view'] },
+    { name: 'Expenses', path: '/expenses', icon: ExpensesIcon, perms: ['expenses.view', 'expenses.add'] },
+    { name: 'Appointments', path: '/appointments', icon: AppointmentsIcon, perms: ['appointments.view'] },
+    { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'suppliers.view'] },
+    { name: 'Product Orders', path: '/product-orders', icon: ShoppingIcon, perms: ['product_orders.view'] },
+    { name: 'Costing', path: '/costing', icon: CostingIcon, perms: ['costing.view'] },
+    { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, perms: ['forecasting.view'] },
+    { name: 'Item Trail', path: '/delivery', icon: DeliveryIcon, perms: ['item_trail.view'] },
+    { name: 'Reports', path: '/reports', icon: ReportsIcon, perms: ['reports.sales', 'reports.inventory', 'reports.settlement', 'reports.audit_trail'] },
+    { name: 'Settings', path: '/settings', icon: SettingsIcon, perms: ['settings.edit', 'users.manage', 'branches.manage'] },
   ];
 
-  const filteredNavItems = navItems.filter((item) => hasAccess(user?.role, item.roles));
+  const filteredNavItems = navItems.filter((item) =>
+    item.roles ? hasAccess(user?.role, item.roles) : item.perms ? can(...item.perms) : true);
 
   const handleLogout = async () => {
     const ok = await confirm({
@@ -406,7 +420,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
                   {showArchive ? 'No archived notifications' : 'No notifications'}
                 </p>
               ) : (showArchive ? archived : notifications).map(n => {
-                const href = notificationHref(n.type, n.data, user?.role);
+                const href = notificationHref(n.type, n.data, user?.role, can);
                 const unread = !showArchive && !n.isRead;
                 const body = (
                   <div className="flex items-start gap-2">
@@ -487,7 +501,8 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
  * Where a notification leads, or null when it has nowhere to go for this role
  * (the row is then shown as plain text rather than a link).
  */
-function notificationHref(type: string, data: unknown, role: string | undefined): string | null {
+function notificationHref(type: string, data: unknown, role: string | undefined,
+  can: (...permissions: string[]) => boolean): string | null {
   const d = (data || {}) as { orderId?: number; jobOrderId?: number; kind?: 'job' | 'product' | 'request' };
   switch (type) {
     case 'transfer_request':
@@ -495,12 +510,12 @@ function notificationHref(type: string, data: unknown, role: string | undefined)
     case 'order_cancelled':
     case 'order_ready':
     case 'sale_completed':
-      return d.orderId && hasAccess(role, ['administrator', 'supervisor']) ? `/product-orders/${d.orderId}` : null;
+      return d.orderId && can('product_orders.view') ? `/product-orders/${d.orderId}` : null;
     case 'premade_delivery':
       // Incoming premade stock is confirmed on the Finished Goods tab
-      return hasAccess(role, ['administrator', 'supervisor']) ? '/inventory?tab=finished-goods' : null;
+      return can('premade.view') ? '/inventory?tab=finished-goods' : null;
     case 'quotation_response':
-      return d.jobOrderId && hasAccess(role, ['administrator', 'supervisor', 'sales_manager'])
+      return d.jobOrderId && can('sales.view')
         ? `/sales/${d.jobOrderId}` : null;
     case 'order_status':
     case 'quotation_ready':
