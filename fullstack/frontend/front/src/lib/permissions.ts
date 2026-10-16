@@ -24,7 +24,7 @@ const PAGE_PERMISSIONS: [string, string[]][] = [
   ['/appointments', ['appointments.view']],
   ['/inventory/purchase-orders/new', ['purchase_orders.add']],
   ['/inventory/purchase-orders', ['purchase_orders.view']],
-  ['/inventory', ['inventory.view', 'premade.view', 'suppliers.view']],
+  ['/inventory', ['inventory.view', 'premade.view', 'premade.receive', 'suppliers.view']],
   ['/product-orders', ['product_orders.view']],
   ['/customer-orders', ['custom_requests.view']],
   ['/costing', ['costing.view']],

@@ -232,7 +232,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
     { name: 'Payments', path: '/payments', icon: PaymentsIcon, perms: ['payments.view'] },
     { name: 'Expenses', path: '/expenses', icon: ExpensesIcon, perms: ['expenses.view', 'expenses.add'] },
     { name: 'Appointments', path: '/appointments', icon: AppointmentsIcon, perms: ['appointments.view'] },
-    { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'suppliers.view'] },
+    { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'premade.receive', 'suppliers.view'] },
     { name: 'Product Orders', path: '/product-orders', icon: ShoppingIcon, perms: ['product_orders.view'] },
     { name: 'Costing', path: '/costing', icon: CostingIcon, perms: ['costing.view'] },
     { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, perms: ['forecasting.view'] },
@@ -513,7 +513,7 @@ function notificationHref(type: string, data: unknown, role: string | undefined,
       return d.orderId && can('product_orders.view') ? `/product-orders/${d.orderId}` : null;
     case 'premade_delivery':
       // Incoming premade stock is confirmed on the Finished Goods tab
-      return can('premade.view') ? '/inventory?tab=finished-goods' : null;
+      return can('premade.view', 'premade.receive') ? '/inventory?tab=finished-goods' : null;
     case 'quotation_response':
       return d.jobOrderId && can('sales.view')
         ? `/sales/${d.jobOrderId}` : null;

@@ -13,7 +13,7 @@ const TAB_IDS: TabType[] = ['raw-materials', 'finished-goods', 'material-usage',
 // Permissions that show each tab (any one is enough), matching what its data needs
 const TAB_PERMISSIONS: Record<TabType, string[]> = {
   'raw-materials': ['inventory.view'],
-  'finished-goods': ['premade.view'],
+  'finished-goods': ['premade.view', 'premade.receive'],  // receivers confirm incoming deliveries here
   'material-usage': ['inventory.view'],
   'purchase-orders': ['purchase_orders.view'],
   'suppliers': ['suppliers.view'],
@@ -1059,7 +1059,7 @@ function InventoryContent() {
                 type="text"
                 value={newMaterial.itemId}
                 onChange={(e) => setNewMaterial((prev) => ({ ...prev, itemId: e.target.value }))}
-                placeholder="Item ID (e.g. FAB001)"
+                placeholder="Item ID (e.g. LTH-001)"
                 className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
               />
               <input
