@@ -810,21 +810,12 @@ default_users = [
 
 # Sign-in sessions live in the user_sessions table; see create_session()
 
-# Branch and finished-goods seed data, used only to populate an empty database.
+# Branch seed data, used only to populate an empty database.
 branches = [
     {'id': 1, 'name': 'Main Warehouse', 'code': 'MW', 'address': '123 Main St', 'isWarehouse': True, 'isActive': True},
     {'id': 2, 'name': 'Branch A', 'code': 'BA', 'address': '456 Branch A St', 'isWarehouse': False, 'isActive': True},
     {'id': 3, 'name': 'Branch B', 'code': 'BB', 'address': '789 Branch B St', 'isWarehouse': False, 'isActive': True},
     {'id': 4, 'name': 'Branch C', 'code': 'BC', 'address': '321 Branch C St', 'isWarehouse': False, 'isActive': True},
-]
-
-
-# Finished Goods Inventory
-finished_goods = [
-    {'id': 1, 'name': 'Car Seat Cover - Standard', 'sku': 'FG-CSC-001', 'quantity': 25, 'unit': 'pcs', 'category': 'Seat Covers', 'price': 150.00, 'cost': 75.00, 'branchId': 2, 'isArchived': False, 'lastUpdated': '2026-01-20'},
-    {'id': 2, 'name': 'Car Seat Cover - Premium', 'sku': 'FG-CSC-002', 'quantity': 15, 'unit': 'pcs', 'category': 'Seat Covers', 'price': 250.00, 'cost': 120.00, 'branchId': 2, 'isArchived': False, 'lastUpdated': '2026-01-20'},
-    {'id': 3, 'name': 'Motorcycle Seat - Custom', 'sku': 'FG-MCS-001', 'quantity': 10, 'unit': 'pcs', 'category': 'Motorcycle', 'price': 180.00, 'cost': 85.00, 'branchId': 3, 'isArchived': False, 'lastUpdated': '2026-01-19'},
-    {'id': 4, 'name': 'Sofa Cushion Set', 'sku': 'FG-SCS-001', 'quantity': 8, 'unit': 'pcs', 'category': 'Furniture', 'price': 200.00, 'cost': 95.00, 'branchId': 2, 'isArchived': False, 'lastUpdated': '2026-01-18'},
 ]
 
 
@@ -1182,35 +1173,6 @@ def seed_default_users():
 
     db.session.commit()
 
-def seed_inventory_items():
-    if InventoryMaterial.query.count() == 0:
-        pass  # No default seed data for the new inventory schema
-
-    if PremadeProduct.query.count() == 0:
-        # Seed data references branches by hardcoded ids (e.g. branchId=2), but the
-        # real ids are auto-assigned and may differ after a re-seed (Postgres
-        # sequences don't roll back). Resolve each product's branch by its code so
-        # the foreign key always matches an existing branch.
-        code_by_seed_id = {b['id']: b['code'] for b in branches}
-        branch_by_code = {b.code: b for b in Branch.query.all()}
-        fallback_branch = Branch.query.first()
-
-        for product in finished_goods:
-            branch = branch_by_code.get(code_by_seed_id.get(product.get('branchId', 1))) or fallback_branch
-            db.session.add(PremadeProduct(
-                name=product['name'],
-                sku=product.get('sku') or f"FG-{product['id']:03d}",
-                quantity=float(product.get('quantity', 0)),
-                unit=product.get('unit', 'pcs'),
-                category=product.get('category', 'General'),
-                price=float(product.get('price', 0)),
-                cost=float(product.get('cost', 0)),
-                branch_id=branch.id if branch else None,
-                is_archived=product.get('isArchived', False)
-            ))
-
-    db.session.commit()
-
 def normalize_premade_units():
     """Ensure premade product unit values stay consistent as plain piece counts."""
     updated = False
@@ -1355,7 +1317,6 @@ def init_db():
     # Seed users
     seed_default_users()
     link_registered_customers()
-    seed_inventory_items()
     normalize_premade_units()
 
     # Seed default catalog items
