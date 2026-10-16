@@ -11,6 +11,11 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   const [collapsed, setCollapsed] = useState(false);
   const { isAuthenticated, isLoading, can } = useAuth();
   const pathname = usePathname();
+  // Phones: the sidebar is a drawer opened from the top bar. It remembers the page
+  // it was opened on, so going to another page closes it.
+  const [drawerPath, setDrawerPath] = useState<string | null>(null);
+  const mobileOpen = drawerPath === pathname;
+  const setMobileOpen = (open: boolean) => setDrawerPath(open ? pathname : null);
 
   const authlessPages = ['/login', '/register'];
   const showSidebar = isAuthenticated && !isLoading && !authlessPages.includes(pathname);
@@ -22,10 +27,11 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
 
   return (
     <div className="flex min-h-screen bg-gray-50">
-      <Navigation collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+      <Navigation collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)}
+        mobileOpen={mobileOpen} onMobileOpen={() => setMobileOpen(true)} onMobileClose={() => setMobileOpen(false)} />
       <div
         className={`flex-1 min-w-0 transition-all duration-300 ${
-          showSidebar ? (collapsed ? 'ml-16' : 'ml-64') : showPublicTopNav ? 'pt-16' : ''
+          showSidebar ? `pt-14 md:pt-0 ${collapsed ? 'md:ml-16' : 'md:ml-64'}` : showPublicTopNav ? 'pt-16' : ''
         }`}
       >
         {denied ? <AccessDenied /> : children}
