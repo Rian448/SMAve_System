@@ -18,6 +18,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html import escape
 
 app = Flask(__name__)
@@ -75,6 +76,9 @@ class User(db.Model):
     lockout_until = db.Column(db.DateTime, nullable=True)
     phone = db.Column(db.String(50), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # Bumped whenever the account's access changes (archive, role, branch,
+    # permissions) so every server worker drops its cached copy at once
+    auth_version = db.Column(db.Integer, default=0)
 
     role = db.relationship('Role')
     branch_rel = db.relationship('Branch')
@@ -203,7 +207,11 @@ class JobOrder(db.Model):
     down_payment = db.Column(db.Float, default=0)
     balance = db.Column(db.Float, default=0)
     discount_percent = db.Column(db.Float, nullable=True)  # per-order discount override
-    vat_percent = db.Column(db.Float, nullable=True)  # VAT added on top of the discounted price (None = no VAT)
+    vat_percent = db.Column(db.Float, nullable=True)  # VAT rate applied to this order (None = no VAT)
+    # True: the price entered already included VAT (orders priced since VAT-inclusive
+    # entry). NULL/False: older orders, where VAT was added on top of the entered
+    # price. total_price is the final customer price either way.
+    vat_inclusive = db.Column(db.Boolean, nullable=True)
     # Quotations: a draft sent to the customer to accept or reject online.
     # quote_status: None (not a quotation) | sent | rejected | accepted
     quote_status = db.Column(db.String(20), nullable=True)
@@ -310,6 +318,9 @@ class ProductOrder(db.Model):
     pickup_branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
     shipment_status = db.Column(db.String(20), default='not_needed')  # not_needed, pending, shipped, received
     amount_paid = db.Column(db.Float, default=0.0)
+    # VAT rate included in the product prices when the order was placed (NULL on
+    # older orders, whose receipts always used the standard 12%)
+    vat_percent = db.Column(db.Float, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -813,7 +824,8 @@ db_initialized = False
 PERMISSION_MODULES = [
     ('dashboard', 'Dashboard', [('view', 'View')]),
     ('sales', 'Sales / Job Orders', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'), ('delete', 'Delete'),
-                                     ('void', 'Void'), ('quote', 'Send quotations')]),
+                                     ('void', 'Void'), ('quote', 'Send quotations'),
+                                     ('edit_unpaid', 'Edit before down payment')]),
     ('custom_requests', 'Custom Requests', [('view', 'View'), ('edit', 'Edit'), ('quote', 'Send quotations')]),
     ('customers', 'Customers', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit')]),
     ('payments', 'Payments', [('view', 'View'), ('add', 'Add'), ('request_override', 'Request override'),
@@ -901,6 +913,42 @@ def has_perm(user, *permissions):
 def all_branches(user):
     """Whether the user sees every branch rather than only their own."""
     return has_perm(user, 'branches.all')
+
+# Delegation policy. Administrators may change anyone's access. Anyone else who
+# manages users can't change their own account, can't touch administrator
+# accounts or hand out the administrator role, and can only grant or remove
+# permissions they hold themselves -- never these privileged ones, which decide
+# who manages accounts and who sees every branch.
+PRIVILEGED_PERMISSIONS = frozenset({'users.manage', 'branches.manage', 'branches.all'})
+
+def is_administrator(user):
+    return user.get('role') == 'administrator'
+
+def target_account_error(actor, target):
+    """Why `actor` may not manage the `target` account at all, or None."""
+    if is_administrator(actor):
+        return None
+    if target.id == actor['id']:
+        return 'Only an administrator can change your own account here. Use My Profile for your details.'
+    if target.role and target.role.key == 'administrator':
+        return 'Only an administrator can change an administrator account.'
+    return None
+
+def delegation_error(actor, perms_before, perms_after, new_role_key=None):
+    """Why `actor` may not change an account's access from perms_before to
+    perms_after (and to new_role_key, if the role changes), or None."""
+    if is_administrator(actor):
+        return None
+    if new_role_key == 'administrator':
+        return 'Only an administrator can give out the administrator role.'
+    changed = set(perms_before) ^ set(perms_after)
+    privileged = changed & PRIVILEGED_PERMISSIONS
+    if privileged:
+        return f"Only an administrator can grant or remove: {', '.join(sorted(privileged))}"
+    not_held = changed - set(actor.get('permissions') or ())
+    if not_held:
+        return f"You can only grant or remove permissions you have yourself: {', '.join(sorted(not_held))}"
+    return None
 
 def user_to_dict(user):
     role_key = user.role.key if user.role else None
@@ -1183,6 +1231,12 @@ def run_migrations():
         "ALTER TABLE catalog_items ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT 'Automotive'",
         # Notifications a user has moved out of the bell into their archive
         "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
+        # Invalidates cached sessions on every worker when a user's access changes
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_version INTEGER DEFAULT 0",
+        # VAT-inclusive pricing: which job orders were priced that way, and the rate
+        # each product order was sold at. Existing rows stay NULL (their old meaning).
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS vat_inclusive BOOLEAN",
+        "ALTER TABLE product_orders ADD COLUMN IF NOT EXISTS vat_percent REAL",
     ]
     is_sqlite = db.engine.dialect.name == 'sqlite'
     for sql in migrations:
@@ -1214,6 +1268,8 @@ def init_db():
         ('inventory_low_stock_threshold', '0'),
         # Default markup applied to a material's cost to derive its selling unit price
         ('default_material_markup', '25'),
+        # VAT rate included in customer prices (the standard Philippine rate)
+        ('vat_percent', str(DEFAULT_VAT_PERCENT)),
     ]
     for key, value in default_settings:
         if not SystemSetting.query.filter_by(key=key).first():
@@ -1263,10 +1319,10 @@ def init_db():
 SESSION_TTL = timedelta(days=7)  # signed out after a week without using the system
 SESSION_CACHE_SECONDS = 60
 
-# Per-process cache of token -> (user dict, cached_at), so a burst of API calls
-# (e.g. a page loading several endpoints at once) doesn't hit the database on
-# every request. The 60s bound means role, branch or archive changes still take
-# effect quickly.
+# Per-process cache of token -> (user dict, cached_at, auth_version), so a burst
+# of API calls doesn't rebuild the user (role, branch, permissions) every time.
+# Each request still checks the session row and the user's auth_version in one
+# query, so archiving, sign-outs and access changes apply at once on every worker.
 _session_cache = {}
 
 def _token_hash(token):
@@ -1275,14 +1331,19 @@ def _token_hash(token):
 def end_user_sessions(user_id):
     """Sign a user out everywhere. The caller commits."""
     UserSession.query.filter_by(user_id=user_id).delete(synchronize_session=False)
-    for t in [t for t, (u, _) in _session_cache.items() if u['id'] == user_id]:
-        _session_cache.pop(t, None)
+    forget_cached_sessions(user_id)
 
 def forget_cached_sessions(user_id):
-    """Drop a user's cached session data so role or permission changes apply on
-    their very next request."""
-    for t in [t for t, (u, _) in _session_cache.items() if u['id'] == user_id]:
+    """Drop this worker's cached copy of a user's sessions. Other workers notice
+    the change through bump_auth_version."""
+    for t in [t for t, (u, *_) in _session_cache.items() if u['id'] == user_id]:
         _session_cache.pop(t, None)
+
+def bump_auth_version(user):
+    """Mark the user's access as changed so every worker reloads it on their next
+    request. The caller commits."""
+    user.auth_version = (user.auth_version or 0) + 1
+    forget_cached_sessions(user.id)
 
 def create_session(user):
     """Start a session and return its token. One login at a time: any other
@@ -1301,27 +1362,39 @@ def get_user_from_token(token):
     if not token:
         return None
     now_ts = time.time()
+    now = datetime.utcnow()
+    token_hash = _token_hash(token)
+    # One cheap query every request: is the session still there, the account
+    # still active, and its access unchanged since we cached it?
+    row = (db.session.query(UserSession.expires_at, User.is_active, User.auth_version)
+           .join(User, User.id == UserSession.user_id)
+           .filter(UserSession.token_hash == token_hash).first())
+    if not row or row.expires_at <= now or not row.is_active:
+        _session_cache.pop(token, None)
+        return None
+    version = row.auth_version or 0
+
+    # Sliding expiry, written at most once a day per session
+    if row.expires_at - now < SESSION_TTL - timedelta(days=1):
+        UserSession.query.filter_by(token_hash=token_hash).update(
+            {'expires_at': now + SESSION_TTL}, synchronize_session=False)
+        db.session.commit()
+
     cached = _session_cache.get(token)
-    if cached and (now_ts - cached[1]) < SESSION_CACHE_SECONDS:
+    if cached and cached[2] == version and (now_ts - cached[1]) < SESSION_CACHE_SECONDS:
         return cached[0]
 
-    now = datetime.utcnow()
-    s = UserSession.query.filter_by(token_hash=_token_hash(token)).first()
-    user = User.query.get(s.user_id) if s and s.expires_at > now else None
-    if not user or not user.is_active:
+    s = UserSession.query.filter_by(token_hash=token_hash).first()
+    user = User.query.get(s.user_id) if s else None
+    if not user:
         _session_cache.pop(token, None)
         return None
 
-    # Sliding expiry, written at most once a day per session
-    if s.expires_at - now < SESSION_TTL - timedelta(days=1):
-        s.expires_at = now + SESSION_TTL
-        db.session.commit()
-
     if len(_session_cache) > 1000:
-        for t in [t for t, (_, at) in _session_cache.items() if now_ts - at >= SESSION_CACHE_SECONDS]:
+        for t in [t for t, (_, at, _v) in _session_cache.items() if now_ts - at >= SESSION_CACHE_SECONDS]:
             _session_cache.pop(t, None)
     resolved = user_to_dict(user)
-    _session_cache[token] = (resolved, now_ts)
+    _session_cache[token] = (resolved, now_ts, version)
     return resolved
 
 def require_auth(f):
@@ -1376,6 +1449,44 @@ PH_OFFSET = timedelta(hours=8)
 def manila_today():
     """Today's date in the Philippines (the server clock is UTC)."""
     return (datetime.utcnow() + PH_OFFSET).date()
+
+# ============================================
+# VAT (customer prices include it)
+# ============================================
+
+DEFAULT_VAT_PERCENT = 12  # standard Philippine VAT, until changed in Settings
+MAX_VAT_PERCENT = 100
+
+def money(amount):
+    """Round to the centavo, halves up (0.005 -> 0.01), as a float."""
+    return float(Decimal(str(amount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+
+def vat_percent_error(raw):
+    """Error message if raw isn't a valid VAT rate, else None."""
+    try:
+        rate = Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError):
+        return 'VAT rate must be a number'
+    if not rate.is_finite() or rate < 0 or rate > MAX_VAT_PERCENT:
+        return f'VAT rate must be between 0 and {MAX_VAT_PERCENT}%'
+    if rate != rate.quantize(Decimal('0.01')):
+        return 'VAT rate can have at most 2 decimal places'
+    return None
+
+def current_vat_percent():
+    """The VAT rate set in Settings, applied to newly priced orders."""
+    setting = SystemSetting.query.filter_by(key='vat_percent').first()
+    if setting is None or vat_percent_error(setting.value):
+        return float(DEFAULT_VAT_PERCENT)
+    return float(setting.value)
+
+def vat_breakdown(gross, vat_percent):
+    """Split a VAT-inclusive amount into its net and VAT parts, to the centavo.
+    net + vat always equals gross; VAT is taken out of the price, not added."""
+    gross = money(gross or 0)
+    rate = float(vat_percent or 0)
+    net = money(gross / (1 + rate / 100)) if rate > 0 else gross
+    return {'gross': gross, 'net': net, 'vat': money(gross - net), 'vatPercent': rate}
 
 # ============================================
 # PASSWORD HELPERS
@@ -1846,9 +1957,9 @@ EMAIL_CHANGE_CODE_TTL = timedelta(minutes=10)
 def refresh_cached_user(user):
     """Push a user's new details into the session cache so the change shows at once."""
     resolved, now_ts = user_to_dict(user), time.time()
-    for t, (u, _) in list(_session_cache.items()):
+    for t, (u, _, version) in list(_session_cache.items()):
         if u['id'] == user.id:
-            _session_cache[t] = (resolved, now_ts)
+            _session_cache[t] = (resolved, now_ts, version)
 
 def check_current_password(user, raw_password):
     """None if raw_password is the user's password, else an error response.
@@ -3381,10 +3492,16 @@ def create_payment():
     data = request.get_json()
     if not data.get('jobOrderId') or not data.get('amount'):
         return jsonify({'status': 'error', 'message': 'jobOrderId and amount are required'}), 400
-    job_order = JobOrder.query.get(int(data['jobOrderId']))
+    try:
+        job_order = JobOrder.query.get(int(data['jobOrderId']))
+        amount = float(data['amount'])
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'jobOrderId and amount must be numbers'}), 400
     if not job_order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    amount = float(data['amount'])
+    error = branch_access_error(request.current_user, job_order.branch_id)
+    if error:
+        return error
     if amount <= 0:
         return jsonify({'status': 'error', 'message': 'Amount must be positive'}), 400
     payment = PaymentRecord(
@@ -3468,9 +3585,15 @@ def create_payment_override():
     """Supervisor submits a payment override for admin approval. Nothing is
     applied to the job order until an administrator approves it."""
     data = request.get_json() or {}
-    job_order = JobOrder.query.get(int(data.get('jobOrderId', 0)))
+    try:
+        job_order = JobOrder.query.get(int(data.get('jobOrderId', 0)))
+    except (TypeError, ValueError):
+        job_order = None
     if not job_order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
+    error = branch_access_error(request.current_user, job_order.branch_id)
+    if error:
+        return error
     new_status = data.get('paymentStatus')
     if new_status and new_status not in ('unpaid', 'partial', 'paid'):
         return jsonify({'status': 'error', 'message': 'Invalid payment status'}), 400
@@ -3520,6 +3643,9 @@ def approve_payment_override(req_id):
     job_order = req.job_order
     if not job_order:
         return jsonify({'status': 'error', 'message': 'Job order no longer exists'}), 404
+    error = branch_access_error(request.current_user, job_order.branch_id)
+    if error:
+        return error
     # Apply the requested override to the job order
     if req.new_payment_status:
         job_order.payment_status = req.new_payment_status
@@ -3544,6 +3670,10 @@ def reject_payment_override(req_id):
         return jsonify({'status': 'error', 'message': 'Override request not found'}), 404
     if req.status != 'pending':
         return jsonify({'status': 'error', 'message': 'This request has already been reviewed'}), 400
+    if req.job_order:
+        error = branch_access_error(request.current_user, req.job_order.branch_id)
+        if error:
+            return error
     req.status = 'rejected'
     req.reviewed_by = request.current_user['id']
     req.review_notes = ((request.get_json() or {}).get('notes') or '').strip() or None
@@ -3807,6 +3937,9 @@ def get_job_orders():
             'totalPrice': jo.total_price,
             'discountPercent': jo.discount_percent,
             'vatPercent': jo.vat_percent,
+            'vatInclusive': bool(jo.vat_inclusive),
+            # VAT already inside the total, worked out here so every screen agrees
+            'vatAmount': vat_breakdown(jo.total_price, jo.vat_percent)['vat'],
             'status': jo.status,
             'paymentStatus': jo.payment_status,
             'downPayment': jo.down_payment,
@@ -3863,6 +3996,9 @@ def get_job_order(order_id):
         'totalPrice': order.total_price,
         'discountPercent': order.discount_percent,
         'vatPercent': order.vat_percent,
+        'vatInclusive': bool(order.vat_inclusive),
+        # VAT already inside the total, worked out here so every screen agrees
+        'vatAmount': vat_breakdown(order.total_price, order.vat_percent)['vat'],
         'status': order.status,
         'paymentStatus': order.payment_status,
         'downPayment': order.down_payment,
@@ -3877,27 +4013,67 @@ def get_job_order(order_id):
     
     return jsonify({'status': 'success', 'data': order_dict})
 
-# The price for the work (before discount and VAT) is at most 8 digits
+# The price for the work (VAT included, before discount) is at most 8 digits
 MAX_JOB_ORDER_PRICE = 99_999_999.99
+PRICING_KEYS = ('priceForWork', 'discountPercent', 'vatIncluded', 'totalPrice', 'vatPercent')
 
-def job_order_price_error(total_price, discount_percent, vat_percent):
-    """Error message if a job order's price is out of range, else None.
+def job_order_entered_price(order):
+    """The VAT-inclusive price before discount that gives this order's stored total."""
+    d = float(order.discount_percent or 0)
+    total = float(order.total_price or 0)
+    return money(total / (1 - d / 100)) if d < 100 else total
 
-    Only the final total is stored, so the price for the work is worked back
-    from it the same way the frontend's jobOrderPriceBreakdown() does."""
+def job_order_pricing(data, order=None):
+    """Work out a job order's price on the server. Returns (fields, error).
+
+    What is entered is the price for the work with VAT already included, a
+    discount % and whether VAT applies. The final price is that price less the
+    discount -- VAT is never added on top; its share is taken out of the final
+    price when shown (vat_breakdown). A total or VAT rate sent by the browser is
+    not trusted: the rate comes from Settings, or stays the one the order was
+    priced at. Older browsers that still send totalPrice have it read as the
+    final, VAT-inclusive price."""
     try:
-        total = float(total_price or 0)
-        d = min(max(float(discount_percent or 0), 0), 100)
-        v = max(float(vat_percent or 0), 0)
+        d = float(data['discountPercent'] if 'discountPercent' in data else
+                  (order.discount_percent if order else None) or 0)
+        if 'priceForWork' in data:
+            price = float(data['priceForWork'] or 0)
+        elif 'totalPrice' in data and data['totalPrice'] is not None:
+            price = float(data['totalPrice']) / (1 - d / 100) if d < 100 else float(data['totalPrice'])
+        elif order is not None:
+            price = job_order_entered_price(order)
+        else:
+            price = sum(float(it.get('quantity', 0) or 0) * float(it.get('unitPrice', 0) or 0)
+                        for it in (data.get('items') or []))
     except (TypeError, ValueError):
-        return 'Invalid price'
-    if total < 0:
-        return 'Price cannot be negative'
-    after_discount = total / (1 + v / 100)
-    subtotal = after_discount / (1 - d / 100) if d < 100 else after_discount
-    if round(subtotal, 2) > MAX_JOB_ORDER_PRICE:
-        return 'Price for the work must be less than ₱100,000,000 (up to 8 digits)'
-    return None
+        return None, 'Invalid price'
+    if not (0 <= d <= 100):
+        return None, 'Discount must be between 0 and 100%'
+    if price < 0:
+        return None, 'Price cannot be negative'
+    price = money(price)
+    if price > MAX_JOB_ORDER_PRICE:
+        return None, 'Price for the work must be less than ₱100,000,000 (up to 8 digits)'
+
+    if 'vatIncluded' in data:
+        vat_applies = bool(data['vatIncluded'])
+    elif 'vatPercent' in data:  # older browsers
+        vat_applies = bool(data['vatPercent'])
+    else:
+        vat_applies = bool(order.vat_percent) if order is not None else True
+    if not vat_applies:
+        rate = None
+    elif order is not None and order.vat_percent:
+        rate = order.vat_percent  # keep the rate the order was priced at
+    else:
+        rate = current_vat_percent() or None
+
+    return {
+        'total_price': money(price * (1 - d / 100)),
+        'discount_percent': d or None,
+        'vat_percent': rate,
+        'vat_inclusive': True,
+    }, None
 
 @app.route('/api/sales/job-orders', methods=['POST'])
 @require_auth
@@ -3945,18 +4121,19 @@ def create_job_order():
         else:
             return jsonify({'status': 'error',
                             'message': 'Choose the branch where the customer will pay for this quotation.'}), 400
+    error = branch_access_error(request.current_user, branch_db.id, 'branch')
+    if error:
+        return error
 
     job_order_id = generate_job_order_id(branch_db.code)
     
     items = data.get('items') or []
 
-    # Calculate costs
-    total_price = data.get('totalPrice')
-    if total_price is None:
-        total_price = sum(item.get('quantity', 0) * item.get('unitPrice', 0) for item in items)
-    price_error = job_order_price_error(total_price, data.get('discountPercent'), data.get('vatPercent'))
+    # Price, worked out here from what was entered (see job_order_pricing)
+    pricing, price_error = job_order_pricing(data)
     if price_error:
         return jsonify({'status': 'error', 'message': price_error}), 400
+    total_price = pricing['total_price']
     computed_cost = sum(item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0)) for item in items)
     estimated_cost = data.get('estimatedCost') if data.get('estimatedCost') is not None else computed_cost
     down_payment = 0 if is_draft else data.get('downPayment', 0)
@@ -4029,8 +4206,9 @@ def create_job_order():
         payment_status=payment_status,
         down_payment=down_payment,
         balance=balance,
-        discount_percent=data.get('discountPercent'),
-        vat_percent=data.get('vatPercent') or None,
+        discount_percent=pricing['discount_percent'],
+        vat_percent=pricing['vat_percent'],
+        vat_inclusive=pricing['vat_inclusive'],
         estimated_completion=estimated_completion,
         created_by=request.current_user['id'],
         quote_status='sent' if send_quotation else None,
@@ -4081,6 +4259,10 @@ def create_job_order():
             'jobOrderId': new_order.job_order_id,
             'branchName': branch_db.name,
             'totalPrice': total_price,
+            'discountPercent': new_order.discount_percent,
+            'vatPercent': new_order.vat_percent,
+            'vatInclusive': True,
+            'vatAmount': vat_breakdown(total_price, new_order.vat_percent)['vat'],
             'status': 'draft' if is_draft else 'pending',
             **({'customerNotified': notify_customer_of_quotation(new_order)} if send_quotation else {}),
         }
@@ -4096,11 +4278,15 @@ def update_job_order(order_id):
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
 
     user = request.current_user
+    error = branch_access_error(user, order.branch_id)
+    if error:
+        return error
     is_draft = order.status == 'draft'
-    # Drafts are unpaid by definition, so the down-payment gate would lock sales
-    # managers out of the very orders they are still drafting.
-    if user.get('role') == 'sales_manager' and not is_draft and (order.down_payment or 0) <= 0:
-        return jsonify({'status': 'error', 'message': 'Down payment is required before sales managers can edit this job order'}), 403
+    # A confirmed order needs a down payment before it can be edited, unless the
+    # user may edit unpaid orders (by default administrators and supervisors).
+    # Drafts are unpaid by definition, so they are never held back by this.
+    if not is_draft and (order.down_payment or 0) <= 0 and not has_perm(user, 'sales.edit_unpaid'):
+        return jsonify({'status': 'error', 'message': 'A down payment is required before you can edit this job order'}), 403
 
     data = request.get_json()
     if data.get('sendQuotation') and not has_perm(user, 'sales.quote'):
@@ -4130,6 +4316,10 @@ def update_job_order(order_id):
             branch = Branch.query.get(data['branchId'])
             if not branch:
                 return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
+            # Moving the order is as restricted as creating it there
+            error = branch_access_error(user, branch.id, 'branch')
+            if error:
+                return error
             order.branch_id = branch.id
         if 'estimatedCompletion' in data and data['estimatedCompletion']:
             try:
@@ -4142,11 +4332,9 @@ def update_job_order(order_id):
                 return jsonify({'status': 'error', 'message': 'Estimated completion date cannot be in the past'}), 400
             order.estimated_completion = new_completion
 
-    if any(k in data for k in ('totalPrice', 'discountPercent', 'vatPercent')):
-        price_error = job_order_price_error(
-            data.get('totalPrice', order.total_price),
-            data.get('discountPercent', order.discount_percent),
-            data.get('vatPercent', order.vat_percent))
+    pricing = None
+    if any(k in data for k in PRICING_KEYS):
+        pricing, price_error = job_order_pricing(data, order)
         if price_error:
             return jsonify({'status': 'error', 'message': price_error}), 400
 
@@ -4159,12 +4347,11 @@ def update_job_order(order_id):
         order.down_payment = data['downPayment']
     if 'actualCost' in data:
         order.actual_cost = data['actualCost']
-    if 'totalPrice' in data:
-        order.total_price = data['totalPrice']
-    if 'discountPercent' in data:
-        order.discount_percent = data['discountPercent']
-    if 'vatPercent' in data:
-        order.vat_percent = data['vatPercent'] or None
+    if pricing:
+        order.total_price = pricing['total_price']
+        order.discount_percent = pricing['discount_percent']
+        order.vat_percent = pricing['vat_percent']
+        order.vat_inclusive = pricing['vat_inclusive']
     if 'items' in data:
         previous_items = list(order.items or [])
         order.items = [{k: v for k, v in it.items() if k not in TRANSIENT_ITEM_KEYS} for it in (data['items'] or [])]
@@ -4317,6 +4504,9 @@ def update_job_order(order_id):
             'totalPrice': order.total_price,
             'discountPercent': order.discount_percent,
             'vatPercent': order.vat_percent,
+            'vatInclusive': bool(order.vat_inclusive),
+            # VAT already inside the total, worked out here so every screen agrees
+            'vatAmount': vat_breakdown(order.total_price, order.vat_percent)['vat'],
             'items': items_with_assignment_status(order),
             'completedAt': order.completed_at.strftime('%Y-%m-%d') if order.completed_at else None,
             'updatedAt': order.updated_at.strftime('%Y-%m-%d')
@@ -4437,6 +4627,9 @@ def customer_job_order_dict(o):
         'totalPrice': o.total_price or 0,
         'discountPercent': o.discount_percent,
         'vatPercent': o.vat_percent,
+        'vatInclusive': bool(o.vat_inclusive),
+        # VAT already inside the total, worked out here so every screen agrees
+        'vatAmount': vat_breakdown(o.total_price, o.vat_percent)['vat'],
         'downPayment': o.down_payment or 0,
         'balance': o.balance or 0,
         'estimatedCompletion': o.estimated_completion.strftime('%Y-%m-%d') if o.estimated_completion else None,
@@ -4546,6 +4739,9 @@ def delete_job_order(order_id):
     order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
+    error = branch_access_error(request.current_user, order.branch_id)
+    if error:
+        return error
     if order.status != 'draft':
         return jsonify({'status': 'error', 'message': 'Only draft orders can be deleted. Void confirmed orders instead.'}), 400
     label = order.job_order_id
@@ -4610,6 +4806,9 @@ def get_all_orders():
             'totalPrice': jo.total_price,
             'discountPercent': jo.discount_percent,
             'vatPercent': jo.vat_percent,
+            'vatInclusive': bool(jo.vat_inclusive),
+            # VAT already inside the total, worked out here so every screen agrees
+            'vatAmount': vat_breakdown(jo.total_price, jo.vat_percent)['vat'],
             'status': jo.status,
             'paymentStatus': jo.payment_status,
             'downPayment': jo.down_payment,
@@ -4741,6 +4940,14 @@ def user_branch_id(user):
         return b.id if b else None
     return None
 
+def branch_access_error(user, branch_id, what='job order'):
+    """403 response if the user is limited to their own branch and branch_id is
+    another one, else None. Always pass the branch stored on the record, never
+    one taken from the request."""
+    if all_branches(user) or (branch_id is not None and branch_id == user_branch_id(user)):
+        return None
+    return jsonify({'status': 'error', 'message': f'This {what} belongs to another branch'}), 403
+
 
 def costed_job_orders(user):
     """Job orders the user may see for costing: real orders, not drafts or dead ones."""
@@ -4752,8 +4959,7 @@ def costed_job_orders(user):
 
 def revenue_ex_vat(order):
     """What the order earns us: its total less any VAT collected for the government."""
-    vat = float(order.vat_percent or 0)
-    return round(float(order.total_price or 0) / (1 + vat / 100), 2)
+    return vat_breakdown(order.total_price, order.vat_percent)['net']
 
 
 def job_order_costing(order):
@@ -4893,6 +5099,11 @@ def generate_receipt(order_id):
             for item in (order.items or []) if item_category(item) == 'material'
         ],
         'subtotal': order.total_price,
+        # The total already includes VAT; these show its share
+        'total': order.total_price,
+        'vatPercent': order.vat_percent,
+        'vatAmount': vat_breakdown(order.total_price, order.vat_percent)['vat'],
+        'netOfVat': vat_breakdown(order.total_price, order.vat_percent)['net'],
         'downPayment': order.down_payment,
         'balance': order.balance,
         'paymentStatus': order.payment_status
@@ -5070,6 +5281,10 @@ def create_delivery():
         return jsonify({'status': 'error', 'message': 'Delivery type and date are required'}), 400
 
     job_order = JobOrder.query.get(data['jobOrderId']) if data.get('jobOrderId') else None
+    if job_order:
+        error = branch_access_error(request.current_user, job_order.branch_id)
+        if error:
+            return error
     # Deliver from the branch that did the job, unless one is given
     from_branch_id = data.get('fromBranchId') or (job_order.branch_id if job_order else None) \
         or user_branch_id(request.current_user)
@@ -5740,6 +5955,10 @@ def product_order_to_dict(order):
         'customerAddress': order.customer_address,
         'items': order.items,
         'totalAmount': order.total_amount,
+        # Older orders didn't record a rate; their receipts always used the standard 12%
+        'vatPercent': order.vat_percent if order.vat_percent is not None else DEFAULT_VAT_PERCENT,
+        'vatAmount': vat_breakdown(order.total_amount, order.vat_percent if order.vat_percent is not None
+                                   else DEFAULT_VAT_PERCENT)['vat'],
         'branchId': order.branch_id,
         'branchName': branch_name,
         'groupId': order.group_id,
@@ -5925,6 +6144,7 @@ def place_multi_branch_order(data, user_id):
         customer_address=data.get('customerAddress', ''),
         items=all_items,
         total_amount=sum(i['total'] for i in all_items),
+        vat_percent=current_vat_percent(),  # product prices include VAT
         branch_id=pickup_branch_id,
         pickup_branch_id=pickup_branch_id,
         shipment_status='pending' if needs_transfers else 'not_needed',
@@ -6260,6 +6480,7 @@ def create_product_order():
         customer_address=data.get('customerAddress', ''),
         items=validated_items,
         total_amount=total_amount,
+        vat_percent=current_vat_percent(),  # product prices include VAT
         branch_id=branch_id,
         status='pending',
         payment_status=initial_payment_status,
@@ -7854,7 +8075,10 @@ def create_user():
     role = Role.query.filter_by(key=data['role']).first()
     if not role:
         return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
-    
+    error = delegation_error(request.current_user, set(), ROLE_DEFAULT_PERMISSIONS.get(role.key, ()), role.key)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
+
     # Handle branch - support both branchId and branch (string)
     branch_id = data.get('branchId')
     branch_name = data.get('branch')
@@ -7915,6 +8139,9 @@ def update_user(user_id):
     user = User.query.get(user_id)
     if not user:
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
+    error = target_account_error(request.current_user, user)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
 
     data = request.get_json()
 
@@ -7954,6 +8181,11 @@ def update_user(user_id):
         if not role:
             return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
         perms_after = effective_permissions(user.id, role.key)
+        if role.id != user.role_id:
+            error = delegation_error(request.current_user, effective_permissions(user.id, old_role_key),
+                                     perms_after, role.key)
+            if error:
+                return jsonify({'status': 'error', 'message': error}), 403
         if user.id == request.current_user['id'] and 'users.manage' not in perms_after:
             return jsonify({'status': 'error', 'message': "You can't remove your own access to user management"}), 400
         if user.is_active and would_leave_no_user_manager(user.id, perms_after):
@@ -7978,9 +8210,9 @@ def update_user(user_id):
                            f"right away.</p><p>Seatmakers Avenue</p>")
             threading.Thread(target=send_email, args=(user.email, user.full_name, 'Your password was changed',
                                                       notice, notice_html), daemon=True).start()
-    
+
+    bump_auth_version(user)  # role or branch may have changed
     db.session.commit()
-    forget_cached_sessions(user.id)
 
     # Handle Worker profile when role changes
     worker_roles = ['seat_maker', 'sewer']
@@ -8025,6 +8257,9 @@ def archive_user(user_id):
     
     if user.id == request.current_user['id']:
         return jsonify({'status': 'error', 'message': 'Cannot archive yourself'}), 400
+    error = target_account_error(request.current_user, user)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
 
     # Archiving blocks login, so the last administrator must stay active.
     if user.role and user.role.key == 'administrator' and last_active_administrator(user):
@@ -8035,8 +8270,9 @@ def archive_user(user_id):
                         'message': 'Cannot archive the last account that can manage users'}), 400
 
     user.is_active = False
+    bump_auth_version(user)  # their open sessions stop working on every worker
     db.session.commit()
-    
+
     log_action(request.current_user['id'], request.current_user['fullName'], 'ARCHIVE', 'Settings', f"Archived user: {user.username}", request.remote_addr or '0.0.0.0')
     
     return jsonify({'status': 'success', 'message': 'User archived'})
@@ -8048,8 +8284,12 @@ def restore_user(user_id):
     user = User.query.get(user_id)
     if not user:
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
-    
+    error = target_account_error(request.current_user, user)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
+
     user.is_active = True
+    bump_auth_version(user)
     db.session.commit()
     
     log_action(request.current_user['id'], request.current_user['fullName'], 'RESTORE', 'Settings', f"Restored user: {user.username}", request.remote_addr or '0.0.0.0')
@@ -8107,6 +8347,9 @@ def check_user_deletable(user_id):
     if user.id == request.current_user['id']:
         return jsonify({'status': 'success', 'data': {
             'canDelete': False, 'reason': 'You cannot delete your own account.', 'blockers': []}})
+    error = target_account_error(request.current_user, user)
+    if error:
+        return jsonify({'status': 'success', 'data': {'canDelete': False, 'reason': error, 'blockers': []}})
 
     if user.role and user.role.key == 'administrator' and last_active_administrator(user):
         return jsonify({'status': 'success', 'data': {
@@ -8140,9 +8383,19 @@ def prune_redundant_overrides(user_id, role_key):
         if role_key == 'customer' or (o.effect == 'grant') == (o.permission in defaults):
             db.session.delete(o)
 
-def user_permissions_payload(user):
+def permissions_version(role_key, overrides):
+    """Fingerprint of a user's role and overrides. The permissions dialog sends
+    back the one it loaded, so a save made from a stale copy is refused instead
+    of silently replacing someone else's changes."""
+    state = json.dumps([role_key, sorted((o.permission, o.effect) for o in overrides)])
+    return hashlib.sha256(state.encode()).hexdigest()[:16]
+
+def user_permissions_payload(user, actor):
     role_key = user.role.key if user.role else None
     overrides = UserPermissionOverride.query.filter_by(user_id=user.id).all()
+    # Customer accounts are self-service only
+    read_only_reason = ('Customer accounts can\'t be given staff permissions.' if role_key == 'customer'
+                        else target_account_error(actor, user))
     return {
         'userId': user.id,
         'role': role_key,
@@ -8150,8 +8403,12 @@ def user_permissions_payload(user):
         'grants': sorted(o.permission for o in overrides if o.effect == 'grant'),
         'revokes': sorted(o.permission for o in overrides if o.effect == 'revoke'),
         'effective': sorted(effective_permissions(user.id, role_key, overrides)),
-        # Customer accounts are self-service only
-        'editable': role_key != 'customer',
+        'version': permissions_version(role_key, overrides),
+        'editable': read_only_reason is None,
+        'readOnlyReason': read_only_reason,
+        # Permissions this actor may not hand out or take away (see delegation_error)
+        'locked': [] if is_administrator(actor) else sorted(
+            PRIVILEGED_PERMISSIONS | (set(PERMISSIONS) - set(actor.get('permissions') or ()))),
     }
 
 @app.route('/api/permissions', methods=['GET'])
@@ -8177,22 +8434,36 @@ def get_user_permissions(user_id):
     user = User.query.get(user_id)
     if not user:
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
-    return jsonify({'status': 'success', 'data': user_permissions_payload(user)})
+    return jsonify({'status': 'success', 'data': user_permissions_payload(user, request.current_user)})
 
 @app.route('/api/users/<int:user_id>/permissions', methods=['PUT'])
 @require_auth
 @require_permission('users.manage')
 def set_user_permissions(user_id):
-    """Replace a user's overrides. Body: {grants: [...], revokes: [...]}; an empty
-    body resets them to their role's defaults."""
-    user = User.query.get(user_id)
+    """Replace a user's overrides. Body: {grants: [...], revokes: [...], version};
+    empty lists reset them to their role's defaults. `version` is the one the
+    caller loaded; if the permissions changed since, the save is refused (409)."""
+    # Row lock: two saves for the same user run one after the other, so the
+    # second one sees the first one's version and is refused
+    user = User.query.filter_by(id=user_id).with_for_update().first()
     if not user:
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
+    me = request.current_user
     role_key = user.role.key if user.role else None
     if role_key == 'customer':
         return jsonify({'status': 'error', 'message': 'Customer accounts cannot be given staff permissions'}), 400
+    error = target_account_error(me, user)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
 
     data = request.get_json(silent=True) or {}
+    current = UserPermissionOverride.query.filter_by(user_id=user.id).all()
+    if not data.get('version'):
+        return jsonify({'status': 'error', 'message': 'Reload the permissions and try again.'}), 400
+    if data['version'] != permissions_version(role_key, current):
+        return jsonify({'status': 'error', 'code': 'stale',
+                        'message': "Someone else changed this user's permissions while you were editing. "
+                                   "Reload to see the latest, then make your changes again."}), 409
     grants, revokes = data.get('grants') or [], data.get('revokes') or []
     if not isinstance(grants, list) or not isinstance(revokes, list):
         return jsonify({'status': 'error', 'message': 'grants and revokes must be lists'}), 400
@@ -8208,8 +8479,10 @@ def set_user_permissions(user_id):
     grants -= defaults
     revokes &= defaults
     perms_after = (set(defaults) | grants) - revokes
+    error = delegation_error(me, effective_permissions(user.id, role_key, current), perms_after)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
 
-    me = request.current_user
     if user.id == me['id'] and 'users.manage' not in perms_after:
         return jsonify({'status': 'error', 'message': "You can't remove your own access to user management"}), 400
     if user.is_active and would_leave_no_user_manager(user.id, perms_after):
@@ -8220,8 +8493,8 @@ def set_user_permissions(user_id):
         db.session.add(UserPermissionOverride(user_id=user.id, permission=perm, effect='grant', created_by=me['id']))
     for perm in revokes:
         db.session.add(UserPermissionOverride(user_id=user.id, permission=perm, effect='revoke', created_by=me['id']))
+    bump_auth_version(user)
     db.session.commit()
-    forget_cached_sessions(user.id)
 
     summary = []
     if grants:
@@ -8231,7 +8504,7 @@ def set_user_permissions(user_id):
     log_action(me['id'], me['fullName'], 'PERMISSIONS', 'Settings',
                f"Set permissions of {user.username}: {'; '.join(summary) or 'reset to role defaults'}",
                request.remote_addr or '0.0.0.0')
-    return jsonify({'status': 'success', 'data': user_permissions_payload(user)})
+    return jsonify({'status': 'success', 'data': user_permissions_payload(user, me)})
 
 def last_active_administrator(user):
     """True if removing/deactivating `user` would leave no active administrator."""
@@ -8256,6 +8529,9 @@ def delete_user(user_id):
 
     if user.id == request.current_user['id']:
         return jsonify({'status': 'error', 'message': 'You cannot delete your own account'}), 400
+    error = target_account_error(request.current_user, user)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
 
     if user.role and user.role.key == 'administrator' and last_active_administrator(user):
         return jsonify({'status': 'error',
@@ -8282,6 +8558,11 @@ def delete_user(user_id):
         UserSession.query.filter_by(user_id=user.id).delete(synchronize_session=False)
         PasswordResetCode.query.filter_by(user_id=user.id).delete(synchronize_session=False)
         EmailChangeCode.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+        # Their own permission changes go with the account; changes they made to
+        # other users stay in force, just without the author
+        UserPermissionOverride.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+        UserPermissionOverride.query.filter_by(created_by=user.id).update(
+            {'created_by': None}, synchronize_session=False)
         # The customer record (and its job orders) stays, just without the online account
         Customer.query.filter_by(user_id=user.id).update({'user_id': None}, synchronize_session=False)
         # Announcements outlive their author — keep the post, drop the byline.
@@ -8419,8 +8700,13 @@ def get_system_settings():
 @require_auth
 @require_permission('settings.edit')
 def update_system_setting(key):
-    data = request.get_json()
-    value = str(data.get('value', ''))
+    data = request.get_json() or {}
+    value = str(data.get('value', '')).strip()
+    if key == 'vat_percent':
+        error = vat_percent_error(value)
+        if error:
+            return jsonify({'status': 'error', 'message': error}), 400
+        value = str(Decimal(value).normalize() if Decimal(value) != 0 else 0)  # '12.00' -> '12'
     setting = SystemSetting.query.filter_by(key=key).first()
     if not setting:
         setting = SystemSetting(key=key, value=value)
@@ -8601,6 +8887,8 @@ def create_worker_assignment():
                  else JobOrder.query.filter_by(job_order_id=job_order_ref).first())
         if not order:
             return jsonify({'error': 'Job order not found'}), 404
+        if branch_access_error(request.current_user, order.branch_id):
+            return jsonify({'error': 'This job order belongs to another branch'}), 403
         if order.status in ('draft', 'cancelled', 'voided'):
             return jsonify({'error': f'Workers cannot be assigned to a {order.status} job order'}), 400
         if not description:
@@ -8674,6 +8962,11 @@ def update_worker_assignment(assignment_id):
     assignment = WorkerAssignment.query.get(assignment_id)
     if not assignment:
         return jsonify({'error': 'Assignment not found'}), 404
+    # Finishing an assignment writes its pay onto the job order
+    order = (JobOrder.query.get(assignment.job_order_db_id) if assignment.job_order_db_id
+             else JobOrder.query.filter_by(job_order_id=assignment.job_order_ref).first())
+    if order and branch_access_error(request.current_user, order.branch_id):
+        return jsonify({'error': 'This job order belongs to another branch'}), 403
     data = request.get_json()
     new_status = data.get('status')
     if new_status:
@@ -8798,6 +9091,8 @@ def delete_worker_assignment(assignment_id):
     # Its labor line goes with it, so both screens keep showing the same workers
     order = (JobOrder.query.get(assignment.job_order_db_id) if assignment.job_order_db_id
              else JobOrder.query.filter_by(job_order_id=assignment.job_order_ref).first())
+    if order and branch_access_error(request.current_user, order.branch_id):
+        return jsonify({'error': 'This job order belongs to another branch'}), 403
     if order and any(it.get('assignmentId') == assignment.id for it in (order.items or [])):
         items = [dict(it) for it in order.items if it.get('assignmentId') != assignment.id]
         order.items = items

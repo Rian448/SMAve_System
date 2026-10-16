@@ -4,6 +4,7 @@ import { useAuth } from '@/context/AuthContext';
 import { api, Branch, User as UserType, Role } from '@/lib/api';
 import { useConfirm } from '@/components/ConfirmDialog';
 import PermissionsDialog from '@/components/PermissionsDialog';
+import VatRateSetting from '@/components/VatRateSetting';
 
 type TabType = 'general' | 'users' | 'branches' | 'notifications';
 
@@ -226,6 +227,16 @@ export default function SettingsPage() {
       }
     };
 
+    // Mirrors the server's delegation rule: only administrators manage their own
+    // account here or any administrator account
+    const isAdministrator = user?.role === 'administrator';
+    const offLimitsReason = (target: UserType): string | null => {
+      if (isAdministrator) return null;
+      if (target.id === user?.id) return 'Only an administrator can change your own account here';
+      if (target.role === 'administrator') return 'Only an administrator can change an administrator account';
+      return null;
+    };
+
     /**
      * Why this account can't be deactivated or deleted, or null if it can.
      * Mirrors the server's guards so the buttons are disabled with a reason
@@ -233,6 +244,8 @@ export default function SettingsPage() {
      */
     const protectedReason = (target: UserType): string | null => {
       if (target.id === user?.id) return 'This is your own account';
+      const offLimits = offLimitsReason(target);
+      if (offLimits) return offLimits;
       const otherActiveAdmins = users.filter(
         (u) => u.role === 'administrator' && u.isActive && u.id !== target.id,
       ).length;
@@ -420,6 +433,7 @@ export default function SettingsPage() {
       case 'general':
         return (
           <div className="space-y-6">
+            <VatRateSetting canEdit={can('settings.edit')} />
             <div>
               <h3 className="text-lg font-semibold text-gray-900 mb-4">Company Information</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -610,14 +624,18 @@ export default function SettingsPage() {
                             <>
                               <button 
                                 onClick={() => handleEditUser(u)}
-                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3"
+                                disabled={!!offLimitsReason(u)}
+                                title={offLimitsReason(u) || undefined}
+                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300"
                               >
                           Edit
                         </button>
                               {u.role !== 'customer' && (
                                 <button
                                   onClick={() => setPermTarget(u)}
-                                  className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3"
+                                  disabled={!!offLimitsReason(u)}
+                                  title={offLimitsReason(u) || undefined}
+                                  className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300"
                                 >
                                   Permissions
                                 </button>
@@ -1111,6 +1129,8 @@ export default function SettingsPage() {
                     {/* An existing account keeps its own role in the list so editing it still works */}
                     {roles
                       .filter((role) => !HIDDEN_ROLES.includes(role.id) || (editingUser && editingUser.role === role.id))
+                      // Only administrators can give out the administrator role
+                      .filter((role) => role.id !== 'administrator' || user?.role === 'administrator')
                       .map((role) => (
                         <option key={role.id} value={role.id}>
                           {role.name}

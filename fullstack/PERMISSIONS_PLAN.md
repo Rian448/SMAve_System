@@ -34,7 +34,7 @@ Roles: `administrator`, `supervisor`, `sales_manager`, `seat_maker`, `sewer`, `c
 | Module | Permissions | Notes |
 |---|---|---|
 | Dashboard | `dashboard.view` | |
-| Sales / Job Orders | `sales.view`, `sales.add`, `sales.edit`, `sales.delete`, `sales.void`, `sales.quote` | `sales.quote` = sending a job order as a quotation (the `sendQuotation` field). Lineup slips and premade drafts fall under Sales. |
+| Sales / Job Orders | `sales.view`, `sales.add`, `sales.edit`, `sales.delete`, `sales.void`, `sales.quote`, `sales.edit_unpaid` | `sales.quote` = sending a job order as a quotation (the `sendQuotation` field). `sales.edit_unpaid` = edit a confirmed order before its down payment, and its parts, status and workers (replaces the old sales-manager role check; administrators and supervisors have it by default). Lineup slips and premade drafts fall under Sales. |
 | Custom Requests | `custom_requests.view`, `custom_requests.edit`, `custom_requests.quote` | Customer-submitted custom orders (staff side). |
 | Customers | `customers.view`, `customers.add`, `customers.edit` | No delete endpoint exists. |
 | Payments | `payments.view`, `payments.add`, `payments.request_override`, `payments.approve_override` | |
@@ -57,7 +57,22 @@ Roles: `administrator`, `supervisor`, `sales_manager`, `seat_maker`, `sewer`, `c
 | Branches | `branches.manage`, `branches.all` | `branches.all` = cross-branch scope (see §5). |
 | Users | `users.manage` | Add/edit/archive/delete users and edit their permissions. |
 
-**67 permissions in 23 modules.**
+**68 permissions in 23 modules.**
+
+### Delegation policy
+
+Administrators can change anyone's access. Anyone else granted `users.manage`:
+
+- can't change their own account in user management (they use My Profile),
+- can't change, archive, delete or edit the permissions of an administrator account,
+- can't give out the administrator role,
+- can only grant or remove permissions they hold themselves, and never
+  `users.manage`, `branches.manage` or `branches.all` (administrators only).
+
+The same rule applies when creating a user or changing a role: the access that
+changes must all be within what the editor may delegate. Saving permissions
+sends back the version that was loaded; if someone else saved in between, the
+save is refused (409) and the dialog offers to reload.
 
 ## 4. Role defaults (reproduce today exactly)
 

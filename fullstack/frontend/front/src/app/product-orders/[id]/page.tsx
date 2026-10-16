@@ -3,7 +3,7 @@ import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { api, ProductOrder, ProductOrderTransfer, ProductOrderTimelineEvent } from '@/lib/api';
+import { api, ProductOrder, ProductOrderTransfer, ProductOrderTimelineEvent, vatBreakdown, DEFAULT_VAT_PERCENT } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 
 type SaveState = 'idle' | 'saving';
@@ -161,9 +161,8 @@ export default function ProductOrderDetailPage() {
     const paymentLabel = order.paymentStatus === 'paid' ? 'PAID' : order.paymentStatus === 'partial' ? 'PARTIAL PAYMENT' : 'UNPAID';
     const statusLabel = order.status.toUpperCase();
 
-    const totalWithVat = order.totalAmount;
-    const vat = totalWithVat * (12 / 112);
-    const subtotal = totalWithVat - vat;
+    // Product prices include VAT: show its share at the rate the order was sold at
+    const { total: totalWithVat, net: subtotal, vat, vatPercent } = vatBreakdown(order.totalAmount, order.vatPercent ?? DEFAULT_VAT_PERCENT);
 
     const itemRows = order.items.map((item) => {
       const fromBranch = item.sourceBranchName && item.sourceBranchName !== order.branchName
@@ -322,7 +321,7 @@ export default function ProductOrderDetailPage() {
         <td class="right" style="font-size:11px">&#8369;${subtotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
       </tr>
       <tr>
-        <td colspan="3" class="right" style="font-size:11px; color:#555;">VAT (12%)</td>
+        <td colspan="3" class="right" style="font-size:11px; color:#555;">VAT (${vatPercent}%)</td>
         <td class="right" style="font-size:11px; color:#555;">&#8369;${vat.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
       </tr>
       <tr class="total-row">
@@ -370,9 +369,8 @@ export default function ProductOrderDetailPage() {
       year: 'numeric', month: 'long', day: 'numeric',
       hour: '2-digit', minute: '2-digit', hour12: true,
     });
-    const totalWithVat = order.totalAmount;
-    const vat = totalWithVat * (12 / 112);
-    const subtotal = totalWithVat - vat;
+    // Product prices include VAT: show its share at the rate the order was sold at
+    const { total: totalWithVat, net: subtotal, vat, vatPercent } = vatBreakdown(order.totalAmount, order.vatPercent ?? DEFAULT_VAT_PERCENT);
 
     const itemRows = order.items.map((item) => {
       const fromBranch = item.sourceBranchName && item.sourceBranchName !== order.branchName
@@ -470,7 +468,7 @@ export default function ProductOrderDetailPage() {
   </table>
   <div class="totals">
     <div class="totals-row"><span>Net of VAT</span><span>&#8369;${subtotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
-    <div class="totals-row"><span>VAT (12%)</span><span>&#8369;${vat.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+    <div class="totals-row"><span>VAT (${vatPercent}%)</span><span>&#8369;${vat.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
     <div class="totals-row total"><span>Total</span><span>&#8369;${totalWithVat.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
   </div>
   <div class="amount-due">
@@ -512,6 +510,8 @@ export default function ProductOrderDetailPage() {
       </div>
     );
   }
+
+  const orderVat = vatBreakdown(order.totalAmount, order.vatPercent ?? DEFAULT_VAT_PERCENT);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -940,11 +940,11 @@ export default function ProductOrderDetailPage() {
                   <div className="w-64 space-y-2">
                     <div className="flex justify-between text-sm text-gray-500">
                       <span>Net of VAT</span>
-                      <span>₱{(order.totalAmount * (100 / 112)).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      <span>₱{orderVat.net.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
                     <div className="flex justify-between text-sm text-gray-500">
-                      <span>VAT (12%)</span>
-                      <span>₱{(order.totalAmount * (12 / 112)).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      <span>VAT ({orderVat.vatPercent}%)</span>
+                      <span>₱{orderVat.vat.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
                     <div className="flex justify-between text-base font-bold text-gray-900 border-t border-gray-200 pt-2">
                       <span>Total</span>

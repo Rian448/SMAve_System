@@ -4,9 +4,10 @@ import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord, ManagedWorker, PaymentOverride,
-  jobOrderItemCategory, jobOrderPriceBreakdown, jobOrderTotalFrom, DEFAULT_VAT_PERCENT, MAX_JOB_ORDER_PRICE, isValidPriceInput,
+  jobOrderItemCategory, jobOrderPriceBreakdown, jobOrderTotalFrom, MAX_JOB_ORDER_PRICE, isValidPriceInput,
 } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
+import { useVatRate } from '@/lib/useVatRate';
 
 type EditableJobOrderItem = JobOrderItem & {
   materialSource?: 'inventory' | 'custom';
@@ -65,10 +66,12 @@ export default function JobOrderDetailPage() {
   const [updating, setUpdating] = useState(false);
   const [inventoryMaterials, setInventoryMaterials] = useState<RawMaterial[]>([]);
   const [editingParts, setEditingParts] = useState<EditableJobOrderItem[]>([]);
-  // Price is edited as: price before discount → discount % → optional VAT → total
+  // Price is edited as: price for the work (VAT included) → discount % → total.
+  // VAT is the share of the total shown alongside, never added on top.
   const [editedSubtotal, setEditedSubtotal] = useState('0');
   const [editedDiscount, setEditedDiscount] = useState('');
   const [vatOn, setVatOn] = useState(false);
+  const vatRate = useVatRate();
   const [savingParts, setSavingParts] = useState(false);
   const [partsMsg, setPartsMsg] = useState('');
   const [error, setError] = useState('');
@@ -157,7 +160,8 @@ export default function JobOrderDetailPage() {
       : [blankItem];
 
     setEditingParts(items);
-    const price = jobOrderPriceBreakdown(jobOrder.totalPrice || 0, jobOrder.discountPercent, jobOrder.vatPercent);
+    // Edited as a VAT-inclusive price, so saving keeps the total (older orders too)
+    const price = jobOrderPriceBreakdown(jobOrder.totalPrice || 0, jobOrder.discountPercent, jobOrder.vatPercent, true);
     setEditedSubtotal(String(price.subtotal));
     setEditedDiscount(price.discountPercent ? String(price.discountPercent) : '');
     setVatOn(price.vatPercent > 0);
@@ -231,9 +235,10 @@ export default function JobOrderDetailPage() {
     }
   };
 
-  // Production changes (parts, status, workers) stay with senior staff: sales managers
-  // edit order details only, a business rule the server applies too.
-  const canEditParts = can('sales.edit') && user?.role !== 'sales_manager';
+  // Production changes (parts, status, workers) stay with staff who may edit orders
+  // before a down payment (sales.edit_unpaid, by default administrators and
+  // supervisors); the server refuses edits to unpaid confirmed orders without it.
+  const canEditParts = can('sales.edit') && can('sales.edit_unpaid');
   const canUpdatePaymentStatus = can('payments.add');
   // Those who can't approve overrides themselves send a request for approval instead
   const canRequestOverride = can('payments.request_override') && !can('payments.approve_override');
@@ -434,7 +439,6 @@ export default function JobOrderDetailPage() {
     }
 
     const discountPercent = Math.min(Math.max(Number(editedDiscount) || 0, 0), 100);
-    const vatPercent = vatOn ? DEFAULT_VAT_PERCENT : 0;
     let subtotal = Number(editedSubtotal) || 0;
     // An order that was never priced falls back to what the parts cost, as before
     if (!subtotal && !(jobOrder.totalPrice > 0)) {
@@ -445,16 +449,17 @@ export default function JobOrderDetailPage() {
       setError('Price for the work must be less than ₱100,000,000 (up to 8 digits).');
       return;
     }
-    const totalPrice = jobOrderTotalFrom(subtotal, discountPercent, vatPercent);
+    const totalPrice = jobOrderTotalFrom(subtotal, discountPercent);
 
     setSavingParts(true);
     setPartsMsg('');
     try {
       const response = await api.sales.updateJobOrder(jobOrder.id, {
         items: normalizedItems,
-        totalPrice,
+        // The server works out the total and VAT from these
+        priceForWork: subtotal,
         discountPercent: discountPercent || null,
-        vatPercent: vatPercent || null,
+        vatIncluded: vatOn,
       });
 
       const updated = response.data;
@@ -465,7 +470,9 @@ export default function JobOrderDetailPage() {
           items: updated.items ?? normalizedItems,
           totalPrice: updated.totalPrice ?? totalPrice,
           discountPercent: updated.discountPercent ?? (discountPercent || null),
-          vatPercent: updated.vatPercent ?? (vatPercent || null),
+          vatPercent: updated.vatPercent ?? null,
+          vatInclusive: updated.vatInclusive ?? true,
+          vatAmount: updated.vatAmount,
           actualCost: updated.actualCost ?? jobOrder.actualCost,
           balance: updated.balance ?? Math.max(totalPrice - (jobOrder.downPayment || 0), 0),
           paymentStatus: updated.paymentStatus || jobOrder.paymentStatus
@@ -646,19 +653,21 @@ export default function JobOrderDetailPage() {
 
   // Price being edited in the parts editor
   const editDiscountPct = Math.min(Math.max(Number(editedDiscount) || 0, 0), 100);
-  const editVatPct = vatOn ? DEFAULT_VAT_PERCENT : 0;
-  const editTotal = jobOrderTotalFrom(Number(editedSubtotal) || 0, editDiscountPct, editVatPct);
-  const editPrice = jobOrderPriceBreakdown(editTotal, editDiscountPct, editVatPct);
+  // An order keeps the VAT rate it was priced at; switching VAT on uses the rate in Settings
+  const editVatPct = vatOn ? (Number(jobOrder.vatPercent) || vatRate) : 0;
+  const editTotal = jobOrderTotalFrom(Number(editedSubtotal) || 0, editDiscountPct);
+  const editPrice = jobOrderPriceBreakdown(editTotal, editDiscountPct, editVatPct, true);
 
-  // Saved price, split into subtotal → discount → VAT → total
-  const price = jobOrderPriceBreakdown(jobOrder.totalPrice || 0, jobOrder.discountPercent, jobOrder.vatPercent);
+  // Saved price, split into its parts (older orders had VAT added on top)
+  const price = jobOrderPriceBreakdown(jobOrder.totalPrice || 0, jobOrder.discountPercent, jobOrder.vatPercent,
+                                       !!jobOrder.vatInclusive);
   const showPriceBreakdown = price.discount > 0 || price.vat > 0;
 
   // Financial summary (shown when completed/delivered). VAT is collected for the
   // government, so profit is measured on the price before VAT.
   const actualExpenses = materialSubtotal + laborSubtotal + expenseSubtotal;
   const finalPrice = jobOrder.totalPrice || 0;
-  const revenue = price.afterDiscount;
+  const revenue = price.net;
   const grossProfit = revenue - actualExpenses;
   const profitMarginPct = revenue > 0 ? (grossProfit / revenue) * 100 : 0;
   const isProfit = grossProfit >= 0;
@@ -1487,7 +1496,7 @@ export default function JobOrderDetailPage() {
                         className="w-full pl-7 pr-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm"
                       />
                     </div>
-                    <p className="text-xs text-gray-400 mt-1">Before discount and VAT, up to ₱99,999,999.99</p>
+                    <p className="text-xs text-gray-400 mt-1">VAT included, before discount; up to ₱99,999,999.99</p>
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1.5">Discount</label>
@@ -1506,15 +1515,15 @@ export default function JobOrderDetailPage() {
                 <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
                   <input type="checkbox" checked={vatOn} onChange={(e) => setVatOn(e.target.checked)}
                     className="w-4 h-4 rounded border-gray-300 text-[#011c72]" />
-                  Add {DEFAULT_VAT_PERCENT}% VAT
+                  Price includes {Number(jobOrder.vatPercent) || vatRate}% VAT
                 </label>
                 {computedPartsTotal > 0 && (
                   <p className="text-xs text-gray-500">
                     Job cost so far: <span className="font-semibold text-gray-700">{formatCurrency(computedPartsTotal)}</span>
-                    {editPrice.afterDiscount > 0 && (
-                      <> · margin at this price:{' '}
-                        <span className={`font-semibold ${editPrice.afterDiscount >= computedPartsTotal ? 'text-green-700' : 'text-red-600'}`}>
-                          {(((editPrice.afterDiscount - computedPartsTotal) / editPrice.afterDiscount) * 100).toFixed(1)}%
+                    {editPrice.net > 0 && (
+                      <> · margin at this price (before VAT):{' '}
+                        <span className={`font-semibold ${editPrice.net >= computedPartsTotal ? 'text-green-700' : 'text-red-600'}`}>
+                          {(((editPrice.net - computedPartsTotal) / editPrice.net) * 100).toFixed(1)}%
                         </span>
                       </>
                     )}
@@ -1526,12 +1535,12 @@ export default function JobOrderDetailPage() {
                 {editPrice.discount > 0 && (
                   <div className="flex justify-between text-green-700"><span>Discount ({editDiscountPct}%)</span><span>− {formatCurrency(editPrice.discount)}</span></div>
                 )}
-                {editPrice.vat > 0 && (
-                  <div className="flex justify-between text-gray-600"><span>VAT ({editVatPct}%)</span><span>+ {formatCurrency(editPrice.vat)}</span></div>
-                )}
                 <div className="flex justify-between pt-1.5 mt-1 border-t border-gray-200 font-bold text-gray-900">
                   <span>Total</span><span className="text-lg">{formatCurrency(editPrice.total)}</span>
                 </div>
+                {editPrice.vat > 0 && (
+                  <div className="flex justify-between text-xs text-gray-500"><span>Includes VAT ({editVatPct}%)</span><span>{formatCurrency(editPrice.vat)}</span></div>
+                )}
               </div>
             </div>
             {partsMsg && <p className="mt-3 text-sm text-green-700">{partsMsg}</p>}
@@ -1633,8 +1642,9 @@ export default function JobOrderDetailPage() {
                   {price.discount > 0 && (
                     <div className="flex justify-between text-green-700"><span>Discount ({price.discountPercent}%)</span><span>− {formatCurrency(price.discount)}</span></div>
                   )}
-                  {price.vat > 0 && (
-                    <div className="flex justify-between"><span>VAT ({price.vatPercent}%)</span><span>+ {formatCurrency(price.vat)}</span></div>
+                  {price.vat > 0 && (price.vatInclusive
+                    ? <div className="flex justify-between"><span>Includes VAT ({price.vatPercent}%)</span><span>{formatCurrency(price.vat)}</span></div>
+                    : <div className="flex justify-between"><span>VAT ({price.vatPercent}%)</span><span>+ {formatCurrency(price.vat)}</span></div>
                   )}
                 </div>
               )}

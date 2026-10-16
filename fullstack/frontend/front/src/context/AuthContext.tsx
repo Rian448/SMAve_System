@@ -1,7 +1,7 @@
 ﻿'use client';
 
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
-import { api, User, setAuthToken, getAuthToken } from '@/lib/api';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
+import { api, User, setAuthToken, getAuthToken, PERMISSIONS_STALE_EVENT } from '@/lib/api';
 import { userCan } from '@/lib/permissions';
 
 interface AuthContextType {
@@ -45,6 +45,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     checkAuth();
   }, []);
+
+  // Keep the menus in step with permission changes an administrator makes while
+  // this user is signed in: reload them quietly (no loading state) when the tab
+  // regains focus, once a minute, and right after the server refuses a request.
+  const signedIn = !!user;
+  const lastRefresh = useRef(0);
+  useEffect(() => {
+    if (!signedIn) return;
+    const refresh = () => {
+      if (Date.now() - lastRefresh.current < 5000 || !getAuthToken()) return;
+      lastRefresh.current = Date.now();
+      // Keep the same object when nothing changed, so pages whose effects depend
+      // on `user` or `can` don't reload their data every minute
+      api.auth.me().then(r => {
+        const fresh = r.data;
+        if (fresh) setUser(prev => (JSON.stringify(prev) === JSON.stringify(fresh) ? prev : fresh));
+      }).catch(() => {});
+    };
+    const onVisible = () => { if (document.visibilityState === 'visible') refresh(); };
+    window.addEventListener(PERMISSIONS_STALE_EVENT, refresh);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', onVisible);
+    const timer = window.setInterval(refresh, 60000);
+    return () => {
+      window.removeEventListener(PERMISSIONS_STALE_EVENT, refresh);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.clearInterval(timer);
+    };
+  }, [signedIn]);
 
   const login = async (username: string, password: string) => {
     const response = await api.auth.login(username, password);

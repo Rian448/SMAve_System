@@ -1,6 +1,6 @@
 ﻿'use client';
 import { formatDate, formatDateTime } from '@/lib/dateUtils';
-import { useState, useEffect, useMemo, useRef, Suspense } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus, PremadeTransfer } from '@/lib/api';
@@ -10,6 +10,16 @@ import Link from 'next/link';
 type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'purchase-orders' | 'suppliers' | 'waste-log' | 'ai-predictions';
 
 const TAB_IDS: TabType[] = ['raw-materials', 'finished-goods', 'material-usage', 'purchase-orders', 'suppliers', 'waste-log', 'ai-predictions'];
+// Permissions that show each tab (any one is enough), matching what its data needs
+const TAB_PERMISSIONS: Record<TabType, string[]> = {
+  'raw-materials': ['inventory.view'],
+  'finished-goods': ['premade.view'],
+  'material-usage': ['inventory.view'],
+  'purchase-orders': ['purchase_orders.view'],
+  'suppliers': ['suppliers.view'],
+  'waste-log': ['inventory.view'],
+  'ai-predictions': ['forecasting.view'],
+};
 
 export default function InventoryPage() {
   // useSearchParams needs a Suspense boundary for this route to prerender.
@@ -33,6 +43,16 @@ function InventoryContent() {
   const tabParam = searchParams.get('tab');
   const initialTab: TabType = TAB_IDS.includes(tabParam as TabType) ? (tabParam as TabType) : 'raw-materials';
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
+  const tabAllowed = useCallback((tab: TabType) => can(...TAB_PERMISSIONS[tab]), [can]);
+  // The stock-out banner reads predictions too; the server lets inventory viewers see them
+  const canReadPredictions = can('forecasting.view', 'inventory.view');
+
+  // Someone who can't open the requested tab (e.g. premade access only) starts on one they can
+  useEffect(() => {
+    if (!user || tabAllowed(activeTab)) return;
+    const first = TAB_IDS.find(tabAllowed);
+    if (first) setActiveTab(first);
+  }, [user, activeTab, tabAllowed]);
   const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([]);
   const [finishedGoods, setFinishedGoods] = useState<FinishedGood[]>([]);
   const [materialUsageLogs, setMaterialUsageLogs] = useState<MaterialUsageLog[]>([]);
@@ -141,8 +161,8 @@ function InventoryContent() {
   const confirmsViaDialog = can('branches.all', 'premade.distribute');
 
   useEffect(() => {
-    if (activeTab !== 'ai-predictions') fetchInventory();
-  }, [activeTab]);
+    if (activeTab !== 'ai-predictions' && tabAllowed(activeTab)) fetchInventory();
+  }, [activeTab, tabAllowed]);
 
   const fetchAIPredictions = async () => {
     setAiLoading(true);
@@ -153,14 +173,16 @@ function InventoryContent() {
     finally { setAiLoading(false); }
   };
 
-  // Fetch AI predictions on mount (for notification banner) and when tab is opened
+  // Predictions are optional here: fetched on mount for the stock-out banner and
+  // when their tab opens, only for users allowed to read them. A failure just
+  // leaves the banner hidden.
   useEffect(() => {
-    fetchAIPredictions();
-  }, []);
+    if (canReadPredictions) fetchAIPredictions();
+  }, [canReadPredictions]);
 
   useEffect(() => {
-    if (activeTab === 'ai-predictions') fetchAIPredictions();
-  }, [activeTab]);
+    if (activeTab === 'ai-predictions' && can('forecasting.view')) fetchAIPredictions();
+  }, [activeTab, can]);
 
   useEffect(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -205,12 +227,12 @@ function InventoryContent() {
   }, [user?.branchId]);
 
   useEffect(() => {
-    if (activeTab === 'finished-goods' && newPremade.branchId) {
+    if (activeTab === 'finished-goods' && newPremade.branchId && can('inventory.view', 'sales.add', 'sales.edit', 'purchase_orders.add')) {
       api.inventory.getRawMaterials({ branchId: Number(newPremade.branchId), includeWarehouse: true })
         .then(res => setRawMaterials(res.data || []))
         .catch(() => {});
     }
-  }, [newPremade.branchId, activeTab]);
+  }, [newPremade.branchId, activeTab, can]);
 
   const fetchInventory = async () => {
     setLoading(true);
@@ -218,7 +240,10 @@ function InventoryContent() {
       if (activeTab === 'raw-materials') {
         const [matRes, supRes] = await Promise.all([
           api.inventory.getRawMaterials({ branchId: user?.branchId }),
-          api.inventory.getSuppliers(),
+          // Only feeds the supplier picker; someone without supplier access still sees the stock
+          can('suppliers.view', 'purchase_orders.add')
+            ? api.inventory.getSuppliers().catch(() => ({ data: [] }))
+            : Promise.resolve({ data: [] }),
         ]);
         setRawMaterials(matRes.data || []);
         setSuppliers(supRes.data || []);
@@ -226,7 +251,10 @@ function InventoryContent() {
         const targetBranchId = Number(newPremade.branchId) || user?.branchId;
         const [finishedGoodsResponse, rawMaterialsResponse, transfersResponse] = await Promise.all([
           api.inventory.getFinishedGoods(),
-          api.inventory.getRawMaterials({ branchId: targetBranchId, includeWarehouse: true }),
+          // Materials only feed the "made from" picker when adding stock
+          can('inventory.view', 'sales.add', 'sales.edit', 'purchase_orders.add')
+            ? api.inventory.getRawMaterials({ branchId: targetBranchId, includeWarehouse: true }).catch(() => ({ data: [] }))
+            : Promise.resolve({ data: [] }),
           // Pending deliveries are optional context — don't fail the tab over them.
           api.inventory.getPremadeTransfers({ status: 'pending' }).catch(() => ({ data: [] })),
         ]);
@@ -839,7 +867,7 @@ function InventoryContent() {
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
       </svg>
     )},
-  ];
+  ].filter((tab) => tabAllowed(tab.id));
 
   return (
     <div className="min-h-screen bg-gray-50">

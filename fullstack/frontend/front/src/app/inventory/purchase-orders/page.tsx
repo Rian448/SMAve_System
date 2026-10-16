@@ -3,8 +3,11 @@ import { formatDate } from '@/lib/dateUtils';
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { api, PurchaseOrder } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 
 export default function PurchaseOrdersPage() {
+  const { can } = useAuth();
+  const canCreate = can('purchase_orders.add');
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'pending' | 'approved' | 'received' | 'all'>('all');
@@ -85,7 +88,7 @@ export default function PurchaseOrdersPage() {
               View and manage purchase orders for raw materials
             </p>
           </div>
-          <Link
+          {canCreate && <Link
             href="/inventory/purchase-orders/new"
             className="mt-4 sm:mt-0 inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors"
           >
@@ -93,7 +96,7 @@ export default function PurchaseOrdersPage() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
             New Purchase Order
-          </Link>
+          </Link>}
         </div>
 
         {/* Tabs */}
@@ -136,14 +139,14 @@ export default function PurchaseOrdersPage() {
               </svg>
               <h3 className="text-lg font-medium text-gray-900 mb-2">No purchase orders</h3>
               <p className="text-gray-500 mb-4">
-                {activeTab === 'all' ? 'Create your first purchase order to get started.' : 'No purchase orders in this status.'}
+                {activeTab !== 'all' ? 'No purchase orders in this status.' : canCreate ? 'Create your first purchase order to get started.' : 'No purchase orders yet.'}
               </p>
-              <Link
+              {canCreate && <Link
                 href="/inventory/purchase-orders/new"
                 className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors"
               >
                 Create Purchase Order
-              </Link>
+              </Link>}
             </div>
           ) : (
             <div className="overflow-x-auto">

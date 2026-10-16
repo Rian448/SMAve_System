@@ -5,9 +5,10 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import {
   api, type Customer, type FinishedGood, type RawMaterial, type Appointment, type QuoteStatus, type Branch,
-  DEFAULT_VAT_PERCENT, jobOrderTotalFrom, jobOrderPriceBreakdown, MAX_JOB_ORDER_PRICE, isValidPriceInput,
+  vatBreakdown, jobOrderTotalFrom, jobOrderPriceBreakdown, MAX_JOB_ORDER_PRICE, isValidPriceInput,
 } from '@/lib/api';
 import Combobox from '@/components/Combobox';
+import { useVatRate } from '@/lib/useVatRate';
 
 interface MaterialItem {
   id: string;
@@ -123,7 +124,9 @@ function NewJobOrderForm() {
   const [linkedCustomerId, setLinkedCustomerId] = useState<number | null>(null);
   const [linkedCustomerDiscount, setLinkedCustomerDiscount] = useState<number | null>(null);
   const [orderDiscount, setOrderDiscount] = useState<string>('');  // editable per-order discount %
-  const [vatOn, setVatOn] = useState(false);
+  // Prices include VAT by default; untick for a sale without VAT
+  const [vatOn, setVatOn] = useState(true);
+  const vatRate = useVatRate();
   const [customerSuggestions, setCustomerSuggestions] = useState<Customer[]>([]);
   const [searchingCustomer, setSearchingCustomer] = useState(false);
   const customerSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -348,11 +351,12 @@ function NewJobOrderForm() {
   // Per-order discount: clamp 0–100, derive the discounted total and savings.
   const orderDiscountPct = Math.min(Math.max(Number(orderDiscount) || 0, 0), 100);
   const discountAmount = estimatedTotal > 0 ? Math.round(estimatedTotal * (orderDiscountPct / 100) * 100) / 100 : 0;
-  const discountedTotal = estimatedTotal > 0 ? Math.round((estimatedTotal - discountAmount) * 100) / 100 : 0;
-  // Optional VAT on top of the discounted price; this is what the customer pays
-  const vatPct = vatOn ? DEFAULT_VAT_PERCENT : 0;
-  const finalTotal = estimatedTotal > 0 ? jobOrderTotalFrom(estimatedTotal, orderDiscountPct, vatPct) : 0;
-  const vatAmount = Math.round((finalTotal - discountedTotal) * 100) / 100;
+  // The price already includes VAT: the customer pays the discounted price, and
+  // VAT is the share of it shown below (never added on top). The server works
+  // the total out again with the rate saved in Settings.
+  const vatPct = vatOn ? vatRate : 0;
+  const finalTotal = estimatedTotal > 0 ? jobOrderTotalFrom(estimatedTotal, orderDiscountPct) : 0;
+  const vatAmount = vatBreakdown(finalTotal, vatPct).vat;
 
   const goNext = () => {
     setError('');
@@ -388,8 +392,9 @@ function NewJobOrderForm() {
         if (d.discountPercent != null) setOrderDiscount(String(d.discountPercent));
         setVatOn(Number(d.vatPercent) > 0);
         // Restore the price (it used to be lost when reopening a draft)
+        // As a VAT-inclusive price, so saving keeps the draft's total (older drafts too)
         if (Number(d.totalPrice) > 0) {
-          setEstimatedTotal(jobOrderPriceBreakdown(Number(d.totalPrice), d.discountPercent, d.vatPercent).subtotal);
+          setEstimatedTotal(jobOrderPriceBreakdown(Number(d.totalPrice), d.discountPercent, d.vatPercent, true).subtotal);
         }
         if (d.notes) setNotes(d.notes);
         if (d.estimatedCompletion) setEstimatedCompletionDate(String(d.estimatedCompletion).slice(0, 10));
@@ -515,8 +520,8 @@ function NewJobOrderForm() {
         items: normalizedItems,
         notes,
         ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
-        vatPercent: vatPct || null,
-        ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, totalPrice: finalTotal } : {}),
+        vatIncluded: vatOn,
+        ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, priceForWork: estimatedTotal } : {}),
       };
 
       if (editingDraftId) {
@@ -755,7 +760,7 @@ function NewJobOrderForm() {
     } : undefined;
 
     const grossTotal = estimatedTotal > 0 ? estimatedTotal : materialTotal;
-    const orderTotal = jobOrderTotalFrom(grossTotal, orderDiscountPct, vatPct);
+    const orderTotal = jobOrderTotalFrom(grossTotal, orderDiscountPct);
     // A quotation takes no payment: the customer pays once they have accepted it
     const finalDown = quoteMode ? 0 : estimatedTotal > 0 ? Math.round((orderTotal / 2) * 100) / 100 : 0;
 
@@ -772,9 +777,9 @@ function NewJobOrderForm() {
         paymentMethod,
         notes,
         ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
-        ...(vatPct > 0 ? { vatPercent: vatPct } : {}),
+        vatIncluded: vatOn,
         ...(slipData ? { slipData } : {}),
-        ...(orderTotal > 0 ? { estimatedCost: grossTotal, totalPrice: orderTotal } : {}),
+        ...(orderTotal > 0 ? { estimatedCost: grossTotal, priceForWork: grossTotal } : {}),
       };
 
       if (quoteMode) {
@@ -1666,7 +1671,7 @@ function NewJobOrderForm() {
             <div className="space-y-3">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Price for the Work <span className="text-xs font-normal text-gray-400">(before discount and VAT)</span>
+                  Price for the Work <span className="text-xs font-normal text-gray-400">(VAT included, before discount)</span>
                 </label>
                 <div className="relative">
                   <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">₱</span>
@@ -1706,7 +1711,7 @@ function NewJobOrderForm() {
               <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
                 <input type="checkbox" checked={vatOn} onChange={(e) => setVatOn(e.target.checked)}
                   className="w-4 h-4 rounded border-gray-300 text-[#011c72]" />
-                Add {DEFAULT_VAT_PERCENT}% VAT
+                Price includes {vatRate}% VAT
               </label>
 
               {estimatedTotal > 0 && (orderDiscountPct > 0 || vatPct > 0) && (
@@ -1721,16 +1726,16 @@ function NewJobOrderForm() {
                       <span>− ₱{discountAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
                   )}
-                  {vatPct > 0 && (
-                    <div className="flex items-center justify-between text-gray-600">
-                      <span>VAT ({vatPct}%)</span>
-                      <span>+ ₱{vatAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                    </div>
-                  )}
                   <div className="flex items-center justify-between font-semibold text-gray-900 pt-1 border-t border-gray-200">
                     <span>Total</span>
                     <span>₱{finalTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   </div>
+                  {vatPct > 0 && (
+                    <div className="flex items-center justify-between text-xs text-gray-500">
+                      <span>Includes VAT ({vatPct}%) · ₱{(finalTotal - vatAmount).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} before VAT</span>
+                      <span>₱{vatAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                  )}
                 </div>
               )}
 
