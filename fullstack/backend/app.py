@@ -2804,7 +2804,7 @@ def restore_raw_material(material_id):
 
 @app.route('/api/inventory/finished-goods', methods=['GET'])
 @require_auth
-@require_permission('premade.view', 'sales.add')
+@require_permission('premade.view', 'premade.receive', 'sales.add')
 def get_finished_goods():
     include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
     branch_id = request.args.get('branchId')
@@ -3903,6 +3903,21 @@ def sync_labor_assignments(order, previous_items):
     order.items = items
 
 
+def release_pending_assignments(order):
+    """Free the workers booked on an order that will no longer be worked on:
+    delete the assignments that never started and unlink their labor lines, so
+    a line can't point at an id the database later gives another assignment."""
+    released = set()
+    for a in _assignments_for_order(order):
+        if a.status == 'pending':
+            released.add(a.id)
+            db.session.delete(a)
+    if released:
+        order.items = [{k: v for k, v in it.items() if k != 'assignmentId'}
+                       if it.get('assignmentId') in released else it
+                       for it in (order.items or [])]
+
+
 def add_labor_line_for_assignment(order, assignment):
     """Give an assignment made in Worker Management its labor line on the job
     order (or link an existing unlinked line for the same worker and task), so
@@ -4497,9 +4512,7 @@ def update_job_order(order_id):
 
     if order.status in ('cancelled', 'voided') and prev_status != order.status:
         # Free up workers who were booked on this order but never started
-        for a in _assignments_for_order(order):
-            if a.status == 'pending':
-                db.session.delete(a)
+        release_pending_assignments(order)
     if 'slipData' in data:
         order.slip_data = data['slipData']
 
@@ -4667,9 +4680,7 @@ def void_job_order(order_id):
     order.voided_at = datetime.now().date()
     order.updated_at = datetime.utcnow()
     # Free up workers who were booked but never started
-    for a in _assignments_for_order(order):
-        if a.status == 'pending':
-            db.session.delete(a)
+    release_pending_assignments(order)
     db.session.commit()
 
     log_action(user['id'], user['fullName'], 'VOID', 'Sales', f"Voided job order: {order.job_order_id} (unclaimed after 60 days)", request.remote_addr or '0.0.0.0')
