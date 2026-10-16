@@ -73,8 +73,9 @@ export default function LoginPage() {
       // Success — store token and load user
       setAuthToken(data.data.token);
       await checkAuth();
-      // Worker Management is admin-only, so worker accounts land on the dashboard too
-      router.push('/dashboard');
+      // The owner starts on the business summary; everyone else on the dashboard
+      // (Worker Management is admin-only, so worker accounts land there too)
+      router.push(data.data.user?.role === 'owner' ? '/owner' : '/dashboard');
     } catch {
       setError('Connection error. Please try again.');
     } finally {

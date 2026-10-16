@@ -56,8 +56,12 @@ Roles: `administrator`, `supervisor`, `sales_manager`, `seat_maker`, `sewer`, `c
 | Settings | `settings.edit` | System settings (thresholds, markup). |
 | Branches | `branches.manage`, `branches.all` | `branches.all` = cross-branch scope (see §5). |
 | Users | `users.manage` | Add/edit/archive/delete users and edit their permissions. |
+| Owner Dashboard | `owner.view` | Executive summary, job costing margins, P&L, receivables, inventory value (`/owner`). Administrators and the Owner role. |
+| Expenses | `expenses.view`, `expenses.add`, `expenses.delete` | Business cash outflows (payables). Supervisors and sales managers log their branch's; deleting is administrator-only. |
 
-**68 permissions in 23 modules.**
+**72 permissions in 25 modules.**
+
+The **Owner** role reviews rather than operates: every view permission, all branches and the owner dashboard, with no add/edit/delete permissions. A default `owner` account (password `owner123`) is created on startup if missing; change its password after the first login.
 
 ### Delegation policy
 

@@ -17,7 +17,7 @@ export interface User {
   username: string;
   email: string;
   fullName: string;
-  role: 'administrator' | 'supervisor' | 'sales_manager' | 'seat_maker' | 'sewer' | 'customer';
+  role: 'administrator' | 'supervisor' | 'sales_manager' | 'seat_maker' | 'sewer' | 'customer' | 'owner';
   roleName?: string;
   branch: string;
   branchId?: number;
@@ -1133,6 +1133,90 @@ export class ApiError extends Error {
   }
 }
 
+// ============================================
+// OWNER DASHBOARD & EXPENSES
+// ============================================
+
+export interface MonthlyFinancials { month: string; sales: number; expenses: number; netIncome: number }
+export interface MethodAmount { method: string; amount: number }
+
+export interface OwnerSummary {
+  period: { startDate: string; endDate: string };
+  ytd: { sales: number; totalExpenses: number; netIncome: number; profitMargin: number; grossProfit: number; vatCollected: number };
+  thisMonth: { sales: number; totalExpenses: number; netIncome: number };
+  receivables: number;
+  monthly: MonthlyFinancials[];
+  cashflowByMethod: { in: MethodAmount[]; out: MethodAmount[]; totalIn: number; totalOut: number };
+}
+
+export interface ProfitAndLoss {
+  period: { startDate: string; endDate: string; branchId: number | null };
+  sales: number; jobSales: number; premadeSales: number;
+  cogs: { materials: number; labor: number; otherJobCosts: number; premadeProducts: number; total: number };
+  grossProfit: number;
+  operatingExpenses: { byCategory: { category: string; amount: number }[]; total: number };
+  totalExpenses: number; netIncome: number; profitMargin: number; vatCollected: number;
+  orderCounts: { jobOrders: number; premadeOrders: number };
+  monthly: MonthlyFinancials[];
+}
+
+export interface JobCostingRow {
+  id: number; jobOrderId: string; customerName: string; description: string; branchName: string | null;
+  finishedOn: string; status: string;
+  customerPrice: number; vat: number; sellingPrice: number;
+  materials: number; labor: number; otherCosts: number; grossMargin: number; marginPercent: number;
+  lines: { name: string; category: 'material' | 'labor' | 'expense'; quantity: number; unitCost: number; cost: number }[];
+}
+
+export interface OwnerJobCosting {
+  jobs: JobCostingRow[];
+  totals: { sellingPrice: number; materials: number; labor: number; otherCosts: number; grossMargin: number; marginPercent: number };
+}
+
+export interface ReceivableInvoice {
+  type: 'job_order' | 'product_order'; id: number; reference: string; customerName: string;
+  branchName: string | null; orderStatus: string; date: string | null;
+  subtotal: number; vat: number; totalPaid: number; balance: number;
+  paymentStatus: 'paid' | 'partial' | 'unpaid';
+  payments: { date: string | null; amount: number; method: string; reference: string | null; recordedBy: string | null }[];
+}
+
+export interface OwnerReceivables {
+  invoices: ReceivableInvoice[];
+  totals: { subtotal: number; totalPaid: number; balance: number };
+}
+
+export interface OwnerInventory {
+  materialsValue: number; premadeValue: number; totalValue: number;
+  cogsYtd: ProfitAndLoss['cogs'];
+  restock: { id: number; name: string; color: string | null; branchName: string | null; stock: number; threshold: number; status: 'out' | 'low' }[];
+  outOfStock: number; lowStock: number;
+  movements: { date: string | null; direction: 'in' | 'out'; item: string; quantity: number; reason: string; branchName: string | null }[];
+}
+
+export interface Expense {
+  id: number; date: string; category: string; particulars: string; amount: number;
+  paymentMethod: string; notes: string | null; branchId: number | null; branchName: string | null;
+  createdBy: string | null; createdAt: string | null;
+}
+
+export interface ExpenseList { expenses: Expense[]; total: number; categories: string[]; paymentMethods: string[] }
+
+/** How a payment method key reads on screen */
+export const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  cash: 'Cash', gcash: 'GCash', maya: 'Maya', bank_transfer: 'Bank Transfer', credit_card: 'Credit Card',
+  debit_card: 'Debit Card', check: 'Cheque', other: 'Other', not_recorded: 'Premade sales (method not recorded)',
+};
+
+const periodQuery = (p?: { startDate?: string; endDate?: string; branchId?: number | '' }) => {
+  const q = new URLSearchParams();
+  if (p?.startDate) q.set('startDate', p.startDate);
+  if (p?.endDate) q.set('endDate', p.endDate);
+  if (p?.branchId) q.set('branchId', String(p.branchId));
+  const s = q.toString();
+  return s ? `?${s}` : '';
+};
+
 export const PERMISSIONS_STALE_EVENT = 'auth:permissions-stale';
 
 async function fetchApi<T>(
@@ -1854,6 +1938,28 @@ export const api = {
   // ==================
   // SETTINGS
   // ==================
+  owner: {
+    summary: () => fetchApi<OwnerSummary>('/api/owner/summary'),
+    pnl: (p?: { startDate?: string; endDate?: string; branchId?: number | '' }) =>
+      fetchApi<ProfitAndLoss>(`/api/owner/pnl${periodQuery(p)}`),
+    jobCosting: (p?: { startDate?: string; endDate?: string }) =>
+      fetchApi<OwnerJobCosting>(`/api/owner/job-costing${periodQuery(p)}`),
+    receivables: (status?: string) =>
+      fetchApi<OwnerReceivables>(`/api/owner/receivables${status ? `?status=${status}` : ''}`),
+    inventory: () => fetchApi<OwnerInventory>('/api/owner/inventory'),
+  },
+
+  expenses: {
+    list: (p?: { startDate?: string; endDate?: string; category?: string }) => {
+      const q = periodQuery(p);
+      const cat = p?.category ? `${q ? '&' : '?'}category=${encodeURIComponent(p.category)}` : '';
+      return fetchApi<ExpenseList>(`/api/expenses${q}${cat}`);
+    },
+    create: (data: { date: string; category: string; particulars: string; amount: number; paymentMethod: string; notes?: string; branchId?: number }) =>
+      fetchApi<Expense>('/api/expenses', { method: 'POST', body: JSON.stringify(data) }),
+    remove: (id: number) => fetchApi<void>(`/api/expenses/${id}`, { method: 'DELETE' }),
+  },
+
   permissions: {
     catalogue: () => fetchApi<PermissionCatalogue>('/api/permissions'),
     getForUser: (userId: number) => fetchApi<UserPermissions>(`/api/users/${userId}/permissions`),

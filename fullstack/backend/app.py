@@ -691,6 +691,24 @@ class WorkerAvailabilitySchedule(db.Model):
     worker = db.relationship('ManagedWorker', backref='schedule')
     __table_args__ = (db.UniqueConstraint('managed_worker_id', 'date', name='uq_worker_date'),)
 
+class Expense(db.Model):
+    """Money the business spends that isn't stock bought through purchase orders:
+    rent, power, wages paid outside job orders, supplies and so on."""
+    __tablename__ = 'expenses'
+    id = db.Column(db.Integer, primary_key=True)
+    expense_date = db.Column(db.Date, nullable=False, index=True)
+    category = db.Column(db.String(50), nullable=False)
+    particulars = db.Column(db.String(255), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    payment_method = db.Column(db.String(30), nullable=False, default='cash')
+    notes = db.Column(db.Text)
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    branch = db.relationship('Branch')
+    creator = db.relationship('User', foreign_keys=[created_by])
+
 class AuditLog(db.Model):
     """Audit trail. Kept in the database — an in-memory list was wiped on every
     restart, and on serverless hosting each request could see a different one."""
@@ -775,13 +793,15 @@ default_roles = [
     {'key': 'sales_manager', 'name': 'Sales Manager'},
     {'key': 'seat_maker', 'name': 'Seat Maker'},
     {'key': 'sewer', 'name': 'Sewer'},
-    {'key': 'customer', 'name': 'Customer'}
+    {'key': 'customer', 'name': 'Customer'},
+    {'key': 'owner', 'name': 'Owner'},
 ]
 
 default_users = [
     {'username': 'admin', 'password': 'admin123', 'email': 'admin@seatmakers.com', 'fullName': 'System Administrator', 'role': 'administrator', 'branch': 'Main Warehouse', 'isActive': True},
     {'username': 'supervisor', 'password': 'super123', 'email': 'supervisor@seatmakers.com', 'fullName': 'John Supervisor', 'role': 'supervisor', 'branch': 'Main Warehouse', 'isActive': True},
     {'username': 'salesmanager', 'password': 'sales123', 'email': 'sales@seatmakers.com', 'fullName': 'Jane Sales', 'role': 'sales_manager', 'branch': 'Branch A', 'isActive': True},
+    {'username': 'owner', 'password': 'owner123', 'email': 'owner@seatmakers.com', 'fullName': 'Business Owner', 'role': 'owner', 'branch': 'Main Warehouse', 'isActive': True},
 ]
 
 # ============================================
@@ -854,6 +874,8 @@ PERMISSION_MODULES = [
     ('settings', 'System Settings', [('edit', 'Edit')]),
     ('branches', 'Branches', [('manage', 'Manage'), ('all', 'Access all branches')]),
     ('users', 'Users', [('manage', 'Manage users & permissions')]),
+    ('owner', 'Owner Dashboard', [('view', 'View business financials')]),
+    ('expenses', 'Expenses', [('view', 'View'), ('add', 'Add'), ('delete', 'Delete')]),
 ]
 PERMISSIONS = {
     f'{module}.{action}': {'module': module, 'moduleLabel': module_label, 'action': action, 'label': label}
@@ -865,6 +887,7 @@ _SUPERVISOR_EXCLUDED = {
     'payments.approve_override', 'purchase_orders.approve', 'reports.audit_trail',
     'workers.add', 'workers.edit', 'workers.delete', 'workers.delete_assignment',
     'catalog.manage', 'blacklist.manage', 'branches.manage', 'branches.all', 'users.manage',
+    'owner.view', 'expenses.delete',
 }
 # Defaults reproduce what each role could do before permissions existed
 ROLE_DEFAULT_PERMISSIONS = {
@@ -881,6 +904,17 @@ ROLE_DEFAULT_PERMISSIONS = {
         'reports.sales',
         'announcements.view',
         'workers.view', 'workers.assign',
+        'expenses.view', 'expenses.add',
+    }),
+    # The owner reviews the results of the day-to-day work rather than doing it:
+    # every view, all branches, and the owner dashboard -- no editing
+    'owner': frozenset({
+        'owner.view', 'dashboard.view', 'branches.all',
+        'sales.view', 'custom_requests.view', 'customers.view', 'payments.view', 'appointments.view',
+        'inventory.view', 'premade.view', 'suppliers.view', 'purchase_orders.view', 'product_orders.view',
+        'costing.view', 'forecasting.view', 'item_trail.view', 'announcements.view', 'workers.view',
+        'reports.sales', 'reports.inventory', 'reports.settlement', 'reports.audit_trail',
+        'expenses.view',
     }),
     # Worker accounts only use their profile; Worker Management tracks their work
     'seat_maker': frozenset(),
@@ -8253,6 +8287,414 @@ def get_branch_settlement():
     })
 
 
+# ============================================
+# EXPENSES (payables) AND OWNER DASHBOARD
+# ============================================
+
+EXPENSE_CATEGORIES = ['Rent', 'Electricity', 'Water', 'Internet & Phone', 'Salaries & Wages', 'Supplies',
+                      'Transportation', 'Repairs & Maintenance', 'Marketing', 'Taxes & Permits', 'Other']
+PAYMENT_METHODS = ['cash', 'gcash', 'maya', 'bank_transfer', 'credit_card', 'debit_card', 'check', 'other']
+
+def parse_period():
+    """(start, end) dates from ?startDate=&endDate= (YYYY-MM-DD); defaults to
+    this year so far. Returns (None, None, error) on bad input."""
+    today = manila_today()
+    try:
+        start = datetime.strptime(request.args['startDate'], '%Y-%m-%d').date() if request.args.get('startDate') \
+            else today.replace(month=1, day=1)
+        end = datetime.strptime(request.args['endDate'], '%Y-%m-%d').date() if request.args.get('endDate') else today
+    except ValueError:
+        return None, None, (jsonify({'status': 'error', 'message': 'Dates must be YYYY-MM-DD'}), 400)
+    if start > end:
+        return None, None, (jsonify({'status': 'error', 'message': 'The start date is after the end date'}), 400)
+    return start, end, None
+
+def expense_to_dict(e):
+    return {
+        'id': e.id,
+        'date': e.expense_date.isoformat() if e.expense_date else None,
+        'category': e.category,
+        'particulars': e.particulars,
+        'amount': float(e.amount or 0),
+        'paymentMethod': e.payment_method,
+        'notes': e.notes,
+        'branchId': e.branch_id,
+        'branchName': e.branch.name if e.branch else None,
+        'createdBy': e.creator.full_name if e.creator else None,
+        'createdAt': to_pht(e.created_at) if e.created_at else None,
+    }
+
+def scoped_expenses(user):
+    q = Expense.query
+    if not all_inventory_branches(user):
+        q = q.filter(Expense.branch_id == (user_branch_id(user) or -1))
+    return q
+
+@app.route('/api/expenses', methods=['GET'])
+@require_auth
+@require_permission('expenses.view', 'expenses.add')
+def list_expenses():
+    start, end, error = parse_period()
+    if error:
+        return error
+    q = scoped_expenses(request.current_user).filter(Expense.expense_date >= start, Expense.expense_date <= end)
+    if request.args.get('category'):
+        q = q.filter(Expense.category == request.args['category'])
+    rows = q.order_by(Expense.expense_date.desc(), Expense.id.desc()).all()
+    return jsonify({'status': 'success', 'data': {
+        'expenses': [expense_to_dict(e) for e in rows],
+        'total': money(sum(float(e.amount or 0) for e in rows)),
+        'categories': EXPENSE_CATEGORIES,
+        'paymentMethods': PAYMENT_METHODS,
+    }})
+
+@app.route('/api/expenses', methods=['POST'])
+@require_auth
+@require_permission('expenses.add')
+def create_expense():
+    user = request.current_user
+    data = request.get_json(silent=True) or {}
+    try:
+        amount = money(float(data.get('amount')))
+        expense_date = datetime.strptime(str(data.get('date') or manila_today()), '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Enter a valid amount and date'}), 400
+    particulars = (data.get('particulars') or '').strip()
+    if not amount > 0:
+        return jsonify({'status': 'error', 'message': 'Amount must be above zero'}), 400
+    if not particulars:
+        return jsonify({'status': 'error', 'message': 'Say what the money was spent on'}), 400
+    if expense_date > manila_today():
+        return jsonify({'status': 'error', 'message': 'The date cannot be in the future'}), 400
+    if data.get('category') not in EXPENSE_CATEGORIES:
+        return jsonify({'status': 'error', 'message': 'Choose a category'}), 400
+    if data.get('paymentMethod') not in PAYMENT_METHODS:
+        return jsonify({'status': 'error', 'message': 'Choose how it was paid'}), 400
+    branch_id = data.get('branchId') or user_branch_id(user)
+    if branch_id and not Branch.query.get(branch_id):
+        return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
+    error = inventory_branch_error(user, branch_id)
+    if error:
+        return jsonify({'status': 'error', 'message': 'You can only log expenses for your own branch'}), 403
+    expense = Expense(expense_date=expense_date, category=data['category'], particulars=particulars[:255],
+                      amount=amount, payment_method=data['paymentMethod'],
+                      notes=(data.get('notes') or '').strip() or None, branch_id=branch_id, created_by=user['id'])
+    db.session.add(expense)
+    db.session.commit()
+    log_action(user['id'], user['fullName'], 'CREATE', 'Expenses',
+               f"Logged expense ₱{amount:,.2f} ({expense.category}): {particulars}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': expense_to_dict(expense)}), 201
+
+@app.route('/api/expenses/<int:expense_id>', methods=['DELETE'])
+@require_auth
+@require_permission('expenses.delete')
+def delete_expense(expense_id):
+    user = request.current_user
+    expense = scoped_expenses(user).filter(Expense.id == expense_id).first()
+    if not expense:
+        return jsonify({'status': 'error', 'message': 'Expense not found'}), 404
+    label = f"₱{float(expense.amount):,.2f} ({expense.category}): {expense.particulars}"
+    db.session.delete(expense)
+    db.session.commit()
+    log_action(user['id'], user['fullName'], 'DELETE', 'Expenses', f"Deleted expense {label}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'message': 'Expense deleted'})
+
+
+def job_order_finished_on(order):
+    """The day a job order's work was finished (older orders: the day created)."""
+    if order.completed_at:
+        return order.completed_at if not isinstance(order.completed_at, datetime) else order.completed_at.date()
+    return (order.created_at + PH_OFFSET).date() if order.created_at else None
+
+def premade_unit_cost(item):
+    product = PremadeProduct.query.get(item.get('productId')) if item.get('productId') else None
+    return float(product.cost or 0) if product else 0.0
+
+def owner_financials(start, end, branch_id=None):
+    """Earned sales and their costs between two dates (inclusive), by month.
+
+    Sales are what finished orders earned, without the VAT inside them: job
+    orders when completed or delivered, premade orders when completed. Cost of
+    goods sold is each job's materials, labor and other job costs (the same
+    figures as Job Order Costing) plus the production cost of premade items
+    sold. Operating expenses are the logged expenses plus material written off
+    as waste."""
+    months = {}
+    def month(d):
+        key = d.strftime('%Y-%m')
+        return months.setdefault(key, {'month': key, 'sales': 0.0, 'cogs': 0.0, 'opex': 0.0})
+
+    jo_q = JobOrder.query.filter(JobOrder.status.in_(EARNED_STATUSES))
+    po_q = ProductOrder.query.filter(ProductOrder.status == 'completed')
+    ex_q = Expense.query.filter(Expense.expense_date >= start, Expense.expense_date <= end)
+    if branch_id:
+        jo_q, po_q = jo_q.filter(JobOrder.branch_id == branch_id), po_q.filter(ProductOrder.branch_id == branch_id)
+        ex_q = ex_q.filter(Expense.branch_id == branch_id)
+
+    t = {'jobSales': 0.0, 'premadeSales': 0.0, 'materials': 0.0, 'labor': 0.0, 'jobOther': 0.0, 'premadeCost': 0.0,
+         'vatCollected': 0.0, 'jobOrders': 0, 'premadeOrders': 0}
+    for o in jo_q.all():
+        d = job_order_finished_on(o)
+        if not d or not (start <= d <= end):
+            continue
+        c = job_order_costing(o)
+        t['jobSales'] += c['revenue']
+        t['materials'] += c['materials']; t['labor'] += c['labor']; t['jobOther'] += c['expenses']
+        t['vatCollected'] += vat_breakdown(o.total_price, o.vat_percent)['vat']
+        t['jobOrders'] += 1
+        m = month(d); m['sales'] += c['revenue']; m['cogs'] += c['totalCost']
+    for o in po_q.all():
+        d = ((o.updated_at or o.created_at) + PH_OFFSET).date()
+        if not (start <= d <= end):
+            continue
+        rate = o.vat_percent if o.vat_percent is not None else DEFAULT_VAT_PERCENT
+        split = vat_breakdown(o.total_amount, rate)
+        cost = sum(premade_unit_cost(it) * float(it.get('quantity') or 0) for it in (o.items or []))
+        t['premadeSales'] += split['net']; t['vatCollected'] += split['vat']; t['premadeCost'] += cost
+        t['premadeOrders'] += 1
+        m = month(d); m['sales'] += split['net']; m['cogs'] += cost
+
+    by_category = {}
+    for e in ex_q.all():
+        by_category[e.category] = by_category.get(e.category, 0.0) + float(e.amount or 0)
+        month(e.expense_date)['opex'] += float(e.amount or 0)
+    waste_q = db.session.query(MaterialWasteLog, InventoryMaterial).join(
+        InventoryMaterial, InventoryMaterial.id == MaterialWasteLog.material_id)
+    if branch_id:
+        waste_q = waste_q.filter(MaterialWasteLog.branch_id == branch_id)
+    waste = 0.0
+    for w, mat in waste_q.all():
+        d = ((w.created_at or datetime.utcnow()) + PH_OFFSET).date()
+        if start <= d <= end:
+            value = float(w.quantity or 0) * float(mat.cost_per_unit or mat.unit_price or 0)
+            waste += value
+            month(d)['opex'] += value
+    if waste:
+        by_category['Material waste'] = waste
+
+    sales = t['jobSales'] + t['premadeSales']
+    cogs = t['materials'] + t['labor'] + t['jobOther'] + t['premadeCost']
+    opex = sum(by_category.values())
+    gross = sales - cogs
+    net = gross - opex
+    monthly = []
+    for key in sorted(months):
+        m = months[key]
+        monthly.append({'month': key, 'sales': money(m['sales']), 'expenses': money(m['cogs'] + m['opex']),
+                        'netIncome': money(m['sales'] - m['cogs'] - m['opex'])})
+    return {
+        'sales': money(sales), 'jobSales': money(t['jobSales']), 'premadeSales': money(t['premadeSales']),
+        'cogs': {'materials': money(t['materials']), 'labor': money(t['labor']), 'otherJobCosts': money(t['jobOther']),
+                 'premadeProducts': money(t['premadeCost']), 'total': money(cogs)},
+        'grossProfit': money(gross),
+        'operatingExpenses': {'byCategory': [{'category': k, 'amount': money(v)}
+                                             for k, v in sorted(by_category.items(), key=lambda kv: -kv[1])],
+                              'total': money(opex)},
+        'totalExpenses': money(cogs + opex),
+        'netIncome': money(net),
+        'profitMargin': round(net / sales * 100, 1) if sales else 0.0,
+        'vatCollected': money(t['vatCollected']),
+        'orderCounts': {'jobOrders': t['jobOrders'], 'premadeOrders': t['premadeOrders']},
+        'monthly': monthly,
+    }
+
+def money_by_method(start, end):
+    """Cash actually received and spent between two dates, by mode of payment."""
+    money_in, money_out = {}, {}
+    for p in PaymentRecord.query.all():
+        d = ((p.created_at or datetime.utcnow()) + PH_OFFSET).date()
+        if start <= d <= end and p.job_order and p.job_order.status not in ('draft',):
+            key = p.payment_method or 'cash'
+            money_in[key] = money_in.get(key, 0.0) + float(p.amount or 0)
+    for o in ProductOrder.query.filter(ProductOrder.amount_paid > 0).all():
+        d = ((o.created_at or datetime.utcnow()) + PH_OFFSET).date()
+        if start <= d <= end:
+            # Premade orders don't record how they were paid
+            money_in['not_recorded'] = money_in.get('not_recorded', 0.0) + float(o.amount_paid or 0)
+    for e in Expense.query.filter(Expense.expense_date >= start, Expense.expense_date <= end).all():
+        money_out[e.payment_method] = money_out.get(e.payment_method, 0.0) + float(e.amount or 0)
+    as_list = lambda d: [{'method': k, 'amount': money(v)} for k, v in sorted(d.items(), key=lambda kv: -kv[1])]
+    return {'in': as_list(money_in), 'out': as_list(money_out),
+            'totalIn': money(sum(money_in.values())), 'totalOut': money(sum(money_out.values()))}
+
+@app.route('/api/owner/summary', methods=['GET'])
+@require_auth
+@require_permission('owner.view')
+def owner_summary():
+    """Executive dashboard: this year so far."""
+    today = manila_today()
+    start = today.replace(month=1, day=1)
+    f = owner_financials(start, today)
+    cash = money_by_method(start, today)
+    month_start = today.replace(day=1)
+    this_month = owner_financials(month_start, today)
+    receivable = sum(max(float(o.total_price or 0) - float(o.down_payment or 0), 0) for o in
+                     JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided'))).all()) + \
+        sum(max(float(o.total_amount or 0) - float(o.amount_paid or 0), 0) for o in
+            ProductOrder.query.filter(ProductOrder.status != 'cancelled').all())
+    return jsonify({'status': 'success', 'data': {
+        'period': {'startDate': start.isoformat(), 'endDate': today.isoformat()},
+        'ytd': {k: f[k] for k in ('sales', 'totalExpenses', 'netIncome', 'profitMargin', 'grossProfit', 'vatCollected')},
+        'thisMonth': {k: this_month[k] for k in ('sales', 'totalExpenses', 'netIncome')},
+        'receivables': money(receivable),
+        'monthly': f['monthly'],
+        'cashflowByMethod': cash,
+    }})
+
+@app.route('/api/owner/pnl', methods=['GET'])
+@require_auth
+@require_permission('owner.view')
+def owner_pnl():
+    start, end, error = parse_period()
+    if error:
+        return error
+    branch_id = request.args.get('branchId', type=int)
+    data = owner_financials(start, end, branch_id)
+    data['period'] = {'startDate': start.isoformat(), 'endDate': end.isoformat(), 'branchId': branch_id}
+    return jsonify({'status': 'success', 'data': data})
+
+@app.route('/api/owner/job-costing', methods=['GET'])
+@require_auth
+@require_permission('owner.view')
+def owner_job_costing():
+    """Every finished job order in the period with its margin, least profitable first."""
+    start, end, error = parse_period()
+    if error:
+        return error
+    rows = []
+    for o in JobOrder.query.filter(JobOrder.status.in_(EARNED_STATUSES)).all():
+        d = job_order_finished_on(o)
+        if not d or not (start <= d <= end):
+            continue
+        c = job_order_costing(o)
+        lines = []
+        for it in o.items or []:
+            cat = item_category(it)
+            qty = float(it.get('quantity') or 0)
+            if cat == 'labor':
+                cost = float(it['actualLaborCost']) if it.get('actualLaborCost') is not None else qty * float(it.get('laborCost') or 0)
+            else:
+                cost = qty * float(it.get('materialCost') or 0)
+            lines.append({'name': it.get('name') or '', 'category': cat, 'quantity': qty,
+                          'unitCost': float(it.get('materialCost') or it.get('laborCost') or 0), 'cost': money(cost)})
+        split = vat_breakdown(o.total_price, o.vat_percent)
+        rows.append({
+            'id': o.id, 'jobOrderId': o.job_order_id, 'customerName': o.customer_name,
+            'description': o.description, 'branchName': o.branch.name if o.branch else None,
+            'finishedOn': d.isoformat(), 'status': o.status,
+            'customerPrice': split['gross'], 'vat': split['vat'], 'sellingPrice': c['revenue'],
+            'materials': c['materials'], 'labor': c['labor'], 'otherCosts': c['expenses'],
+            'grossMargin': c['grossProfit'], 'marginPercent': c['profitMargin'], 'lines': lines,
+        })
+    rows.sort(key=lambda r: r['marginPercent'])
+    total_sell = sum(r['sellingPrice'] for r in rows)
+    total_margin = sum(r['grossMargin'] for r in rows)
+    return jsonify({'status': 'success', 'data': {
+        'jobs': rows,
+        'totals': {'sellingPrice': money(total_sell), 'materials': money(sum(r['materials'] for r in rows)),
+                   'labor': money(sum(r['labor'] for r in rows)), 'otherCosts': money(sum(r['otherCosts'] for r in rows)),
+                   'grossMargin': money(total_margin),
+                   'marginPercent': round(total_margin / total_sell * 100, 1) if total_sell else 0.0},
+    }})
+
+@app.route('/api/owner/receivables', methods=['GET'])
+@require_auth
+@require_permission('owner.view')
+def owner_receivables():
+    """Every customer invoice (job orders and premade orders) with what is still owed."""
+    invoices = []
+    for o in JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided'))).all():
+        total, paid = float(o.total_price or 0), float(o.down_payment or 0)
+        invoices.append({
+            'type': 'job_order', 'id': o.id, 'reference': o.job_order_id, 'customerName': o.customer_name,
+            'branchName': o.branch.name if o.branch else None, 'orderStatus': o.status,
+            'date': to_pht(o.created_at) if o.created_at else None,
+            'subtotal': money(total), 'vat': vat_breakdown(total, o.vat_percent)['vat'],
+            'totalPaid': money(paid), 'balance': money(max(total - paid, 0)),
+            'paymentStatus': 'paid' if total > 0 and paid >= total else 'partial' if paid > 0 else 'unpaid',
+            'payments': [{'date': to_pht(p.created_at) if p.created_at else None, 'amount': float(p.amount),
+                          'method': p.payment_method, 'reference': p.reference_number,
+                          'recordedBy': p.recorder.full_name if p.recorder else None}
+                         for p in sorted(o.payment_records, key=lambda p: p.created_at or datetime.min)],
+        })
+    for o in ProductOrder.query.filter(ProductOrder.status != 'cancelled').all():
+        total, paid = float(o.total_amount or 0), float(o.amount_paid or 0)
+        rate = o.vat_percent if o.vat_percent is not None else DEFAULT_VAT_PERCENT
+        invoices.append({
+            'type': 'product_order', 'id': o.id, 'reference': o.order_number, 'customerName': o.customer_name,
+            'branchName': o.branch.name if o.branch else None, 'orderStatus': o.status,
+            'date': to_pht(o.created_at) if o.created_at else None,
+            'subtotal': money(total), 'vat': vat_breakdown(total, rate)['vat'],
+            'totalPaid': money(paid), 'balance': money(max(total - paid, 0)),
+            'paymentStatus': 'paid' if total > 0 and paid >= total else 'partial' if paid > 0 else 'unpaid',
+            # Premade orders keep a running total, not individual payments
+            'payments': [{'date': None, 'amount': money(paid), 'method': 'not_recorded', 'reference': None,
+                          'recordedBy': None}] if paid > 0 else [],
+        })
+    invoices.sort(key=lambda i: i['date'] or '', reverse=True)
+    status = request.args.get('status')
+    if status in ('paid', 'partial', 'unpaid'):
+        invoices = [i for i in invoices if i['paymentStatus'] == status]
+    return jsonify({'status': 'success', 'data': {
+        'invoices': invoices,
+        'totals': {'subtotal': money(sum(i['subtotal'] for i in invoices)),
+                   'totalPaid': money(sum(i['totalPaid'] for i in invoices)),
+                   'balance': money(sum(i['balance'] for i in invoices))},
+    }})
+
+@app.route('/api/owner/inventory', methods=['GET'])
+@require_auth
+@require_permission('owner.view')
+def owner_inventory():
+    """Where capital sits in stock, what was used up, and what needs restocking."""
+    today = manila_today()
+    setting = SystemSetting.query.filter_by(key='inventory_low_stock_threshold').first()
+    try:
+        global_threshold = float(setting.value) if setting else 0.0
+    except ValueError:
+        global_threshold = 0.0
+    materials = InventoryMaterial.query.filter(InventoryMaterial.is_archived.is_(False)).all()
+    restock, materials_value = [], 0.0
+    for m in materials:
+        unit_cost = float(m.cost_per_unit or 0) or float(m.unit_price or 0)
+        stock = float(m.stock_quantity or 0)
+        materials_value += max(stock, 0) * unit_cost
+        threshold = float(m.low_stock_threshold or 0) or global_threshold
+        state = 'out' if stock <= 0 else 'low' if threshold and stock <= threshold else None
+        if state:
+            restock.append({'id': m.id, 'name': m.material_type, 'color': m.color, 'branchName': m.branch.name if m.branch else None,
+                            'stock': stock, 'threshold': threshold, 'status': state})
+    premade = PremadeProduct.query.filter(PremadeProduct.is_archived.is_(False)).all()
+    premade_value = sum(max(float(p.quantity or 0), 0) * float(p.cost or 0) for p in premade)
+
+    movements = []
+    for log in MaterialUsageLog.query.order_by(MaterialUsageLog.created_at.desc()).limit(40).all():
+        movements.append({'date': to_pht(log.created_at) if log.created_at else None, 'direction': 'out' if log.quantity_used >= 0 else 'in',
+                          'item': log.material.material_type if log.material else '', 'quantity': abs(float(log.quantity_used)),
+                          'reason': log.notes or log.used_in_reference, 'branchName': log.branch.name if log.branch else None})
+    for w in MaterialWasteLog.query.order_by(MaterialWasteLog.created_at.desc()).limit(20).all():
+        movements.append({'date': to_pht(w.created_at) if w.created_at else None, 'direction': 'out',
+                          'item': w.material.material_type if w.material else '', 'quantity': float(w.quantity),
+                          'reason': f'Waste: {w.reason}', 'branchName': w.branch.name if w.branch else None})
+    for po in PurchaseOrder.query.filter(PurchaseOrder.status == 'received').order_by(PurchaseOrder.received_at.desc()).limit(20).all():
+        for it in po.items or []:
+            movements.append({'date': to_pht(po.received_at) if po.received_at else None, 'direction': 'in',
+                              'item': it.get('name') or '', 'quantity': float(it.get('quantity') or 0),
+                              'reason': f'Received {po.po_number} from {po.supplier_name}', 'branchName': None})
+    movements.sort(key=lambda m: m['date'] or '', reverse=True)
+
+    cogs = owner_financials(today.replace(month=1, day=1), today)['cogs']
+    restock.sort(key=lambda r: (r['status'] != 'out', r['name']))
+    return jsonify({'status': 'success', 'data': {
+        'materialsValue': money(materials_value), 'premadeValue': money(premade_value),
+        'totalValue': money(materials_value + premade_value),
+        'cogsYtd': cogs,
+        'restock': restock,
+        'outOfStock': sum(1 for r in restock if r['status'] == 'out'),
+        'lowStock': sum(1 for r in restock if r['status'] == 'low'),
+        'movements': movements[:50],
+    }})
+
 @app.route('/api/reports/audit-trail', methods=['GET'])
 @require_auth
 @require_permission('reports.audit_trail')
@@ -8806,6 +9248,7 @@ def delete_user(user_id):
         # The customer record (and its job orders) stays, just without the online account
         Customer.query.filter_by(user_id=user.id).update({'user_id': None}, synchronize_session=False)
         # Announcements outlive their author — keep the post, drop the byline.
+        Expense.query.filter_by(created_by=user.id).update({'created_by': None}, synchronize_session=False)
         Announcement.query.filter_by(created_by_id=user.id).update(
             {'created_by_id': None}, synchronize_session=False)
 
