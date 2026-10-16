@@ -4,12 +4,16 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useAuth, hasAccess } from '@/context/AuthContext';
 import { useNotifications } from '@/context/NotificationContext';
 import { formatDateTime } from '@/lib/dateUtils';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useConfirm } from './ConfirmDialog';
 
 interface NavigationProps {
   collapsed: boolean;
   onToggle: () => void;
+  // Below the md breakpoint the sidebar is a drawer instead of a fixed column
+  mobileOpen: boolean;
+  onMobileOpen: () => void;
+  onMobileClose: () => void;
 }
 
 const HomeIcon = () => (
@@ -114,7 +118,9 @@ const LogoutIcon = () => (
   </svg>
 );
 
-export default function Navigation({ collapsed, onToggle }: NavigationProps) {
+export default function Navigation({ collapsed: collapsedSetting, onToggle, mobileOpen, onMobileOpen, onMobileClose }: NavigationProps) {
+  // The open drawer always shows full labels, whatever the desktop collapse setting is
+  const collapsed = collapsedSetting && !mobileOpen;
   const pathname = usePathname();
   const router = useRouter();
   const { user, isAuthenticated, logout, isLoading, can } = useAuth();
@@ -124,6 +130,14 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [showArchive, setShowArchive] = useState(false);
+
+  // Escape closes the phone drawer
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onMobileClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [mobileOpen, onMobileClose]);
 
   const publicRoutes = ['/', '/login', '/register', '/place-order'];
 
@@ -263,10 +277,37 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
 
   return (
     <>
+    {/* Phones: top bar with the menu button (the sidebar opens as a drawer) */}
+    <header className="md:hidden fixed top-0 inset-x-0 h-14 z-30 bg-white border-b border-gray-200 shadow-sm flex items-center gap-2 px-3">
+      <button onClick={onMobileOpen} aria-label="Open menu" aria-expanded={mobileOpen}
+        className="p-2 -ml-1 rounded-lg text-gray-600 hover:text-[#011c72] hover:bg-gray-100 transition-colors">
+        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+        </svg>
+      </button>
+      <Link href="/" className="flex items-center gap-2 min-w-0 flex-1">
+        <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0">
+          <LogoIcon />
+        </div>
+        <span className="font-bold text-gray-900 text-sm truncate">Seatmakers Ave</span>
+      </Link>
+      <button onClick={() => setNotifOpen(o => !o)} aria-label="Notifications"
+        className="relative p-2 rounded-lg text-gray-600 hover:text-[#011c72] hover:bg-gray-100 transition-colors">
+        <BellIcon />
+        {unreadCount > 0 && (
+          <span className="absolute top-1 right-1 min-w-[14px] h-3.5 px-0.5 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
+            {unreadCount > 9 ? '9+' : unreadCount}
+          </span>
+        )}
+      </button>
+    </header>
+    {mobileOpen && (
+      <div className="md:hidden fixed inset-0 z-30 bg-black/40" onClick={onMobileClose} aria-hidden="true" />
+    )}
     <aside
-      className={`fixed left-0 top-0 h-full bg-white border-r border-gray-200 z-40 flex flex-col shadow-sm transition-all duration-300 ${
+      className={`fixed top-0 h-full bg-white border-r border-gray-200 z-40 flex flex-col shadow-sm transition-all duration-300 ${
         collapsed ? 'w-16' : 'w-64'
-      }`}
+      } ${mobileOpen ? 'left-0' : '-left-64'} md:left-0`}
     >
       {/* Header */}
       <div className={`flex items-center h-16 px-3 border-b border-gray-200 shrink-0 ${collapsed ? 'justify-center' : 'gap-2'}`}>
@@ -280,9 +321,15 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
             </span>
           )}
         </Link>
+        <button onClick={onMobileClose} aria-label="Close menu"
+          className="md:hidden p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0">
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
         <button
           onClick={onToggle}
-          className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0"
+          className="hidden md:block p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0"
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -348,6 +395,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
             <Link
               key={item.path}
               href={item.path}
+              onClick={onMobileClose}
               title={collapsed ? item.name : undefined}
               className={`flex items-center rounded-lg text-sm font-medium transition-colors ${
                 collapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
@@ -391,8 +439,8 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
       {notifOpen && (
         <>
           <div className="fixed inset-0 z-30" onClick={() => { setNotifOpen(false); setShowArchive(false); }} />
-          <div className="fixed top-20 z-40 w-80 bg-white rounded-xl shadow-xl border border-gray-200 overflow-hidden"
-            style={{ left: collapsed ? '4.5rem' : '16.5rem' }}>
+          <div className={`fixed top-16 md:top-20 inset-x-2 md:inset-x-auto z-40 md:w-80 bg-white rounded-xl shadow-xl border border-gray-200 overflow-hidden ${
+            collapsed ? 'md:left-[4.5rem]' : 'md:left-[16.5rem]'}`}>
             <div className="px-4 pt-3 pb-2 border-b border-gray-100">
               <p className="text-sm font-bold text-gray-900">{showArchive ? 'Archived Notifications' : 'Notifications'}</p>
               <div className="flex items-center justify-between mt-1.5">
