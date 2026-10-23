@@ -145,9 +145,7 @@ export default function PermissionsDialog({ target, onClose, onSaved }: {
             <p className="text-center text-gray-400 text-sm py-10">Loading permissions…</p>
           ) : !current.editable ? (
             <p className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 text-sm text-gray-600">
-              {current.role === 'customer'
-                ? 'Customer accounts use the customer pages only (their orders, cart and profile) and can’t be given staff permissions.'
-                : current.readOnlyReason}
+              {current.readOnlyReason}
             </p>
           ) : (
             <table className="w-full text-sm">

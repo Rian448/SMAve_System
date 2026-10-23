@@ -303,19 +303,14 @@ export default function LoginPage() {
                 </button>
                 <div className="border-t border-gray-200 pt-4">
                   <p className="text-sm text-gray-600">
-                    Don&apos;t have an account yet?{' '}
-                    <Link href="/register" className="text-[#011c72] font-medium hover:underline">
-                      Register here
+                    For Seatmakers Avenue staff only.{' '}
+                    <Link href="/" className="text-[#011c72] font-medium hover:underline">
+                      Back to the website
                     </Link>
                   </p>
                 </div>
               </div>
 
-              <div className="mt-4 p-4 bg-gray-50 rounded-xl">
-                <div className="text-xs text-gray-600 space-y-1">
-                  <p><span className="font-medium">Admin:</span> admin / admin123</p>
-                </div>
-              </div>
 
             </>
           ) : (

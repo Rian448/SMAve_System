@@ -1,9 +1,8 @@
-from flask import Flask, jsonify, request, send_from_directory, has_request_context
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
-from datetime import datetime, timedelta
+from datetime import date as date_cls, datetime, timedelta
 from functools import wraps
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -11,6 +10,7 @@ import os
 import hashlib
 import hmac
 import json
+import math
 import re
 import secrets
 import threading
@@ -174,7 +174,8 @@ class CustomerOrder(db.Model):
     # Customer user link (for logged-in customers)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     
-    # Quotation fields
+    # Retired quotation feature: columns kept so older rows load; quotation_total
+    # is still read as the request's amount on the customer's history
     quotation_items = db.Column(db.JSON)  # [{name, description, quantity, unitPrice, total}]
     quotation_total = db.Column(db.Float, default=0)
     quotation_status = db.Column(db.String(50), default='pending_quotation')  # pending_quotation, quoted, accepted, rejected
@@ -212,8 +213,8 @@ class JobOrder(db.Model):
     # entry). NULL/False: older orders, where VAT was added on top of the entered
     # price. total_price is the final customer price either way.
     vat_inclusive = db.Column(db.Boolean, nullable=True)
-    # Quotations: a draft sent to the customer to accept or reject online.
-    # quote_status: None (not a quotation) | sent | rejected | accepted
+    # Retired quotation feature: columns kept only so older rows load. Nothing
+    # reads or writes them any more.
     quote_status = db.Column(db.String(20), nullable=True)
     quote_reject_reason = db.Column(db.Text, nullable=True)
     quote_sent_at = db.Column(db.DateTime, nullable=True)
@@ -264,6 +265,8 @@ class WorkTask(db.Model):
     worker = db.relationship('Worker', backref='tasks')
 
 class Appointment(db.Model):
+    """Retired: appointments were booked online. The table and its rows are kept,
+    but nothing in the system reads or writes them any more."""
     __tablename__ = 'appointments'
     id = db.Column(db.Integer, primary_key=True)
     appointment_number = db.Column(db.String(50), unique=True, nullable=False)
@@ -375,6 +378,39 @@ class CartDraft(db.Model):
 
     user = db.relationship('User', foreign_keys=[user_id])
     pickup_branch = db.relationship('Branch', foreign_keys=[pickup_branch_id])
+
+class PremadeDraft(db.Model):
+    """A premade job order staff are still preparing. It is not a sale: it has
+    no order number, takes and reserves no stock, and stays out of sales
+    figures, the pickup queue and reports until it is confirmed, when it becomes
+    a ProductOrder through the same code as a premade sale. Confirmed drafts
+    stay (status 'confirmed', product_order_id) so the link can be traced."""
+    __tablename__ = 'premade_drafts'
+    id = db.Column(db.Integer, primary_key=True)
+    draft_number = db.Column(db.String(50), unique=True, nullable=False)  # PD-BA-2026-0001
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False, index=True)
+    customer_id = db.Column(db.Integer, nullable=True)  # a customers row, when one was picked
+    customer_name = db.Column(db.String(255), nullable=False)
+    customer_phone = db.Column(db.String(50), nullable=True)
+    customer_email = db.Column(db.String(255), nullable=True)
+    customer_address = db.Column(db.String(255), nullable=True)
+    # [{productId, quantity, name, sku, unitPrice}] -- name/sku/price as when saved;
+    # stock and current price are re-read every time the draft is shown
+    items = db.Column(db.JSON, nullable=False, default=list)
+    notes = db.Column(db.Text, nullable=True)
+    payment_method = db.Column(db.String(30), nullable=True)
+    status = db.Column(db.String(20), default='draft', nullable=False, index=True)  # draft | confirmed
+    product_order_id = db.Column(db.Integer, db.ForeignKey('product_orders.id'), nullable=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    updated_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    confirmed_at = db.Column(db.DateTime, nullable=True)
+
+    branch = db.relationship('Branch')
+    product_order = db.relationship('ProductOrder')
+    creator = db.relationship('User', foreign_keys=[created_by])
+    updater = db.relationship('User', foreign_keys=[updated_by])
 
 class Notification(db.Model):
     __tablename__ = 'notifications'
@@ -571,10 +607,18 @@ class MaterialWasteLog(db.Model):
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=False)
     logged_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # Set when the material was extra material issued for a job order (e.g. a
+    # recut after a mistake): it then counts in that job's actual cost
+    job_order_id = db.Column(db.Integer, db.ForeignKey('job_orders.id'), nullable=True, index=True)
+    managed_worker_id = db.Column(db.Integer, db.ForeignKey('managed_workers.id'), nullable=True)
+    # Cost per unit when it was logged, so later price changes don't rewrite it
+    unit_cost = db.Column(db.Float, nullable=True)
 
     material = db.relationship('InventoryMaterial')
     branch = db.relationship('Branch')
     logged_by_user = db.relationship('User', foreign_keys=[logged_by])
+    job_order = db.relationship('JobOrder')
+    worker = db.relationship('ManagedWorker')
 
 class HistoricalInventoryData(db.Model):
     __tablename__ = 'historical_inventory_data'
@@ -797,12 +841,10 @@ default_roles = [
     {'key': 'owner', 'name': 'Owner'},
 ]
 
-default_users = [
-    {'username': 'admin', 'password': 'admin123', 'email': 'admin@seatmakers.com', 'fullName': 'System Administrator', 'role': 'administrator', 'branch': 'Main Warehouse', 'isActive': True},
-    {'username': 'supervisor', 'password': 'super123', 'email': 'supervisor@seatmakers.com', 'fullName': 'John Supervisor', 'role': 'supervisor', 'branch': 'Main Warehouse', 'isActive': True},
-    {'username': 'salesmanager', 'password': 'sales123', 'email': 'sales@seatmakers.com', 'fullName': 'Jane Sales', 'role': 'sales_manager', 'branch': 'Branch A', 'isActive': True},
-    {'username': 'owner', 'password': 'owner123', 'email': 'owner@seatmakers.com', 'fullName': 'Business Owner', 'role': 'owner', 'branch': 'Main Warehouse', 'isActive': True},
-]
+# Demo accounts the system used to create with known passwords. They are no
+# longer created; startup only warns if one still has its old password.
+DEMO_ACCOUNT_PASSWORDS = {'admin': 'admin123', 'supervisor': 'super123',
+                          'salesmanager': 'sales123', 'owner': 'owner123'}
 
 # ============================================
 # IN-MEMORY STATE AND SEED DATA
@@ -835,13 +877,13 @@ db_initialized = False
 PERMISSION_MODULES = [
     ('dashboard', 'Dashboard', [('view', 'View')]),
     ('sales', 'Sales / Job Orders', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'), ('delete', 'Delete'),
-                                     ('void', 'Void'), ('quote', 'Send quotations'),
+                                     ('void', 'Void'),
                                      ('edit_unpaid', 'Edit before down payment')]),
-    ('custom_requests', 'Custom Requests', [('view', 'View'), ('edit', 'Edit'), ('quote', 'Send quotations')]),
+    # Requests customers sent online before online ordering was retired; kept as history
+    ('custom_requests', 'Custom Requests (online, retired)', [('view', 'View'), ('edit', 'Edit')]),
     ('customers', 'Customers', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit')]),
     ('payments', 'Payments', [('view', 'View'), ('add', 'Add'), ('request_override', 'Request override'),
                               ('approve_override', 'Approve overrides')]),
-    ('appointments', 'Appointments', [('view', 'View'), ('edit', 'Edit')]),
     ('inventory', 'Inventory', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'), ('delete', 'Archive'),
                                 ('log_waste', 'Log waste')]),
     ('premade', 'Premade Products', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'),
@@ -886,12 +928,13 @@ ROLE_DEFAULT_PERMISSIONS = {
     'supervisor': frozenset(set(PERMISSIONS) - _SUPERVISOR_EXCLUDED),
     'sales_manager': frozenset({
         'dashboard.view',
-        'sales.view', 'sales.add', 'sales.edit', 'sales.delete', 'sales.quote',
-        'custom_requests.view', 'custom_requests.edit', 'custom_requests.quote',
+        'sales.view', 'sales.add', 'sales.edit', 'sales.delete',
+        'custom_requests.view', 'custom_requests.edit',
         'customers.view', 'customers.edit',
         'payments.view', 'payments.add', 'payments.request_override',
-        'appointments.view', 'appointments.edit',
         'premade.receive',
+        # Premade sales at their own branch: see them, take payments, mark them done
+        'product_orders.view', 'product_orders.edit', 'product_orders.payment',
         'reports.sales',
         'announcements.view',
         'workers.view', 'workers.assign',
@@ -901,7 +944,7 @@ ROLE_DEFAULT_PERMISSIONS = {
     # every view, all branches, and the owner dashboard -- no editing
     'owner': frozenset({
         'owner.view', 'dashboard.view', 'branches.all',
-        'sales.view', 'custom_requests.view', 'customers.view', 'payments.view', 'appointments.view',
+        'sales.view', 'custom_requests.view', 'customers.view', 'payments.view',
         'inventory.view', 'premade.view', 'suppliers.view', 'purchase_orders.view', 'product_orders.view',
         'costing.view', 'forecasting.view', 'item_trail.view', 'announcements.view', 'workers.view',
         'reports.sales', 'reports.inventory', 'reports.settlement', 'reports.audit_trail',
@@ -910,7 +953,7 @@ ROLE_DEFAULT_PERMISSIONS = {
     # Worker accounts only use their profile; Worker Management tracks their work
     'seat_maker': frozenset(),
     'sewer': frozenset(),
-    # Customers are self-service: their own orders, cart and profile, no staff features
+    # Online customer accounts were retired with online ordering and can't sign in
     'customer': frozenset(),
 }
 
@@ -1027,15 +1070,7 @@ def customer_order_to_dict(order):
         'branchId': order.branch_id,
         'branchName': order.branch.name if order.branch else None,
         'createdAt': fmt_dt(order.created_at),
-        # Quotation fields
         'userId': order.user_id,
-        'quotationItems': order.quotation_items,
-        'quotationTotal': order.quotation_total,
-        'quotationStatus': order.quotation_status,
-        'quotationNotes': order.quotation_notes,
-        'customerResponseNotes': order.customer_response_notes,
-        'quotedAt': fmt_dt(order.quoted_at),
-        'respondedAt': fmt_dt(order.responded_at)
     }
 
 def branch_to_dict(branch):
@@ -1070,108 +1105,39 @@ def retire_staff_role():
         db.session.rollback()
         print(f"[migration] Retiring 'staff' role skipped: {e}")
 
-def link_customer_record(user):
-    """Give a signed-up customer a row in the Customers list, and return it.
-
-    A walk-in record with the same email or phone (e.g. from an earlier job
-    order) is linked instead of creating a duplicate. The caller commits."""
-    existing = Customer.query.filter_by(user_id=user.id).first()
-    if existing:
-        return existing
-    unlinked = Customer.query.filter(Customer.user_id.is_(None))
-    match = None
-    if user.email:
-        match = unlinked.filter(db.func.lower(Customer.email) == user.email.lower()).first()
-    if not match and user.phone:
-        match = unlinked.filter(Customer.phone == user.phone).first()
-    if match:
-        match.user_id = user.id
-        match.email = match.email or user.email
-        match.phone = match.phone or user.phone
-        return match
-    customer = Customer(name=user.full_name, phone=user.phone or '', email=user.email or '', address='',
-                        user_id=user.id, created_at=user.created_at or datetime.utcnow())
-    db.session.add(customer)
-    return customer
-
-def sync_customer_contact(user):
-    """Copy a customer's own profile edits onto their customer record. The caller commits."""
-    customer = Customer.query.filter_by(user_id=user.id).first()
-    if not customer:
+def seed_first_administrator():
+    """On a brand-new database (no staff accounts at all) create one
+    administrator so someone can sign in and set up the rest. Its password comes
+    from INITIAL_ADMIN_PASSWORD, or is random and printed once to the server log.
+    An existing database is never given accounts, so a deleted or renamed
+    account can't come back with a known password."""
+    staff = User.query.join(Role, User.role_id == Role.id).filter(Role.key != 'customer').count()
+    if staff:
         return
-    customer.name = user.full_name
-    customer.email = user.email
-    if user.phone:
-        customer.phone = user.phone
-
-def link_registered_customers():
-    """Startup backfill: link every signed-up customer to a customer record.
-
-    Accounts made before phones were saved get the phone from their latest
-    online order. Idempotent: linked accounts are skipped."""
-    try:
-        linked = db.session.query(Customer.user_id).filter(Customer.user_id.isnot(None))
-        users = (User.query.join(Role).filter(Role.key == 'customer', ~User.id.in_(linked))
-                 .order_by(User.id).all())
-        for user in users:
-            if not user.phone:
-                latest = (ProductOrder.query.filter_by(user_id=user.id).order_by(ProductOrder.created_at.desc()).first()
-                          or CustomerOrder.query.filter_by(user_id=user.id).order_by(CustomerOrder.created_at.desc()).first())
-                if latest and latest.customer_phone:
-                    user.phone = latest.customer_phone.strip() or None
-            link_customer_record(user)
-            db.session.flush()
-        db.session.commit()
-        if users:
-            print(f"[migration] Linked {len(users)} signed-up customer(s) to customer records")
-    except Exception as e:
-        db.session.rollback()
-        print(f"[migration] Linking signed-up customers skipped: {e}")
-
-def seed_default_users():
-    for user in default_users:
-        existing = User.query.filter_by(username=user['username']).first()
-        if existing:
-            continue
-
-        role = Role.query.filter_by(key=user['role']).first()
-        if not role:
-            continue
-
-        branch = Branch.query.filter_by(name=user['branch']).first()
-
-        new_user = User(
-            username=user['username'],
-            password=hash_password(user['password']),
-            email=user['email'],
-            full_name=user['fullName'],
-            role_id=role.id,
-            branch_id=branch.id if branch else None,
-            branch=user['branch'],
-            is_active=user['isActive']
-        )
-        db.session.add(new_user)
-        db.session.flush()  # Flush to get the user ID
-        
-        # Create Worker profile for worker roles
-        worker_roles = ['seat_maker', 'sewer']
-        if user['role'] in worker_roles:
-            # Determine specialization based on role
-            if user['role'] in ['seat_maker', 'sewer']:
-                specialization = user['role']
-            else:
-                specialization = 'general'
-            
-            new_worker = Worker(
-                user_id=new_user.id,
-                worker_type='staff',
-                is_available=True,
-                specialization=specialization,
-                branch_id=branch.id if branch else None
-            )
-            db.session.add(new_worker)
-
+    role = Role.query.filter_by(key='administrator').first()
+    if not role:
+        return
+    password = os.getenv('INITIAL_ADMIN_PASSWORD') or secrets.token_urlsafe(12)
+    warehouse = Branch.query.filter_by(is_warehouse=True).first()
+    db.session.add(User(username='admin', password=hash_password(password), email='admin@seatmakers.com',
+                        full_name='System Administrator', role_id=role.id,
+                        branch_id=warehouse.id if warehouse else None,
+                        branch=warehouse.name if warehouse else None, is_active=True))
     db.session.commit()
+    if os.getenv('INITIAL_ADMIN_PASSWORD'):
+        print("[setup] Created the first administrator 'admin' with INITIAL_ADMIN_PASSWORD.", flush=True)
+    else:
+        print(f"[setup] Created the first administrator 'admin' with password: {password}  "
+              f"-- sign in and change it now.", flush=True)
+
+def warn_about_demo_passwords():
+    """Log a warning for every active account still using an old demo password."""
+    for username, demo_password in DEMO_ACCOUNT_PASSWORDS.items():
+        user = User.query.filter_by(username=username, is_active=True).first()
+        if user and verify_password(user, demo_password):
+            print(f"[security] WARNING: account '{username}' still uses its demo password. "
+                  f"Change it in My Profile or Settings > Users.", flush=True)
+    db.session.rollback()  # verify_password may upgrade an old hash; nothing to save here
 
 def normalize_premade_units():
     """Ensure premade product unit values stay consistent as plain piece counts."""
@@ -1253,6 +1219,11 @@ def run_migrations():
         # each product order was sold at. Existing rows stay NULL (their old meaning).
         "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS vat_inclusive BOOLEAN",
         "ALTER TABLE product_orders ADD COLUMN IF NOT EXISTS vat_percent REAL",
+        # Extra materials issued for a job order (waste linked to the job)
+        "ALTER TABLE material_waste_logs ADD COLUMN IF NOT EXISTS job_order_id INTEGER REFERENCES job_orders(id)",
+        "ALTER TABLE material_waste_logs ADD COLUMN IF NOT EXISTS managed_worker_id INTEGER REFERENCES managed_workers(id)",
+        "ALTER TABLE material_waste_logs ADD COLUMN IF NOT EXISTS unit_cost REAL",
+        "CREATE INDEX IF NOT EXISTS ix_material_waste_logs_job_order_id ON material_waste_logs (job_order_id)",
     ]
     is_sqlite = db.engine.dialect.name == 'sqlite'
     for sql in migrations:
@@ -1286,6 +1257,8 @@ def init_db():
         ('default_material_markup', '25'),
         # VAT rate included in customer prices (the standard Philippine rate)
         ('vat_percent', str(DEFAULT_VAT_PERCENT)),
+        # Row locked while a premade order number is picked (lock_product_order_numbering)
+        (PRODUCT_ORDER_NUMBER_LOCK, ''),
     ]
     for key, value in default_settings:
         if not SystemSetting.query.filter_by(key=key).first():
@@ -1314,9 +1287,9 @@ def init_db():
     
     db.session.commit()
 
-    # Seed users
-    seed_default_users()
-    link_registered_customers()
+    # Accounts: only a first administrator on a brand-new database
+    seed_first_administrator()
+    warn_about_demo_passwords()
     normalize_premade_units()
 
     # Seed default catalog items
@@ -1401,7 +1374,8 @@ def get_user_from_token(token):
 
     s = UserSession.query.filter_by(token_hash=token_hash).first()
     user = User.query.get(s.user_id) if s else None
-    if not user:
+    # A customer still signed in from before online ordering was retired is signed out
+    if not user or is_customer_account(user):
         _session_cache.pop(token, None)
         return None
 
@@ -1448,16 +1422,13 @@ def require_staff(f):
         return f(*args, **kwargs)
     return decorated
 
-def require_customer(f):
-    """Decorator: customer self-service routes (their own orders, quotations)."""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if not hasattr(request, 'current_user'):
-            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-        if request.current_user['role'] != 'customer':
-            return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
-        return f(*args, **kwargs)
-    return decorated
+CUSTOMER_LOGIN_RETIRED_MESSAGE = ('Online customer accounts are no longer available. '
+                                  'Please contact Seatmakers Avenue by phone, Messenger or at any branch.')
+
+def is_customer_account(user):
+    """An online customer account. They were only for ordering online, which
+    was retired: the accounts and their history stay, but can't sign in."""
+    return bool(user.role and user.role.key == 'customer')
 
 PH_OFFSET = timedelta(hours=8)
 
@@ -1471,6 +1442,19 @@ def manila_today():
 
 DEFAULT_VAT_PERCENT = 12  # standard Philippine VAT, until changed in Settings
 MAX_VAT_PERCENT = 100
+
+def finite_number(value, default=None):
+    """value as a float if it is a real, finite number; default for None or a
+    blank string; None for anything else (text, NaN, Infinity, true/false)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 def money(amount):
     """Round to the centavo, halves up (0.005 -> 0.01), as a float."""
@@ -1539,51 +1523,7 @@ def to_pht(dt):
         return None
     return (dt + PH_OFFSET).strftime('%Y-%m-%dT%H:%M:%S+08:00')
 
-MAX_ACTIVE_APPOINTMENTS = 2   # per phone number
-MAX_ACTIVE_ORDERS = 3         # per phone number
 MAX_STRIKES_BEFORE_BLOCK = 3  # no-shows / fake orders before auto-block
-
-def check_spam_protection(phone: str, check_type: str = 'appointment'):
-    """Return (allowed: bool, error_message: str | None).
-    check_type: 'appointment' or 'order'
-    Checks:
-      1. Phone is on the blocklist.
-      2. Too many active records for this phone.
-      3. Duplicate booking on same branch+date within 24 h (appointments only).
-    """
-    if not phone:
-        return True, None
-
-    record = PhoneBlacklist.query.filter_by(phone_number=phone).first()
-    if record and record.is_blocked:
-        return False, (
-            'This phone number has been blocked due to repeated no-shows or fake orders. '
-            'Please contact the branch to resolve this.'
-        )
-
-    if check_type == 'appointment':
-        active_count = Appointment.query.filter(
-            Appointment.customer_phone == phone,
-            Appointment.status.in_(['pending', 'confirmed'])
-        ).count()
-        if active_count >= MAX_ACTIVE_APPOINTMENTS:
-            return False, (
-                f'You already have {active_count} active appointment request(s). '
-                f'Please wait for them to be completed before booking a new one.'
-            )
-    else:
-        active_count = ProductOrder.query.filter(
-            ProductOrder.customer_phone == phone,
-            ProductOrder.status.in_(['pending', 'processing', 'ready'])
-        ).count()
-        if active_count >= MAX_ACTIVE_ORDERS:
-            return False, (
-                f'You already have {active_count} active order(s). '
-                f'Please wait for them to be completed before placing a new one.'
-            )
-
-    return True, None
-
 
 def add_strike(phone: str, reason: str):
     """Add a strike to a phone number. Auto-blocks at MAX_STRIKES_BEFORE_BLOCK."""
@@ -1635,6 +1575,19 @@ def ensure_db_initialized():
     if not db_initialized:
         init_db()  # init_db() already seeds default users
         db_initialized = True
+
+PRODUCT_ORDER_NUMBER_LOCK = '_lock:product_order_numbers'
+NUMBER_CLASH_MESSAGE = 'Another order was saved at the same moment. Please try again.'
+
+def lock_branch_numbering(branch_id):
+    """Make saves that number a job order for this branch take turns: the branch
+    row stays locked until the transaction ends, so the next save waits and then
+    sees the number this one used. (PostgreSQL; SQLite ignores row locks.)"""
+    Branch.query.filter_by(id=branch_id).with_for_update().first()
+
+def lock_product_order_numbering():
+    """The same for premade order numbers, which run across all branches."""
+    SystemSetting.query.filter_by(key=PRODUCT_ORDER_NUMBER_LOCK).with_for_update().first()
 
 def generate_job_order_id(branch_code):
     """Generate unique job order ID"""
@@ -1775,6 +1728,12 @@ def login():
     user.failed_login_attempts = 0
     user.lockout_until = None
 
+    # Online ordering was retired: the system is for staff only, and customer
+    # accounts made for ordering can no longer sign in (their records are kept)
+    if is_customer_account(user):
+        db.session.commit()
+        return jsonify({'status': 'error', 'message': CUSTOMER_LOGIN_RETIRED_MESSAGE}), 403
+
     # Ends any other session this user has (one login at a time) and commits
     token = create_session(user)
     log_action(user.id, user.full_name, 'LOGIN', 'Auth', 'User logged in', request.remote_addr or '0.0.0.0')
@@ -1851,7 +1810,10 @@ def _reset_code_hash(user_id, code):
     return hashlib.sha256(f"{user_id}:{code}".encode()).hexdigest()
 
 def _active_user_by_email(email):
-    return User.query.filter(db.func.lower(User.email) == email.lower(), User.is_active == True).first()
+    """An active staff account with this email. Retired customer accounts can't
+    sign in, so they get no reset codes either."""
+    user = User.query.filter(db.func.lower(User.email) == email.lower(), User.is_active == True).first()
+    return None if user is None or is_customer_account(user) else user
 
 @app.route('/api/auth/recover', methods=['POST'])
 def recover_account():
@@ -1863,9 +1825,14 @@ def recover_account():
     if not EMAIL_PATTERN.match(email):
         return jsonify({'status': 'error', 'message': 'Please enter a valid email address.'}), 400
 
+    # The same answer whether or not an account uses this email (and whether or
+    # not a code was actually sent), so nobody can use this form to find out
+    # which emails have accounts
+    generic = jsonify({'status': 'success', 'message': 'If an account uses this email, a 6-digit code has been sent '
+                                                       'to it. Please check your inbox and spam folder.'})
     user = _active_user_by_email(email)
     if not user:
-        return jsonify({'status': 'error', 'message': 'No account was found with that email address.'}), 404
+        return generic
 
     now = datetime.utcnow()
     PasswordResetCode.query.filter(PasswordResetCode.created_at < now - timedelta(days=1)).delete(synchronize_session=False)
@@ -1875,12 +1842,10 @@ def recover_account():
               .order_by(PasswordResetCode.created_at.desc()).all())
     db.session.commit()
     if len(recent) >= RESET_CODE_MAX_PER_HOUR:
-        return jsonify({'status': 'error',
-                        'message': 'Too many code requests for this account. Please try again in an hour.'}), 429
+        return generic  # limit reached: no new code is sent
     if recent and (now - recent[0].created_at).total_seconds() < RESET_CODE_RESEND_SECONDS:
         # The last code is still on its way and still valid, so carry on to the code step
-        return jsonify({'status': 'success',
-                        'message': 'A code was sent to this email less than a minute ago. Please check your inbox and spam folder.'})
+        return generic
 
     # Only the newest code works
     PasswordResetCode.query.filter_by(user_id=user.id, used_at=None).update({'used_at': now}, synchronize_session=False)
@@ -1903,7 +1868,7 @@ def recover_account():
             f"you can ignore this email.</p><p>Seatmakers Avenue</p>")
     # Sent in the background so the reply doesn't wait on the email send
     threading.Thread(target=send_email, args=(user.email, user.full_name, subject, text, html), daemon=True).start()
-    return jsonify({'status': 'success', 'message': f'A 6-digit code has been sent to {user.email}.'})
+    return generic
 
 @app.route('/api/auth/reset-password', methods=['POST'])
 def reset_password():
@@ -2031,8 +1996,6 @@ def update_my_profile():
         user.phone = phone or None
         changes.append('phone')
 
-    if changes:
-        sync_customer_contact(user)
     db.session.commit()
     if changes:
         refresh_cached_user(user)
@@ -2144,7 +2107,6 @@ def confirm_email_change():
         return jsonify({'status': 'error', 'message': 'That email is already used by another account.'}), 400
     old_email = user.email
     user.email = rc.new_email
-    sync_customer_contact(user)
     try:
         db.session.commit()
     except IntegrityError:
@@ -2173,8 +2135,23 @@ STAFF_ROLES = ('administrator', 'supervisor', 'sales_manager')
 # Finished work: a delivered order was completed first, so it counts as earned too
 EARNED_STATUSES = ('completed', 'delivered')
 
-# Revenue excludes VAT: it is collected for the government, not earned
-REVENUE_EX_VAT = JobOrder.total_price / (1 + db.func.coalesce(JobOrder.vat_percent, 0) / 100.0)
+DASHBOARD_PERIODS = ('today', 'week', 'month', 'year', 'all')
+
+def dashboard_period():
+    """(key, start, end) for ?period=today|week|month|year|all, Philippine dates.
+    'all' (the default, as before) starts from the first recorded sale."""
+    key = request.args.get('period') or 'all'
+    if key not in DASHBOARD_PERIODS:
+        key = 'all'
+    today = manila_today()
+    start = {
+        'today': today,
+        'week': today - timedelta(days=today.weekday()),  # since Monday
+        'month': today.replace(day=1),
+        'year': today.replace(month=1, day=1),
+        'all': date_cls(2000, 1, 1),
+    }[key]
+    return key, start, today
 
 def dashboard_scope():
     """Branch the dashboard is limited to: (branch_id or None for all, error response).
@@ -2217,20 +2194,20 @@ def get_dashboard_stats():
     total_job_orders = live_orders.count()
     pending_orders = live_orders.filter(JobOrder.status == 'pending').count()
     in_progress_orders = live_orders.filter(JobOrder.status == 'in_progress').count()
-    completed_orders = live_orders.filter(JobOrder.status.in_(EARNED_STATUSES)).count()
 
-    revenue_row = scoped(db.session.query(
-        db.func.coalesce(db.func.sum(REVENUE_EX_VAT), 0.0),
-        db.func.coalesce(db.func.sum(JobOrder.actual_cost), 0.0),
-    ).filter(JobOrder.status.in_(EARNED_STATUSES)), JobOrder.branch_id).one()
-    total_revenue = float(revenue_row[0] or 0)
-    total_cost = float(revenue_row[1] or 0)
-    profit = total_revenue - total_cost
+    # Sales for the chosen period: finished job orders and completed premade
+    # sales, without VAT, with their cost of goods -- the same figures as the
+    # Owner P&L (owner_financials)
+    period_key, period_start, period_end = dashboard_period()
+    f = owner_financials(period_start, period_end, bid)
+    total_revenue = float(f['sales'])
+    total_cost = float(f['cogs']['total'])
+    profit = float(f['grossProfit'])
+    completed_orders = f['orderCounts']['jobOrders']
 
     low_stock_count = scoped(InventoryMaterial.query.filter(
         InventoryMaterial.is_archived.is_(False),
-        InventoryMaterial.status == 'available',
-        InventoryMaterial.stock_quantity <= InventoryMaterial.low_stock_threshold,
+        low_stock_condition(global_low_stock_threshold()),
     ), InventoryMaterial.branch_id).count()
 
     deliveries_q = Delivery.query.filter(Delivery.status.in_(('scheduled', 'in_transit')))
@@ -2244,8 +2221,12 @@ def get_dashboard_stats():
         'inProgressOrders': in_progress_orders,
         'completedOrders': completed_orders,
         'totalRevenue': total_revenue,
+        'jobOrderRevenue': float(f['jobSales']),
+        'premadeRevenue': float(f['premadeSales']),
+        'completedPremadeOrders': f['orderCounts']['premadeOrders'],
         'totalCost': total_cost,
         'profit': profit,
+        'period': {'key': period_key, 'startDate': period_start.isoformat(), 'endDate': period_end.isoformat()},
         'profitMargin': round((profit / total_revenue * 100), 2) if total_revenue > 0 else 0,
         'lowStockItems': low_stock_count,
         'pendingDeliveries': deliveries_q.count(),
@@ -2313,16 +2294,16 @@ def get_alerts():
         return err
     alerts = []
 
+    global_threshold = global_low_stock_threshold()
     low_stock_q = InventoryMaterial.query.filter(
         InventoryMaterial.is_archived.is_(False),
-        InventoryMaterial.status == 'available',
-        InventoryMaterial.stock_quantity <= InventoryMaterial.low_stock_threshold,
+        low_stock_condition(global_threshold),
     )
     if bid is not None:
         low_stock_q = low_stock_q.filter(InventoryMaterial.branch_id == bid)
     for material in low_stock_q.order_by(InventoryMaterial.stock_quantity.asc()).limit(20).all():
         name = ' '.join(filter(None, [material.material_type, material.color])).strip()
-        threshold = float(material.low_stock_threshold or 0)
+        threshold = effective_reorder_level(material, global_threshold)
         alerts.append({
             'type': 'low_stock',
             'severity': 'warning' if (material.stock_quantity or 0) > 0 else 'critical',
@@ -2383,6 +2364,7 @@ def material_to_dict(material):
         'supplierId': material.supplier_id,
         'supplierName': material.supplier.name if material.supplier else None,
         'branchId': material.branch_id,
+        'branchName': material.branch.name if material.branch else None,
         'isArchived': material.is_archived,
         'sourceJobOrderId': material.source_job_order_id,
         'status': material.status or 'available',
@@ -2406,6 +2388,70 @@ def raw_material_group_to_dict(materials, include_components=True):
         'totalStockQuantity': total_stock_quantity,
         'components': [material_to_dict(m) for m in materials] if include_components else []
     }
+
+def global_low_stock_threshold():
+    """The reorder level set in Settings, used for materials without their own."""
+    setting = SystemSetting.query.filter_by(key='inventory_low_stock_threshold').first()
+    try:
+        return max(float(setting.value), 0.0) if setting and setting.value else 0.0
+    except ValueError:
+        return 0.0
+
+def low_stock_state(material, global_threshold):
+    """'out' (nothing left), 'low' (at or below its reorder level: its own, else
+    the one in Settings) or None. The one definition every screen uses."""
+    stock = float(material.stock_quantity or 0)
+    if stock <= 0:
+        return 'out'
+    threshold = float(material.low_stock_threshold or 0) or global_threshold
+    return 'low' if threshold > 0 and stock <= threshold else None
+
+def effective_reorder_level(material, global_threshold):
+    return float(material.low_stock_threshold or 0) or global_threshold
+
+def low_stock_condition(global_threshold):
+    """low_stock_state as a database filter (out or low)."""
+    own = db.func.coalesce(InventoryMaterial.low_stock_threshold, 0)
+    cond = db.or_(InventoryMaterial.stock_quantity <= 0,
+                  db.and_(own > 0, InventoryMaterial.stock_quantity <= own))
+    if global_threshold > 0:
+        cond = db.or_(cond, db.and_(own <= 0, InventoryMaterial.stock_quantity <= global_threshold))
+    return cond
+
+# ── Who sees which branch's inventory ─────────────────────────────────────────
+# Administrators, owners, supervisors and warehouse accounts see every branch;
+# everyone else only their own (plus the warehouse's raw materials, which their
+# job orders draw from). Changing stock stays limited by inventory_branch_error.
+
+def sees_all_inventory(user):
+    return all_inventory_branches(user) or user.get('role') == 'supervisor'
+
+def inventory_read_branches(user, requested=None, include_warehouse=False):
+    """Branch ids a list may show: None = every branch. Returns (ids, error)."""
+    try:
+        requested = int(requested) if requested not in (None, '') else None
+    except (TypeError, ValueError):
+        return None, (jsonify({'status': 'error', 'message': 'Invalid branch'}), 400)
+    warehouse = get_warehouse_branch()
+    if sees_all_inventory(user):
+        if requested is None:
+            return None, None
+        ids = {requested}
+        if include_warehouse and warehouse:
+            ids.add(warehouse.id)
+        return ids, None
+    own = user_branch_id(user)
+    allowed = {own} if own else set()
+    if include_warehouse and warehouse and own:
+        allowed.add(warehouse.id)
+    if requested is not None:
+        if requested not in allowed:
+            return None, (jsonify({'status': 'error', 'message': "You can only view your own branch's inventory"}), 403)
+        ids = {requested}
+        if include_warehouse and warehouse:
+            ids.add(warehouse.id)
+        return ids & allowed, None
+    return allowed, None
 
 def get_warehouse_branch():
     """The branch that holds produced stock before it is handed to a shop."""
@@ -2558,17 +2604,11 @@ def get_raw_materials():
     )
     if not include_archived:
         query = query.filter_by(is_archived=False)
-    if branch_id:
-        branch_id_int = int(branch_id)
-        if include_warehouse:
-            warehouse = Branch.query.filter_by(is_warehouse=True).first()
-            warehouse_id = warehouse.id if warehouse else 1
-            if branch_id_int != warehouse_id:
-                query = query.filter(InventoryMaterial.branch_id.in_([branch_id_int, warehouse_id]))
-            else:
-                query = query.filter_by(branch_id=branch_id_int)
-        else:
-            query = query.filter_by(branch_id=branch_id_int)
+    branch_ids, error = inventory_read_branches(request.current_user, branch_id, include_warehouse)
+    if error:
+        return error
+    if branch_ids is not None:
+        query = query.filter(InventoryMaterial.branch_id.in_(branch_ids or [-1]))
     if category:
         query = query.filter_by(category=category)
 
@@ -2587,8 +2627,11 @@ def get_raw_materials_summary():
     query = InventoryMaterial.query
     if not include_archived:
         query = query.filter_by(is_archived=False)
-    if branch_id:
-        query = query.filter_by(branch_id=int(branch_id))
+    branch_ids, error = inventory_read_branches(request.current_user, branch_id)
+    if error:
+        return error
+    if branch_ids is not None:
+        query = query.filter(InventoryMaterial.branch_id.in_(branch_ids or [-1]))
     if category:
         query = query.filter_by(category=category)
 
@@ -2617,8 +2660,11 @@ def get_raw_material_group_detail():
     query = InventoryMaterial.query
     if not include_archived:
         query = query.filter_by(is_archived=False)
-    if branch_id:
-        query = query.filter_by(branch_id=int(branch_id))
+    branch_ids, error = inventory_read_branches(request.current_user, branch_id)
+    if error:
+        return error
+    if branch_ids is not None:
+        query = query.filter(InventoryMaterial.branch_id.in_(branch_ids or [-1]))
 
     items = query.order_by(InventoryMaterial.material_type.asc(), InventoryMaterial.created_at.asc()).all()
     group_items = [m for m in items if build_raw_material_group_key(m) == group_key]
@@ -2635,6 +2681,9 @@ def get_raw_material(material_id):
     material = InventoryMaterial.query.get(material_id)
     if not material:
         return jsonify({'status': 'error', 'message': 'Material not found'}), 404
+    branch_ids, _ = inventory_read_branches(request.current_user, None, include_warehouse=True)
+    if branch_ids is not None and material.branch_id not in branch_ids:
+        return jsonify({'status': 'error', 'message': "You can only view your own branch's inventory"}), 403
     return jsonify({'status': 'success', 'data': material_to_dict(material)})
 
 @app.route('/api/inventory/raw-materials', methods=['POST'])
@@ -2668,14 +2717,28 @@ def create_raw_material():
     if material_status not in ('available', 'needed'):
         material_status = 'available'
 
-    supplier_id = int(data['supplierId']) if data.get('supplierId') else None
+    try:
+        supplier_id = int(data['supplierId']) if data.get('supplierId') else None
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Invalid supplier'}), 400
 
-    cost_per_unit = float(data['costPerUnit']) if data.get('costPerUnit') not in (None, '') else 0.0
-    markup_percent = float(data['markupPercent']) if data.get('markupPercent') not in (None, '') else 25.0
+    cost_per_unit = finite_number(data.get('costPerUnit'), 0.0)
+    markup_percent = finite_number(data.get('markupPercent'), 25.0)
+    stock_quantity = finite_number(data.get('stockQuantity'))
+    low_stock_threshold = finite_number(data.get('lowStockThreshold'), 0.0)
     # If a selling price is supplied use it; otherwise derive it from cost + markup
-    if data.get('unitPrice') not in (None, ''):
-        unit_price = float(data['unitPrice'])
-    else:
+    unit_price = finite_number(data.get('unitPrice'))
+    if data.get('unitPrice') not in (None, '') and (unit_price is None or unit_price < 0):
+        return jsonify({'status': 'error', 'message': 'Selling price must be a number of zero or more'}), 400
+    if cost_per_unit is None or cost_per_unit < 0:
+        return jsonify({'status': 'error', 'message': 'Cost must be a number of zero or more'}), 400
+    if markup_percent is None or markup_percent < 0:
+        return jsonify({'status': 'error', 'message': 'Markup must be a number of zero or more'}), 400
+    if stock_quantity is None or stock_quantity < 0:
+        return jsonify({'status': 'error', 'message': 'Stock quantity must be a number of zero or more'}), 400
+    if low_stock_threshold is None or low_stock_threshold < 0:
+        return jsonify({'status': 'error', 'message': 'Reorder level must be a number of zero or more'}), 400
+    if unit_price is None:
         unit_price = round(cost_per_unit * (1 + markup_percent / 100), 2)
 
     material = InventoryMaterial(
@@ -2687,8 +2750,8 @@ def create_raw_material():
         cost_per_unit=cost_per_unit,
         markup_percent=markup_percent,
         sku=(data.get('sku', '').strip() or None),
-        stock_quantity=float(data['stockQuantity']),
-        low_stock_threshold=float(data.get('lowStockThreshold', 0) or 0),
+        stock_quantity=stock_quantity,
+        low_stock_threshold=low_stock_threshold,
         supplier_id=supplier_id,
         branch_id=int(data['branchId']),
         is_archived=False,
@@ -2716,7 +2779,14 @@ def update_raw_material(material_id):
     if error:
         return error
 
-    data = request.get_json()
+    data = request.get_json() or {}
+
+    for key, label in (('costPerUnit', 'Cost'), ('markupPercent', 'Markup'), ('unitPrice', 'Selling price'),
+                       ('lowStockThreshold', 'Reorder level')):
+        if data.get(key) not in (None, ''):
+            value = finite_number(data[key])
+            if value is None or value < 0:
+                return jsonify({'status': 'error', 'message': f'{label} must be a number of zero or more'}), 400
 
     if 'materialType' in data:
         material.material_type = data['materialType'].strip()
@@ -2813,8 +2883,11 @@ def get_finished_goods():
     query = PremadeProduct.query.options(joinedload(PremadeProduct.branch))
     if not include_archived:
         query = query.filter_by(is_archived=False)
-    if branch_id:
-        query = query.filter_by(branch_id=int(branch_id))
+    branch_ids, error = inventory_read_branches(request.current_user, branch_id)
+    if error:
+        return error
+    if branch_ids is not None:
+        query = query.filter(PremadeProduct.branch_id.in_(branch_ids or [-1]))
 
     # Newest first so stock that was just added is at the top of the list.
     # id is the tie-breaker because rows created in the same second share a timestamp.
@@ -2823,6 +2896,18 @@ def get_finished_goods():
     ).all()
 
     return jsonify({'status': 'success', 'data': [premade_product_to_dict(i) for i in items]})
+
+def premade_cost_per_piece(entered, materials_cost, pieces):
+    """Production cost of one piece: the materials used for the batch divided by
+    the pieces made. A positive cost entered by hand wins; a blank or zero one
+    (the inventory screen used to always send 0) does not erase the real cost."""
+    try:
+        entered = float(entered)
+    except (TypeError, ValueError):
+        entered = 0.0
+    if entered > 0:
+        return money(entered)
+    return money(materials_cost / pieces) if pieces > 0 else 0.0
 
 @app.route('/api/inventory/finished-goods', methods=['POST'])
 @require_auth
@@ -2899,7 +2984,9 @@ def create_finished_good():
             return jsonify({'status': 'error', 'message': f'Insufficient stock for {material.material_type}. Available: {float(material.stock_quantity)}'}), 400
 
         usage_entries.append({'material': material, 'quantityUsed': quantity_used})
-        computed_cost += float(material.unit_price) * quantity_used
+        # What the materials cost us (not their selling price); materials with no
+        # recorded cost fall back to their price
+        computed_cost += (float(material.cost_per_unit or 0) or float(material.unit_price or 0)) * quantity_used
 
     next_id = (db.session.query(db.func.max(PremadeProduct.id)).scalar() or 0) + 1
     product = PremadeProduct(
@@ -2909,7 +2996,7 @@ def create_finished_good():
         unit='pcs',
         category=data['category'],
         price=float(data['price']),
-        cost=float(data.get('cost', computed_cost)),
+        cost=premade_cost_per_piece(data.get('cost'), computed_cost, made_qty),
         branch_id=production_branch.id,
         is_archived=False
     )
@@ -2999,7 +3086,12 @@ def update_finished_good(item_id):
         branch = Branch.query.get(data['branchId'])
         if not branch or not branch.is_active:
             return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
-        product.branch_id = int(data['branchId'])
+        # Moving stock to another branch needs access to that branch too
+        if branch.id != product.branch_id and inventory_branch_error(request.current_user, branch.id):
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': 'You can only keep stock in your own branch. '
+                            'Send it to another branch as a delivery instead.'}), 403
+        product.branch_id = branch.id
 
     db.session.commit()
 
@@ -3281,56 +3373,16 @@ def get_material_usage_logs():
     material_id = request.args.get('materialId')
 
     query = MaterialUsageLog.query
-    if branch_id:
-        query = query.filter_by(branch_id=int(branch_id))
+    branch_ids, error = inventory_read_branches(request.current_user, branch_id)
+    if error:
+        return error
+    if branch_ids is not None:
+        query = query.filter(MaterialUsageLog.branch_id.in_(branch_ids or [-1]))
     if material_id:
         query = query.filter_by(material_id=int(material_id))
 
     logs = query.order_by(MaterialUsageLog.created_at.desc()).limit(300).all()
     return jsonify({'status': 'success', 'data': [material_usage_to_dict(log) for log in logs]})
-
-@app.route('/api/inventory/finished-goods/public', methods=['GET'])
-def get_finished_goods_public():
-    """Public API to get finished goods (products) for customers.
-    Only returns products from active, non-warehouse retail branches. Out-of-stock
-    products are left out unless ?includeUnavailable=true, which the shop uses to
-    show them greyed out."""
-    branch_id = request.args.get('branchId')
-    category = request.args.get('category')
-    include_unavailable = request.args.get('includeUnavailable', 'false').lower() == 'true'
-
-    query = PremadeProduct.query.join(
-        Branch, PremadeProduct.branch_id == Branch.id
-    ).filter(
-        PremadeProduct.is_archived.is_(False),
-        Branch.is_warehouse.is_(False),
-        Branch.is_active.is_(True)
-    )
-    if not include_unavailable:
-        query = query.filter(PremadeProduct.quantity > 0)
-
-    if branch_id:
-        query = query.filter(PremadeProduct.branch_id == int(branch_id))
-
-    if category:
-        query = query.filter(db.func.lower(PremadeProduct.category) == category.lower())
-
-    items = query.order_by(PremadeProduct.name.asc()).all()
-
-    public_items = [{
-        'id': item.id,
-        'name': item.name,
-        'sku': item.sku,
-        'quantity': float(item.quantity),
-        'unit': item.unit,
-        'category': item.category,
-        'price': float(item.price),
-        'branchId': item.branch_id,
-        'branchName': item.branch.name if item.branch else None,
-        'isAvailable': float(item.quantity or 0) > 0
-    } for item in items]
-
-    return jsonify({'status': 'success', 'data': public_items})
 
 @app.route('/api/inventory/categories', methods=['GET'])
 @require_auth
@@ -3351,23 +3403,16 @@ def get_categories():
 @require_auth
 @require_permission('inventory.view')
 def get_low_stock_items():
-    threshold_setting = SystemSetting.query.filter_by(key='inventory_low_stock_threshold').first()
-    threshold = float(threshold_setting.value) if threshold_setting and threshold_setting.value else 0
-
-    if threshold > 0:
-        from sqlalchemy import or_
-        low_stock = InventoryMaterial.query.filter(
-            InventoryMaterial.is_archived.is_(False),
-            or_(
-                InventoryMaterial.stock_quantity <= 0,
-                InventoryMaterial.stock_quantity <= threshold
-            )
-        ).order_by(InventoryMaterial.stock_quantity.asc()).all()
-    else:
-        low_stock = InventoryMaterial.query.filter(
-            InventoryMaterial.is_archived.is_(False),
-            InventoryMaterial.stock_quantity <= 0
-        ).order_by(InventoryMaterial.stock_quantity.asc()).all()
+    branch_ids, error = inventory_read_branches(request.current_user, request.args.get('branchId'))
+    if error:
+        return error
+    query = InventoryMaterial.query.filter(
+        InventoryMaterial.is_archived.is_(False),
+        low_stock_condition(global_low_stock_threshold()),
+    )
+    if branch_ids is not None:
+        query = query.filter(InventoryMaterial.branch_id.in_(branch_ids or [-1]))
+    low_stock = query.order_by(InventoryMaterial.stock_quantity.asc()).all()
 
     return jsonify({'status': 'success', 'data': [material_to_dict(m) for m in low_stock]})
 
@@ -3460,7 +3505,75 @@ def waste_log_to_dict(log):
         'loggedBy': log.logged_by,
         'loggedByName': log.logged_by_user.full_name if log.logged_by_user else None,
         'createdAt': fmt_dt(log.created_at),
+        'jobOrderId': log.job_order_id,
+        'jobOrderNumber': log.job_order.job_order_id if log.job_order else None,
+        'workerId': log.managed_worker_id,
+        'workerName': log.worker.name if log.worker else None,
+        'unitCost': waste_unit_cost(log),
+        'value': money(float(log.quantity or 0) * waste_unit_cost(log)),
     }
+
+def waste_unit_cost(log, material=None):
+    """Cost per unit of a waste entry: the one saved when it was logged, or for
+    entries from before that was saved, the material's current cost."""
+    if log.unit_cost is not None:
+        return float(log.unit_cost)
+    m = material or log.material
+    return float((m.cost_per_unit or m.unit_price or 0) if m else 0)
+
+# Job order statuses during which extra material can be issued for it
+EXTRA_MATERIAL_STATUSES = ('in_progress', 'completed')
+
+def record_waste(material_id, quantity, reason, notes=None, job_order=None, worker_id=None):
+    """Take wasted (or extra) material out of stock and log it.
+    Returns (log, None) or (None, error response). The caller commits."""
+    try:
+        material_id = int(material_id)
+    except (TypeError, ValueError):
+        return None, (jsonify({'status': 'error', 'message': 'Please choose a material'}), 400)
+    try:
+        qty = round(float(quantity), 4)
+    except (TypeError, ValueError):
+        return None, (jsonify({'status': 'error', 'message': 'Quantity must be a number'}), 400)
+    if not qty > 0 or qty != qty or qty == float('inf'):
+        return None, (jsonify({'status': 'error', 'message': 'Quantity must be more than zero'}), 400)
+    reason = (reason or '').strip()
+    if not reason:
+        return None, (jsonify({'status': 'error', 'message': 'Please give a reason'}), 400)
+    # Row lock: two people logging at once can't both take the same stock
+    material = InventoryMaterial.query.filter_by(id=material_id).with_for_update().first()
+    if not material:
+        return None, (jsonify({'status': 'error', 'message': 'Material not found'}), 404)
+    error = inventory_branch_error(request.current_user, material.branch_id)
+    if error:
+        return None, error
+    worker = None
+    if worker_id not in (None, ''):
+        try:
+            worker = ManagedWorker.query.get(int(worker_id))
+        except (TypeError, ValueError):
+            worker = None
+        if not worker:
+            return None, (jsonify({'status': 'error', 'message': 'Worker not found'}), 404)
+    on_hand = float(material.stock_quantity or 0)
+    if qty > on_hand:
+        return None, (jsonify({'status': 'error',
+                               'message': f'Only {on_hand:g} in stock; you cannot take more than what is on hand'}), 400)
+    material.stock_quantity = round(on_hand - qty, 4)
+    material.updated_at = datetime.now()
+    log = MaterialWasteLog(
+        material_id=material.id,
+        quantity=qty,
+        reason=reason[:255],
+        notes=(notes or '').strip() or None,
+        branch_id=material.branch_id,  # where the stock was, not what the request says
+        logged_by=request.current_user['id'],
+        job_order_id=job_order.id if job_order else None,
+        managed_worker_id=worker.id if worker else None,
+        unit_cost=float(material.cost_per_unit or material.unit_price or 0),
+    )
+    db.session.add(log)
+    return log, None
 
 @app.route('/api/inventory/waste-logs', methods=['GET'])
 @require_auth
@@ -3468,8 +3581,16 @@ def waste_log_to_dict(log):
 def get_waste_logs():
     branch_id = request.args.get('branchId')
     query = MaterialWasteLog.query
-    if branch_id:
-        query = query.filter_by(branch_id=int(branch_id))
+    branch_ids, error = inventory_read_branches(request.current_user, branch_id)
+    if error:
+        return error
+    if branch_ids is not None:
+        query = query.filter(MaterialWasteLog.branch_id.in_(branch_ids or [-1]))
+    if request.args.get('jobOrderId'):
+        try:
+            query = query.filter(MaterialWasteLog.job_order_id == int(request.args['jobOrderId']))
+        except ValueError:
+            return jsonify({'status': 'error', 'message': 'Invalid job order'}), 400
     logs = query.order_by(MaterialWasteLog.created_at.desc()).all()
     return jsonify({'status': 'success', 'data': [waste_log_to_dict(l) for l in logs]})
 
@@ -3477,38 +3598,66 @@ def get_waste_logs():
 @require_auth
 @require_permission('inventory.log_waste')
 def create_waste_log():
-    data = request.get_json()
-    if not data.get('materialId') or not data.get('quantity') or not data.get('reason', '').strip():
+    """Waste not tied to a job order (damaged stock and the like). Extra material
+    for a job order goes through /api/sales/job-orders/<id>/extra-materials."""
+    data = request.get_json(silent=True) or {}
+    if not data.get('materialId'):
         return jsonify({'status': 'error', 'message': 'materialId, quantity, and reason are required'}), 400
-    material = InventoryMaterial.query.get(int(data['materialId']))
-    if not material:
-        return jsonify({'status': 'error', 'message': 'Material not found'}), 404
-    error = inventory_branch_error(request.current_user, material.branch_id)
+    log, error = record_waste(data.get('materialId'), data.get('quantity'), data.get('reason'), data.get('notes'))
+    if error:
+        db.session.rollback()
+        return error
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory',
+               f"Logged waste: {log.quantity:g} of {log.material.material_type}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': waste_log_to_dict(log)}), 201
+
+
+@app.route('/api/sales/job-orders/<int:order_id>/extra-materials', methods=['GET'])
+@require_auth
+# Internal cost, so only for those who see job costs
+@require_permission('costing.view', 'inventory.log_waste', 'sales.edit_unpaid')
+def get_job_order_extra_materials(order_id):
+    order = JobOrder.query.get(order_id)
+    if not order:
+        return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
+    error = branch_access_error(request.current_user, order.branch_id)
     if error:
         return error
-    try:
-        qty = float(data['quantity'])
-    except (TypeError, ValueError):
-        return jsonify({'status': 'error', 'message': 'Quantity must be a number'}), 400
-    if not qty > 0:
-        return jsonify({'status': 'error', 'message': 'Quantity must be positive'}), 400
-    on_hand = float(material.stock_quantity or 0)
-    if qty > on_hand:
-        return jsonify({'status': 'error',
-                        'message': f'Only {on_hand:g} in stock; waste cannot exceed what is on hand'}), 400
-    # Deduct from stock
-    material.stock_quantity = on_hand - qty
-    log = MaterialWasteLog(
-        material_id=material.id,
-        quantity=qty,
-        reason=data['reason'].strip(),
-        notes=data.get('notes', '').strip() or None,
-        branch_id=material.branch_id,  # where the stock was, not what the request says
-        logged_by=request.current_user['id'],
-    )
-    db.session.add(log)
+    return jsonify({'status': 'success', 'data': [waste_log_to_dict(l) for l in job_order_extras(order)]})
+
+
+@app.route('/api/sales/job-orders/<int:order_id>/extra-materials', methods=['POST'])
+@require_auth
+@require_permission('inventory.log_waste')
+def issue_job_order_extra_materials(order_id):
+    """Extra material issued for a job order beyond what it planned -- a recut
+    after a mistake, defective material, rework. It leaves stock now, counts in
+    the job's actual material cost, and doesn't change the customer's price."""
+    # Lock the order so a status change can't slip in between the check and the log
+    order = JobOrder.query.filter_by(id=order_id).with_for_update().first()
+    if not order:
+        return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
+    error = branch_access_error(request.current_user, order.branch_id)
+    if error:
+        return error
+    if order.status not in EXTRA_MATERIAL_STATUSES:
+        return jsonify({'status': 'error', 'message': 'Extra materials can only be issued while the job order is '
+                                                      'In Progress or Completed.'}), 400
+    data = request.get_json(silent=True) or {}
+    log, error = record_waste(data.get('materialId'), data.get('quantity'), data.get('reason'), data.get('notes'),
+                              job_order=order, worker_id=data.get('workerId'))
+    if error:
+        db.session.rollback()
+        return error
+    db.session.flush()
+    order.actual_cost = job_order_actual_cost(order)
+    order.updated_at = datetime.utcnow()
     db.session.commit()
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory', f"Logged waste: {qty} of {material.material_type}", request.remote_addr or '0.0.0.0')
+    who = f" (worker: {log.worker.name})" if log.worker else ''
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Sales',
+               f"Issued extra material for {order.job_order_id}: {log.quantity:g} of {log.material.material_type}, "
+               f"reason: {log.reason}{who}", request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': waste_log_to_dict(log)}), 201
 
 # ============================================
@@ -3571,8 +3720,10 @@ def create_payment():
     try:
         # Row lock: payments for one order are added one at a time
         job_order = JobOrder.query.filter_by(id=int(data['jobOrderId'])).with_for_update().first()
-        amount = float(data['amount'])
     except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'jobOrderId and amount must be numbers'}), 400
+    amount = finite_number(data.get('amount'))
+    if amount is None:
         return jsonify({'status': 'error', 'message': 'jobOrderId and amount must be numbers'}), 400
     if not job_order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
@@ -3679,12 +3830,17 @@ def create_payment_override():
         return jsonify({'status': 'error', 'message': 'Invalid payment status'}), 400
     if not new_status and data.get('balance') is None and data.get('downPayment') is None:
         return jsonify({'status': 'error', 'message': 'Provide a new payment status or balance to override'}), 400
+    new_balance = finite_number(data.get('balance'))
+    new_down_payment = finite_number(data.get('downPayment'))
+    if (data.get('balance') not in (None, '') and (new_balance is None or new_balance < 0)) or \
+            (data.get('downPayment') not in (None, '') and (new_down_payment is None or new_down_payment < 0)):
+        return jsonify({'status': 'error', 'message': 'Amounts must be numbers of zero or more'}), 400
     req = PaymentOverrideRequest(
         job_order_id=job_order.id,
         requested_by=request.current_user['id'],
         new_payment_status=new_status,
-        new_balance=float(data['balance']) if data.get('balance') is not None else None,
-        new_down_payment=float(data['downPayment']) if data.get('downPayment') is not None else None,
+        new_balance=new_balance,
+        new_down_payment=new_down_payment,
         reason=(data.get('reason') or '').strip() or None,
         status='pending',
     )
@@ -3726,18 +3882,39 @@ def approve_payment_override(req_id):
     error = branch_access_error(request.current_user, job_order.branch_id)
     if error:
         return error
-    # Apply the requested override to the job order
-    if req.new_payment_status:
-        job_order.payment_status = req.new_payment_status
-    if req.new_balance is not None:
-        job_order.balance = req.new_balance
+    # What the order should count as paid after the override
+    total = float(job_order.total_price or 0)
     if req.new_down_payment is not None:
-        job_order.down_payment = req.new_down_payment
-        if req.new_balance is None:
-            # A new amount paid changes what is still owed
-            job_order.balance = money(max(float(job_order.total_price or 0) - float(job_order.down_payment or 0), 0))
-            if not req.new_payment_status:
-                refresh_job_order_balance(job_order)
+        target_paid = float(req.new_down_payment)
+    elif req.new_balance is not None:
+        target_paid = total - float(req.new_balance)
+    elif req.new_payment_status == 'paid':
+        target_paid = total
+    elif req.new_payment_status == 'unpaid':
+        target_paid = 0.0
+    else:
+        target_paid = None  # 'partial' alone names no amount
+    if target_paid is not None:
+        target_paid = money(target_paid)
+        if target_paid < 0 or target_paid > money(total):
+            return jsonify({'status': 'error',
+                            'message': f'The override would make the amount paid ₱{target_paid:,.2f}, outside ₱0 to '
+                                       f'the order total of ₱{total:,.2f}. Reject it and ask for a corrected one.'}), 400
+        # Paid is always the sum of the payment records, so the override is saved
+        # as an adjustment record; a later payment then adds to it instead of
+        # recalculating it away
+        recorded = money(db.session.query(db.func.coalesce(db.func.sum(PaymentRecord.amount), 0))
+                         .filter(PaymentRecord.job_order_id == job_order.id).scalar())
+        adjustment = money(target_paid - recorded)
+        if adjustment:
+            db.session.add(PaymentRecord(
+                job_order_id=job_order.id, amount=adjustment, payment_method='adjustment',
+                notes=f"Payment override #{req.id} approved" + (f": {req.reason}" if req.reason else ''),
+                recorded_by=request.current_user['id']))
+        job_order.down_payment = target_paid
+        refresh_job_order_balance(job_order)
+    elif req.new_payment_status:
+        job_order.payment_status = req.new_payment_status
     req.status = 'approved'
     req.reviewed_by = request.current_user['id']
     req.review_notes = ((request.get_json(silent=True) or {}).get('notes') or '').strip() or None
@@ -3796,6 +3973,57 @@ def material_quantities(items):
         key = f"id:{it['materialId']}" if it.get('materialId') else f"name:{(it.get('name') or '').strip().lower()}"
         totals[key] = round(totals.get(key, 0) + float(it.get('quantity') or 0), 4)
     return {k: v for k, v in totals.items() if v}
+
+def _material_ids(items):
+    ids = set()
+    for it in items or []:
+        if item_category(it) == 'material' and it.get('materialId'):
+            try:
+                ids.add(int(it['materialId']))
+            except (TypeError, ValueError):
+                pass
+    return ids
+
+def material_branch_error(items, branch_id, previous_items=()):
+    """Why a job order at branch_id can't use these materials, or None. An order
+    takes stock from its own branch or the warehouse only, so it can't empty
+    another branch's shelves. Lines already on the order are left alone, so
+    older orders can still be edited."""
+    new_ids = _material_ids(items) - _material_ids(previous_items)
+    if not new_ids:
+        return None
+    allowed = {branch_id} | {b.id for b in Branch.query.filter_by(is_warehouse=True).all()}
+    other = (InventoryMaterial.query.filter(InventoryMaterial.id.in_(new_ids),
+                                            ~InventoryMaterial.branch_id.in_(allowed)).first())
+    if other:
+        return (f"{other.material_type} is stock of another branch. Use materials from this "
+                f"order's branch or the warehouse.")
+    return None
+
+def job_order_extras(order):
+    """Extra material issued for this order, oldest first."""
+    if not order or not order.id:
+        return []
+    return MaterialWasteLog.query.filter(MaterialWasteLog.job_order_id == order.id) \
+        .order_by(MaterialWasteLog.created_at.asc(), MaterialWasteLog.id.asc()).all()
+
+def extras_by_order(order_ids):
+    """{job order id: [extra material logs]} for many orders in one query."""
+    out = {}
+    ids = [i for i in order_ids if i]
+    if not ids:
+        return out
+    for log in MaterialWasteLog.query.filter(MaterialWasteLog.job_order_id.in_(ids)).all():
+        out.setdefault(log.job_order_id, []).append(log)
+    return out
+
+def extras_cost(logs):
+    return sum(float(l.quantity or 0) * waste_unit_cost(l) for l in logs or [])
+
+def job_order_actual_cost(order, items=None):
+    """Stored actual cost: the order's lines plus any extra material issued for it."""
+    base = job_order_cost(order.items if items is None else items)
+    return round(base + extras_cost(job_order_extras(order)), 2)
 
 def job_order_cost(items):
     """What the job costs us: materials + other expenses + labor, where a labor
@@ -3946,7 +4174,7 @@ def add_labor_line_for_assignment(order, assignment):
         items.append(line)
     line['assignmentId'] = assignment.id
     order.items = items
-    order.actual_cost = job_order_cost(items)
+    order.actual_cost = job_order_actual_cost(order, items)
 
 
 def record_assignment_pay(assignment):
@@ -3966,7 +4194,7 @@ def record_assignment_pay(assignment):
             for it in linked:
                 it.pop('actualLaborCost', None)
             order.items = items
-            order.actual_cost = job_order_cost(items)
+            order.actual_cost = job_order_actual_cost(order, items)
         return
     line = next((it for it in items if it.get('assignmentId') == assignment.id), None)
     if line is None:
@@ -3990,7 +4218,7 @@ def record_assignment_pay(assignment):
     line['assignmentId'] = assignment.id
     line['actualLaborCost'] = round(float(assignment.pay), 2)
     order.items = items
-    order.actual_cost = job_order_cost(items)
+    order.actual_cost = job_order_actual_cost(order, items)
 
 
 @app.route('/api/sales/job-orders', methods=['GET'])
@@ -4060,7 +4288,6 @@ def get_job_orders():
             'createdAt': jo.created_at.strftime('%Y-%m-%d'),
             'createdBy': jo.created_by,
             'updatedAt': jo.updated_at.strftime('%Y-%m-%d'),
-            **job_order_quote_fields(jo)
         }
 
     return jsonify({'status': 'success', 'data': [job_order_to_dict(jo) for jo in orders]})
@@ -4119,9 +4346,13 @@ def get_job_order(order_id):
         'createdAt': order.created_at.strftime('%Y-%m-%d'),
         'createdBy': order.created_by,
         'updatedAt': order.updated_at.strftime('%Y-%m-%d'),
-        **job_order_quote_fields(order),
     }
-    
+    # Extra material is an internal cost: only for those who see costs
+    if has_perm(user, 'costing.view') or has_perm(user, 'inventory.log_waste') or has_perm(user, 'sales.edit_unpaid'):
+        extras = job_order_extras(order)
+        order_dict['extraMaterials'] = [waste_log_to_dict(l) for l in extras]
+        order_dict['extraMaterialsCost'] = money(extras_cost(extras))
+
     return jsonify({'status': 'success', 'data': order_dict})
 
 # The price for the work (VAT included, before discount) is at most 8 digits
@@ -4193,8 +4424,9 @@ def create_job_order():
     data = request.get_json()
     is_draft = bool(data.get('isDraft'))
 
-    required = ['customerName', 'customerPhone', 'branchId', 'description', 'items', 'estimatedCompletion']
-    if not is_draft and not all(f in data for f in required):
+    # The customer's phone is optional: not every customer gives one
+    required = ['customerName', 'branchId', 'description', 'items', 'estimatedCompletion']
+    if not is_draft and (not all(f in data for f in required) or not str(data.get('customerName') or '').strip()):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
     # A draft may be incomplete, but still needs a customer name and a branch to be saved.
     if is_draft and not (data.get('customerName') or '').strip():
@@ -4202,43 +4434,22 @@ def create_job_order():
     if is_draft and not data.get('branchId'):
         return jsonify({'status': 'error', 'message': 'Branch is required to save a draft'}), 400
 
-    # A quotation is a complete job order that the customer still has to accept.
-    # It is kept as a draft until then, so it stays out of sales figures and
-    # worker schedules exactly like any other draft.
-    send_quotation = bool(data.get('sendQuotation'))
-    if send_quotation and not has_perm(request.current_user, 'sales.quote'):
-        return jsonify({'status': 'error', 'message': 'You do not have permission to send quotations'}), 403
-    appointment = None
-    if send_quotation:
-        if not all(f in data for f in required):
-            return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
-        is_draft = True
-        if data.get('appointmentId'):
-            appointment = Appointment.query.get(data['appointmentId'])
-            if not appointment:
-                return jsonify({'status': 'error', 'message': 'Appointment not found'}), 400
-    
     # Look up branch from database
     branch_db = Branch.query.get(data['branchId'])
     if not branch_db:
         return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
     
-    # A quotation is paid for at a retail branch, never at a warehouse: fall back
-    # to the branch the appointment was booked at.
-    if send_quotation and branch_db.is_warehouse:
-        if appointment and appointment.branch_id:
-            branch_db = Branch.query.get(appointment.branch_id)
-            data['branchId'] = branch_db.id
-        else:
-            return jsonify({'status': 'error',
-                            'message': 'Choose the branch where the customer will pay for this quotation.'}), 400
     error = branch_access_error(request.current_user, branch_db.id, 'branch')
     if error:
         return error
 
+    lock_branch_numbering(branch_db.id)
     job_order_id = generate_job_order_id(branch_db.code)
     
     items = data.get('items') or []
+    material_error = material_branch_error(items, branch_db.id)
+    if material_error:
+        return jsonify({'status': 'error', 'message': material_error}), 400
 
     # Price, worked out here from what was entered (see job_order_pricing)
     pricing, price_error = job_order_pricing(data)
@@ -4275,20 +4486,13 @@ def create_job_order():
     if ec_raw and estimated_completion < manila_today():
         return jsonify({'status': 'error', 'message': 'Estimated completion date cannot be in the past'}), 400
 
-    # A quotation for a signed-up customer's appointment goes to their account
-    if appointment and appointment.user_id and not data.get('customerId'):
-        account = User.query.get(appointment.user_id)
-        if account:
-            data['customerId'] = link_customer_record(account).id
-            db.session.flush()
-
     # Find or create customer account
     resolved_customer_id = data.get('customerId')
     if resolved_customer_id and not Customer.query.get(resolved_customer_id):
         resolved_customer_id = None
     if not resolved_customer_id:
-        phone = data.get('customerPhone', '').strip()
-        email = data.get('customerEmail', '').strip()
+        phone = str(data.get('customerPhone') or '').strip()
+        email = str(data.get('customerEmail') or '').strip()
         customer = None
         if phone:
             customer = Customer.query.filter(Customer.phone == phone).first()
@@ -4309,8 +4513,8 @@ def create_job_order():
     new_order = JobOrder(
         job_order_id=job_order_id,
         customer_id=resolved_customer_id,
-        customer_name=data['customerName'],
-        customer_phone=data['customerPhone'],
+        customer_name=str(data['customerName']).strip(),
+        customer_phone=str(data.get('customerPhone') or '').strip(),
         customer_email=data.get('customerEmail', ''),
         branch_id=data['branchId'],
         description=data.get('description', '') or '',
@@ -4329,13 +4533,15 @@ def create_job_order():
         vat_inclusive=pricing['vat_inclusive'],
         estimated_completion=estimated_completion,
         created_by=request.current_user['id'],
-        quote_status='sent' if send_quotation else None,
-        quote_sent_at=datetime.utcnow() if send_quotation else None,
-        appointment_id=appointment.id if appointment else None,
     )
 
     db.session.add(new_order)
-    db.session.flush()  # get new_order.id before commit
+    try:
+        db.session.flush()  # get new_order.id before commit
+    except IntegrityError:
+        # Two saves picked the same number (only possible without row locks)
+        db.session.rollback()
+        return jsonify({'status': 'error', 'message': NUMBER_CLASH_MESSAGE}), 409
     if not is_draft:
         sync_labor_assignments(new_order, [])
     new_order.actual_cost = job_order_cost(new_order.items)
@@ -4361,13 +4567,14 @@ def create_job_order():
         )
         db.session.add(initial_payment)
 
-    db.session.commit()
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # Two saves picked the same number (only possible without row locks)
+        db.session.rollback()
+        return jsonify({'status': 'error', 'message': NUMBER_CLASH_MESSAGE}), 409
 
-    if send_quotation:
-        log_action(request.current_user['id'], request.current_user['fullName'], 'QUOTATION', 'Sales',
-                   f"Sent quotation {job_order_id} to {new_order.customer_name}", request.remote_addr or '0.0.0.0')
-    else:
-        log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Sales', f"Created job order: {job_order_id}", request.remote_addr or '0.0.0.0')
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Sales', f"Created job order: {job_order_id}", request.remote_addr or '0.0.0.0')
 
     # Return the created order
     return jsonify({
@@ -4382,7 +4589,6 @@ def create_job_order():
             'vatInclusive': True,
             'vatAmount': vat_breakdown(total_price, new_order.vat_percent)['vat'],
             'status': 'draft' if is_draft else 'pending',
-            **({'customerNotified': notify_customer_of_quotation(new_order)} if send_quotation else {}),
         }
     }), 201
 
@@ -4392,8 +4598,19 @@ JOB_ORDER_TRANSITIONS = {
     'draft': {'pending', 'cancelled'},
     'pending': {'in_progress', 'cancelled'},
     'in_progress': {'pending', 'completed', 'cancelled'},
-    'completed': {'in_progress', 'cancelled'},
+    # A completed order's materials have been used, so it can't be cancelled
+    'completed': {'in_progress'},
 }
+
+def job_order_materials_taken(order):
+    """True if an earlier completion took this order's materials from stock and
+    they haven't all been given back (reverting to In Progress keeps them out)."""
+    rows = db.session.query(MaterialUsageLog.material_id, db.func.sum(MaterialUsageLog.quantity_used)).filter(
+        MaterialUsageLog.used_in_type == 'job_order',
+        MaterialUsageLog.used_in_reference == order.job_order_id,
+        MaterialUsageLog.used_by.isnot(None),
+    ).group_by(MaterialUsageLog.material_id).all()
+    return any(float(total or 0) > 0 for _, total in rows)
 
 @app.route('/api/sales/job-orders/<int:order_id>', methods=['PUT'])
 @require_auth
@@ -4417,8 +4634,6 @@ def update_job_order(order_id):
         return jsonify({'status': 'error', 'message': 'A down payment is required before you can edit this job order'}), 403
 
     data = request.get_json() or {}
-    if data.get('sendQuotation') and not has_perm(user, 'sales.quote'):
-        return jsonify({'status': 'error', 'message': 'You do not have permission to send quotations'}), 403
     # Money received goes through Payments (and overrides through their approval);
     # the cost is worked out from the order's lines
     locked_fields = [f for f in ('downPayment', 'balance', 'paymentStatus', 'actualCost') if f in data]
@@ -4426,8 +4641,9 @@ def update_job_order(order_id):
         return jsonify({'status': 'error', 'message': f"{', '.join(locked_fields)} can't be set here. Record payments "
                                                       f"on the Payments panel or request a payment override."}), 400
 
-    # Capture previous status BEFORE any updates
+    # Capture previous status and branch BEFORE any updates
     prev_status = order.status
+    prev_branch_id = order.branch_id
     # A finished order's materials have left stock; changing them here would make
     # stock and costing disagree. Revert it to In Progress first (completing it
     # again then takes or returns the difference).
@@ -4438,9 +4654,18 @@ def update_job_order(order_id):
     if 'status' in data and data['status'] != prev_status:
         allowed = JOB_ORDER_TRANSITIONS.get(prev_status, set())
         if data['status'] not in allowed:
+            if data['status'] == 'cancelled' and prev_status in ('completed', 'delivered'):
+                return jsonify({'status': 'error', 'message': "A completed job order can't be cancelled: "
+                                                              "its materials have already been used."}), 400
             return jsonify({'status': 'error',
                             'message': f"A {prev_status.replace('_', ' ')} job order can't be changed to "
                                        f"{str(data['status']).replace('_', ' ')}"}), 400
+        if data['status'] == 'cancelled' and job_order_materials_taken(order):
+            return jsonify({'status': 'error', 'message': "This job order was completed before and its materials "
+                                                          "were used, so it can't be cancelled."}), 400
+        if data['status'] == 'cancelled' and job_order_extras(order):
+            return jsonify({'status': 'error', 'message': "Extra materials were already issued for this job order, "
+                                                          "so it can't be cancelled."}), 400
 
     # While still a draft the whole order is editable — customer details and
     # branch included. Once confirmed these are locked and only the fields
@@ -4485,6 +4710,15 @@ def update_job_order(order_id):
         if price_error:
             return jsonify({'status': 'error', 'message': price_error}), 400
 
+    # New material lines (or every line, if a draft moved branch) must come from
+    # the order's branch or the warehouse
+    if 'items' in data or order.branch_id != prev_branch_id:
+        material_error = material_branch_error(
+            data['items'] if 'items' in data else order.items, order.branch_id,
+            order.items if order.branch_id == prev_branch_id else ())
+        if material_error:
+            return jsonify({'status': 'error', 'message': material_error}), 400
+
     # Update allowed fields
     if 'status' in data:
         order.status = data['status']
@@ -4504,32 +4738,17 @@ def update_job_order(order_id):
         # cancelled/voided orders no longer need anyone.
         if order.status not in ('draft', 'cancelled', 'voided'):
             sync_labor_assignments(order, previous_items)
-        order.actual_cost = job_order_cost(order.items)
+        order.actual_cost = job_order_actual_cost(order)
     elif prev_status == 'draft' and order.status not in ('draft', 'cancelled', 'voided'):
         # Confirming a draft books the workers named on its labor lines.
         sync_labor_assignments(order, [])
-        order.actual_cost = job_order_cost(order.items)
+        order.actual_cost = job_order_actual_cost(order)
 
     if order.status in ('cancelled', 'voided') and prev_status != order.status:
         # Free up workers who were booked on this order but never started
         release_pending_assignments(order)
     if 'slipData' in data:
         order.slip_data = data['slipData']
-
-    # Re-send a quotation (e.g. after revising one the customer rejected)
-    resend_quotation = bool(data.get('sendQuotation')) and order.status == 'draft'
-    if resend_quotation:
-        quote_branch = Branch.query.get(order.branch_id) if order.branch_id else None
-        if not quote_branch or quote_branch.is_warehouse:
-            return jsonify({'status': 'error',
-                            'message': 'Choose the branch where the customer will pay for this quotation.'}), 400
-        order.quote_status = 'sent'
-        order.quote_reject_reason = None
-        order.quote_sent_at = datetime.utcnow()
-        order.quote_responded_at = None
-        notify_customer_of_quotation(order)
-        log_action(request.current_user['id'], request.current_user['fullName'], 'QUOTATION', 'Sales',
-                   f"Re-sent quotation {order.job_order_id} to {order.customer_name}", request.remote_addr or '0.0.0.0')
 
     # A new price changes what is still owed
     if pricing:
@@ -4687,158 +4906,6 @@ def void_job_order(order_id):
 
     return jsonify({'status': 'success', 'message': 'Job order voided'})
 
-QUOTE_REASON_MAX = 500
-
-def job_order_quote_fields(jo):
-    """Quotation details shared by every job order serializer."""
-    return {
-        'quoteStatus': jo.quote_status,
-        'quoteRejectReason': jo.quote_reject_reason,
-        'quoteSentAt': to_pht(jo.quote_sent_at) if jo.quote_sent_at else None,
-        'quoteRespondedAt': to_pht(jo.quote_responded_at) if jo.quote_responded_at else None,
-        'appointmentId': jo.appointment_id,
-    }
-
-def confirm_draft_job_order(order):
-    """Turn a draft into a real (pending) job order: the same thing staff
-    confirming a draft does, which also books the workers on its labor lines."""
-    order.status = 'pending'
-    sync_labor_assignments(order, [])
-    order.actual_cost = job_order_cost(order.items)
-    order.updated_at = datetime.now()
-
-def quotation_account(order):
-    """The online account a quotation goes to, or None for walk-in customers."""
-    customer = Customer.query.get(order.customer_id) if order.customer_id else None
-    if not customer or not customer.user_id:
-        return None
-    account = User.query.get(customer.user_id)
-    return account if account and account.is_active else None
-
-def notify_customer_of_quotation(order):
-    """Email the customer that a quotation is waiting. Returns whether they have
-    an online account to accept it from."""
-    account = quotation_account(order)
-    if not account:
-        return False
-    total = f"{float(order.total_price or 0):,.2f}"
-    subject = f"Your quotation {order.job_order_id} is ready"
-    text = (f"Hi {account.full_name},\n\nYour quotation {order.job_order_id} from Seatmakers Avenue is ready. "
-            f"Total: PHP {total}.\n\nSign in and open My Orders > Custom to accept or reject it.\n\n"
-            f"Seatmakers Avenue")
-    html = (f"<p>Hi {escape(account.full_name)},</p><p>Your quotation <b>{escape(order.job_order_id)}</b> from "
-            f"Seatmakers Avenue is ready.</p><p style=\"font-size:20px;font-weight:bold;color:#011c72\">Total: "
-            f"&#8369;{total}</p><p>Sign in and open <b>My Orders &rsaquo; Custom</b> to accept or reject it.</p>"
-            f"<p>Seatmakers Avenue</p>")
-    threading.Thread(target=send_email, args=(account.email, account.full_name, subject, text, html), daemon=True).start()
-    return True
-
-# Slip fields a customer may see, with the labels used on their order
-CUSTOMER_SLIP_FIELDS = (
-    ('materialCenter', 'Center material'),
-    ('materialSides', 'Side material'),
-    ('materialBack', 'Back material'),
-    ('dStitch', 'Double stitch'),
-    ('piping', 'Piping'),
-    ('pockets', 'Pockets'),
-    ('logo', 'Logo'),
-    ('specification', 'Specification'),
-)
-
-def customer_work_details(o):
-    """The work to be done, in customer terms: the specification and work steps
-    from the order slip. Materials, costs, labor hours and worker names stay
-    staff-only."""
-    slip = o.slip_data or {}
-    specs = [{'label': label, 'value': str(slip.get(key)).strip()}
-             for key, label in CUSTOMER_SLIP_FIELDS if str(slip.get(key) or '').strip()]
-    steps = [str(r.get('description')).strip() for r in (slip.get('rows') or [])
-             if isinstance(r, dict) and str(r.get('description') or '').strip()]
-    return {'specs': specs, 'workSteps': steps}
-
-def customer_job_order_dict(o):
-    """What a customer sees of their own job order: the vehicle, the work and
-    the price. Materials, costs, labor and internal notes stay staff-only."""
-    return {
-        **customer_work_details(o),
-        'id': o.id,
-        'jobOrderId': o.job_order_id,
-        'description': o.description,
-        'vehicleInfo': o.vehicle_info,
-        'branchName': o.branch.name if o.branch else '',
-        'status': o.status,
-        'paymentStatus': o.payment_status,
-        'totalPrice': o.total_price or 0,
-        'discountPercent': o.discount_percent,
-        'vatPercent': o.vat_percent,
-        'vatInclusive': bool(o.vat_inclusive),
-        # VAT already inside the total, worked out here so every screen agrees
-        'vatAmount': vat_breakdown(o.total_price, o.vat_percent)['vat'],
-        'downPayment': o.down_payment or 0,
-        'balance': o.balance or 0,
-        'estimatedCompletion': o.estimated_completion.strftime('%Y-%m-%d') if o.estimated_completion else None,
-        'completedAt': o.completed_at.strftime('%Y-%m-%d') if o.completed_at else None,
-        'createdAt': o.created_at.strftime('%Y-%m-%d') if o.created_at else None,
-        **job_order_quote_fields(o),
-    }
-
-def my_customer_record_ids():
-    return [c.id for c in Customer.query.filter_by(user_id=request.current_user['id']).all()]
-
-@app.route('/api/job-orders/mine', methods=['GET'])
-@require_auth
-@require_customer
-def get_my_job_orders():
-    """Job orders (and quotations) for the signed-in customer's linked record.
-    Staff drafts stay hidden; drafts sent as quotations are shown."""
-    ids = my_customer_record_ids()
-    if not ids:
-        return jsonify({'status': 'success', 'data': []})
-    orders = (JobOrder.query
-              .filter(JobOrder.customer_id.in_(ids),
-                      db.or_(JobOrder.status != 'draft', JobOrder.quote_status.in_(('sent', 'rejected'))))
-              .order_by(JobOrder.created_at.desc()).all())
-    return jsonify({'status': 'success', 'data': [customer_job_order_dict(o) for o in orders]})
-
-@app.route('/api/job-orders/<int:order_id>/quotation/respond', methods=['POST'])
-@require_auth
-@require_customer
-def respond_to_job_order_quotation(order_id):
-    """Customer accepts (becomes a pending job order) or rejects (with a reason) a quotation."""
-    user = request.current_user
-    order = JobOrder.query.get(order_id)
-    if not order or order.customer_id not in my_customer_record_ids():
-        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
-    if order.status != 'draft' or order.quote_status != 'sent':
-        return jsonify({'status': 'error', 'message': 'This quotation is no longer waiting for your reply.'}), 400
-
-    data = request.get_json(silent=True) or {}
-    response = data.get('response')
-    if response not in ('accept', 'reject'):
-        return jsonify({'status': 'error', 'message': 'Invalid response. Use "accept" or "reject"'}), 400
-
-    now = datetime.utcnow()
-    if response == 'accept':
-        confirm_draft_job_order(order)
-        order.quote_status = 'accepted'
-        title, message = 'Quotation accepted', f"{order.customer_name} accepted quotation {order.job_order_id}."
-    else:
-        reason = (data.get('reason') or '').strip()
-        if not reason:
-            return jsonify({'status': 'error', 'message': 'Please tell us why you are rejecting the quotation.'}), 400
-        order.quote_status = 'rejected'
-        order.quote_reject_reason = reason[:QUOTE_REASON_MAX]
-        title, message = 'Quotation rejected', f"{order.customer_name} rejected quotation {order.job_order_id}: {order.quote_reject_reason}"
-    order.quote_responded_at = now
-    # Sales managers send quotations too, so they hear back as well
-    notify_branch_users(order.branch_id, 'quotation_response', title, message,
-                        {'jobOrderId': order.id, 'response': response})
-    db.session.commit()
-
-    log_action(user['id'], user['fullName'], 'RESPOND', 'Sales',
-               f"Customer {response}ed quotation {order.job_order_id}", request.remote_addr or '0.0.0.0')
-    return jsonify({'status': 'success', 'data': customer_job_order_dict(order)})
-
 @app.route('/api/sales/drafts', methods=['GET'])
 @require_auth
 @require_permission('sales.view')
@@ -4870,7 +4937,6 @@ def get_draft_job_orders():
         'status': d.status,
         'createdAt': d.created_at.strftime('%Y-%m-%d'),
         'updatedAt': fmt_dt(d.updated_at),
-        **job_order_quote_fields(d),
     } for d in drafts]})
 
 
@@ -4962,7 +5028,6 @@ def get_all_orders():
             'createdAt': jo.created_at.strftime('%Y-%m-%d'),
             'createdBy': jo.created_by,
             'updatedAt': jo.updated_at.strftime('%Y-%m-%d'),
-            **job_order_quote_fields(jo)
         }
 
     job_orders_list = [job_order_to_dict(jo) for jo in job_orders_db]
@@ -5106,10 +5171,17 @@ def revenue_ex_vat(order):
     return vat_breakdown(order.total_price, order.vat_percent)['net']
 
 
-def job_order_costing(order):
-    """Cost split for one job order — the same figures the job order page shows.
-    'Overhead' is the order's own other-expense lines; labor uses actual pay
-    once a worker has finished."""
+def job_order_costing(order, extras=None):
+    """Estimated and actual cost of one job order, split into materials, labor
+    and overhead (the order's other-expense lines).
+      materials: estimated = the planned material lines; actual = those plus any
+                 extra material issued for the job (recuts, defects, rework)
+      labor:     estimated = the labor lines' rates; actual = the workers' actual
+                 pay once they have finished
+      overhead:  the same on both sides
+    Pass extras (that order's extra material logs) when costing many orders."""
+    if extras is None:
+        extras = job_order_extras(order)
     materials = labor = expenses = estimated_labor = 0.0
     for it in order.items or []:
         qty = float(it.get('quantity') or 0)
@@ -5122,12 +5194,17 @@ def job_order_costing(order):
             expenses += qty * float(it.get('materialCost') or 0)
         else:
             materials += qty * float(it.get('materialCost') or 0)
+    extra = extras_cost(extras)
+    estimated_materials = materials
+    materials += extra
     total_cost = materials + labor + expenses
-    estimated_cost = materials + estimated_labor + expenses
+    estimated_cost = estimated_materials + estimated_labor + expenses
     revenue = revenue_ex_vat(order)
     profit = revenue - total_cost
     return {
         'materials': round(materials, 2), 'labor': round(labor, 2), 'expenses': round(expenses, 2),
+        'estimatedMaterials': round(estimated_materials, 2), 'estimatedLabor': round(estimated_labor, 2),
+        'estimatedExpenses': round(expenses, 2), 'extraMaterials': round(extra, 2),
         'totalCost': round(total_cost, 2), 'estimatedCost': round(estimated_cost, 2),
         'revenue': revenue, 'grossProfit': round(profit, 2),
         'profitMargin': round(profit / revenue * 100, 2) if revenue > 0 else 0,
@@ -5139,9 +5216,10 @@ def job_order_costing(order):
 @require_permission('costing.view')
 def get_all_costings():
     orders = costed_job_orders(request.current_user).order_by(JobOrder.created_at.desc()).all()
+    extras = extras_by_order([o.id for o in orders])
     result = []
     for order in orders:
-        c = job_order_costing(order)
+        c = job_order_costing(order, extras.get(order.id, []))
         result.append({
             'id': order.id,
             'jobOrderNumber': order.job_order_id,
@@ -5149,6 +5227,10 @@ def get_all_costings():
             'materialsCost': c['materials'],
             'laborCost': c['labor'],
             'overheadCost': c['expenses'],
+            'extraMaterialsCost': c['extraMaterials'],
+            'estimatedCost': c['estimatedCost'],
+            'actualCost': c['totalCost'],
+            'variance': round(c['totalCost'] - c['estimatedCost'], 2),
             # Revenue before VAT, so profit and margin on the page are real
             'totalAmount': c['revenue'],
             'status': order.status,
@@ -5163,11 +5245,42 @@ def get_job_order_costing(order_id):
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
 
-    c = job_order_costing(order)
+    extras = job_order_extras(order)
+    c = job_order_costing(order, extras)
+
+    def component(est, act):
+        return {'estimated': money(est), 'actual': money(act), 'variance': money(act - est)}
+
+    # Each line with what it costs us (not its selling price)
+    lines = []
+    for it in order.items or []:
+        cat = item_category(it)
+        qty = float(it.get('quantity') or 0)
+        if cat == 'labor':
+            est = qty * float(it.get('laborCost') or 0)
+            act = float(it['actualLaborCost']) if it.get('actualLaborCost') is not None else est
+            unit = float(it.get('laborCost') or 0)
+        else:
+            est = act = qty * float(it.get('materialCost') or 0)
+            unit = float(it.get('materialCost') or 0)
+        lines.append({'name': it.get('name') or it.get('materialName') or '', 'category': cat, 'quantity': qty,
+                      'unitCost': unit, 'estimatedCost': money(est), 'actualCost': money(act),
+                      'workerName': it.get('workerName') or None})
     return jsonify({'status': 'success', 'data': {
         'id': order.id,
         'jobOrderId': order.job_order_id,
+        'customerName': order.customer_name,
+        'status': order.status,
         'items': order.items,
+        'lines': lines,
+        'components': {
+            'materials': component(c['estimatedMaterials'], c['materials']),
+            'labor': component(c['estimatedLabor'], c['labor']),
+            'overhead': component(c['estimatedExpenses'], c['expenses']),
+            'total': component(c['estimatedCost'], c['totalCost']),
+        },
+        'extraMaterials': [waste_log_to_dict(l) for l in extras],
+        'extraMaterialsCost': c['extraMaterials'],
         'estimatedCost': c['estimatedCost'],
         'actualCost': c['totalCost'],
         'materialCost': c['materials'],
@@ -5194,18 +5307,22 @@ def update_actual_cost(order_id):
 @require_permission('costing.view')
 def get_variance_report():
     orders = costed_job_orders(request.current_user).filter(JobOrder.status.in_(EARNED_STATUSES)).all()
+    extras = extras_by_order([o.id for o in orders])
     report = []
     for order in orders:
-        c = job_order_costing(order)
+        c = job_order_costing(order, extras.get(order.id, []))
         if c['totalCost'] <= 0:
             continue
         variance = c['totalCost'] - c['estimatedCost']
         report.append({
+            'id': order.id,
             'jobOrderId': order.job_order_id,
             'customerName': order.customer_name,
             'estimatedCost': c['estimatedCost'],
             'actualCost': c['totalCost'],
             'variance': round(variance, 2),
+            'materialVariance': round(c['materials'] - c['estimatedMaterials'], 2),
+            'laborVariance': round(c['labor'] - c['estimatedLabor'], 2),
             'variancePercent': round(variance / c['estimatedCost'] * 100, 2) if c['estimatedCost'] > 0 else 0,
             'status': 'over' if variance > 0 else 'under' if variance < 0 else 'on_target'
         })
@@ -5308,13 +5425,17 @@ def create_purchase_order():
     if not all(data.get(f) for f in required):
         return jsonify({'status': 'error', 'message': 'Supplier, at least one item and an expected delivery date are required'}), 400
 
+    if not isinstance(data['items'], list) or not all(isinstance(it, dict) for it in data['items']):
+        return jsonify({'status': 'error', 'message': 'Items are not in the right format'}), 400
     items = [{
         'materialId': it.get('materialId'),
         'name': it.get('name', ''),
-        'quantity': float(it.get('quantity') or 0),
+        'quantity': finite_number(it.get('quantity'), 0.0),
         'unit': it.get('unit', ''),
-        'unitPrice': float(it.get('unitPrice') or 0),
+        'unitPrice': finite_number(it.get('unitPrice'), 0.0),
     } for it in data['items']]
+    if any(it['quantity'] is None or it['unitPrice'] is None for it in items):
+        return jsonify({'status': 'error', 'message': 'Quantities and unit prices must be numbers'}), 400
     if any(it['quantity'] <= 0 for it in items):
         return jsonify({'status': 'error', 'message': 'Every item needs a quantity above zero'}), 400
     if any(it['unitPrice'] < 0 for it in items):
@@ -5387,6 +5508,15 @@ def receive_purchase_order(po_id):
     log_action(request.current_user['id'], request.current_user['fullName'], 'RECEIVE', 'Purchase Orders', f"Received PO: {po.po_number}", request.remote_addr or '0.0.0.0')
 
     return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
+
+# Delivery status changes; delivered and cancelled deliveries are final
+DELIVERY_TRANSITIONS = {
+    'scheduled': {'in_transit', 'delivered', 'cancelled'},
+    'in_transit': {'scheduled', 'delivered', 'cancelled'},
+}
+
+# Statuses a worker assignment can have (cancelled work is deleted, not kept)
+ASSIGNMENT_STATUSES = ('pending', 'in_progress', 'completed')
 
 # ============================================
 # DELIVERY MODULE
@@ -5479,10 +5609,14 @@ def update_delivery_status(delivery_id):
     if not can_see_delivery(user, d):
         return jsonify({'status': 'error', 'message': 'Access denied'}), 403
 
-    new_status = (request.get_json() or {}).get('status')
+    new_status = (request.get_json(silent=True) or {}).get('status')
     if new_status not in ['scheduled', 'in_transit', 'delivered', 'cancelled']:
         return jsonify({'status': 'error', 'message': 'Invalid status'}), 400
-
+    if new_status == d.status:
+        return jsonify({'status': 'success', 'data': delivery_to_dict(d)})
+    if new_status not in DELIVERY_TRANSITIONS.get(d.status, set()):
+        return jsonify({'status': 'error', 'message': f"A {(d.status or '').replace('_', ' ')} delivery can't be changed to "
+                                                      f"{new_status.replace('_', ' ')}"}), 400
     d.status = new_status
     if new_status == 'delivered':
         d.delivered_at = datetime.utcnow()
@@ -5524,286 +5658,8 @@ def generate_delivery_receipt(delivery_id):
     return jsonify({'status': 'success', 'data': receipt})
 
 # ============================================
-# APPOINTMENTS MODULE
-# ============================================
-
-def appointment_to_dict(appointment):
-    """Helper to convert Appointment model to dictionary"""
-    branch_name = None
-    if appointment.branch:
-        branch_name = appointment.branch.name
-    
-    return {
-        'id': appointment.id,
-        'appointmentNumber': appointment.appointment_number,
-        'customerName': appointment.customer_name,
-        'customerPhone': appointment.customer_phone,
-        'customerEmail': appointment.customer_email,
-        'contactMethod': appointment.contact_method,
-        'branchId': appointment.branch_id,
-        'branchName': branch_name,
-        'preferredDate': fmt_dt(appointment.preferred_date),
-        'preferredTime': appointment.preferred_time,
-        'description': appointment.description,
-        'vehicleInfo': appointment.vehicle_info,
-        'status': appointment.status,
-        'confirmedTime': appointment.confirmed_time,
-        'confirmedBy': appointment.confirmed_by,
-        'confirmedByName': appointment.confirmer.full_name if appointment.confirmer else None,
-        'confirmedByRole': appointment.confirmer.role.key if (appointment.confirmer and appointment.confirmer.role) else None,
-        'adminNotes': appointment.admin_notes,
-        'createdAt': to_pht(appointment.created_at),
-        'updatedAt': to_pht(appointment.updated_at),
-        'hasAccount': appointment.user_id is not None,
-        'quotation': appointment_quotation(appointment.id),
-    }
-
-def appointment_quotation(appointment_id):
-    """The latest quotation made from an appointment, if any."""
-    jo = (JobOrder.query.filter_by(appointment_id=appointment_id)
-          .order_by(JobOrder.created_at.desc()).first())
-    if not jo:
-        return None
-    return {'id': jo.id, 'jobOrderId': jo.job_order_id, 'status': jo.status,
-            'quoteStatus': jo.quote_status, 'quoteRejectReason': jo.quote_reject_reason}
-
-@app.route('/api/appointments', methods=['POST'])
-def create_appointment():
-    """Create a new appointment request - public endpoint"""
-    data = request.get_json()
-
-    required = ['customerName', 'customerPhone', 'contactMethod', 'preferredDate']
-    if not all(f in data for f in required):
-        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
-
-    contact_method = data['contactMethod']
-    if contact_method not in ['branch_visit', 'phone_call']:
-        return jsonify({'status': 'error', 'message': 'Invalid contact method'}), 400
-
-    # Spam / abuse protection
-    phone = data.get('customerPhone', '').strip()
-    allowed, spam_msg = check_spam_protection(phone, 'appointment')
-    if not allowed:
-        return jsonify({'status': 'error', 'message': spam_msg}), 429
-
-    # Branch is always required so appointments are routed to the selected branch.
-    branch_id = data.get('branchId')
-    if not branch_id:
-        return jsonify({'status': 'error', 'message': 'Please select a branch for this appointment'}), 400
-    
-    # Validate selected branch
-    branch = Branch.query.get(branch_id)
-    if not branch or not branch.is_active:
-        return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
-    
-    # Check if user is authenticated (optional)
-    user_id = None
-    token = request.headers.get('Authorization', '').replace('Bearer ', '')
-    if token:
-        user = get_user_from_token(token)
-        if user:
-            user_id = user['id']
-    
-    # Generate appointment number
-    appointment_count = Appointment.query.count() + 1
-    appointment_number = f"APT-{appointment_count:04d}"
-    
-    # Parse date
-    try:
-        preferred_date = datetime.strptime(data['preferredDate'], '%Y-%m-%d').date()
-    except ValueError:
-        return jsonify({'status': 'error', 'message': 'Invalid date format. Use YYYY-MM-DD'}), 400
-
-    # Validate date/time against Philippine time (UTC+8)
-    now_ph = datetime.utcnow() + timedelta(hours=8)
-    today_ph = now_ph.date()
-    current_hour_ph = now_ph.hour
-
-    if preferred_date < today_ph:
-        return jsonify({'status': 'error', 'message': 'Cannot book an appointment for a past date.'}), 400
-
-    if preferred_date == today_ph:
-        # All slots end at 20:00 (8 PM)
-        if current_hour_ph >= 20:
-            return jsonify({'status': 'error', 'message': 'All time slots for today have already passed. Please choose tomorrow or a later date.'}), 400
-        # Validate specific period if provided
-        preferred_time = data.get('preferredTime', '')
-        period_end = {'morning': 12, 'afternoon': 17, 'evening': 20}
-        if preferred_time in period_end and current_hour_ph >= period_end[preferred_time]:
-            return jsonify({
-                'status': 'error',
-                'message': f'The {preferred_time} slot has already ended today. Please choose a later time period or a different date.'
-            }), 400
-
-    new_appointment = Appointment(
-        appointment_number=appointment_number,
-        customer_name=data['customerName'],
-        customer_phone=data['customerPhone'],
-        customer_email=data.get('customerEmail', ''),
-        contact_method=contact_method,
-        branch_id=branch_id,
-        preferred_date=preferred_date,
-        preferred_time=data.get('preferredTime', ''),
-        description=data.get('description', ''),
-        vehicle_info=data.get('vehicleInfo'),
-        status='pending',
-        user_id=user_id
-    )
-    
-    db.session.add(new_appointment)
-    db.session.commit()
-    
-    return jsonify({'status': 'success', 'data': appointment_to_dict(new_appointment)}), 201
-
-APPOINTMENT_STAFF = ('administrator', 'supervisor', 'sales_manager')
-
-def appointment_branch_error(user, appointment=None):
-    """Supervisors and sales managers only handle their own branch's
-    appointments; administrators handle every branch. Returns an error
-    response, or None when access is fine."""
-    if all_branches(user):
-        return None
-    if not user.get('branchId'):
-        return jsonify({'status': 'error', 'message': 'Your account has no assigned branch'}), 400
-    if appointment is not None and appointment.branch_id != user['branchId']:
-        return jsonify({'status': 'error', 'message': 'Access denied'}), 403
-    return None
-
-@app.route('/api/appointments', methods=['GET'])
-@require_auth
-@require_permission('appointments.view')
-def get_appointments():
-    """Get all appointments - staff endpoint"""
-    user = request.current_user
-    status = request.args.get('status')
-    
-    query = Appointment.query
-    
-    # Filter by status if provided
-    if status:
-        query = query.filter_by(status=status)
-    
-    # Supervisors and sales managers only see their own branch
-    error = appointment_branch_error(user)
-    if error:
-        return error
-    if not all_branches(user):
-        query = query.filter(Appointment.branch_id == user['branchId'])
-    
-    appointments = query.order_by(Appointment.preferred_date.desc()).all()
-    
-    return jsonify({'status': 'success', 'data': [appointment_to_dict(a) for a in appointments]})
-
-@app.route('/api/appointments/<int:appointment_id>', methods=['GET'])
-@require_auth
-@require_permission('appointments.view')
-def get_appointment(appointment_id):
-    """One appointment, e.g. to pre-fill a quotation from it."""
-    appointment = Appointment.query.get(appointment_id)
-    if not appointment:
-        return jsonify({'status': 'error', 'message': 'Appointment not found'}), 404
-    error = appointment_branch_error(request.current_user, appointment)
-    if error:
-        return error
-    return jsonify({'status': 'success', 'data': appointment_to_dict(appointment)})
-
-@app.route('/api/appointments/<int:appointment_id>', methods=['PUT'])
-@require_auth
-@require_permission('appointments.edit')
-def update_appointment(appointment_id):
-    """Update an appointment status or notes"""
-    appointment = Appointment.query.get(appointment_id)
-    if not appointment:
-        return jsonify({'status': 'error', 'message': 'Appointment not found'}), 404
-
-    user = request.current_user
-    error = appointment_branch_error(user, appointment)
-    if error:
-        return error
-    
-    data = request.get_json()
-
-    if 'status' in data:
-        new_status = data['status']
-        if new_status == 'confirmed':
-            confirmed_time = data.get('confirmedTime')
-            if not confirmed_time:
-                return jsonify({'status': 'error', 'message': 'A confirmed time must be selected when confirming an appointment'}), 400
-
-            # Double-booking check: same branch, same date, same time slot, already confirmed
-            if appointment.branch_id and appointment.preferred_date:
-                clash = Appointment.query.filter(
-                    Appointment.id != appointment.id,
-                    Appointment.branch_id == appointment.branch_id,
-                    Appointment.preferred_date == appointment.preferred_date,
-                    Appointment.confirmed_time == confirmed_time,
-                    Appointment.status == 'confirmed'
-                ).first()
-                if clash:
-                    return jsonify({
-                        'status': 'error',
-                        'message': f'This time slot ({confirmed_time}) is already taken by appointment {clash.appointment_number} on this date. Please choose a different time.'
-                    }), 409
-
-            appointment.confirmed_time = confirmed_time
-            appointment.confirmed_by = user['id']
-
-        appointment.status = new_status
-
-    if 'adminNotes' in data:
-        appointment.admin_notes = data['adminNotes']
-
-    db.session.commit()
-
-    return jsonify({'status': 'success', 'data': appointment_to_dict(appointment)})
-
-@app.route('/api/appointments/my-appointments', methods=['GET'])
-@require_auth
-def get_my_appointments():
-    """Get appointments for the logged-in customer"""
-    user_id = request.current_user['id']
-    appointments = Appointment.query.filter_by(user_id=user_id).order_by(Appointment.created_at.desc()).all()
-    return jsonify({'status': 'success', 'data': [appointment_to_dict(a) for a in appointments]})
-
-# ============================================
 # SPAM / ABUSE PROTECTION ADMIN ENDPOINTS
 # ============================================
-
-@app.route('/api/admin/appointments/<int:appointment_id>/no-show', methods=['POST'])
-@require_auth
-@require_permission('appointments.edit')
-def mark_appointment_no_show(appointment_id):
-    """Mark a confirmed appointment as no-show and add a strike to the phone number."""
-    appointment = Appointment.query.get(appointment_id)
-    if not appointment:
-        return jsonify({'status': 'error', 'message': 'Appointment not found'}), 404
-
-    user = request.current_user
-    error = appointment_branch_error(user, appointment)
-    if error:
-        return error
-
-    appointment.status = 'cancelled'
-    appointment.admin_notes = (appointment.admin_notes or '') + ' [No-Show]'
-    db.session.flush()
-
-    record = add_strike(
-        appointment.customer_phone,
-        f'No-show for appointment {appointment.appointment_number}'
-    )
-
-    log_action(user['id'], user['fullName'], 'NO_SHOW', 'Appointments',
-               f'Marked {appointment.appointment_number} as no-show. '
-               f'Strikes for {appointment.customer_phone}: {record.strike_count}/{MAX_STRIKES_BEFORE_BLOCK}',
-               request.remote_addr or '0.0.0.0')
-
-    return jsonify({
-        'status': 'success',
-        'message': 'Appointment marked as no-show.',
-        'strikeCount': record.strike_count,
-        'isBlocked': record.is_blocked
-    })
-
 
 @app.route('/api/admin/product-orders/<int:order_id>/flag-spam', methods=['POST'])
 @require_auth
@@ -5906,15 +5762,20 @@ def delete_phone_record(record_id):
 # PRODUCT ORDERS MODULE (Premade Products)
 # ============================================
 
+# Premade sale numbers: PS-0001, ... (PS = premade sale). Older sales were
+# numbered PO-0001, ...; they keep those numbers. Supplier purchase orders use
+# PO-<year>-<seq>, so the two can no longer be mistaken for each other.
+PREMADE_SALE_PREFIX = 'PS-'
+
 def generate_product_order_number():
-    """Generate a unique PO-XXXX order number that won't collide."""
+    """Generate a unique PS-XXXX premade sale number that won't collide."""
     max_id = db.session.query(db.func.max(ProductOrder.id)).scalar() or 0
-    candidate = f"PO-{max_id + 1:04d}"
+    candidate = f"{PREMADE_SALE_PREFIX}{max_id + 1:04d}"
     # If somehow it already exists, keep incrementing
     offset = 1
     while ProductOrder.query.filter_by(order_number=candidate).first():
         offset += 1
-        candidate = f"PO-{max_id + offset:04d}"
+        candidate = f"{PREMADE_SALE_PREFIX}{max_id + offset:04d}"
     return candidate
 
 def fmt_dt(dt):
@@ -5933,7 +5794,6 @@ def fmt_dt(dt):
 # the branch concerned, or who have access to every branch
 NOTIFICATION_PERMISSIONS = {
     'premade_delivery': 'premade.view',
-    'quotation_response': 'sales.view',
     'transfer_request': 'product_orders.transfer',
     'transfer_dispatched': 'product_orders.transfer',
     'order_ready': 'product_orders.view',
@@ -5963,104 +5823,6 @@ def notify_branch_users(branch_id, notif_type, title, message, data=None):
                 message=message,
                 data=data or {},
             ))
-
-# Notification types a customer sees: changes to their own orders only
-CUSTOMER_NOTIFICATION_TYPES = ('order_status', 'quotation_ready')
-
-# What each status means to the customer, per kind of order
-CUSTOMER_STATUS_PHRASES = {
-    'job': {
-        'pending': 'has been confirmed',
-        'in_progress': 'is now in progress',
-        'completed': 'is completed',
-        'delivered': 'has been delivered',
-        'cancelled': 'has been cancelled',
-        'voided': 'has been voided',
-    },
-    'product': {
-        'pending': 'is pending',
-        'processing': 'is being prepared',
-        'ready': 'is ready for pickup',
-        'completed': 'is completed',
-        'cancelled': 'has been cancelled',
-    },
-    'request': {
-        'pending': 'is pending',
-        'processing': 'is being processed',
-        'in_progress': 'is now in progress',
-        'ready_for_installation': 'is ready for installation',
-        'completed': 'is completed',
-        'delivered': 'has been delivered',
-        'cancelled': 'has been cancelled',
-    },
-}
-
-def _order_account_id(order):
-    """(kind, number, customer account id) for an order a customer can follow."""
-    if isinstance(order, JobOrder):
-        customer = Customer.query.get(order.customer_id) if order.customer_id else None
-        return 'job', order.job_order_id, customer.user_id if customer else None
-    if isinstance(order, ProductOrder):
-        return 'product', order.order_number, order.user_id
-    return 'request', order.order_number, order.user_id
-
-def _changed_to(obj, attr):
-    """The new value of attr if this flush changes it, else None."""
-    hist = db.inspect(obj).attrs[attr].history
-    return hist.added[0] if hist.added and hist.added[0] not in hist.deleted else None
-
-@event.listens_for(db.session, 'after_flush')
-def notify_customers_of_order_changes(session, flush_context):
-    """Tell a customer when one of their orders changes status or gets a
-    quotation, whichever endpoint made the change. Changes the customer made
-    themselves (accepting a quotation, cancelling) are not echoed back.
-    Runs after the flush so new orders already have ids; attribute history
-    still shows what this flush changed."""
-    actor_id = request.current_user['id'] if has_request_context() and hasattr(request, 'current_user') else None
-    pending = session.info.setdefault('customer_notifications', [])
-    with session.no_autoflush:
-        for obj in list(session.new) + list(session.dirty):
-            if not isinstance(obj, (JobOrder, ProductOrder, CustomerOrder)):
-                continue
-            is_new = obj in session.new
-            kind, number, account_id = _order_account_id(obj)
-            if not account_id or account_id == actor_id:
-                continue
-
-            quote_attr = {'job': 'quote_status', 'request': 'quotation_status'}.get(kind)
-            if quote_attr:
-                new_quote = getattr(obj, quote_attr) if is_new else _changed_to(obj, quote_attr)
-                if new_quote == {'job': 'sent', 'request': 'quoted'}[kind]:
-                    pending.append(Notification(
-                        user_id=account_id, type='quotation_ready',
-                        title=f"Quotation ready: {number}",
-                        message=f"Your quotation for {number} is ready. Open it to accept or reject.",
-                        data={'kind': kind, 'orderId': obj.id, 'orderNumber': number},
-                    ))
-                    continue
-
-            # Only status changes on existing orders; a staff draft is not visible to the customer yet
-            new_status = None if is_new else _changed_to(obj, 'status')
-            if not new_status or new_status == 'draft':
-                continue
-            phrase = CUSTOMER_STATUS_PHRASES[kind].get(new_status, f"is now {new_status.replace('_', ' ')}")
-            pending.append(Notification(
-                user_id=account_id, type='order_status',
-                title=f"Order {number} updated",
-                message=f"Your order {number} {phrase}.",
-                data={'kind': kind, 'orderId': obj.id, 'orderNumber': number, 'status': new_status},
-            ))
-
-@event.listens_for(db.session, 'after_flush_postexec')
-def add_customer_notifications(session, flush_context):
-    # Objects can't be added mid-flush; commit flushes these in its next pass
-    pending = session.info.pop('customer_notifications', None)
-    if pending:
-        session.add_all(pending)
-
-@event.listens_for(db.session, 'after_rollback')
-def drop_customer_notifications(session):
-    session.info.pop('customer_notifications', None)
 
 def transfer_to_dict(transfer):
     order = transfer.order
@@ -6139,8 +5901,8 @@ def build_product_order_timeline(order):
     if order.created_at:
         events.append({
             'type': 'created',
-            'title': 'Order Placed',
-            'description': f"Customer placed order {order.order_number}",
+            'title': 'Order Recorded',
+            'description': f"Order {order.order_number} recorded for {order.customer_name or 'the customer'}",
             'timestamp': fmt_dt(order.created_at),
             'by': order.customer_name or 'Customer'
         })
@@ -6182,56 +5944,6 @@ def build_product_order_timeline(order):
     events.sort(key=lambda e: e.get('timestamp') or '', reverse=True)
     return events
 
-def check_items_availability(items):
-    """Re-validate saved cart lines against current stock.
-
-    Returns (all_ok, report) with one report row per requested line, so the
-    customer can be shown exactly what changed since they saved the cart.
-    """
-    report = []
-    all_ok = True
-    for item_data in items or []:
-        product_id = item_data.get('productId')
-        requested = int(item_data.get('quantity', 0) or 0)
-        saved_name = item_data.get('name') or f'Product {product_id}'
-        product = PremadeProduct.query.filter_by(id=product_id, is_archived=False).first()
-
-        if not product:
-            all_ok = False
-            report.append({
-                'productId': product_id, 'name': saved_name, 'requested': requested,
-                'available': 0, 'currentPrice': None, 'issue': 'unavailable',
-                'message': f'{saved_name} is no longer offered.',
-            })
-            continue
-
-        available = float(product.quantity or 0)
-        issue = None
-        message = ''
-        if requested <= 0:
-            issue, message = 'invalid', f'{product.name} has an invalid quantity.'
-        elif available <= 0:
-            issue, message = 'out_of_stock', f'{product.name} is out of stock.'
-        elif available < requested:
-            issue = 'insufficient'
-            message = f'Only {available:g} of {product.name} left — you asked for {requested}.'
-        if issue:
-            all_ok = False
-
-        report.append({
-            'productId': product.id,
-            'name': product.name,
-            'sku': product.sku,
-            'requested': requested,
-            'available': available,
-            'currentPrice': float(product.price or 0),
-            'savedPrice': float(item_data.get('unitPrice') or 0),
-            'issue': issue,
-            'message': message,
-        })
-
-    return all_ok, report
-
 def order_quantity(raw):
     """A whole number of units above zero, or None."""
     try:
@@ -6243,13 +5955,14 @@ def order_quantity(raw):
     return int(value)
 
 def stock_taken_at_placement(item):
-    """Checkout orders (place_multi_branch_order) take each item's stock when the
-    order is placed and record the branch it came from; walk-in orders
-    (create_product_order) take it when the order is completed."""
+    """Orders recorded since stock was reserved on placement (create_product_order,
+    and online checkout orders from before it was retired) took each item's stock
+    when placed and record the branch it came from; older walk-in orders take it
+    when the order is completed."""
     return 'sourceBranchId' in item
 
 def return_placement_stock(order):
-    """Put back the stock a checkout order took when it was placed, when the order
+    """Put back the stock an order took when it was placed, when the order
     is cancelled. Items whose transfer already arrived stay at the pickup branch.
     Returns an error message if items are still in transit, else None."""
     transfers = {t.source_branch_id: t for t in (order.transfers or []) if t.status != 'cancelled'}
@@ -6269,135 +5982,6 @@ def return_placement_stock(order):
         if transfer.status == 'pending':
             transfer.status = 'cancelled'
     return None
-
-def place_multi_branch_order(data, user_id):
-    """Create one order at the pickup branch, with transfer requests for items
-    held at other branches. Shared by the public checkout and draft confirm.
-
-    Returns (order, None) on success or (None, (payload, status)) on failure.
-    """
-    if not data.get('items'):
-        return None, ({'status': 'error', 'message': 'At least one item is required'}, 400)
-
-    phone = (data.get('customerPhone') or '').strip()
-    allowed, spam_msg = check_spam_protection(phone, 'order')
-    if not allowed:
-        return None, ({'status': 'error', 'message': spam_msg}, 429)
-
-    pickup_branch_id = int(data['pickupBranchId'])
-    pickup_branch = Branch.query.get(pickup_branch_id)
-    if not pickup_branch or not pickup_branch.is_active:
-        return None, ({'status': 'error', 'message': 'Invalid or inactive pickup branch'}, 400)
-
-    all_items = []
-    items_by_source = {}
-    all_deductions = []
-    requested_by_product = {}
-    for item_data in data['items']:
-        product_id = item_data.get('productId')
-        quantity = order_quantity(item_data.get('quantity', 1))
-        if quantity is None:
-            return None, ({'status': 'error', 'message': 'Each quantity must be a whole number above zero'}, 400)
-        # Row lock: two checkouts for the last units can't both take them
-        product = PremadeProduct.query.filter_by(id=product_id, is_archived=False).with_for_update().first()
-        if not product:
-            return None, ({'status': 'error', 'message': f'Product {product_id} not found'}, 400)
-        # The same product listed twice is checked against its stock once, in total
-        requested_by_product[product.id] = requested_by_product.get(product.id, 0) + quantity
-        if float(product.quantity) < requested_by_product[product.id]:
-            return None, ({'status': 'error', 'message': f'Insufficient stock for {product.name}'}, 400)
-
-        item_dict = {
-            'productId': product.id,
-            'name': product.name,
-            'sku': product.sku,
-            'quantity': quantity,
-            'unitPrice': float(product.price),
-            'total': float(product.price) * quantity,
-            'sourceBranchId': int(product.branch_id),
-            'sourceBranchName': product.branch.name if product.branch else None,
-        }
-        all_items.append(item_dict)
-        all_deductions.append((product, quantity))
-
-        src = int(product.branch_id)
-        if src != pickup_branch_id:
-            items_by_source.setdefault(src, []).append(item_dict)
-
-    needs_transfers = len(items_by_source) > 0
-    group_id = str(uuid.uuid4()) if needs_transfers else None
-
-    order = ProductOrder(
-        order_number=generate_product_order_number(),
-        customer_name=data['customerName'],
-        customer_phone=data['customerPhone'],
-        customer_email=data.get('customerEmail', ''),
-        customer_address=data.get('customerAddress', ''),
-        items=all_items,
-        total_amount=sum(i['total'] for i in all_items),
-        vat_percent=current_vat_percent(),  # product prices include VAT
-        branch_id=pickup_branch_id,
-        pickup_branch_id=pickup_branch_id,
-        shipment_status='pending' if needs_transfers else 'not_needed',
-        group_id=group_id,
-        status='pending',
-        payment_status='unpaid',
-        user_id=user_id,
-        notes=data.get('notes', '')
-    )
-    db.session.add(order)
-    db.session.flush()
-
-    # Deduct at allocation time so sales attribution stays with the source branch.
-    for product, qty in all_deductions:
-        product.quantity = float(product.quantity) - qty
-
-    for src_branch_id, branch_items in items_by_source.items():
-        db.session.add(ProductOrderTransfer(
-            product_order_id=order.id,
-            source_branch_id=src_branch_id,
-            items=branch_items,
-            status='pending'
-        ))
-        notify_branch_users(
-            src_branch_id,
-            'transfer_request',
-            f'Transfer Request — {order.order_number}',
-            f'Items needed at {pickup_branch.name}. Please prepare and dispatch.',
-            {'orderId': order.id, 'orderNumber': order.order_number, 'pickupBranchName': pickup_branch.name},
-        )
-
-    db.session.commit()
-
-    log_action(
-        user_id or 0, data.get('customerName', 'Customer'), 'CREATE', 'Product Orders',
-        f"Order {order.order_number} at {pickup_branch.name} — {len(items_by_source)} transfer request(s) created",
-        request.remote_addr or '0.0.0.0'
-    )
-    return order, None
-
-@app.route('/api/product-orders/multi-branch', methods=['POST'])
-def create_multi_branch_product_order():
-    """Create a single order at the pickup branch. Items from other branches
-    generate transfer requests notifying those branches to send the items over."""
-    data = request.get_json()
-
-    required = ['customerName', 'customerPhone', 'items', 'pickupBranchId']
-    if not all(f in data for f in required):
-        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
-
-    user_id = None
-    token = request.headers.get('Authorization', '').replace('Bearer ', '')
-    if token:
-        u = get_user_from_token(token)
-        if u:
-            user_id = u['id']
-
-    order, error = place_multi_branch_order(data, user_id)
-    if error:
-        payload, code = error
-        return jsonify(payload), code
-    return jsonify({'status': 'success', 'data': product_order_to_dict(order)}), 201
 
 @app.route('/api/product-orders/group/<group_id>', methods=['GET'])
 @require_auth
@@ -6592,91 +6176,82 @@ def confirm_transfer_receipt(transfer_id):
     return jsonify({'status': 'success', 'data': transfer_to_dict(transfer)})
 
 
-@app.route('/api/product-orders', methods=['POST'])
-def create_product_order():
-    """Create a new product order - public endpoint for ordering premade products"""
-    data = request.get_json()
+def build_premade_sale(staff, data):
+    """Check a premade sale and add it to the session: the order, and the stock
+    it takes off the shelf. Does not commit, so a caller can save other changes
+    in the same transaction. Returns (order, branch, None) or
+    (None, None, (payload, status))."""
+    def fail(message, code=400):
+        return None, None, ({'status': 'error', 'message': message}, code)
 
-    required = ['customerName', 'customerPhone', 'items', 'branchId']
-    if not all(f in data for f in required):
-        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    # The customer's phone is optional: not every customer gives one
+    required = ['customerName', 'items', 'branchId']
+    if not all(f in data for f in required) or not str(data['customerName'] or '').strip():
+        return fail('Customer name, branch and items are required')
+    if not data['items']:
+        return fail('At least one item is required')
 
-    # Spam / abuse protection
-    phone = data.get('customerPhone', '').strip()
-    allowed, spam_msg = check_spam_protection(phone, 'order')
-    if not allowed:
-        return jsonify({'status': 'error', 'message': spam_msg}), 429
-
-    if not data['items'] or len(data['items']) == 0:
-        return jsonify({'status': 'error', 'message': 'At least one item is required'}), 400
-    
-    # Validate branch
-    branch_id = data['branchId']
+    try:
+        branch_id = int(data['branchId'])
+    except (TypeError, ValueError):
+        return fail('Invalid branch')
     branch = Branch.query.get(branch_id)
     if not branch or not branch.is_active:
-        return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
-    
-    # Check if user is authenticated (optional)
-    user_id = None
-    token = request.headers.get('Authorization', '').replace('Bearer ', '')
-    if token:
-        user = get_user_from_token(token)
-        if user:
-            user_id = user['id']
-    
-    # Validate items and calculate total
+        return fail('Invalid or inactive branch')
+    # Staff sell from their own branch's stock unless they work across branches
+    if inventory_branch_error(staff, branch.id):
+        return fail('You can only record sales for your own branch', 403)
+
     total_amount = 0
     validated_items = []
-    
     requested_by_product = {}
     stock_deductions = []
     for item in data['items']:
         product_id = item.get('productId')
         quantity = order_quantity(item.get('quantity', 1))
         if quantity is None:
-            return jsonify({'status': 'error', 'message': 'Each quantity must be a whole number above zero'}), 400
+            return fail('Each quantity must be a whole number above zero')
 
-        # Find product in database-backed premade products. Row lock: two orders
-        # for the last units can't both take them
+        # Row lock: two orders for the last units can't both take them
         product = PremadeProduct.query.filter_by(id=product_id, is_archived=False).with_for_update().first()
         if not product:
-            return jsonify({'status': 'error', 'message': f'Product with ID {product_id} not found'}), 400
+            return fail(f"{item.get('name') or f'Product {product_id}'} is no longer available")
 
         requested_by_product[product.id] = requested_by_product.get(product.id, 0) + quantity
         if float(product.quantity) < requested_by_product[product.id]:
-            return jsonify({'status': 'error', 'message': f'Insufficient stock for {product.name}'}), 400
+            return fail(f'Insufficient stock for {product.name}: {float(product.quantity):g} available')
 
-        # Enforce that all products come from the selected pickup branch.
-        if int(product.branch_id) != int(branch_id):
-            return jsonify({'status': 'error', 'message': f'{product.name} is not available in the selected branch'}), 400
+        # Every product comes from the selling branch's own stock
+        if int(product.branch_id) != branch_id:
+            return fail(f'{product.name} is not available in the selected branch')
 
         item_total = float(product.price) * quantity
         total_amount += item_total
-
         validated_items.append({
-            'productId': product_id,
+            'productId': product.id,
             'name': product.name,
             'sku': product.sku,
             'quantity': quantity,
             'unitPrice': float(product.price),
             'total': item_total,
-            # Taken from this branch's stock now, like checkout (stock_taken_at_placement)
+            # Production cost per piece at the time of the sale, so the cost of
+            # goods sold doesn't change if the product's cost is edited later
+            'unitCost': float(product.cost or 0),
+            # Taken from this branch's stock now (stock_taken_at_placement)
             'sourceBranchId': int(product.branch_id),
         })
         stock_deductions.append((product, quantity))
-    
-    try:
-        payment_amount = money(float(data.get('paymentAmount') or 0))
-    except (TypeError, ValueError):
-        return jsonify({'status': 'error', 'message': 'Payment amount must be a number'}), 400
+
+    payment_amount = finite_number(data.get('paymentAmount'), 0.0)
+    if payment_amount is None:
+        return fail('Payment amount must be a number')
+    payment_amount = money(payment_amount)
     # Money taken at the counter is recorded by staff who may take payments,
     # and can't be more than the order costs
-    payer = get_user_from_token(token) if token else None
-    if payment_amount > 0 and not (payer and has_perm(payer, 'product_orders.payment')):
-        return jsonify({'status': 'error', 'message': 'You do not have permission to record payments'}), 403
+    if payment_amount > 0 and not has_perm(staff, 'product_orders.payment'):
+        return fail('You do not have permission to record payments', 403)
     if payment_amount < 0 or payment_amount > money(total_amount):
-        return jsonify({'status': 'error',
-                        'message': f'Payment must be between ₱0 and the order total of ₱{total_amount:,.2f}'}), 400
+        return fail(f'Payment must be between ₱0 and the order total of ₱{total_amount:,.2f}')
     if payment_amount >= total_amount and total_amount > 0:
         initial_payment_status = 'paid'
     elif payment_amount > 0:
@@ -6684,12 +6259,13 @@ def create_product_order():
     else:
         initial_payment_status = 'unpaid'
 
-    new_order = ProductOrder(
+    lock_product_order_numbering()
+    order = ProductOrder(
         order_number=generate_product_order_number(),
-        customer_name=data['customerName'],
-        customer_phone=data['customerPhone'],
-        customer_email=data.get('customerEmail', ''),
-        customer_address=data.get('customerAddress', ''),
+        customer_name=str(data['customerName']).strip(),
+        customer_phone=str(data.get('customerPhone') or '').strip(),
+        customer_email=data.get('customerEmail') or '',
+        customer_address=data.get('customerAddress') or '',
         items=validated_items,
         total_amount=total_amount,
         vat_percent=current_vat_percent(),  # product prices include VAT
@@ -6697,26 +6273,331 @@ def create_product_order():
         status='pending',
         payment_status=initial_payment_status,
         amount_paid=payment_amount,
-        user_id=user_id,
-        notes=data.get('notes', '')
+        user_id=staff['id'],
+        notes=data.get('notes') or ''
     )
-    
-    db.session.add(new_order)
+    db.session.add(order)
     # The units are taken off the shelf now, so another order can't promise them
     for product, qty in stock_deductions:
         product.quantity = float(product.quantity) - qty
-    db.session.commit()
+    return order, branch, None
 
-    log_action(
-        user_id if user_id else 0,
-        data.get('customerName', 'Customer'),
-        'CREATE',
-        'Product Orders',
-        f"Created product order {new_order.order_number} for branch {branch.name}",
-        request.remote_addr or '0.0.0.0'
-    )
-    
-    return jsonify({'status': 'success', 'data': product_order_to_dict(new_order)}), 201
+@app.route('/api/product-orders', methods=['POST'])
+@require_auth
+@require_permission('sales.add')
+def create_product_order():
+    """Record a premade product sale made at a branch (walk-in, phone or
+    message). Staff only: customers no longer order online."""
+    staff = request.current_user
+    order, branch, error = build_premade_sale(staff, request.get_json(silent=True) or {})
+    if error:
+        db.session.rollback()
+        payload, code = error
+        return jsonify(payload), code
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({'status': 'error', 'message': NUMBER_CLASH_MESSAGE}), 409
+
+    log_action(staff['id'], staff['fullName'], 'CREATE', 'Product Orders',
+               f"Recorded product order {order.order_number} for {order.customer_name} at {branch.name}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': product_order_to_dict(order)}), 201
+
+# ============================================
+# PREMADE JOB ORDER DRAFTS
+# ============================================
+
+def generate_premade_draft_number(branch_code):
+    """Next draft number for this branch and year (PD-BA-2026-0001, ...)"""
+    prefix = f'PD-{branch_code}-{datetime.now().year}-'
+    numbers = [int(n[len(prefix):]) for (n,) in
+               db.session.query(PremadeDraft.draft_number).filter(PremadeDraft.draft_number.like(f'{prefix}%')).all()
+               if n[len(prefix):].isdigit()]
+    return f'{prefix}{(max(numbers) + 1 if numbers else 1):04d}'
+
+def premade_draft_availability(draft):
+    """Each line checked against stock as it is now. Nothing is taken off or
+    dropped: a line whose product sold out stays, flagged, so staff can lower
+    it, remove it or wait for stock. Returns (rows, all_ok)."""
+    lines = draft.items or []
+    ids = [it.get('productId') for it in lines if it.get('productId')]
+    products = {p.id: p for p in PremadeProduct.query.filter(PremadeProduct.id.in_(ids or [-1])).all()}
+    requested = {}
+    for it in lines:
+        requested[it.get('productId')] = requested.get(it.get('productId'), 0) + int(it.get('quantity') or 0)
+    rows, all_ok = [], bool(lines)
+    for it in lines:
+        pid = it.get('productId')
+        product = products.get(pid)
+        qty = int(it.get('quantity') or 0)
+        name = (product.name if product else None) or it.get('name') or f'Product {pid}'
+        sellable = product is not None and not product.is_archived and product.branch_id == draft.branch_id
+        available = float(product.quantity or 0) if sellable else 0.0
+        if not sellable:
+            issue, message = 'unavailable', f'{name} is no longer sold at this branch.'
+        elif available <= 0:
+            issue, message = 'out_of_stock', f'{name} is out of stock.'
+        elif available < requested[pid]:
+            issue, message = 'insufficient', f'Only {available:g} of {name} in stock; the draft needs {requested[pid]}.'
+        else:
+            issue, message = None, ''
+        all_ok = all_ok and issue is None
+        price = float(product.price or 0) if product else float(it.get('unitPrice') or 0)
+        rows.append({
+            'productId': pid, 'name': name, 'sku': product.sku if product else it.get('sku'),
+            'quantity': qty, 'available': available,
+            'unitPrice': price, 'savedUnitPrice': float(it.get('unitPrice') or 0), 'total': round(price * qty, 2),
+            'issue': issue, 'message': message,
+        })
+    return rows, all_ok
+
+def premade_draft_to_dict(draft):
+    rows, all_ok = premade_draft_availability(draft)
+    return {
+        'id': draft.id,
+        'draftNumber': draft.draft_number,
+        'status': draft.status,
+        'branchId': draft.branch_id,
+        'branchName': draft.branch.name if draft.branch else None,
+        'customerId': draft.customer_id,
+        'customerName': draft.customer_name,
+        'customerPhone': draft.customer_phone or '',
+        'customerEmail': draft.customer_email or '',
+        'customerAddress': draft.customer_address or '',
+        'notes': draft.notes or '',
+        'paymentMethod': draft.payment_method or 'cash',
+        'items': rows,
+        'itemCount': sum(r['quantity'] for r in rows),
+        # At current prices: what the sale would come to if confirmed now
+        'totalAmount': round(sum(r['total'] for r in rows), 2),
+        'isAvailable': all_ok,
+        'productOrderId': draft.product_order_id,
+        'productOrderNumber': draft.product_order.order_number if draft.product_order else None,
+        'createdByName': draft.creator.full_name if draft.creator else None,
+        'updatedByName': draft.updater.full_name if draft.updater else None,
+        'createdAt': fmt_dt(draft.created_at),
+        'updatedAt': fmt_dt(draft.updated_at),
+        'confirmedAt': fmt_dt(draft.confirmed_at),
+    }
+
+def premade_draft_access_error(user, draft):
+    """Staff see their own branch's drafts; cross-branch staff see every branch's."""
+    if all_job_order_branches(user) or draft.branch_id == user_branch_id(user):
+        return None
+    return jsonify({'status': 'error', 'message': 'This draft belongs to another branch'}), 403
+
+def apply_premade_draft_fields(draft, data, staff):
+    """Copy what was entered onto the draft. Products must be sold at the
+    draft's branch, but stock is not checked: a draft may ask for more than is
+    on the shelf (the line is flagged, and confirming is refused until it fits).
+    Returns an error message, or None."""
+    if 'customerName' in data:
+        name = (data.get('customerName') or '').strip()
+        if not name:
+            return 'Customer name is required to save a draft'
+        draft.customer_name = name[:255]
+    for key, attr, size in (('customerPhone', 'customer_phone', 50), ('customerEmail', 'customer_email', 255),
+                            ('customerAddress', 'customer_address', 255), ('paymentMethod', 'payment_method', 30)):
+        if key in data:
+            setattr(draft, attr, (str(data.get(key) or '').strip()[:size]) or None)
+    if 'notes' in data:
+        draft.notes = str(data.get('notes') or '').strip() or None
+    if 'customerId' in data:
+        cid = data.get('customerId')
+        draft.customer_id = cid if cid and Customer.query.get(cid) else None
+    if 'items' in data:
+        raw = data.get('items') or []
+        if not isinstance(raw, list):
+            return 'Items must be a list'
+        previous_ids = {it.get('productId') for it in (draft.items or [])}
+        items, by_product = [], {}
+        for entry in raw:
+            if not isinstance(entry, dict) or not entry.get('productId'):
+                continue  # an empty row on the form
+            quantity = order_quantity(entry.get('quantity', 1))
+            if quantity is None:
+                return 'Each quantity must be a whole number above zero'
+            product = PremadeProduct.query.get(entry.get('productId'))
+            # A product already on the draft may stay even if it was archived since
+            if not product or product.branch_id != draft.branch_id or \
+                    (product.is_archived and product.id not in previous_ids):
+                return f"That product is not sold at {draft.branch.name if draft.branch else 'this branch'}"
+            if product.id in by_product:  # the same product twice becomes one line
+                by_product[product.id]['quantity'] += quantity
+                continue
+            line = {'productId': product.id, 'name': product.name, 'sku': product.sku,
+                    'quantity': quantity, 'unitPrice': float(product.price or 0)}
+            by_product[product.id] = line
+            items.append(line)
+        draft.items = items
+    draft.updated_by = staff['id']
+    draft.updated_at = datetime.utcnow()
+    return None
+
+def drafts_for(user):
+    query = PremadeDraft.query.filter(PremadeDraft.status == 'draft')
+    if not all_job_order_branches(user):
+        query = query.filter(PremadeDraft.branch_id == (user_branch_id(user) or -1))
+    return query
+
+@app.route('/api/premade-drafts', methods=['GET'])
+@require_auth
+@require_permission('sales.view')
+def list_premade_drafts():
+    drafts = drafts_for(request.current_user).order_by(PremadeDraft.updated_at.desc()).all()
+    return jsonify({'status': 'success', 'data': [premade_draft_to_dict(d) for d in drafts]})
+
+@app.route('/api/premade-drafts/<int:draft_id>', methods=['GET'])
+@require_auth
+@require_permission('sales.view')
+def get_premade_draft(draft_id):
+    draft = PremadeDraft.query.get(draft_id)
+    if not draft:
+        return jsonify({'status': 'error', 'message': 'Draft not found'}), 404
+    error = premade_draft_access_error(request.current_user, draft)
+    if error:
+        return error
+    return jsonify({'status': 'success', 'data': premade_draft_to_dict(draft)})
+
+@app.route('/api/premade-drafts', methods=['POST'])
+@require_auth
+@require_permission('sales.add')
+def create_premade_draft():
+    staff = request.current_user
+    data = request.get_json(silent=True) or {}
+    try:
+        branch = Branch.query.get(int(data.get('branchId')))
+    except (TypeError, ValueError):
+        branch = None
+    if not branch or not branch.is_active:
+        return jsonify({'status': 'error', 'message': 'Choose the branch the products are sold from'}), 400
+    if inventory_branch_error(staff, branch.id):
+        return jsonify({'status': 'error', 'message': 'You can only prepare drafts for your own branch'}), 403
+    if not (data.get('customerName') or '').strip():
+        return jsonify({'status': 'error', 'message': 'Customer name is required to save a draft'}), 400
+
+    # Two drafts saved at the same moment can pick the same number; the loser retries
+    for attempt in range(3):
+        draft = PremadeDraft(branch_id=branch.id, branch=branch, customer_name='', items=[], status='draft',
+                             created_by=staff['id'])
+        error = apply_premade_draft_fields(draft, data, staff)
+        if error:
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': error}), 400
+        draft.draft_number = generate_premade_draft_number(branch.code)
+        db.session.add(draft)
+        try:
+            db.session.commit()
+            break
+        except IntegrityError:
+            db.session.rollback()
+    else:
+        return jsonify({'status': 'error', 'message': 'Could not number the draft. Please try again.'}), 409
+
+    log_action(staff['id'], staff['fullName'], 'CREATE', 'Sales',
+               f"Saved premade draft {draft.draft_number} for {draft.customer_name}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': premade_draft_to_dict(draft)}), 201
+
+def _locked_open_draft(draft_id):
+    """The draft, row-locked so a double-click can't save or confirm it twice,
+    or an error response if it can't be changed."""
+    draft = PremadeDraft.query.filter_by(id=draft_id).with_for_update().first()
+    if not draft:
+        return None, (jsonify({'status': 'error', 'message': 'Draft not found'}), 404)
+    error = premade_draft_access_error(request.current_user, draft)
+    if error:
+        return None, error
+    if draft.status != 'draft':
+        number = draft.product_order.order_number if draft.product_order else 'an order'
+        return None, (jsonify({'status': 'error', 'message': f'This draft was already recorded as {number}.'}), 400)
+    return draft, None
+
+@app.route('/api/premade-drafts/<int:draft_id>', methods=['PUT'])
+@require_auth
+@require_permission('sales.add', 'sales.edit')
+def update_premade_draft(draft_id):
+    draft, error = _locked_open_draft(draft_id)
+    if error:
+        return error
+    error = apply_premade_draft_fields(draft, request.get_json(silent=True) or {}, request.current_user)
+    if error:
+        db.session.rollback()
+        return jsonify({'status': 'error', 'message': error}), 400
+    db.session.commit()
+    return jsonify({'status': 'success', 'data': premade_draft_to_dict(draft)})
+
+@app.route('/api/premade-drafts/<int:draft_id>', methods=['DELETE'])
+@require_auth
+@require_permission('sales.delete')
+def delete_premade_draft(draft_id):
+    draft, error = _locked_open_draft(draft_id)
+    if error:
+        return error
+    number = draft.draft_number
+    db.session.delete(draft)
+    db.session.commit()
+    staff = request.current_user
+    log_action(staff['id'], staff['fullName'], 'DELETE', 'Sales', f"Deleted premade draft {number}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'message': 'Draft deleted'})
+
+@app.route('/api/premade-drafts/<int:draft_id>/confirm', methods=['POST'])
+@require_auth
+@require_permission('sales.add')
+def confirm_premade_draft(draft_id):
+    """Record the draft as a real premade order. Stock is checked again here,
+    with the product rows locked, whatever the page showed: if anything is short
+    nothing is recorded and the draft comes back with its stock flags."""
+    staff = request.current_user
+    draft, error = _locked_open_draft(draft_id)
+    if error:
+        return error
+    data = request.get_json(silent=True) or {}
+
+    rows, all_ok = premade_draft_availability(draft)
+    if not all_ok:
+        payload = premade_draft_to_dict(draft)
+        db.session.rollback()
+        message = ('Some items are out of stock or short. Edit the draft or wait for stock.'
+                   if rows else 'Add at least one product before confirming.')
+        return jsonify({'status': 'error', 'message': message, 'data': payload}), 409
+    payment_method = str(data.get('paymentMethod') or draft.payment_method or 'cash')[:30]
+    notes = [draft.notes or '', f'Recorded from draft {draft.draft_number}', f'Payment Method: {payment_method}']
+    order, _branch, sale_error = build_premade_sale(staff, {
+        'customerName': draft.customer_name, 'customerPhone': draft.customer_phone or '',
+        'customerEmail': draft.customer_email, 'customerAddress': draft.customer_address,
+        'branchId': draft.branch_id, 'paymentAmount': data.get('paymentAmount') or 0,
+        'items': [{'productId': it['productId'], 'quantity': it['quantity'], 'name': it.get('name')}
+                  for it in draft.items or []],
+        'notes': '\n'.join(n for n in notes if n),
+    })
+    if sale_error:
+        # Stock moved between the check above and the locked re-check: nothing is saved
+        db.session.rollback()
+        payload, code = sale_error
+        return jsonify(payload), code
+    try:
+        db.session.flush()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({'status': 'error', 'message': NUMBER_CLASH_MESSAGE}), 409
+    draft.status = 'confirmed'
+    draft.product_order_id = order.id
+    draft.payment_method = payment_method
+    draft.confirmed_at = datetime.utcnow()
+    draft.updated_by = staff['id']
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({'status': 'error', 'message': NUMBER_CLASH_MESSAGE}), 409
+
+    log_action(staff['id'], staff['fullName'], 'CREATE', 'Product Orders',
+               f"Recorded product order {order.order_number} for {order.customer_name} from draft {draft.draft_number}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': product_order_to_dict(order)}), 201
 
 @app.route('/api/product-orders', methods=['GET'])
 @require_auth
@@ -6872,10 +6753,10 @@ def update_product_order(order_id):
         order.payment_status = data['paymentStatus']
     
     if 'addPayment' in data:
-        try:
-            add_amount = money(float(data.get('addPayment') or 0))
-        except (TypeError, ValueError):
+        add_amount = finite_number(data.get('addPayment'), 0.0)
+        if add_amount is None:
             return jsonify({'status': 'error', 'message': 'Payment amount must be a number'}), 400
+        add_amount = money(add_amount)
         remaining = money(max(float(order.total_amount or 0) - float(order.amount_paid or 0), 0))
         if add_amount < 0:
             return jsonify({'status': 'error', 'message': 'Payment amount must be positive'}), 400
@@ -6945,248 +6826,14 @@ def get_product_order_timeline(order_id):
     return jsonify({'status': 'success', 'data': build_product_order_timeline(order)})
 
 # ============================================
-# PREMADE CART DRAFTS (saved carts)
-# ============================================
-
-def cart_draft_to_dict(draft, include_availability=True):
-    """Serialise a saved cart. Availability is recomputed on every read so the
-    customer always sees current stock, not what was true when they saved."""
-    items = draft.items or []
-    payload = {
-        'id': draft.id,
-        'kind': 'premade',
-        'userId': draft.user_id,
-        'customerName': draft.customer_name or '',
-        'customerPhone': draft.customer_phone or '',
-        'customerEmail': draft.customer_email or '',
-        'customerAddress': draft.customer_address or '',
-        'pickupBranchId': draft.pickup_branch_id,
-        'pickupBranchName': draft.pickup_branch.name if draft.pickup_branch else None,
-        'notes': draft.notes or '',
-        'items': items,
-        'itemCount': sum(int(i.get('quantity', 0) or 0) for i in items),
-        'createdAt': fmt_dt(draft.created_at),
-        'updatedAt': fmt_dt(draft.updated_at),
-    }
-    if include_availability:
-        all_ok, report = check_items_availability(items)
-        # Total at current prices — what the customer would actually pay now.
-        payload['availability'] = report
-        payload['isAvailable'] = all_ok
-        payload['totalAmount'] = sum(
-            (row['currentPrice'] or 0) * row['requested']
-            for row in report if row['issue'] is None
-        )
-    else:
-        payload['totalAmount'] = sum(
-            float(i.get('unitPrice') or 0) * int(i.get('quantity', 0) or 0) for i in items
-        )
-    return payload
-
-@app.route('/api/product-orders/draft', methods=['GET'])
-@require_auth
-def get_my_cart_draft():
-    """The logged-in customer's saved cart, if any."""
-    draft = CartDraft.query.filter_by(user_id=request.current_user['id']).first()
-    if not draft:
-        return jsonify({'status': 'success', 'data': None})
-    return jsonify({'status': 'success', 'data': cart_draft_to_dict(draft)})
-
-@app.route('/api/product-orders/draft', methods=['PUT'])
-@require_auth
-def save_my_cart_draft():
-    """Create or replace the logged-in customer's saved cart.
-
-    Item names and prices are re-read from the catalogue rather than trusted
-    from the client, so a saved cart can't carry a forged price.
-    """
-    data = request.get_json() or {}
-    raw_items = data.get('items') or []
-    if not isinstance(raw_items, list):
-        return jsonify({'status': 'error', 'message': 'items must be a list'}), 400
-    if not raw_items:
-        return jsonify({'status': 'error', 'message': 'Cannot save an empty cart'}), 400
-
-    items = []
-    for entry in raw_items:
-        quantity = int(entry.get('quantity', 0) or 0)
-        if quantity <= 0:
-            continue
-        product = PremadeProduct.query.filter_by(id=entry.get('productId'), is_archived=False).first()
-        if not product:
-            return jsonify({'status': 'error',
-                            'message': f"Product {entry.get('productId')} is no longer available"}), 400
-        items.append({
-            'productId': product.id,
-            'name': product.name,
-            'sku': product.sku,
-            'quantity': quantity,
-            'unitPrice': float(product.price or 0),
-            'sourceBranchId': product.branch_id,
-            'sourceBranchName': product.branch.name if product.branch else None,
-        })
-
-    if not items:
-        return jsonify({'status': 'error', 'message': 'Cannot save an empty cart'}), 400
-
-    pickup_branch_id = data.get('pickupBranchId')
-    if pickup_branch_id:
-        branch = Branch.query.get(pickup_branch_id)
-        if not branch or not branch.is_active:
-            return jsonify({'status': 'error', 'message': 'Invalid or inactive pickup branch'}), 400
-
-    user = request.current_user
-    draft = CartDraft.query.filter_by(user_id=user['id']).first()
-    if not draft:
-        draft = CartDraft(user_id=user['id'])
-        db.session.add(draft)
-
-    draft.items = items
-    draft.pickup_branch_id = pickup_branch_id or None
-    draft.customer_name = (data.get('customerName') or user.get('fullName') or '').strip()
-    draft.customer_phone = (data.get('customerPhone') or '').strip()
-    draft.customer_email = (data.get('customerEmail') or user.get('email') or '').strip()
-    draft.customer_address = (data.get('customerAddress') or '').strip()
-    draft.notes = data.get('notes') or ''
-    draft.updated_at = datetime.utcnow()
-    db.session.commit()
-
-    return jsonify({'status': 'success', 'data': cart_draft_to_dict(draft)})
-
-@app.route('/api/product-orders/draft', methods=['DELETE'])
-@require_auth
-def delete_my_cart_draft():
-    draft = CartDraft.query.filter_by(user_id=request.current_user['id']).first()
-    if not draft:
-        return jsonify({'status': 'error', 'message': 'No saved cart'}), 404
-    db.session.delete(draft)
-    db.session.commit()
-    return jsonify({'status': 'success', 'message': 'Saved cart discarded'})
-
-@app.route('/api/product-orders/draft/confirm', methods=['POST'])
-@require_auth
-def confirm_my_cart_draft():
-    """Turn the saved cart into a real order, but only if every line is still
-    in stock. On any shortfall nothing is ordered and the per-item report is
-    returned so the customer can adjust and try again.
-    """
-    draft = CartDraft.query.filter_by(user_id=request.current_user['id']).first()
-    if not draft:
-        return jsonify({'status': 'error', 'message': 'No saved cart to confirm'}), 404
-
-    data = request.get_json() or {}
-    # Last-minute details may be supplied at confirm time, else reuse the draft's.
-    customer_name = (data.get('customerName') or draft.customer_name or '').strip()
-    customer_phone = (data.get('customerPhone') or draft.customer_phone or '').strip()
-    pickup_branch_id = data.get('pickupBranchId') or draft.pickup_branch_id
-
-    if not customer_name or not customer_phone:
-        return jsonify({'status': 'error', 'message': 'Name and phone number are required'}), 400
-    if not pickup_branch_id:
-        return jsonify({'status': 'error', 'message': 'Please select a pickup branch'}), 400
-
-    all_ok, report = check_items_availability(draft.items)
-    if not all_ok:
-        return jsonify({
-            'status': 'error',
-            'message': 'Some items in your saved cart are no longer available. '
-                       'Please review and update your cart.',
-            'availability': report,
-        }), 409
-
-    order, error = place_multi_branch_order({
-        'customerName': customer_name,
-        'customerPhone': customer_phone,
-        'customerEmail': data.get('customerEmail') or draft.customer_email or '',
-        'customerAddress': data.get('customerAddress') or draft.customer_address or '',
-        'items': [{'productId': i['productId'], 'quantity': i['quantity']} for i in draft.items],
-        'pickupBranchId': pickup_branch_id,
-        'notes': data.get('notes') or draft.notes or '',
-    }, request.current_user['id'])
-
-    if error:
-        payload, code = error
-        return jsonify(payload), code
-
-    # The cart became an order, so the draft is done.
-    db.session.delete(draft)
-    db.session.commit()
-
-    return jsonify({'status': 'success', 'data': product_order_to_dict(order)}), 201
-
-@app.route('/api/product-orders/drafts', methods=['GET'])
-@require_auth
-@require_permission('sales.view')
-def get_premade_drafts():
-    """Staff view of customers' saved carts that haven't been confirmed yet."""
-    drafts = CartDraft.query.order_by(CartDraft.updated_at.desc()).all()
-    return jsonify({'status': 'success', 'data': [cart_draft_to_dict(d) for d in drafts]})
-
-@app.route('/api/product-orders/my-orders', methods=['GET'])
-@require_auth
-def get_my_product_orders():
-    """Get product orders for the logged-in customer"""
-    user_id = request.current_user['id']
-    orders = ProductOrder.query.filter_by(user_id=user_id).order_by(ProductOrder.created_at.desc()).all()
-    return jsonify({'status': 'success', 'data': [product_order_to_dict(o) for o in orders]})
-
-@app.route('/api/product-orders/my-orders/<int:order_id>/cancel', methods=['POST'])
-@require_auth
-@require_customer
-def cancel_my_product_order(order_id):
-    """A customer cancels their own premade order while it is still pending.
-    The stock taken when the order was placed goes back on the shelf and any
-    transfer requests still waiting to be sent are called off."""
-    user = request.current_user
-    # Row lock: a repeated cancel waits, then sees the order already cancelled
-    order = ProductOrder.query.filter_by(id=order_id, user_id=user['id']).with_for_update().first()
-    if not order:
-        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
-    if order.status != 'pending':
-        return jsonify({'status': 'error',
-                        'message': 'Only pending orders can be cancelled. Please contact the shop.'}), 400
-    if any(t.status != 'pending' for t in (order.transfers or [])):
-        return jsonify({'status': 'error',
-                        'message': 'Some items are already on their way to your pickup branch. Please contact the shop to cancel.'}), 400
-
-    # Only stock the order actually took goes back (a walk-in order takes none until completed)
-    error = return_placement_stock(order)
-    if error:
-        return jsonify({'status': 'error', 'message': error}), 400
-    order.status = 'cancelled'
-
-    notify_branch_users(
-        order.branch_id, 'order_cancelled',
-        f'Order cancelled — {order.order_number}',
-        f'{order.customer_name} cancelled their order {order.order_number}. The items were returned to stock.',
-        {'orderId': order.id, 'orderNumber': order.order_number},
-    )
-    for src_branch_id in {t.source_branch_id for t in (order.transfers or [])}:
-        notify_branch_users(
-            src_branch_id, 'order_cancelled',
-            f'Transfer cancelled — {order.order_number}',
-            f'{order.order_number} was cancelled by the customer. Do not send its items.',
-            {'orderId': order.id, 'orderNumber': order.order_number},
-        )
-    db.session.commit()
-
-    log_action(user['id'], user['fullName'], 'CANCEL', 'Product Orders',
-               f"Customer cancelled order {order.order_number}", request.remote_addr or '0.0.0.0')
-    return jsonify({'status': 'success', 'data': product_order_to_dict(order)})
-
-# ============================================
 # NOTIFICATIONS
 # ============================================
 
 def my_notifications_query(archived=False):
-    """The signed-in user's notifications in the bell (or the archive).
-    Customers only ever see updates about their own orders."""
+    """The signed-in user's notifications in the bell (or the archive)."""
     user = request.current_user
     q = Notification.query.filter(Notification.user_id == user['id'])
-    q = q.filter(Notification.is_archived == True) if archived else q.filter(Notification.is_archived.isnot(True))
-    if user['role'] == 'customer':
-        q = q.filter(Notification.type.in_(CUSTOMER_NOTIFICATION_TYPES))
-    return q
+    return q.filter(Notification.is_archived == True) if archived else q.filter(Notification.is_archived.isnot(True))
 
 @app.route('/api/notifications', methods=['GET'])
 @require_auth
@@ -7393,61 +7040,6 @@ def bulk_transfer_action():
 # CUSTOMER ORDERS MODULE
 # ============================================
 
-@app.route('/api/customer-orders', methods=['POST'])
-def place_customer_order():
-    """Place a new customer order - supports both authenticated and guest users"""
-    data = request.get_json()
-    
-    required = ['customerName', 'customerPhone', 'vehicleInfo', 'services']
-    if not all(f in data for f in required):
-        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
-    
-    if not data['services']:
-        return jsonify({'status': 'error', 'message': 'At least one service is required'}), 400
-    
-    # Validate branch if provided
-    branch_id = data.get('branchId', None)
-    if branch_id:
-        branch = Branch.query.get(branch_id)
-        if not branch or not branch.is_active:
-            return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
-    
-    # Check if user is authenticated (optional)
-    user_id = None
-    token = request.headers.get('Authorization', '').replace('Bearer ', '')
-    if token:
-        user = get_user_from_token(token)
-        if user:
-            user_id = user['id']
-    
-    order_count = CustomerOrder.query.count() + 1
-    order_number = f"CO-{order_count:04d}"
-    
-    new_order = CustomerOrder(
-        order_number=order_number,
-        customer_name=data['customerName'],
-        customer_phone=data['customerPhone'],
-        customer_email=data.get('customerEmail', ''),
-        customer_address=data.get('customerAddress', ''),
-        vehicle_info={
-            'make': data['vehicleInfo'].get('make', ''),
-            'model': data['vehicleInfo'].get('model', ''),
-            'year': str(data['vehicleInfo'].get('year', '')),
-            'plateNumber': data['vehicleInfo'].get('plateNumber', '')
-        },
-        services=data['services'],
-        notes=data.get('notes', ''),
-        status='pending',
-        branch_id=branch_id,
-        user_id=user_id,
-        quotation_status='pending_quotation'
-    )
-    
-    db.session.add(new_order)
-    db.session.commit()
-    
-    return jsonify({'status': 'success', 'data': customer_order_to_dict(new_order)}), 201
-
 @app.route('/api/customer-orders', methods=['GET'])
 @require_auth
 @require_permission('custom_requests.view')
@@ -7514,8 +7106,7 @@ def update_customer_order_status(order_id):
     
     # Branch-level access control
     if not all_branches(user):
-        user_branch = Branch.query.filter_by(name=user['branch']).first()
-        if not user_branch or order.branch_id != user_branch.id:
+        if not user_branch_id(user) or order.branch_id != user_branch_id(user):
             return jsonify({'status': 'error', 'message': 'Access denied'}), 403
     
     data = request.get_json()
@@ -7530,241 +7121,6 @@ def update_customer_order_status(order_id):
     db.session.commit()
     
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Customer Orders', f"Updated order status: {order.order_number} to {new_status}", request.remote_addr or '0.0.0.0')
-    
-    return jsonify({'status': 'success', 'data': customer_order_to_dict(order)})
-
-SIGNUP_CODE_TTL = timedelta(minutes=10)
-
-def _signup_code_hash(email, code):
-    return hashlib.sha256(f"signup:{email.lower()}:{code}".encode()).hexdigest()
-
-def signup_details_error(data):
-    """Why sign-up details can't be used, or None. Checked both before the
-    verification code is sent and again when the account is created."""
-    required = ['username', 'password', 'email', 'fullName', 'phone']
-    if not all((data.get(f) or '').strip() for f in required):
-        return 'Please fill in all the fields.'
-    if not USERNAME_PATTERN.match(data['username'].strip()):
-        return 'Username must be 3 to 50 characters: letters, numbers, dots, dashes or underscores.'
-    if not EMAIL_PATTERN.match(data['email'].strip()):
-        return 'Please enter a valid email address.'
-    if not PHONE_PATTERN.match(data['phone'].strip()):
-        return 'Enter a valid phone number, e.g. 09171234567.'
-    if len(data['password']) < MIN_PASSWORD_LENGTH:
-        return f'Password must be at least {MIN_PASSWORD_LENGTH} characters.'
-    if User.query.filter(db.func.lower(User.username) == data['username'].strip().lower()).first():
-        return 'That username is already taken.'
-    if User.query.filter(db.func.lower(User.email) == data['email'].strip().lower()).first():
-        return 'That email is already used by another account.'
-    return None
-
-@app.route('/api/auth/register/send-code', methods=['POST'])
-def send_signup_code():
-    """Sign-up, step 1: check the details and email a code to the address given."""
-    data = request.get_json(silent=True) or {}
-    error = signup_details_error(data)
-    if error:
-        return jsonify({'status': 'error', 'message': error}), 400
-
-    email = data['email'].strip().lower()
-    now = datetime.utcnow()
-    SignupCode.query.filter(SignupCode.created_at < now - timedelta(days=1)).delete(synchronize_session=False)
-    recent = (SignupCode.query.filter(SignupCode.email == email, SignupCode.created_at > now - timedelta(hours=1))
-              .order_by(SignupCode.created_at.desc()).all())
-    db.session.commit()
-    if len(recent) >= RESET_CODE_MAX_PER_HOUR:
-        return jsonify({'status': 'error', 'message': 'Too many code requests for this email. Please try again in an hour.'}), 429
-    if recent and (now - recent[0].created_at).total_seconds() < RESET_CODE_RESEND_SECONDS:
-        return jsonify({'status': 'success',
-                        'message': f'A code was sent to {email} less than a minute ago. Please check your inbox and spam folder.'})
-
-    # Only the newest code works
-    SignupCode.query.filter_by(email=email, used_at=None).update({'used_at': now}, synchronize_session=False)
-    code = f"{secrets.randbelow(10**6):06d}"
-    db.session.add(SignupCode(email=email, code_hash=_signup_code_hash(email, code),
-                              created_at=now, expires_at=now + SIGNUP_CODE_TTL))
-    db.session.commit()
-
-    name = data['fullName'].strip()
-    minutes = int(SIGNUP_CODE_TTL.total_seconds() // 60)
-    subject = f"{code} is your Seatmakers Avenue verification code"
-    text = (f"Hi {name},\n\nUse this code to finish creating your account: {code}\n\n"
-            f"It expires in {minutes} minutes. If you did not sign up, you can ignore this email.\n\n"
-            f"Seatmakers Avenue")
-    html = (f"<p>Hi {escape(name)},</p><p>Use this code to finish creating your account:</p>"
-            f"<p style=\"font-size:28px;font-weight:bold;letter-spacing:6px;color:#011c72\">{code}</p>"
-            f"<p>It expires in {minutes} minutes. If you did not sign up, you can ignore this email.</p>"
-            f"<p>Seatmakers Avenue</p>")
-    threading.Thread(target=send_email, args=(email, name, subject, text, html), daemon=True).start()
-    return jsonify({'status': 'success', 'message': f'A 6-digit code has been sent to {email}.'})
-
-@app.route('/api/auth/register', methods=['POST'])
-def register_customer():
-    """Sign-up, step 2: create the customer account once the emailed code checks out."""
-    data = request.get_json(silent=True) or {}
-    error = signup_details_error(data)
-    if error:
-        return jsonify({'status': 'error', 'message': error}), 400
-
-    email = data['email'].strip().lower()
-    code = (data.get('code') or '').strip()
-    if not code:
-        return jsonify({'status': 'error', 'message': 'Enter the 6-digit code we emailed you.'}), 400
-    now = datetime.utcnow()
-    sc = (SignupCode.query.filter(SignupCode.email == email, SignupCode.used_at.is_(None),
-                                  SignupCode.expires_at > now)
-          .order_by(SignupCode.created_at.desc()).first())
-    if not sc:
-        return jsonify({'status': 'error', 'message': 'This code is invalid or has expired. Request a new one.'}), 400
-    if not hmac.compare_digest(sc.code_hash, _signup_code_hash(email, code)):
-        sc.attempts = (sc.attempts or 0) + 1
-        left = RESET_CODE_MAX_ATTEMPTS - sc.attempts
-        if left <= 0:
-            sc.used_at = now
-        db.session.commit()
-        message = (f'Incorrect code. {left} attempt(s) left.' if left > 0
-                   else 'Too many incorrect attempts. Request a new code.')
-        return jsonify({'status': 'error', 'message': message}), 400
-    sc.used_at = now
-    data = {**data, 'username': data['username'].strip(), 'email': email, 'fullName': data['fullName'].strip()}
-    
-    # Get customer role
-    customer_role = Role.query.filter_by(key='customer').first()
-    if not customer_role:
-        return jsonify({'status': 'error', 'message': 'Customer role not configured'}), 500
-    
-    # Create new customer user
-    new_user = User(
-        username=data['username'],
-        password=hash_password(data['password']),
-        email=data['email'],
-        full_name=data['fullName'],
-        role_id=customer_role.id,
-        branch_id=None,
-        branch=None,
-        is_active=True,
-        phone=(data.get('phone') or '').strip() or None
-    )
-    
-    db.session.add(new_user)
-    db.session.commit()
-    
-    link_customer_record(new_user)  # show up in the staff Customers list
-    db.session.commit()
-    token = create_session(new_user)
-    
-    log_action(new_user.id, new_user.full_name, 'REGISTER', 'Auth', 'New customer registered', request.remote_addr or '0.0.0.0')
-    
-    return jsonify({
-        'status': 'success',
-        'data': {
-            'token': token,
-            'user': user_to_dict(new_user)
-        }
-    }), 201
-
-@app.route('/api/customer-orders/my-orders', methods=['GET'])
-@require_auth
-@require_customer
-def get_my_customer_orders():
-    """Get orders for the logged-in customer"""
-    user = request.current_user
-    
-    orders = CustomerOrder.query.filter_by(user_id=user['id']).order_by(CustomerOrder.created_at.desc()).all()
-    
-    return jsonify({'status': 'success', 'data': [customer_order_to_dict(o) for o in orders]})
-
-@app.route('/api/customer-orders/my-orders/<int:order_id>', methods=['GET'])
-@require_auth
-@require_customer
-def get_my_customer_order(order_id):
-    """Get a specific order for the logged-in customer"""
-    user = request.current_user
-    
-    order = CustomerOrder.query.filter_by(id=order_id, user_id=user['id']).first()
-    if not order:
-        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
-    
-    return jsonify({'status': 'success', 'data': customer_order_to_dict(order)})
-
-@app.route('/api/customer-orders/<int:order_id>/quotation', methods=['PUT'])
-@require_auth
-@require_permission('custom_requests.quote')
-def set_customer_order_quotation(order_id):
-    """Set quotation for a customer order"""
-    user = request.current_user
-    order = CustomerOrder.query.get(order_id)
-    
-    if order is None:
-        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
-    
-    # Branch-level access control
-    if not all_branches(user):
-        user_branch_id = user.get('branchId')
-        if not user_branch_id and user.get('branch'):
-            user_branch = Branch.query.filter_by(name=user['branch']).first()
-            user_branch_id = user_branch.id if user_branch else None
-        
-        if not user_branch_id or order.branch_id != user_branch_id:
-            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
-    
-    data = request.get_json()
-    
-    # Validate quotation items
-    items = data.get('items', [])
-    if not items:
-        return jsonify({'status': 'error', 'message': 'Quotation items are required'}), 400
-    
-    # Calculate total
-    total = 0
-    for item in items:
-        item_total = float(item.get('quantity', 1)) * float(item.get('unitPrice', 0))
-        item['total'] = item_total
-        total += item_total
-    
-    order.quotation_items = items
-    order.quotation_total = total
-    order.quotation_notes = data.get('notes', '')
-    order.quotation_status = 'quoted'
-    order.quoted_at = datetime.utcnow()
-    
-    db.session.commit()
-    
-    log_action(user['id'], user['fullName'], 'QUOTATION', 'Customer Orders', f"Sent quotation for order: {order.order_number}, Total: {total}", request.remote_addr or '0.0.0.0')
-    
-    return jsonify({'status': 'success', 'data': customer_order_to_dict(order)})
-
-@app.route('/api/customer-orders/<int:order_id>/respond', methods=['PUT'])
-@require_auth
-@require_customer
-def respond_to_quotation(order_id):
-    """Customer responds to quotation (accept/reject)"""
-    user = request.current_user
-    
-    order = CustomerOrder.query.filter_by(id=order_id, user_id=user['id']).first()
-    if not order:
-        return jsonify({'status': 'error', 'message': 'Order not found'}), 404
-    
-    if order.quotation_status != 'quoted':
-        return jsonify({'status': 'error', 'message': 'No quotation to respond to'}), 400
-    
-    data = request.get_json()
-    response = data.get('response')  # 'accept' or 'reject'
-    
-    if response not in ['accept', 'reject']:
-        return jsonify({'status': 'error', 'message': 'Invalid response. Use "accept" or "reject"'}), 400
-    
-    order.quotation_status = 'accepted' if response == 'accept' else 'rejected'
-    order.customer_response_notes = data.get('notes', '')
-    order.responded_at = datetime.utcnow()
-    
-    # If accepted, update order status to processing
-    if response == 'accept':
-        order.status = 'processing'
-    
-    db.session.commit()
-    
-    log_action(user['id'], user['fullName'], 'RESPOND', 'Customer Orders', f"Customer {response}ed quotation for order: {order.order_number}", request.remote_addr or '0.0.0.0')
     
     return jsonify({'status': 'success', 'data': customer_order_to_dict(order)})
 
@@ -7947,20 +7303,30 @@ def get_material_forecast():
 # REPORTING MODULE
 # ============================================
 
+def ph_report_period():
+    """The report period from ?startDate=&endDate= (YYYY-MM-DD, Philippine
+    calendar days; default the last 30 days), plus the UTC times that bound it,
+    since stored times are UTC. A day runs 00:00-24:00 Philippine time, i.e.
+    16:00 UTC the day before. Returns (start, end, start_utc, end_utc, error)."""
+    today = manila_today()
+    start_date = request.args.get('startDate') or (today - timedelta(days=30)).isoformat()
+    end_date = request.args.get('endDate') or today.isoformat()
+    try:
+        start_utc = datetime.strptime(start_date, '%Y-%m-%d') - PH_OFFSET
+        end_utc = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - PH_OFFSET - timedelta(microseconds=1)
+    except ValueError:
+        return None, None, None, None, (jsonify({'status': 'error', 'message': 'Invalid date format'}), 400)
+    return start_date, end_date, start_utc, end_utc, None
+
 @app.route('/api/reports/sales', methods=['GET'])
 @require_auth
 @require_permission('reports.sales')
 def get_sales_report():
     user = request.current_user
-    start_date = request.args.get('startDate', (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
-    end_date = request.args.get('endDate', datetime.now().strftime('%Y-%m-%d'))
+    start_date, end_date, start_dt, end_dt, error = ph_report_period()
+    if error:
+        return error
     branch_id = request.args.get('branchId')
-
-    try:
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
-    except ValueError:
-        return jsonify({'status': 'error', 'message': 'Invalid date format'}), 400
 
     # ── Job Orders ── (drafts are not real sales yet, so exclude them)
     jo_query = JobOrder.query.filter(
@@ -7971,7 +7337,7 @@ def get_sales_report():
 
     user_branch = None
     if not all_branches(user):
-        user_branch = Branch.query.filter_by(name=user['branch']).first()
+        user_branch = Branch.query.get(user_branch_id(user)) if user_branch_id(user) else None
         if user_branch:
             jo_query = jo_query.filter(JobOrder.branch_id == user_branch.id)
         else:
@@ -7996,7 +7362,7 @@ def get_sales_report():
         status_breakdown[status]['count'] += 1
         status_breakdown[status]['value'] += revenue_ex_vat(o)
 
-        date = o.created_at.strftime('%Y-%m-%d') if o.created_at else ''
+        date = (o.created_at + PH_OFFSET).strftime('%Y-%m-%d') if o.created_at else ''
         if date:
             if date not in daily_sales:
                 daily_sales[date] = {'orders': 0, 'revenue': 0}
@@ -8041,17 +7407,21 @@ def get_sales_report():
 
         if attributed_total <= 0:
             continue
+        # Revenue excludes the VAT inside product prices, like job orders and the
+        # Owner P&L (orders from before rates were saved used the standard 12%)
+        rate = po.vat_percent if po.vat_percent is not None else DEFAULT_VAT_PERCENT
+        attributed_net = vat_breakdown(attributed_total, rate)['net']
 
         premade_orders_seen.add(po.id)
-        date = po.created_at.strftime('%Y-%m-%d') if po.created_at else ''
+        date = (po.created_at + PH_OFFSET).strftime('%Y-%m-%d') if po.created_at else ''
         if date not in premade_daily:
             premade_daily[date] = {'orders': 0, 'revenue': 0}
         premade_daily[date]['orders'] += 1
 
         if po.status == 'completed':
-            premade_revenue += attributed_total
+            premade_revenue += attributed_net
             if date:
-                premade_daily[date]['revenue'] += attributed_total
+                premade_daily[date]['revenue'] += attributed_net
         elif po.status not in ('cancelled',):
             # pending / processing / ready all count as pending revenue
             premade_pending += attributed_total
@@ -8095,11 +7465,9 @@ def get_inventory_report():
 
     # Branch-level access control
     if not all_branches(user):
-        user_branch = Branch.query.filter_by(name=user['branch']).first()
-        if user_branch:
-            branch_id = user_branch.id
-        else:
-            return jsonify({'status': 'error', 'message': 'Branch not found'}), 404
+        if not user_branch_id(user):
+            return jsonify({'status': 'error', 'message': 'Your account has no branch'}), 404
+        branch_id = user_branch_id(user)
 
     rm_query = InventoryMaterial.query.filter_by(is_archived=False)
     if branch_id:
@@ -8111,14 +7479,15 @@ def get_inventory_report():
         fg_query = fg_query.filter_by(branch_id=int(branch_id))
     fg_items = fg_query.all()
 
-    total_rm_value = sum(float(m.stock_quantity) * float(m.unit_price) for m in rm_items)
+    # Stock is valued at what it cost us (its selling price when no cost is recorded),
+    # the same as the owner dashboard
+    unit_cost = lambda m: float(m.cost_per_unit or 0) or float(m.unit_price or 0)
+    total_rm_value = sum(max(float(m.stock_quantity or 0), 0) * unit_cost(m) for m in rm_items)
     total_fg_value = sum(float(fg.quantity) * float(fg.price) for fg in fg_items)
     total_fg_cost = sum(float(fg.quantity) * float(fg.cost) for fg in fg_items)
 
-    low_stock = [
-        m for m in rm_items
-        if float(m.low_stock_threshold or 0) > 0 and float(m.stock_quantity) <= float(m.low_stock_threshold)
-    ]
+    global_threshold = global_low_stock_threshold()
+    low_stock = [m for m in rm_items if low_stock_state(m, global_threshold)]
 
     # Category breakdown grouped by material_type
     rm_by_category = {}
@@ -8127,7 +7496,7 @@ def get_inventory_report():
         if cat not in rm_by_category:
             rm_by_category[cat] = {'count': 0, 'value': 0}
         rm_by_category[cat]['count'] += 1
-        rm_by_category[cat]['value'] += float(m.stock_quantity) * float(m.unit_price)
+        rm_by_category[cat]['value'] += max(float(m.stock_quantity or 0), 0) * unit_cost(m)
 
     report = {
         'summary': {
@@ -8144,7 +7513,7 @@ def get_inventory_report():
                 'id': m.id,
                 'name': m.material_type,
                 'currentStock': float(m.stock_quantity),
-                'reorderPoint': float(m.low_stock_threshold or 0),
+                'reorderPoint': effective_reorder_level(m, global_threshold),
                 'unit': ''
             }
             for m in low_stock
@@ -8167,14 +7536,9 @@ def get_branch_settlement():
     is owed by the pickup branch for items they supplied.
     Admins see all branches; supervisors see entries affecting their branch."""
     user = request.current_user
-    start_date = request.args.get('startDate', (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
-    end_date = request.args.get('endDate', datetime.now().strftime('%Y-%m-%d'))
-
-    try:
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
-    except ValueError:
-        return jsonify({'status': 'error', 'message': 'Invalid date format'}), 400
+    start_date, end_date, start_dt, end_dt, error = ph_report_period()
+    if error:
+        return error
 
     # Only multi-branch orders (have transfers) are relevant for settlement
     orders = (ProductOrder.query
@@ -8379,6 +7743,10 @@ def job_order_finished_on(order):
     return (order.created_at + PH_OFFSET).date() if order.created_at else None
 
 def premade_unit_cost(item):
+    """Cost per piece saved with the sale; older sales didn't save one, so they
+    use the product's current cost."""
+    if item.get('unitCost') is not None:
+        return float(item['unitCost'])
     product = PremadeProduct.query.get(item.get('productId')) if item.get('productId') else None
     return float(product.cost or 0) if product else 0.0
 
@@ -8405,11 +7773,13 @@ def owner_financials(start, end, branch_id=None):
 
     t = {'jobSales': 0.0, 'premadeSales': 0.0, 'materials': 0.0, 'labor': 0.0, 'jobOther': 0.0, 'premadeCost': 0.0,
          'vatCollected': 0.0, 'jobOrders': 0, 'premadeOrders': 0}
-    for o in jo_q.all():
+    earned = jo_q.all()
+    extras = extras_by_order([o.id for o in earned])
+    for o in earned:
         d = job_order_finished_on(o)
         if not d or not (start <= d <= end):
             continue
-        c = job_order_costing(o)
+        c = job_order_costing(o, extras.get(o.id, []))
         t['jobSales'] += c['revenue']
         t['materials'] += c['materials']; t['labor'] += c['labor']; t['jobOther'] += c['expenses']
         t['vatCollected'] += vat_breakdown(o.total_price, o.vat_percent)['vat']
@@ -8434,11 +7804,16 @@ def owner_financials(start, end, branch_id=None):
         InventoryMaterial, InventoryMaterial.id == MaterialWasteLog.material_id)
     if branch_id:
         waste_q = waste_q.filter(MaterialWasteLog.branch_id == branch_id)
+    # Extra material issued for a finished job is part of that job's cost (above),
+    # in the period the job finished; only the rest is written off here as waste
+    finished_ids = {o.id for o in earned}
     waste = 0.0
     for w, mat in waste_q.all():
+        if w.job_order_id and w.job_order_id in finished_ids:
+            continue
         d = ((w.created_at or datetime.utcnow()) + PH_OFFSET).date()
         if start <= d <= end:
-            value = float(w.quantity or 0) * float(mat.cost_per_unit or mat.unit_price or 0)
+            value = float(w.quantity or 0) * waste_unit_cost(w, mat)
             waste += value
             month(d)['opex'] += value
     if waste:
@@ -8534,11 +7909,13 @@ def owner_job_costing():
     if error:
         return error
     rows = []
-    for o in JobOrder.query.filter(JobOrder.status.in_(EARNED_STATUSES)).all():
+    earned = JobOrder.query.filter(JobOrder.status.in_(EARNED_STATUSES)).all()
+    extras = extras_by_order([o.id for o in earned])
+    for o in earned:
         d = job_order_finished_on(o)
         if not d or not (start <= d <= end):
             continue
-        c = job_order_costing(o)
+        c = job_order_costing(o, extras.get(o.id, []))
         lines = []
         for it in o.items or []:
             cat = item_category(it)
@@ -8549,6 +7926,11 @@ def owner_job_costing():
                 cost = qty * float(it.get('materialCost') or 0)
             lines.append({'name': it.get('name') or '', 'category': cat, 'quantity': qty,
                           'unitCost': float(it.get('materialCost') or it.get('laborCost') or 0), 'cost': money(cost)})
+        for w in extras.get(o.id, []):
+            unit = waste_unit_cost(w)
+            lines.append({'name': f"Extra: {w.material.material_type if w.material else 'material'} ({w.reason})",
+                          'category': 'material', 'quantity': float(w.quantity or 0), 'unitCost': unit,
+                          'cost': money(float(w.quantity or 0) * unit), 'extra': True})
         split = vat_breakdown(o.total_price, o.vat_percent)
         rows.append({
             'id': o.id, 'jobOrderId': o.job_order_id, 'customerName': o.customer_name,
@@ -8556,6 +7938,8 @@ def owner_job_costing():
             'finishedOn': d.isoformat(), 'status': o.status,
             'customerPrice': split['gross'], 'vat': split['vat'], 'sellingPrice': c['revenue'],
             'materials': c['materials'], 'labor': c['labor'], 'otherCosts': c['expenses'],
+            'estimatedCost': c['estimatedCost'], 'actualCost': c['totalCost'],
+            'extraMaterials': c['extraMaterials'],
             'grossMargin': c['grossProfit'], 'marginPercent': c['profitMargin'], 'lines': lines,
         })
     rows.sort(key=lambda r: r['marginPercent'])
@@ -8620,19 +8004,15 @@ def owner_receivables():
 def owner_inventory():
     """Where capital sits in stock, what was used up, and what needs restocking."""
     today = manila_today()
-    setting = SystemSetting.query.filter_by(key='inventory_low_stock_threshold').first()
-    try:
-        global_threshold = float(setting.value) if setting else 0.0
-    except ValueError:
-        global_threshold = 0.0
+    global_threshold = global_low_stock_threshold()
     materials = InventoryMaterial.query.filter(InventoryMaterial.is_archived.is_(False)).all()
     restock, materials_value = [], 0.0
     for m in materials:
         unit_cost = float(m.cost_per_unit or 0) or float(m.unit_price or 0)
         stock = float(m.stock_quantity or 0)
         materials_value += max(stock, 0) * unit_cost
-        threshold = float(m.low_stock_threshold or 0) or global_threshold
-        state = 'out' if stock <= 0 else 'low' if threshold and stock <= threshold else None
+        threshold = effective_reorder_level(m, global_threshold)
+        state = low_stock_state(m, global_threshold)
         if state:
             restock.append({'id': m.id, 'name': m.material_type, 'color': m.color, 'branchName': m.branch.name if m.branch else None,
                             'stock': stock, 'threshold': threshold, 'status': state})
@@ -8703,10 +8083,12 @@ def get_audit_trail():
 def get_users():
     include_inactive = request.args.get('includeInactive', 'false').lower() == 'true'
     
-    query = User.query
+    # Staff accounts only: retired online customer accounts can't sign in and
+    # aren't managed here (their history stays on the Customers page)
+    query = User.query.join(Role, User.role_id == Role.id).filter(Role.key != 'customer')
     if not include_inactive:
-        query = query.filter_by(is_active=True)
-    
+        query = query.filter(User.is_active == True)
+
     users_list = query.all()
     return jsonify({'status': 'success', 'data': [user_to_dict(u) for u in users_list]})
 
@@ -8719,6 +8101,9 @@ def create_user():
     required = ['username', 'password', 'email', 'fullName', 'role']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    if not isinstance(data['password'], str) or len(data['password']) < MIN_PASSWORD_LENGTH:
+        return jsonify({'status': 'error',
+                        'message': f'Password must be at least {MIN_PASSWORD_LENGTH} characters'}), 400
     
     if User.query.filter_by(username=data['username']).first():
         return jsonify({'status': 'error', 'message': 'Username already exists'}), 400
@@ -8727,7 +8112,7 @@ def create_user():
         return jsonify({'status': 'error', 'message': 'Email already exists'}), 400
     
     role = Role.query.filter_by(key=data['role']).first()
-    if not role:
+    if not role or role.key == 'customer':
         return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
     error = delegation_error(request.current_user, set(), ROLE_DEFAULT_PERMISSIONS.get(role.key, ()), role.key)
     if error:
@@ -8832,7 +8217,8 @@ def update_user(user_id):
         user.branch = data['branch']
     if 'role' in data:
         role = Role.query.filter_by(key=data['role']).first()
-        if not role:
+        # Retired customer accounts can't be made, nor staff turned into one
+        if not role or (role.key == 'customer' and old_role_key != 'customer'):
             return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
         perms_after = effective_permissions(user.id, role.key)
         if role.id != user.role_id:
@@ -8962,6 +8348,8 @@ def user_history_blockers(user_id):
         ('job order', JobOrder.query.filter_by(created_by=user_id)),
         ('customer order', CustomerOrder.query.filter_by(user_id=user_id)),
         ('product order', ProductOrder.query.filter_by(user_id=user_id)),
+        ('premade draft', PremadeDraft.query.filter(db.or_(
+            PremadeDraft.created_by == user_id, PremadeDraft.updated_by == user_id))),
         ('appointment', Appointment.query.filter(db.or_(
             Appointment.user_id == user_id, Appointment.confirmed_by == user_id))),
         ('payment record', PaymentRecord.query.filter_by(recorded_by=user_id)),
@@ -9247,7 +8635,7 @@ def delete_user(user_id):
 @require_auth
 @require_permission('users.manage')
 def get_roles():
-    roles = Role.query.all()
+    roles = Role.query.filter(Role.key != 'customer').all()
     role_list = [
         {
             'id': role.key,
@@ -9274,9 +8662,15 @@ def get_branches():
 
 @app.route('/api/settings/branches/public', methods=['GET'])
 def get_branches_public():
-    """Get active branches without authentication (for order form)"""
-    branches_list = Branch.query.filter_by(is_active=True).all()
-    return jsonify({'status': 'success', 'data': [branch_to_dict(b) for b in branches_list]})
+    """The active retail branches, for the website's Branches section and for
+    choosing the branch on a job order. Only what a visitor may see: no
+    warehouse, nothing internal."""
+    branches_list = (Branch.query.filter_by(is_active=True, is_warehouse=False)
+                     .order_by(Branch.name).all())
+    return jsonify({'status': 'success', 'data': [{
+        'id': b.id, 'name': b.name, 'code': b.code, 'address': b.address, 'phone': b.phone,
+        'isWarehouse': False, 'isActive': True,
+    } for b in branches_list]})
 
 @app.route('/api/settings/branches', methods=['POST'])
 @require_auth
@@ -9348,13 +8742,15 @@ def update_branch(branch_id):
 @require_auth
 @require_staff
 def get_system_settings():
-    settings = SystemSetting.query.all()
+    settings = SystemSetting.query.filter(~SystemSetting.key.startswith('_')).all()
     return jsonify({'status': 'success', 'data': {s.key: s.value for s in settings}})
 
 @app.route('/api/settings/system/<key>', methods=['PUT'])
 @require_auth
 @require_permission('settings.edit')
 def update_system_setting(key):
+    if key.startswith('_'):  # internal rows (e.g. numbering locks), not settings
+        return jsonify({'status': 'error', 'message': 'Unknown setting'}), 400
     data = request.get_json() or {}
     value = str(data.get('value', '')).strip()
     if key == 'vat_percent':
@@ -9622,8 +9018,17 @@ def update_worker_assignment(assignment_id):
              else JobOrder.query.filter_by(job_order_id=assignment.job_order_ref).first())
     if order and branch_access_error(request.current_user, order.branch_id):
         return jsonify({'error': 'This job order belongs to another branch'}), 403
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     new_status = data.get('status')
+    if new_status and new_status not in ASSIGNMENT_STATUSES:
+        msg = 'Status must be pending, in progress or completed'
+        return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
+    for key in ('hoursWorked', 'payOverride', 'unitsWorked', 'expectedHours'):
+        if data.get(key) not in (None, ''):
+            value = finite_number(data[key])
+            if value is None or value < 0:
+                msg = 'Hours, units and pay must be numbers of zero or more'
+                return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
     if new_status:
         assignment.status = new_status
         if new_status == 'in_progress' and not assignment.start_time:
@@ -9751,7 +9156,7 @@ def delete_worker_assignment(assignment_id):
     if order and any(it.get('assignmentId') == assignment.id for it in (order.items or [])):
         items = [dict(it) for it in order.items if it.get('assignmentId') != assignment.id]
         order.items = items
-        order.actual_cost = job_order_cost(items)
+        order.actual_cost = job_order_actual_cost(order, items)
     db.session.delete(assignment)
     db.session.commit()
     return jsonify({'status': 'success', 'message': 'Assignment deleted'})
@@ -9861,6 +9266,105 @@ def set_worker_availability():
 # HEALTH CHECK
 # ============================================
 
+# ============================================
+# PUBLIC ORDER TRACKING (no account needed)
+# ============================================
+# A customer enters the number on their receipt and sees only where the order
+# is: no names, prices, items, materials, contact or staff details. Wrong
+# numbers count toward a per-visitor limit, to slow down guessing.
+
+TRACK_MAX_FAILURES = 10                 # wrong lookups allowed per visitor...
+TRACK_WINDOW_SECONDS = 15 * 60          # ...in this many seconds
+_track_failures = {}                    # visitor -> [failure timestamps] (per worker)
+
+TRACK_NOT_FOUND = ("We couldn't find an order with that number. "
+                   "Check your receipt, or contact the branch that took your order.")
+
+JOB_ORDER_TRACK_STATUS = {
+    'pending': ('received', 'Order received'),
+    'in_progress': ('in_progress', 'Being worked on'),
+    'completed': ('ready', 'Completed - ready for pickup'),
+    'delivered': ('done', 'Delivered'),
+    'cancelled': ('cancelled', 'Cancelled'),
+    'voided': ('cancelled', 'Cancelled'),
+}
+PRODUCT_ORDER_TRACK_STATUS = {
+    'pending': ('received', 'Order received'),
+    'processing': ('in_progress', 'Being prepared'),
+    'ready': ('ready', 'Ready for pickup'),
+    'completed': ('done', 'Picked up / completed'),
+    'cancelled': ('cancelled', 'Cancelled'),
+}
+PAYMENT_TRACK_LABELS = {'paid': 'Fully paid', 'partial': 'Partly paid', 'unpaid': 'Not yet paid'}
+
+def _visitor_key():
+    """The visitor's address. Behind Render's proxy remote_addr is the proxy, so
+    the first X-Forwarded-For entry (the client) is used when present."""
+    forwarded = request.headers.get('X-Forwarded-For', '')
+    return (forwarded.split(',')[0].strip() if forwarded else '') or request.remote_addr or 'unknown'
+
+def _recent_track_failures(key, now):
+    recent = [t for t in _track_failures.get(key, []) if now - t < TRACK_WINDOW_SECONDS]
+    if recent:
+        _track_failures[key] = recent
+    else:
+        _track_failures.pop(key, None)
+    if len(_track_failures) > 5000:  # keep the table small
+        for k in [k for k, v in _track_failures.items() if not v or now - v[-1] >= TRACK_WINDOW_SECONDS]:
+            _track_failures.pop(k, None)
+    return recent
+
+@app.route('/api/track-order', methods=['POST'])
+def track_order():
+    now = time.time()
+    key = _visitor_key()
+    if len(_recent_track_failures(key, now)) >= TRACK_MAX_FAILURES:
+        return jsonify({'status': 'error',
+                        'message': 'Too many attempts. Please wait 15 minutes, or contact the branch.'}), 429
+
+    data = request.get_json(silent=True) or {}
+    reference = str(data.get('reference') or '').strip().upper()
+    if not reference or len(reference) > 50:
+        return jsonify({'status': 'error', 'message': 'Enter your order number.'}), 400
+
+    result = None
+    job = JobOrder.query.filter(db.func.upper(JobOrder.job_order_id) == reference).first()
+    # Drafts are not orders yet, so they can't be tracked
+    if job and job.status != 'draft':
+        key_status, label = JOB_ORDER_TRACK_STATUS.get(job.status, ('received', job.status.replace('_', ' ').title()))
+        result = {
+            'reference': job.job_order_id, 'kind': 'job_order', 'kindLabel': 'Job order',
+            'description': job.description or '',
+            'status': key_status, 'statusLabel': label,
+            'branchName': job.branch.name if job.branch else None,
+            'branchPhone': job.branch.phone if job.branch else None,
+            'recordedOn': (job.created_at + PH_OFFSET).strftime('%Y-%m-%d') if job.created_at else None,
+            'estimatedCompletion': job.estimated_completion.isoformat() if job.estimated_completion else None,
+            'completedOn': job.completed_at.isoformat() if job.completed_at else None,
+            'paymentStatus': PAYMENT_TRACK_LABELS.get(job.payment_status, job.payment_status),
+        }
+    if result is None:
+        order = ProductOrder.query.filter(db.func.upper(ProductOrder.order_number) == reference).first()
+        if order:
+            key_status, label = PRODUCT_ORDER_TRACK_STATUS.get(order.status, ('received', order.status.title()))
+            count = sum(int(it.get('quantity') or 0) for it in (order.items or []))
+            result = {
+                'reference': order.order_number, 'kind': 'product_order', 'kindLabel': 'Premade order',
+                'description': f"{count} premade item{'s' if count != 1 else ''}",
+                'status': key_status, 'statusLabel': label,
+                'branchName': order.branch.name if order.branch else None,
+                'branchPhone': order.branch.phone if order.branch else None,
+                'recordedOn': (order.created_at + PH_OFFSET).strftime('%Y-%m-%d') if order.created_at else None,
+                'estimatedCompletion': None,
+                'completedOn': None,
+                'paymentStatus': PAYMENT_TRACK_LABELS.get(order.payment_status, order.payment_status),
+            }
+
+    if result is None:
+        _track_failures.setdefault(key, []).append(now)
+        return jsonify({'status': 'error', 'message': TRACK_NOT_FOUND}), 404
+    return jsonify({'status': 'success', 'data': result})
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({
@@ -9874,8 +9378,9 @@ def health_check():
 # CATALOG ROUTES
 # ============================================================
 
-# Filters on the public catalog, in display order
-CATALOG_CATEGORIES = ('Automotive', 'Sofas', 'Chairs', 'Commercial', 'Custom Projects')
+# Filters on the public catalog, in display order. 'Promotions' items are shown
+# in the website's Promotions section instead of the gallery.
+CATALOG_CATEGORIES = ('Automotive', 'Sofas', 'Chairs', 'Commercial', 'Custom Projects', 'Promotions')
 
 def catalog_item_dict(i):
     return {'id': i.id, 'title': i.title, 'description': i.description, 'tag': i.tag,

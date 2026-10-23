@@ -126,9 +126,3 @@ export function useAuth() {
   return context;
 }
 
-// Role check for the few things that really are about the kind of account
-// (customer self-service pages). Features use can() permissions instead.
-export function hasAccess(userRole: string | undefined, allowedRoles: string[]): boolean {
-  if (!userRole) return false;
-  return allowedRoles.includes(userRole);
-}

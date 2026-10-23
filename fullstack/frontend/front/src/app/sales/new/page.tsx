@@ -4,7 +4,8 @@ import { useEffect, useRef, useState, Suspense, type ReactElement } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import {
-  api, type Customer, type FinishedGood, type RawMaterial, type Appointment, type QuoteStatus, type Branch,
+  api, ApiError, type Customer, type FinishedGood, type RawMaterial, type Branch,
+  type PremadeDraft,
   vatBreakdown, jobOrderTotalFrom, jobOrderPriceBreakdown, MAX_JOB_ORDER_PRICE, isValidPriceInput,
 } from '@/lib/api';
 import Combobox from '@/components/Combobox';
@@ -89,27 +90,26 @@ function NewJobOrderForm() {
   const draftId = searchParams.get('draftId');
   const editingDraftId = draftId ? Number(draftId) : null;
   const [loadingDraft, setLoadingDraft] = useState(!!editingDraftId);
-  // ?appointmentId=… : this job order is a quotation for that appointment
-  const appointmentParam = searchParams.get('appointmentId');
-  const quoteAppointmentId = appointmentParam ? Number(appointmentParam) : null;
-  const [quoteAppointment, setQuoteAppointment] = useState<Appointment | null>(null);
-  // Set when the draft being edited was already sent to the customer as a quotation
-  const [editingQuoteStatus, setEditingQuoteStatus] = useState<QuoteStatus | null>(null);
-  const [editingQuoteReason, setEditingQuoteReason] = useState('');
-  const quoteMode = !!quoteAppointmentId || !!editingQuoteStatus;
-  // A quotation is paid for at a retail branch (never the warehouse) chosen here
   const [retailBranches, setRetailBranches] = useState<Branch[]>([]);
-  const [quoteBranchId, setQuoteBranchId] = useState<number | ''>('');
   const { user } = useAuth();
   // Warehouse accounts are general, so they choose which branch a job order is
-  // for; everyone else's orders go to their own branch. (Quotations choose theirs above.)
-  const choosesBranch = !!user?.atWarehouse && !quoteMode;
+  // for; everyone else's orders go to their own branch.
+  const choosesBranch = !!user?.atWarehouse;
   const [orderBranchId, setOrderBranchId] = useState<number | ''>('');
   // Must be one of the retail branches listed (a draft saved before may point at the warehouse)
   const orderBranchValid = orderBranchId !== '' && retailBranches.some((b) => b.id === orderBranchId);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [orderType, setOrderType] = useState<'normal' | 'premade'>('normal');
+  // ?premadeDraftId=… : editing a saved premade draft (no stock is taken until it is confirmed)
+  const premadeDraftParam = searchParams.get('premadeDraftId');
+  const editingPremadeDraftId = premadeDraftParam ? Number(premadeDraftParam) : null;
+  const [premadeDraft, setPremadeDraft] = useState<PremadeDraft | null>(null);
+  const [loadingPremadeDraft, setLoadingPremadeDraft] = useState(!!editingPremadeDraftId);
+  const [savingPremadeDraft, setSavingPremadeDraft] = useState(false);
+  const [notice, setNotice] = useState('');
+  // The branch whose finished goods a premade order sells (a draft keeps its own)
+  const [premadeBranchId, setPremadeBranchId] = useState<number | ''>('');
+  const [orderType, setOrderType] = useState<'normal' | 'premade'>(editingPremadeDraftId ? 'premade' : 'normal');
   const [step, setStep] = useState(1);
   const [premadeStep, setPremadeStep] = useState(1);
   const [paymentAmount, setPaymentAmount] = useState<number | ''>('');
@@ -120,6 +120,8 @@ function NewJobOrderForm() {
   ]);
   const [premadeItems, setPremadeItems] = useState<FinishedGood[]>([]);
   const [premadeLoading, setPremadeLoading] = useState(false);
+  // True once the finished goods list has loaded, so stock flags never show against an empty list
+  const [premadeItemsReady, setPremadeItemsReady] = useState(false);
   const [inventoryMaterials, setInventoryMaterials] = useState<RawMaterial[]>([]);
 
   // Customer Information
@@ -199,12 +201,15 @@ function NewJobOrderForm() {
   useEffect(() => {
     const loadPremadeItems = async () => {
       if (orderType !== 'premade') return;
+      // A draft being edited sells from its own branch; wait until it has loaded
+      if (editingPremadeDraftId && !premadeBranchId) return;
+      const branchId = premadeBranchId || user?.branchId;
       setPremadeLoading(true);
+      setPremadeItemsReady(false);
       try {
-        const response = await api.inventory.getFinishedGoods(
-          user?.branchId ? { branchId: user.branchId } : undefined
-        );
+        const response = await api.inventory.getFinishedGoods(branchId ? { branchId } : undefined);
         setPremadeItems(response.data || []);
+        setPremadeItemsReady(true);
       } catch (err) {
         console.error(err);
         setError('Failed to load premade inventory items.');
@@ -213,7 +218,42 @@ function NewJobOrderForm() {
       }
     };
     loadPremadeItems();
-  }, [orderType, user?.branchId]);
+  }, [orderType, user?.branchId, premadeBranchId, editingPremadeDraftId]);
+
+  // ── Load a saved premade draft (?premadeDraftId=…) ─────────────────────────
+  const applyPremadeDraft = (d: PremadeDraft) => {
+    setPremadeDraft(d);
+    setPremadeBranchId(d.branchId);
+    setCustomerName(d.customerName || '');
+    setCustomerPhone(d.customerPhone || '');
+    setCustomerEmail(d.customerEmail || '');
+    setCustomerAddress(d.customerAddress || '');
+    setLinkedCustomerId(d.customerId ?? null);
+    setNotes(d.notes || '');
+    setPaymentMethod(d.paymentMethod || 'cash');
+    const lines: { productId: number | ''; quantity: number }[] =
+      d.items.length > 0 ? d.items : [{ productId: '', quantity: 1 }];
+    setPremadeSelections(lines.map((it, i) => ({ id: `premade-${i + 1}`, productId: it.productId, quantity: it.quantity })));
+    premadeSelectionIdRef.current = lines.length;
+  };
+
+  useEffect(() => {
+    if (!editingPremadeDraftId) return;
+    let cancelled = false;
+    setLoadingPremadeDraft(true);
+    api.premadeDrafts.get(editingPremadeDraftId)
+      .then((res) => {
+        if (cancelled || !res.data) return;
+        if (res.data.status !== 'draft') {
+          setError(`This draft was already recorded as ${res.data.productOrderNumber || 'an order'}.`);
+          return;
+        }
+        applyPremadeDraft(res.data);
+      })
+      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load the draft.'); })
+      .finally(() => { if (!cancelled) setLoadingPremadeDraft(false); });
+    return () => { cancelled = true; };
+  }, [editingPremadeDraftId]);
 
   useEffect(() => {
     const loadInventoryMaterials = async () => {
@@ -342,6 +382,21 @@ function NewJobOrderForm() {
     );
   };
 
+  // A draft keeps every line, even one that sold out since it was saved: it is
+  // flagged here with the stock on hand now, and can't be confirmed until it fits.
+  const premadeStockIssue = (s: PremadeSelection): string | null => {
+    if (!s.productId || !premadeItemsReady) return null;
+    const item = premadeItems.find((i) => i.id === s.productId);
+    if (!item) return 'No longer sold at this branch';
+    const wanted = premadeSelections.filter((x) => x.productId === s.productId)
+      .reduce((n, x) => n + x.quantity, 0);
+    const stock = Number(item.quantity) || 0;
+    if (stock <= 0) return 'Out of stock';
+    if (stock < wanted) return `Insufficient stock: only ${stock} available`;
+    return null;
+  };
+  const premadeHasStockIssue = !premadeLoading && premadeSelections.some((s) => premadeStockIssue(s) !== null);
+
   const premadeTotal = premadeSelections.reduce((sum, s) => {
     if (!s.productId) return sum;
     const item = premadeItems.find((i) => i.id === s.productId);
@@ -390,11 +445,6 @@ function NewJobOrderForm() {
         setCustomerPhone(d.customerPhone || '');
         setCustomerEmail(d.customerEmail || '');
         if (d.customerId) setLinkedCustomerId(d.customerId);
-        if (d.quoteStatus) {
-          setEditingQuoteStatus(d.quoteStatus);
-          setEditingQuoteReason(d.quoteRejectReason || '');
-          if (d.branchId) setQuoteBranchId(d.branchId);
-        }
         if (d.branchId) setOrderBranchId(d.branchId);
         if (d.discountPercent != null) setOrderDiscount(String(d.discountPercent));
         setVatOn(Number(d.vatPercent) > 0);
@@ -447,45 +497,16 @@ function NewJobOrderForm() {
   }, [editingDraftId]);
 
   useEffect(() => {
-    if (!quoteMode && !user?.atWarehouse) return;
+    if (!user?.atWarehouse) return;
     api.settings.getBranchesPublic()
       .then((res) => {
         const retail = (res.data || []).filter((b) => !b.isWarehouse && b.isActive);
         setRetailBranches(retail);
         // A reopened draft keeps its branch only if it is still a retail branch
         setOrderBranchId((cur) => (cur && retail.some((b) => b.id === cur) ? cur : ''));
-        // No branch yet (e.g. a phone-call appointment): use the staff member's own retail branch
-        setQuoteBranchId((cur) => cur || (retail.some((b) => b.id === user?.branchId) ? (user?.branchId as number) : ''));
       })
       .catch(() => setRetailBranches([]));
-  }, [quoteMode, user?.branchId, user?.atWarehouse]);
-
-  // ── Pre-fill a quotation from an appointment (?appointmentId=…) ─────────────
-  useEffect(() => {
-    if (!quoteAppointmentId || editingDraftId) return;
-    let cancelled = false;
-    api.appointments.get(quoteAppointmentId)
-      .then((res) => {
-        const a = res.data;
-        if (cancelled || !a) return;
-        setQuoteAppointment(a);
-        setOrderType('normal');
-        if (a.branchId) setQuoteBranchId(a.branchId);
-        setCustomerName(a.customerName || '');
-        setCustomerPhone(a.customerPhone || '');
-        setCustomerEmail(a.customerEmail || '');
-        const v = a.vehicleInfo;
-        if (v) {
-          if (v.make) setVehicleMake(v.make);
-          if (v.model) setVehicleModel(v.model);
-          if (v.year) setVehicleYear(String(v.year));
-          if (v.plateNumber) setVehiclePlate(v.plateNumber);
-        }
-        if (a.description) setNotes(`From appointment ${a.appointmentNumber}: ${a.description}`);
-      })
-      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load the appointment.'); });
-    return () => { cancelled = true; };
-  }, [quoteAppointmentId, editingDraftId]);
+  }, [user?.atWarehouse]);
 
   // Save the current (possibly incomplete) job order as a draft so work isn't lost.
   // Drafts stay out of sales/pending counts until confirmed.
@@ -498,8 +519,7 @@ function NewJobOrderForm() {
         setLoading(false);
         return;
       }
-      const branchId = quoteMode && quoteBranchId ? quoteBranchId
-        : choosesBranch ? (orderBranchId as number) : (user?.branchId || 1);
+      const branchId = choosesBranch ? (orderBranchId as number) : (user?.branchId || 1);
 
       const selectedServices: string[] = [];
       if (flooring.selected) selectedServices.push('flooring');
@@ -560,7 +580,6 @@ function NewJobOrderForm() {
       if (step === 1) {
         if (choosesBranch && !orderBranchValid) { setError('Choose which branch this job order is for.'); return; }
         if (!customerName.trim()) { setError('Customer name is required.'); return; }
-        if (!customerPhone.trim()) { setError('Phone number is required.'); return; }
       }
       if (step === 3) {
         if (estimatedCompletionDate && estimatedCompletionDate < manilaDateString()) {
@@ -590,12 +609,16 @@ function NewJobOrderForm() {
 
     // Premade step 1 → 2
     if (orderType === 'premade' && premadeStep === 1) {
-      if (!customerName.trim() || !customerPhone.trim()) {
-        setError('Customer name and phone are required.');
+      if (!customerName.trim()) {
+        setError('Customer name is required.');
         return;
       }
       const hasItems = premadeSelections.some((s) => s.productId);
       if (!hasItems) { setError('Please select at least one premade inventory item.'); return; }
+      if (premadeHasStockIssue) {
+        setError('Some items are out of stock or short. Lower or remove them, or save the draft and wait for stock.');
+        return;
+      }
       setError('');
       setPremadeStep(2);
       return;
@@ -607,14 +630,44 @@ function NewJobOrderForm() {
     // ── Premade order submit ──────────────────────────────────────────────────
     if (orderType === 'premade') {
       const selected = premadeSelections.filter((s) => s.productId && s.quantity > 0);
-      if (!customerName.trim() || !customerPhone.trim()) {
-        setError('Customer name and phone are required.');
+      if (!customerName.trim()) {
+        setError('Customer name is required.');
         setLoading(false);
         return;
       }
       if (selected.length === 0) {
         setError('Please select at least one premade inventory item.');
         setLoading(false);
+        return;
+      }
+
+      if (editingPremadeDraftId) {
+        if (premadeHasStockIssue) {
+          setError('Some items are out of stock or short. Edit the draft, remove them, or wait for stock.');
+          setLoading(false);
+          return;
+        }
+        try {
+          // Save what is on screen first, so the recorded order matches it
+          await api.premadeDrafts.update(editingPremadeDraftId, premadeDraftInput());
+          await api.premadeDrafts.confirm(editingPremadeDraftId, {
+            paymentAmount: typeof paymentAmount === 'number' ? paymentAmount : 0,
+            paymentMethod,
+          });
+          router.push('/product-orders');
+        } catch (err) {
+          // Stock moved since the page loaded: show the draft as it stands now
+          if (err instanceof ApiError && err.status === 409 && err.body?.data) {
+            applyPremadeDraft(err.body.data as PremadeDraft);
+            const fresh = await api.inventory.getFinishedGoods({ branchId: (err.body.data as PremadeDraft).branchId })
+              .catch(() => null);
+            if (fresh?.data) setPremadeItems(fresh.data);
+            setPremadeStep(1);
+          }
+          setError(err instanceof Error && err.message ? err.message : 'Failed to record the job order.');
+        } finally {
+          setLoading(false);
+        }
         return;
       }
 
@@ -650,8 +703,8 @@ function NewJobOrderForm() {
           setLoading(false);
           return;
         }
-        const branchId = user?.branchId || inferredBranchId;
-        if (user?.branchId && user.branchId !== inferredBranchId) {
+        const branchId = premadeBranchId || user?.branchId || inferredBranchId;
+        if (branchId !== inferredBranchId) {
           setError('Selected finished goods do not match your assigned branch.');
           setLoading(false);
           return;
@@ -696,25 +749,12 @@ function NewJobOrderForm() {
       setLoading(false);
       return;
     }
-    // Checked before anything is saved (typed-in materials are added to inventory below)
-    if (quoteMode && !(estimatedTotal > 0 || materialTotal > 0)) {
-      setError('Enter the price for the work before sending the quotation.');
-      setLoading(false);
-      return;
-    }
-
-    if (quoteMode && !quoteBranchId) {
-      setError('Choose the branch where the customer will pay for this quotation.');
-      setLoading(false);
-      return;
-    }
     if (choosesBranch && !orderBranchValid) {
       setError('Choose which branch this job order is for.');
       setLoading(false);
       return;
     }
-    const branchId = quoteMode ? (quoteBranchId as number)
-      : choosesBranch ? (orderBranchId as number) : (user?.branchId || 1);
+    const branchId = choosesBranch ? (orderBranchId as number) : (user?.branchId || 1);
 
     // Add typed-in materials to inventory first (flagged as needed), so the order's
     // lines carry their inventory id and the stock is deducted when the job completes.
@@ -783,8 +823,7 @@ function NewJobOrderForm() {
 
     const grossTotal = estimatedTotal > 0 ? estimatedTotal : materialTotal;
     const orderTotal = jobOrderTotalFrom(grossTotal, orderDiscountPct);
-    // A quotation takes no payment: the customer pays once they have accepted it
-    const finalDown = quoteMode ? 0 : estimatedTotal > 0 ? Math.round((orderTotal / 2) * 100) / 100 : 0;
+    const finalDown = estimatedTotal > 0 ? Math.round((orderTotal / 2) * 100) / 100 : 0;
 
     try {
       const jobOrderData: any = {
@@ -804,29 +843,56 @@ function NewJobOrderForm() {
         ...(orderTotal > 0 ? { estimatedCost: grossTotal, priceForWork: grossTotal } : {}),
       };
 
-      if (quoteMode) {
-        if (editingDraftId) {
-          // Revised quotation: update it in place and send it to the customer again.
-          // A quotation takes no payment, and payments aren't set through this update.
-          const quoteUpdates = { ...jobOrderData, sendQuotation: true };
-          delete quoteUpdates.downPayment;
-          delete quoteUpdates.paymentMethod;
-          await api.sales.updateJobOrder(editingDraftId, quoteUpdates);
-        } else {
-          await api.sales.createJobOrder({ ...jobOrderData, isDraft: true, sendQuotation: true, appointmentId: quoteAppointmentId });
-        }
-        router.push(quoteAppointmentId ? '/appointments' : '/sales');
-        return;
-      }
       await api.sales.createJobOrder(jobOrderData);
       router.push('/sales');
     } catch (err) {
-      setError(err instanceof Error && err.message ? err.message : quoteMode ? 'Failed to send the quotation. Please try again.' : 'Failed to create job order. Please try again.');
+      setError(err instanceof Error && err.message ? err.message : 'Failed to create job order. Please try again.');
       console.error(err);
     } finally {
       setLoading(false);
     }
   };
+
+  const premadeDraftInput = () => ({
+    customerId: linkedCustomerId,
+    customerName: customerName.trim(),
+    customerPhone: customerPhone.trim(),
+    customerEmail: customerEmail.trim(),
+    customerAddress: customerAddress.trim(),
+    notes,
+    paymentMethod,
+    items: premadeSelections.filter((s) => s.productId && s.quantity > 0)
+      .map((s) => ({ productId: s.productId as number, quantity: s.quantity })),
+  });
+
+  // Saves without taking stock. A new draft is opened in place afterwards, so
+  // saving again updates the same draft instead of making another.
+  const savePremadeDraft = async () => {
+    setError(''); setNotice('');
+    if (!customerName.trim()) { setError('Enter the customer name to save a draft.'); return; }
+    const firstProduct = premadeItems.find((i) => premadeSelections.some((s) => s.productId === i.id));
+    const branchId = premadeBranchId || user?.branchId || firstProduct?.branchId;
+    if (!branchId) { setError('Select at least one product so the draft knows which branch it sells from.'); return; }
+    setSavingPremadeDraft(true);
+    try {
+      if (editingPremadeDraftId) {
+        const res = await api.premadeDrafts.update(editingPremadeDraftId, premadeDraftInput());
+        if (res.data) applyPremadeDraft(res.data);
+        setNotice('Draft saved. No stock has been taken.');
+      } else {
+        const res = await api.premadeDrafts.create({ ...premadeDraftInput(), branchId });
+        if (res.data) router.replace(`/sales/new?premadeDraftId=${res.data.id}&saved=1`);
+      }
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : 'Failed to save the draft.');
+    } finally {
+      setSavingPremadeDraft(false);
+    }
+  };
+
+  useEffect(() => {
+    if (searchParams.get('saved')) setNotice('Draft saved. No stock has been taken; confirm it when the customer is ready.');
+  }, [searchParams]);
 
   const premadePaymentAmount = typeof paymentAmount === 'number' ? paymentAmount : 0;
   const isPremadeFullPayment = premadePaymentAmount >= premadeTotal && premadeTotal > 0;
@@ -838,18 +904,26 @@ function NewJobOrderForm() {
       return (
         <div className="space-y-6">
           <div>
-            <h3 className="text-lg font-semibold text-gray-900 mb-1">Walk-in Premade Order</h3>
-            <p className="text-sm text-gray-500 mb-4">Step 1 of 2 — Customer &amp; Items</p>
+            <h3 className="text-lg font-semibold text-gray-900 mb-1 flex items-center gap-2 flex-wrap">
+              {premadeDraft ? <>Premade Draft {premadeDraft.draftNumber}</> : 'Premade Order'}
+              {premadeDraft && (
+                <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-800">Draft</span>
+              )}
+            </h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Step 1 of 2 — Customer &amp; Items
+              {premadeDraft?.branchName ? ` · ${premadeDraft.branchName}` : ''}
+            </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Customer Name *</label>
-                <input type="text" value={customerName} onChange={(e) => setCustomerName(e.target.value)} required
+                <input type="text" value={customerName} onChange={(e) => { setCustomerName(e.target.value); unlinkCustomer(); }} required
                   className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                  placeholder="Walk-in customer name" />
+                  placeholder="Customer name" />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Phone Number *</label>
-                <input type="tel" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} required
+                <label className="block text-sm font-medium text-gray-700 mb-2">Phone Number <span className="font-normal text-gray-400">(optional)</span></label>
+                <input type="tel" value={customerPhone} onChange={(e) => { setCustomerPhone(e.target.value); unlinkCustomer(); }}
                   className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="09XX XXX XXXX" />
               </div>
@@ -866,6 +940,33 @@ function NewJobOrderForm() {
                   placeholder="Customer address" />
               </div>
             </div>
+            {linkedCustomerId ? (
+              <p className="mt-3 text-xs text-green-700">
+                Linked to an existing customer record.{' '}
+                <button type="button" onClick={unlinkCustomer} className="underline">Unlink</button>
+              </p>
+            ) : customerSuggestions.length > 0 && (
+              <div className="mt-3 border border-[#c7d2f5] rounded-xl overflow-hidden">
+                <div className="bg-[#eef1fb] px-4 py-2 flex items-center justify-between">
+                  <p className="text-xs font-semibold text-[#011c72]">
+                    {customerSuggestions.length} existing customer{customerSuggestions.length !== 1 ? 's' : ''} found
+                  </p>
+                  <button type="button" onClick={() => setCustomerSuggestions([])} className="text-xs text-[#011c72] underline">Dismiss</button>
+                </div>
+                {customerSuggestions.map((c) => (
+                  <div key={c.id} className="flex items-center justify-between px-4 py-2.5 border-t border-gray-100 bg-white">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-900 truncate">{c.name}</p>
+                      <p className="text-xs text-gray-500 truncate">{[c.phone, c.email].filter(Boolean).join(' · ')}</p>
+                    </div>
+                    <button type="button" onClick={() => linkCustomer(c)}
+                      className="text-xs font-medium text-white bg-[#011c72] hover:bg-[#022494] px-3 py-1.5 rounded-lg shrink-0 ml-3">
+                      Use This Customer
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div>
@@ -889,28 +990,37 @@ function NewJobOrderForm() {
                 <div className="space-y-3">
                   {premadeSelections.map((selection) => {
                     const selectedItem = premadeItems.find((i) => i.id === selection.productId);
+                    const stockIssue = premadeStockIssue(selection);
+                    // A saved line whose product is no longer listed keeps its saved name
+                    const savedLine = !selectedItem && selection.productId
+                      ? premadeDraft?.items.find((it) => it.productId === selection.productId) : undefined;
                     return (
-                      <div key={selection.id} className="grid grid-cols-1 md:grid-cols-12 gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                      <div key={selection.id} className={`grid grid-cols-1 md:grid-cols-12 gap-3 p-3 rounded-lg border ${stockIssue ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'}`}>
                         <div className="md:col-span-7">
                           <select value={selection.productId}
                             onChange={(e) => updatePremadeSelection(selection.id, 'productId', e.target.value ? Number(e.target.value) : '')}
                             className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
                             disabled={premadeItems.length === 0}>
                             <option value="">Select finished good item</option>
+                            {savedLine && (
+                              <option value={savedLine.productId}>{savedLine.name} (no longer available)</option>
+                            )}
                             {premadeItems.map((item) => (
                               <option key={item.id} value={item.id}>
                                 {item.name} ({item.sku}) - Stock: {item.quantity} - ₱{item.price.toLocaleString()}
                               </option>
                             ))}
                           </select>
+                          {stockIssue && (
+                            <p className="mt-1 text-xs font-semibold text-red-700">{stockIssue}</p>
+                          )}
                         </div>
                         <div className="md:col-span-2">
-                          <input type="number" min={1} max={selectedItem ? Number(selectedItem.quantity) : undefined}
+                          {/* Not capped at the stock: a draft may wait for stock, and is flagged above instead */}
+                          <input type="number" min={1}
                             value={selection.quantity}
                             onChange={(e) => {
-                              const next = Math.max(1, parseInt(e.target.value) || 1);
-                              const bounded = selectedItem ? Math.min(next, Number(selectedItem.quantity)) : next;
-                              updatePremadeSelection(selection.id, 'quantity', bounded);
+                              updatePremadeSelection(selection.id, 'quantity', Math.max(1, parseInt(e.target.value) || 1));
                             }}
                             className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm" />
                         </div>
@@ -919,7 +1029,7 @@ function NewJobOrderForm() {
                         </div>
                         <div className="md:col-span-1 flex items-center justify-end">
                           <button type="button" onClick={() => removePremadeSelection(selection.id)}
-                            disabled={premadeSelections.length === 1}
+                            disabled={premadeSelections.length === 1} title="Remove this item"
                             className="p-2 text-red-500 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -1133,11 +1243,11 @@ function NewJobOrderForm() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Phone Number <span className="text-red-500">*</span>
+                  Phone Number <span className="font-normal text-gray-400">(optional)</span>
                 </label>
                 <input type="tel" value={customerPhone}
                   onChange={(e) => { setCustomerPhone(e.target.value); unlinkCustomer(); }}
-                  required className={inputCls} placeholder="09XX XXX XXXX" />
+                  className={inputCls} placeholder="09XX XXX XXXX" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
@@ -1794,7 +1904,7 @@ function NewJobOrderForm() {
                 </div>
               )}
 
-              {estimatedTotal > 0 && !quoteMode && (
+              {estimatedTotal > 0 && (
                 <div className="bg-[#eef1fb] border border-[#c7d2f5] rounded-xl p-4 flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-[#011c72]">Down Payment (50%)</p>
@@ -1807,12 +1917,6 @@ function NewJobOrderForm() {
               )}
             </div>
 
-            {quoteMode ? (
-              <p className="rounded-xl bg-[#eef1fb] border border-[#c7d2f5] px-4 py-3 text-sm text-[#011c72]">
-                No payment is taken for a quotation. Once the customer accepts it, it becomes a job order and the
-                down payment is collected at the branch.
-              </p>
-            ) : (
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Payment Method</label>
               <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} className={inputCls}>
@@ -1835,7 +1939,6 @@ function NewJobOrderForm() {
                 </optgroup>
               </select>
             </div>
-            )}
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Additional Notes</label>
@@ -1863,50 +1966,18 @@ function NewJobOrderForm() {
             </svg>
             Back
           </button>
-          <h1 className="text-3xl font-bold text-gray-900">{quoteMode ? (editingDraftId ? 'Edit Quotation' : 'New Quotation') : 'New Job Order'}</h1>
+          <h1 className="text-3xl font-bold text-gray-900">
+            {editingPremadeDraftId ? 'Premade Draft' : 'New Job Order'}
+          </h1>
           <p className="text-gray-500 mt-1">
-            {quoteMode
-              ? 'Prepare a job order for the customer to accept or reject'
-              : 'Create a new service order for a customer'}
+            {editingPremadeDraftId
+                ? 'Not yet a job order: no stock is taken until you confirm it'
+                : 'Record a job order for work the customer has confirmed'}
           </p>
         </div>
 
-        {quoteMode && (
-          <div className="mb-5 rounded-xl border border-[#c7d2f5] bg-[#eef1fb] px-4 py-3 text-sm text-[#011c72] space-y-1">
-            {quoteAppointment && (
-              <p>
-                Quotation for appointment <span className="font-semibold">{quoteAppointment.appointmentNumber}</span>
-                {' '}({quoteAppointment.customerName}).
-              </p>
-            )}
-            {quoteAppointment && !quoteAppointment.hasAccount ? (
-              <p className="text-yellow-800">
-                This customer booked without an online account, so they can&apos;t answer it online. Share the
-                quotation with them in person or by phone.
-              </p>
-            ) : (
-              <p>The customer will see it in <span className="font-semibold">My Orders › Custom</span> and can accept or reject it there.</p>
-            )}
-            <label className="flex flex-col sm:flex-row sm:items-center gap-2 pt-1">
-              <span className="font-medium shrink-0">Branch where the customer will pay:</span>
-              <select value={quoteBranchId} onChange={(e) => setQuoteBranchId(e.target.value ? Number(e.target.value) : '')}
-                className="px-3 py-1.5 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
-                <option value="">Select a branch</option>
-                {retailBranches.map((b) => (
-                  <option key={b.id} value={b.id}>{b.name}</option>
-                ))}
-              </select>
-            </label>
-            {editingQuoteStatus === 'rejected' && (
-              <p className="text-red-700">
-                The customer rejected this quotation: “{editingQuoteReason}”. Revise it and press <span className="font-semibold">Resend Quotation</span>.
-              </p>
-            )}
-          </div>
-        )}
-
         {/* Order Type Selector */}
-        {!quoteMode && (
+        {!editingPremadeDraftId && (
         <div className="mb-6 bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
           <p className="text-sm font-semibold text-gray-700 mb-3">Order Type</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1999,7 +2070,6 @@ function NewJobOrderForm() {
                 Previous
               </button>
               <div className="flex items-center gap-3">
-                {!(quoteMode && !editingDraftId) && (
                 <button type="button" onClick={saveDraft} disabled={loading}
                   className="inline-flex items-center gap-2.5 px-6 py-3 rounded-xl text-base font-semibold bg-white border-2 border-[#011c72] text-[#011c72] hover:bg-[#eef1fb] transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                   title={editingDraftId ? 'Save your changes to this draft' : 'Save this order as a draft to finish later'}>
@@ -2008,7 +2078,6 @@ function NewJobOrderForm() {
                   </svg>
                   {loading ? 'Saving…' : editingDraftId ? 'Update Draft' : 'Save as Draft'}
                 </button>
-                )}
               {step < 5 ? (
                 <button key="next-btn" type="submit"
                   className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#011c72] hover:bg-[#01268c] text-white rounded-xl font-medium transition-colors shadow-sm">
@@ -2030,7 +2099,7 @@ function NewJobOrderForm() {
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                       </svg>
-                      {quoteMode ? (editingDraftId ? 'Resend Quotation' : 'Send Quotation') : 'Create Job Order'}
+                      Create Job Order
                     </>
                   )}
                 </button>
@@ -2053,13 +2122,18 @@ function NewJobOrderForm() {
                   Back
                 </button>
               )}
-              <div className="flex gap-3">
+              <div className="flex flex-wrap justify-end gap-3">
                 {premadeStep === 2 && (
                   <button type="button" onClick={() => router.back()}
                     className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white border border-red-200 text-red-600 hover:bg-red-50 transition-colors">
                     Cancel
                   </button>
                 )}
+                <button type="button" onClick={savePremadeDraft} disabled={savingPremadeDraft || loading || loadingPremadeDraft}
+                  title="Save to finish later. No stock is taken."
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-semibold bg-white border-2 border-[#011c72] text-[#011c72] hover:bg-[#eef1fb] transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                  {savingPremadeDraft ? 'Saving…' : editingPremadeDraftId ? 'Save Draft' : 'Save as Draft'}
+                </button>
                 <button type="submit" disabled={loading}
                   className="inline-flex items-center gap-2 px-6 py-2.5 bg-[#011c72] hover:bg-[#01268c] text-white rounded-xl font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">
                   {loading ? (
@@ -2079,7 +2153,7 @@ function NewJobOrderForm() {
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                       </svg>
-                      Create Premade Order
+                      {editingPremadeDraftId ? 'Confirm Job Order' : 'Create Premade Order'}
                     </>
                   )}
                 </button>
@@ -2087,6 +2161,9 @@ function NewJobOrderForm() {
             </div>
           )}
 
+          {notice && !error && (
+            <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-xl text-green-700 text-sm">{notice}</div>
+          )}
           {error && (
             <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-xl text-red-600 text-sm flex items-start gap-2">
               <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">

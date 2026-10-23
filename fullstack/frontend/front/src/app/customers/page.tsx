@@ -74,7 +74,7 @@ export default function CustomersPage() {
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Customers</h1>
-            <p className="text-sm text-gray-500 mt-1">Walk-in customers and customers who signed up online</p>
+            <p className="text-sm text-gray-500 mt-1">Customers recorded on job orders and sales, including former online accounts</p>
           </div>
           {canCreate && (
             <button onClick={() => { setShowCreate(true); setCreateError(''); }}
@@ -105,7 +105,7 @@ export default function CustomersPage() {
             aria-label="Filter by account"
             className="px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
             <option value="all">All customers</option>
-            <option value="online">Signed up online</option>
+            <option value="online">Former online account</option>
             <option value="walkin">Walk-in only</option>
           </select>
           <select value={orderFilter} onChange={(e) => setOrderFilter(e.target.value as typeof orderFilter)}
@@ -130,7 +130,7 @@ export default function CustomersPage() {
           <div className="text-center py-16 text-gray-400 text-sm">
             {query || filtersOn
               ? 'No customers match your search or filters.'
-              : 'No customers yet. They appear when they sign up online or when a job order is made for them.'}
+              : 'No customers yet. They appear when a job order or sale is recorded for them.'}
           </div>
         ) : (
           <div className="bg-white rounded-2xl border border-gray-200 overflow-x-auto">

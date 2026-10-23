@@ -271,12 +271,12 @@ export default function CustomerProfilePage() {
           )}
         </div>
 
-        {/* Orders placed through the online account */}
+        {/* Orders placed through the online account, before online ordering was retired */}
         {customer?.hasAccount && (
           <div className="bg-white rounded-2xl border border-gray-200 overflow-x-auto">
             <div className="px-6 py-4 border-b border-gray-100">
               <h2 className="font-semibold text-gray-900">Online Orders</h2>
-              <p className="text-xs text-gray-500 mt-0.5">Premade products and custom requests placed through the customer&apos;s account</p>
+              <p className="text-xs text-gray-500 mt-0.5">Premade products and custom requests the customer placed online before online ordering was retired</p>
             </div>
             {onlineOrders.length === 0 ? (
               <p className="text-center text-gray-400 text-sm py-10">No online orders yet.</p>
