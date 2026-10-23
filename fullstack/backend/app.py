@@ -18,6 +18,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html import escape
 
 app = Flask(__name__)
@@ -75,6 +76,9 @@ class User(db.Model):
     lockout_until = db.Column(db.DateTime, nullable=True)
     phone = db.Column(db.String(50), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # Bumped whenever the account's access changes (archive, role, branch,
+    # permissions) so every server worker drops its cached copy at once
+    auth_version = db.Column(db.Integer, default=0)
 
     role = db.relationship('Role')
     branch_rel = db.relationship('Branch')
@@ -203,7 +207,11 @@ class JobOrder(db.Model):
     down_payment = db.Column(db.Float, default=0)
     balance = db.Column(db.Float, default=0)
     discount_percent = db.Column(db.Float, nullable=True)  # per-order discount override
-    vat_percent = db.Column(db.Float, nullable=True)  # VAT added on top of the discounted price (None = no VAT)
+    vat_percent = db.Column(db.Float, nullable=True)  # VAT rate applied to this order (None = no VAT)
+    # True: the price entered already included VAT (orders priced since VAT-inclusive
+    # entry). NULL/False: older orders, where VAT was added on top of the entered
+    # price. total_price is the final customer price either way.
+    vat_inclusive = db.Column(db.Boolean, nullable=True)
     # Quotations: a draft sent to the customer to accept or reject online.
     # quote_status: None (not a quotation) | sent | rejected | accepted
     quote_status = db.Column(db.String(20), nullable=True)
@@ -310,6 +318,9 @@ class ProductOrder(db.Model):
     pickup_branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
     shipment_status = db.Column(db.String(20), default='not_needed')  # not_needed, pending, shipped, received
     amount_paid = db.Column(db.Float, default=0.0)
+    # VAT rate included in the product prices when the order was placed (NULL on
+    # older orders, whose receipts always used the standard 12%)
+    vat_percent = db.Column(db.Float, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -377,6 +388,18 @@ class Notification(db.Model):
     is_archived = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     user = db.relationship('User', backref='notifications')
+
+class UserPermissionOverride(db.Model):
+    """A permission granted to or revoked from one user on top of their role's
+    defaults (see ROLE_DEFAULT_PERMISSIONS)."""
+    __tablename__ = 'user_permission_overrides'
+    __table_args__ = (db.UniqueConstraint('user_id', 'permission', name='uq_user_permission'),)
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    permission = db.Column(db.String(64), nullable=False)
+    effect = db.Column(db.String(10), nullable=False)  # grant | revoke
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
 
 class InventoryMaterial(db.Model):
     __tablename__ = 'inventory_materials'
@@ -668,6 +691,24 @@ class WorkerAvailabilitySchedule(db.Model):
     worker = db.relationship('ManagedWorker', backref='schedule')
     __table_args__ = (db.UniqueConstraint('managed_worker_id', 'date', name='uq_worker_date'),)
 
+class Expense(db.Model):
+    """Money the business spends that isn't stock bought through purchase orders:
+    rent, power, wages paid outside job orders, supplies and so on."""
+    __tablename__ = 'expenses'
+    id = db.Column(db.Integer, primary_key=True)
+    expense_date = db.Column(db.Date, nullable=False, index=True)
+    category = db.Column(db.String(50), nullable=False)
+    particulars = db.Column(db.String(255), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    payment_method = db.Column(db.String(30), nullable=False, default='cash')
+    notes = db.Column(db.Text)
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    branch = db.relationship('Branch')
+    creator = db.relationship('User', foreign_keys=[created_by])
+
 class AuditLog(db.Model):
     """Audit trail. Kept in the database — an in-memory list was wiped on every
     restart, and on serverless hosting each request could see a different one."""
@@ -752,13 +793,15 @@ default_roles = [
     {'key': 'sales_manager', 'name': 'Sales Manager'},
     {'key': 'seat_maker', 'name': 'Seat Maker'},
     {'key': 'sewer', 'name': 'Sewer'},
-    {'key': 'customer', 'name': 'Customer'}
+    {'key': 'customer', 'name': 'Customer'},
+    {'key': 'owner', 'name': 'Owner'},
 ]
 
 default_users = [
     {'username': 'admin', 'password': 'admin123', 'email': 'admin@seatmakers.com', 'fullName': 'System Administrator', 'role': 'administrator', 'branch': 'Main Warehouse', 'isActive': True},
     {'username': 'supervisor', 'password': 'super123', 'email': 'supervisor@seatmakers.com', 'fullName': 'John Supervisor', 'role': 'supervisor', 'branch': 'Main Warehouse', 'isActive': True},
     {'username': 'salesmanager', 'password': 'sales123', 'email': 'sales@seatmakers.com', 'fullName': 'Jane Sales', 'role': 'sales_manager', 'branch': 'Branch A', 'isActive': True},
+    {'username': 'owner', 'password': 'owner123', 'email': 'owner@seatmakers.com', 'fullName': 'Business Owner', 'role': 'owner', 'branch': 'Main Warehouse', 'isActive': True},
 ]
 
 # ============================================
@@ -767,21 +810,12 @@ default_users = [
 
 # Sign-in sessions live in the user_sessions table; see create_session()
 
-# Branch and finished-goods seed data, used only to populate an empty database.
+# Branch seed data, used only to populate an empty database.
 branches = [
     {'id': 1, 'name': 'Main Warehouse', 'code': 'MW', 'address': '123 Main St', 'isWarehouse': True, 'isActive': True},
     {'id': 2, 'name': 'Branch A', 'code': 'BA', 'address': '456 Branch A St', 'isWarehouse': False, 'isActive': True},
     {'id': 3, 'name': 'Branch B', 'code': 'BB', 'address': '789 Branch B St', 'isWarehouse': False, 'isActive': True},
     {'id': 4, 'name': 'Branch C', 'code': 'BC', 'address': '321 Branch C St', 'isWarehouse': False, 'isActive': True},
-]
-
-
-# Finished Goods Inventory
-finished_goods = [
-    {'id': 1, 'name': 'Car Seat Cover - Standard', 'sku': 'FG-CSC-001', 'quantity': 25, 'unit': 'pcs', 'category': 'Seat Covers', 'price': 150.00, 'cost': 75.00, 'branchId': 2, 'isArchived': False, 'lastUpdated': '2026-01-20'},
-    {'id': 2, 'name': 'Car Seat Cover - Premium', 'sku': 'FG-CSC-002', 'quantity': 15, 'unit': 'pcs', 'category': 'Seat Covers', 'price': 250.00, 'cost': 120.00, 'branchId': 2, 'isArchived': False, 'lastUpdated': '2026-01-20'},
-    {'id': 3, 'name': 'Motorcycle Seat - Custom', 'sku': 'FG-MCS-001', 'quantity': 10, 'unit': 'pcs', 'category': 'Motorcycle', 'price': 180.00, 'cost': 85.00, 'branchId': 3, 'isArchived': False, 'lastUpdated': '2026-01-19'},
-    {'id': 4, 'name': 'Sofa Cushion Set', 'sku': 'FG-SCS-001', 'quantity': 8, 'unit': 'pcs', 'category': 'Furniture', 'price': 200.00, 'cost': 95.00, 'branchId': 2, 'isArchived': False, 'lastUpdated': '2026-01-18'},
 ]
 
 
@@ -791,19 +825,191 @@ finished_goods = [
 
 db_initialized = False
 
+# ============================================
+# PERMISSIONS
+# ============================================
+# Every feature as module.action. A role only supplies defaults; an admin can
+# grant or revoke any permission for an individual user (user_permission_overrides).
+# branches.all is the cross-branch scope: without it a user only sees and acts on
+# their own branch.
+PERMISSION_MODULES = [
+    ('dashboard', 'Dashboard', [('view', 'View')]),
+    ('sales', 'Sales / Job Orders', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'), ('delete', 'Delete'),
+                                     ('void', 'Void'), ('quote', 'Send quotations'),
+                                     ('edit_unpaid', 'Edit before down payment')]),
+    ('custom_requests', 'Custom Requests', [('view', 'View'), ('edit', 'Edit'), ('quote', 'Send quotations')]),
+    ('customers', 'Customers', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit')]),
+    ('payments', 'Payments', [('view', 'View'), ('add', 'Add'), ('request_override', 'Request override'),
+                              ('approve_override', 'Approve overrides')]),
+    ('appointments', 'Appointments', [('view', 'View'), ('edit', 'Edit')]),
+    ('inventory', 'Inventory', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'), ('delete', 'Archive'),
+                                ('log_waste', 'Log waste')]),
+    ('premade', 'Premade Products', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'),
+                                     ('distribute', 'Distribute'), ('receive', 'Receive deliveries')]),
+    ('suppliers', 'Suppliers', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit')]),
+    ('purchase_orders', 'Purchase Orders', [('view', 'View'), ('add', 'Add'), ('approve', 'Approve'),
+                                            ('receive', 'Receive')]),
+    ('product_orders', 'Product Orders', [('view', 'View'), ('edit', 'Edit'), ('payment', 'Record payments'),
+                                          ('transfer', 'Transfers'), ('flag_spam', 'Flag spam')]),
+    ('costing', 'Costing', [('view', 'View'), ('edit', 'Edit')]),
+    ('forecasting', 'Forecasting', [('view', 'View'), ('manage', 'Manage AI data')]),
+    ('item_trail', 'Item Trail', [('view', 'View'), ('add', 'Add'), ('update_status', 'Update status')]),
+    ('reports', 'Reports', [('sales', 'Sales'), ('inventory', 'Inventory'), ('settlement', 'Branch settlement'),
+                            ('audit_trail', 'Audit trail')]),
+    ('announcements', 'Announcements', [('view', 'View'), ('manage', 'Manage')]),
+    ('workers', 'Worker Management', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'), ('delete', 'Delete'),
+                                      ('assign', 'Assign work'), ('delete_assignment', 'Delete assignments')]),
+    ('catalog', 'Catalog', [('manage', 'Manage')]),
+    ('blacklist', 'Spam Blacklist', [('manage', 'Manage')]),
+    ('chat', 'Staff Chat', [('use', 'Use')]),
+    ('settings', 'System Settings', [('edit', 'Edit')]),
+    ('branches', 'Branches', [('manage', 'Manage'), ('all', 'Access all branches')]),
+    ('users', 'Users', [('manage', 'Manage users & permissions')]),
+    ('owner', 'Owner Dashboard', [('view', 'View business financials')]),
+    ('expenses', 'Expenses', [('view', 'View'), ('add', 'Add'), ('delete', 'Delete')]),
+]
+PERMISSIONS = {
+    f'{module}.{action}': {'module': module, 'moduleLabel': module_label, 'action': action, 'label': label}
+    for module, module_label, actions in PERMISSION_MODULES
+    for action, label in actions
+}
+
+_SUPERVISOR_EXCLUDED = {
+    'payments.approve_override', 'purchase_orders.approve', 'reports.audit_trail',
+    'workers.add', 'workers.edit', 'workers.delete', 'workers.delete_assignment',
+    'catalog.manage', 'blacklist.manage', 'branches.manage', 'branches.all', 'users.manage',
+    'owner.view', 'expenses.delete',
+}
+# Defaults reproduce what each role could do before permissions existed
+ROLE_DEFAULT_PERMISSIONS = {
+    'administrator': frozenset(PERMISSIONS),
+    'supervisor': frozenset(set(PERMISSIONS) - _SUPERVISOR_EXCLUDED),
+    'sales_manager': frozenset({
+        'dashboard.view',
+        'sales.view', 'sales.add', 'sales.edit', 'sales.delete', 'sales.quote',
+        'custom_requests.view', 'custom_requests.edit', 'custom_requests.quote',
+        'customers.view', 'customers.edit',
+        'payments.view', 'payments.add', 'payments.request_override',
+        'appointments.view', 'appointments.edit',
+        'premade.receive',
+        'reports.sales',
+        'announcements.view',
+        'workers.view', 'workers.assign',
+        'expenses.view', 'expenses.add',
+    }),
+    # The owner reviews the results of the day-to-day work rather than doing it:
+    # every view, all branches, and the owner dashboard -- no editing
+    'owner': frozenset({
+        'owner.view', 'dashboard.view', 'branches.all',
+        'sales.view', 'custom_requests.view', 'customers.view', 'payments.view', 'appointments.view',
+        'inventory.view', 'premade.view', 'suppliers.view', 'purchase_orders.view', 'product_orders.view',
+        'costing.view', 'forecasting.view', 'item_trail.view', 'announcements.view', 'workers.view',
+        'reports.sales', 'reports.inventory', 'reports.settlement', 'reports.audit_trail',
+        'expenses.view',
+    }),
+    # Worker accounts only use their profile; Worker Management tracks their work
+    'seat_maker': frozenset(),
+    'sewer': frozenset(),
+    # Customers are self-service: their own orders, cart and profile, no staff features
+    'customer': frozenset(),
+}
+
+def effective_permissions(user_id, role_key, overrides=None):
+    """Role defaults plus this user's grants, minus their revokes."""
+    perms = set(ROLE_DEFAULT_PERMISSIONS.get(role_key, ()))
+    if role_key == 'customer':
+        return perms
+    if overrides is None:
+        overrides = UserPermissionOverride.query.filter_by(user_id=user_id).all()
+    for o in overrides:
+        if o.permission not in PERMISSIONS:
+            continue
+        if o.effect == 'grant':
+            perms.add(o.permission)
+        elif o.effect == 'revoke':
+            perms.discard(o.permission)
+    return perms
+
+def has_perm(user, *permissions):
+    """True if the signed-in user (request.current_user) has any of these."""
+    granted = user.get('permissions') or ()
+    return any(p in granted for p in permissions)
+
+def all_branches(user):
+    """Whether the user sees every branch rather than only their own."""
+    return has_perm(user, 'branches.all')
+
+def all_inventory_branches(user):
+    """Inventory of every branch: administrators (all-branch access) and accounts
+    based at the warehouse. Everyone else changes only their own branch's stock."""
+    return all_branches(user) or bool(user.get('atWarehouse'))
+
+def inventory_branch_error(user, branch_id):
+    """403 response if the user may not change stock held at branch_id, else None.
+    Pass the branch stored on the record (or the one it is moving to)."""
+    if all_inventory_branches(user) or (branch_id is not None and branch_id == user_branch_id(user)):
+        return None
+    return jsonify({'status': 'error', 'message': 'You can only change inventory for your own branch'}), 403
+
+def all_job_order_branches(user):
+    """Job orders (and their payments and lineup slips) of every branch. Accounts
+    based at the warehouse are general: they take orders for any branch and keep
+    managing them. Other modules still follow all_branches."""
+    return all_branches(user) or bool(user.get('atWarehouse'))
+
+# Delegation policy. Administrators may change anyone's access. Anyone else who
+# manages users can't change their own account, can't touch administrator
+# accounts or hand out the administrator role, and can only grant or remove
+# permissions they hold themselves -- never these privileged ones, which decide
+# who manages accounts and who sees every branch.
+PRIVILEGED_PERMISSIONS = frozenset({'users.manage', 'branches.manage', 'branches.all'})
+
+def is_administrator(user):
+    return user.get('role') == 'administrator'
+
+def target_account_error(actor, target):
+    """Why `actor` may not manage the `target` account at all, or None."""
+    if is_administrator(actor):
+        return None
+    if target.id == actor['id']:
+        return 'Only an administrator can change your own account here. Use My Profile for your details.'
+    if target.role and target.role.key == 'administrator':
+        return 'Only an administrator can change an administrator account.'
+    return None
+
+def delegation_error(actor, perms_before, perms_after, new_role_key=None):
+    """Why `actor` may not change an account's access from perms_before to
+    perms_after (and to new_role_key, if the role changes), or None."""
+    if is_administrator(actor):
+        return None
+    if new_role_key == 'administrator':
+        return 'Only an administrator can give out the administrator role.'
+    changed = set(perms_before) ^ set(perms_after)
+    privileged = changed & PRIVILEGED_PERMISSIONS
+    if privileged:
+        return f"Only an administrator can grant or remove: {', '.join(sorted(privileged))}"
+    not_held = changed - set(actor.get('permissions') or ())
+    if not_held:
+        return f"You can only grant or remove permissions you have yourself: {', '.join(sorted(not_held))}"
+    return None
+
 def user_to_dict(user):
+    role_key = user.role.key if user.role else None
     return {
         'id': user.id,
         'username': user.username,
         'email': user.email,
         'fullName': user.full_name,
-        'role': user.role.key if user.role else None,
+        'role': role_key,
         'roleName': user.role.name if user.role else None,
         'branch': user.branch,
         'branchId': user.branch_id,
         'branchName': user.branch_rel.name if user.branch_rel else user.branch,
+        # Warehouse-based accounts pick the branch a job order is for
+        'atWarehouse': bool(user.branch_rel and user.branch_rel.is_warehouse),
         'isActive': user.is_active,
-        'phone': user.phone
+        'phone': user.phone,
+        'permissions': sorted(effective_permissions(user.id, role_key)),
     }
 
 def customer_order_to_dict(order):
@@ -967,35 +1173,6 @@ def seed_default_users():
 
     db.session.commit()
 
-def seed_inventory_items():
-    if InventoryMaterial.query.count() == 0:
-        pass  # No default seed data for the new inventory schema
-
-    if PremadeProduct.query.count() == 0:
-        # Seed data references branches by hardcoded ids (e.g. branchId=2), but the
-        # real ids are auto-assigned and may differ after a re-seed (Postgres
-        # sequences don't roll back). Resolve each product's branch by its code so
-        # the foreign key always matches an existing branch.
-        code_by_seed_id = {b['id']: b['code'] for b in branches}
-        branch_by_code = {b.code: b for b in Branch.query.all()}
-        fallback_branch = Branch.query.first()
-
-        for product in finished_goods:
-            branch = branch_by_code.get(code_by_seed_id.get(product.get('branchId', 1))) or fallback_branch
-            db.session.add(PremadeProduct(
-                name=product['name'],
-                sku=product.get('sku') or f"FG-{product['id']:03d}",
-                quantity=float(product.get('quantity', 0)),
-                unit=product.get('unit', 'pcs'),
-                category=product.get('category', 'General'),
-                price=float(product.get('price', 0)),
-                cost=float(product.get('cost', 0)),
-                branch_id=branch.id if branch else None,
-                is_archived=product.get('isArchived', False)
-            ))
-
-    db.session.commit()
-
 def normalize_premade_units():
     """Ensure premade product unit values stay consistent as plain piece counts."""
     updated = False
@@ -1070,6 +1247,12 @@ def run_migrations():
         "ALTER TABLE catalog_items ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT 'Automotive'",
         # Notifications a user has moved out of the bell into their archive
         "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
+        # Invalidates cached sessions on every worker when a user's access changes
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_version INTEGER DEFAULT 0",
+        # VAT-inclusive pricing: which job orders were priced that way, and the rate
+        # each product order was sold at. Existing rows stay NULL (their old meaning).
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS vat_inclusive BOOLEAN",
+        "ALTER TABLE product_orders ADD COLUMN IF NOT EXISTS vat_percent REAL",
     ]
     is_sqlite = db.engine.dialect.name == 'sqlite'
     for sql in migrations:
@@ -1101,6 +1284,8 @@ def init_db():
         ('inventory_low_stock_threshold', '0'),
         # Default markup applied to a material's cost to derive its selling unit price
         ('default_material_markup', '25'),
+        # VAT rate included in customer prices (the standard Philippine rate)
+        ('vat_percent', str(DEFAULT_VAT_PERCENT)),
     ]
     for key, value in default_settings:
         if not SystemSetting.query.filter_by(key=key).first():
@@ -1132,7 +1317,6 @@ def init_db():
     # Seed users
     seed_default_users()
     link_registered_customers()
-    seed_inventory_items()
     normalize_premade_units()
 
     # Seed default catalog items
@@ -1150,10 +1334,10 @@ def init_db():
 SESSION_TTL = timedelta(days=7)  # signed out after a week without using the system
 SESSION_CACHE_SECONDS = 60
 
-# Per-process cache of token -> (user dict, cached_at), so a burst of API calls
-# (e.g. a page loading several endpoints at once) doesn't hit the database on
-# every request. The 60s bound means role, branch or archive changes still take
-# effect quickly.
+# Per-process cache of token -> (user dict, cached_at, auth_version), so a burst
+# of API calls doesn't rebuild the user (role, branch, permissions) every time.
+# Each request still checks the session row and the user's auth_version in one
+# query, so archiving, sign-outs and access changes apply at once on every worker.
 _session_cache = {}
 
 def _token_hash(token):
@@ -1162,8 +1346,19 @@ def _token_hash(token):
 def end_user_sessions(user_id):
     """Sign a user out everywhere. The caller commits."""
     UserSession.query.filter_by(user_id=user_id).delete(synchronize_session=False)
-    for t in [t for t, (u, _) in _session_cache.items() if u['id'] == user_id]:
+    forget_cached_sessions(user_id)
+
+def forget_cached_sessions(user_id):
+    """Drop this worker's cached copy of a user's sessions. Other workers notice
+    the change through bump_auth_version."""
+    for t in [t for t, (u, *_) in _session_cache.items() if u['id'] == user_id]:
         _session_cache.pop(t, None)
+
+def bump_auth_version(user):
+    """Mark the user's access as changed so every worker reloads it on their next
+    request. The caller commits."""
+    user.auth_version = (user.auth_version or 0) + 1
+    forget_cached_sessions(user.id)
 
 def create_session(user):
     """Start a session and return its token. One login at a time: any other
@@ -1182,27 +1377,39 @@ def get_user_from_token(token):
     if not token:
         return None
     now_ts = time.time()
+    now = datetime.utcnow()
+    token_hash = _token_hash(token)
+    # One cheap query every request: is the session still there, the account
+    # still active, and its access unchanged since we cached it?
+    row = (db.session.query(UserSession.expires_at, User.is_active, User.auth_version)
+           .join(User, User.id == UserSession.user_id)
+           .filter(UserSession.token_hash == token_hash).first())
+    if not row or row.expires_at <= now or not row.is_active:
+        _session_cache.pop(token, None)
+        return None
+    version = row.auth_version or 0
+
+    # Sliding expiry, written at most once a day per session
+    if row.expires_at - now < SESSION_TTL - timedelta(days=1):
+        UserSession.query.filter_by(token_hash=token_hash).update(
+            {'expires_at': now + SESSION_TTL}, synchronize_session=False)
+        db.session.commit()
+
     cached = _session_cache.get(token)
-    if cached and (now_ts - cached[1]) < SESSION_CACHE_SECONDS:
+    if cached and cached[2] == version and (now_ts - cached[1]) < SESSION_CACHE_SECONDS:
         return cached[0]
 
-    now = datetime.utcnow()
-    s = UserSession.query.filter_by(token_hash=_token_hash(token)).first()
-    user = User.query.get(s.user_id) if s and s.expires_at > now else None
-    if not user or not user.is_active:
+    s = UserSession.query.filter_by(token_hash=token_hash).first()
+    user = User.query.get(s.user_id) if s else None
+    if not user:
         _session_cache.pop(token, None)
         return None
 
-    # Sliding expiry, written at most once a day per session
-    if s.expires_at - now < SESSION_TTL - timedelta(days=1):
-        s.expires_at = now + SESSION_TTL
-        db.session.commit()
-
     if len(_session_cache) > 1000:
-        for t in [t for t, (_, at) in _session_cache.items() if now_ts - at >= SESSION_CACHE_SECONDS]:
+        for t in [t for t, (_, at, _v) in _session_cache.items() if now_ts - at >= SESSION_CACHE_SECONDS]:
             _session_cache.pop(t, None)
     resolved = user_to_dict(user)
-    _session_cache[token] = (resolved, now_ts)
+    _session_cache[token] = (resolved, now_ts, version)
     return resolved
 
 def require_auth(f):
@@ -1217,24 +1424,84 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated
 
-def require_roles(*roles):
-    """Decorator for role-based access"""
+def require_permission(*permissions):
+    """Decorator: the signed-in user needs at least one of these permissions."""
     def decorator(f):
         @wraps(f)
         def decorated(*args, **kwargs):
             if not hasattr(request, 'current_user'):
                 return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-            if request.current_user['role'] not in roles:
-                return jsonify({'status': 'error', 'message': 'Forbidden - Insufficient permissions'}), 403
+            if not has_perm(request.current_user, *permissions):
+                return jsonify({'status': 'error', 'message': 'You do not have permission to do this'}), 403
             return f(*args, **kwargs)
         return decorated
     return decorator
+
+def require_staff(f):
+    """Decorator: any staff account (lookups shared by several modules)."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not hasattr(request, 'current_user'):
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+        if request.current_user['role'] == 'customer':
+            return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+        return f(*args, **kwargs)
+    return decorated
+
+def require_customer(f):
+    """Decorator: customer self-service routes (their own orders, quotations)."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not hasattr(request, 'current_user'):
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+        if request.current_user['role'] != 'customer':
+            return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+        return f(*args, **kwargs)
+    return decorated
 
 PH_OFFSET = timedelta(hours=8)
 
 def manila_today():
     """Today's date in the Philippines (the server clock is UTC)."""
     return (datetime.utcnow() + PH_OFFSET).date()
+
+# ============================================
+# VAT (customer prices include it)
+# ============================================
+
+DEFAULT_VAT_PERCENT = 12  # standard Philippine VAT, until changed in Settings
+MAX_VAT_PERCENT = 100
+
+def money(amount):
+    """Round to the centavo, halves up (0.005 -> 0.01), as a float."""
+    return float(Decimal(str(amount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+
+def vat_percent_error(raw):
+    """Error message if raw isn't a valid VAT rate, else None."""
+    try:
+        rate = Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError):
+        return 'VAT rate must be a number'
+    if not rate.is_finite() or rate < 0 or rate > MAX_VAT_PERCENT:
+        return f'VAT rate must be between 0 and {MAX_VAT_PERCENT}%'
+    if rate != rate.quantize(Decimal('0.01')):
+        return 'VAT rate can have at most 2 decimal places'
+    return None
+
+def current_vat_percent():
+    """The VAT rate set in Settings, applied to newly priced orders."""
+    setting = SystemSetting.query.filter_by(key='vat_percent').first()
+    if setting is None or vat_percent_error(setting.value):
+        return float(DEFAULT_VAT_PERCENT)
+    return float(setting.value)
+
+def vat_breakdown(gross, vat_percent):
+    """Split a VAT-inclusive amount into its net and VAT parts, to the centavo.
+    net + vat always equals gross; VAT is taken out of the price, not added."""
+    gross = money(gross or 0)
+    rate = float(vat_percent or 0)
+    net = money(gross / (1 + rate / 100)) if rate > 0 else gross
+    return {'gross': gross, 'net': net, 'vat': money(gross - net), 'vatPercent': rate}
 
 # ============================================
 # PASSWORD HELPERS
@@ -1447,7 +1714,7 @@ def delivery_to_dict(d):
 
 
 def can_see_delivery(user, d):
-    if user['role'] == 'administrator':
+    if all_branches(user):
         return True
     bid = user_branch_id(user)
     return bid is not None and bid in (d.from_branch_id, d.to_branch_id)
@@ -1533,19 +1800,9 @@ def logout():
 @app.route('/api/auth/me', methods=['GET'])
 @require_auth
 def get_current_user():
-    user = request.current_user
-    return jsonify({
-        'status': 'success',
-        'data': {
-            'id': user['id'],
-            'username': user['username'],
-            'email': user['email'],
-            'fullName': user['fullName'],
-            'role': user['role'],
-            'branch': user['branch'],
-            'phone': user.get('phone')
-        }
-    })
+    # The same details login returns (branch included), so a page reload or the
+    # periodic permission refresh doesn't lose the user's branch
+    return jsonify({'status': 'success', 'data': request.current_user})
 
 # ============================================
 # EMAIL + PASSWORD RESET CODES
@@ -1704,9 +1961,9 @@ EMAIL_CHANGE_CODE_TTL = timedelta(minutes=10)
 def refresh_cached_user(user):
     """Push a user's new details into the session cache so the change shows at once."""
     resolved, now_ts = user_to_dict(user), time.time()
-    for t, (u, _) in list(_session_cache.items()):
+    for t, (u, _, version) in list(_session_cache.items()):
         if u['id'] == user.id:
-            _session_cache[t] = (resolved, now_ts)
+            _session_cache[t] = (resolved, now_ts, version)
 
 def check_current_password(user, raw_password):
     """None if raw_password is the user's password, else an error response.
@@ -1913,6 +2170,9 @@ def confirm_email_change():
 
 STAFF_ROLES = ('administrator', 'supervisor', 'sales_manager')
 
+# Finished work: a delivered order was completed first, so it counts as earned too
+EARNED_STATUSES = ('completed', 'delivered')
+
 # Revenue excludes VAT: it is collected for the government, not earned
 REVENUE_EX_VAT = JobOrder.total_price / (1 + db.func.coalesce(JobOrder.vat_percent, 0) / 100.0)
 
@@ -1922,7 +2182,7 @@ def dashboard_scope():
     Administrators see the whole company and may pick one branch with
     ?branchId=; everyone else only ever sees their own branch."""
     user = request.current_user
-    if user['role'] == 'administrator':
+    if all_branches(user):
         raw = request.args.get('branchId')
         if not raw:
             return None, None
@@ -1939,9 +2199,9 @@ def dashboard_scope():
 
 @app.route('/api/dashboard/stats', methods=['GET'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('dashboard.view')
 def get_dashboard_stats():
-    role = request.current_user['role']
+    user = request.current_user
     bid, err = dashboard_scope()
     if err:
         return err
@@ -1957,12 +2217,12 @@ def get_dashboard_stats():
     total_job_orders = live_orders.count()
     pending_orders = live_orders.filter(JobOrder.status == 'pending').count()
     in_progress_orders = live_orders.filter(JobOrder.status == 'in_progress').count()
-    completed_orders = live_orders.filter(JobOrder.status == 'completed').count()
+    completed_orders = live_orders.filter(JobOrder.status.in_(EARNED_STATUSES)).count()
 
     revenue_row = scoped(db.session.query(
         db.func.coalesce(db.func.sum(REVENUE_EX_VAT), 0.0),
         db.func.coalesce(db.func.sum(JobOrder.actual_cost), 0.0),
-    ).filter(JobOrder.status == 'completed'), JobOrder.branch_id).one()
+    ).filter(JobOrder.status.in_(EARNED_STATUSES)), JobOrder.branch_id).one()
     total_revenue = float(revenue_row[0] or 0)
     total_cost = float(revenue_row[1] or 0)
     profit = total_revenue - total_cost
@@ -1996,7 +2256,7 @@ def get_dashboard_stats():
         'scopeBranchName': scope_branch.name if scope_branch else None,
     }
 
-    if role == 'administrator':
+    if all_branches(user):
         stats['totalUsers'] = User.query.filter_by(is_active=True).count()
         stats['totalBranches'] = Branch.query.filter_by(is_active=True).count()
 
@@ -2004,7 +2264,7 @@ def get_dashboard_stats():
 
 @app.route('/api/dashboard/recent-activity', methods=['GET'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('dashboard.view')
 def get_recent_activity():
     bid, err = dashboard_scope()
     if err:
@@ -2046,7 +2306,7 @@ def get_recent_activity():
 
 @app.route('/api/dashboard/alerts', methods=['GET'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('dashboard.view')
 def get_alerts():
     bid, err = dashboard_scope()
     if err:
@@ -2216,14 +2476,11 @@ def premade_transfer_to_dict(transfer):
     }
 
 def can_resolve_premade_transfer(user, transfer):
-    """Admins and supervisors may act on any transfer; a sales manager only on
-    deliveries addressed to their own branch."""
-    role = user.get('role')
-    if role in ('administrator', 'supervisor'):
+    """Anyone who sees every branch or distributes premade stock may act on any
+    delivery; others only on deliveries addressed to their own branch."""
+    if has_perm(user, 'branches.all', 'premade.distribute'):
         return True
-    if role == 'sales_manager':
-        return user.get('branchId') == transfer.destination_branch_id
-    return False
+    return has_perm(user, 'premade.receive') and user.get('branchId') == transfer.destination_branch_id
 
 def material_usage_to_dict(log):
     return {
@@ -2285,6 +2542,7 @@ def get_vehicle_models():
 
 @app.route('/api/inventory/raw-materials', methods=['GET'])
 @require_auth
+@require_permission('inventory.view', 'sales.add', 'sales.edit', 'purchase_orders.add')
 def get_raw_materials():
     include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
     branch_id = request.args.get('branchId')
@@ -2319,6 +2577,7 @@ def get_raw_materials():
 
 @app.route('/api/inventory/raw-materials/summary', methods=['GET'])
 @require_auth
+@require_permission('inventory.view')
 def get_raw_materials_summary():
     include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
     include_components = request.args.get('includeComponents', 'false').lower() == 'true'
@@ -2346,6 +2605,7 @@ def get_raw_materials_summary():
 
 @app.route('/api/inventory/raw-materials/group-detail', methods=['GET'])
 @require_auth
+@require_permission('inventory.view')
 def get_raw_material_group_detail():
     include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
     branch_id = request.args.get('branchId')
@@ -2370,6 +2630,7 @@ def get_raw_material_group_detail():
 
 @app.route('/api/inventory/raw-materials/<int:material_id>', methods=['GET'])
 @require_auth
+@require_permission('inventory.view', 'sales.add', 'sales.edit', 'purchase_orders.add')
 def get_raw_material(material_id):
     material = InventoryMaterial.query.get(material_id)
     if not material:
@@ -2378,7 +2639,7 @@ def get_raw_material(material_id):
 
 @app.route('/api/inventory/raw-materials', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('inventory.add')
 def create_raw_material():
     data = request.get_json()
 
@@ -2392,6 +2653,9 @@ def create_raw_material():
     branch = Branch.query.get(data['branchId'])
     if not branch or not branch.is_active:
         return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+    error = inventory_branch_error(request.current_user, branch.id)
+    if error:
+        return error
 
     custom_item_id = data.get('itemId', '').strip() if data.get('itemId') else None
     if custom_item_id:
@@ -2443,11 +2707,14 @@ def create_raw_material():
 
 @app.route('/api/inventory/raw-materials/<int:material_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('inventory.edit')
 def update_raw_material(material_id):
     material = InventoryMaterial.query.get(material_id)
     if not material:
         return jsonify({'status': 'error', 'message': 'Material not found'}), 404
+    error = inventory_branch_error(request.current_user, material.branch_id)
+    if error:
+        return error
 
     data = request.get_json()
 
@@ -2469,7 +2736,13 @@ def update_raw_material(material_id):
     elif 'costPerUnit' in data or 'markupPercent' in data:
         material.unit_price = round((material.cost_per_unit or 0) * (1 + (material.markup_percent if material.markup_percent is not None else 25) / 100), 2)
     if 'stockQuantity' in data:
-        material.stock_quantity = float(data['stockQuantity'])
+        try:
+            new_stock = float(data['stockQuantity'])
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'Stock quantity must be a number'}), 400
+        if not new_stock >= 0:
+            return jsonify({'status': 'error', 'message': 'Stock quantity cannot be negative'}), 400
+        material.stock_quantity = new_stock
     if 'lowStockThreshold' in data:
         material.low_stock_threshold = float(data['lowStockThreshold'] or 0)
     if 'supplierId' in data:
@@ -2478,6 +2751,9 @@ def update_raw_material(material_id):
         branch = Branch.query.get(data['branchId'])
         if not branch or not branch.is_active:
             return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+        error = inventory_branch_error(request.current_user, branch.id)
+        if error:
+            return error
         material.branch_id = int(data['branchId'])
 
     db.session.commit()
@@ -2488,11 +2764,14 @@ def update_raw_material(material_id):
 
 @app.route('/api/inventory/raw-materials/<int:material_id>/archive', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('inventory.delete')
 def archive_raw_material(material_id):
     material = InventoryMaterial.query.get(material_id)
     if not material:
         return jsonify({'status': 'error', 'message': 'Material not found'}), 404
+    error = inventory_branch_error(request.current_user, material.branch_id)
+    if error:
+        return error
 
     material.is_archived = True
     db.session.commit()
@@ -2503,11 +2782,14 @@ def archive_raw_material(material_id):
 
 @app.route('/api/inventory/raw-materials/<int:material_id>/restore', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('inventory.delete')
 def restore_raw_material(material_id):
     material = InventoryMaterial.query.get(material_id)
     if not material:
         return jsonify({'status': 'error', 'message': 'Material not found'}), 404
+    error = inventory_branch_error(request.current_user, material.branch_id)
+    if error:
+        return error
 
     material.is_archived = False
     db.session.commit()
@@ -2522,6 +2804,7 @@ def restore_raw_material(material_id):
 
 @app.route('/api/inventory/finished-goods', methods=['GET'])
 @require_auth
+@require_permission('premade.view', 'premade.receive', 'sales.add')
 def get_finished_goods():
     include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
     branch_id = request.args.get('branchId')
@@ -2543,7 +2826,7 @@ def get_finished_goods():
 
 @app.route('/api/inventory/finished-goods', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('premade.add')
 def create_finished_good():
     data = request.get_json()
 
@@ -2554,9 +2837,19 @@ def create_finished_good():
     if not isinstance(data.get('materialsUsed'), list) or len(data.get('materialsUsed')) == 0:
         return jsonify({'status': 'error', 'message': 'Please provide materials used for this premade product'}), 400
 
+    try:
+        made_qty, price = float(data['quantity']), float(data['price'])
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Quantity and price must be numbers'}), 400
+    if not made_qty > 0 or not price >= 0:
+        return jsonify({'status': 'error', 'message': 'Quantity must be above zero and price cannot be negative'}), 400
+
     branch = Branch.query.get(data['branchId'])
     if not branch or not branch.is_active:
         return jsonify({'status': 'error', 'message': 'Invalid or inactive branch'}), 400
+    error = inventory_branch_error(request.current_user, branch.id)
+    if error:
+        return error
 
     # Premade stock is always produced at the warehouse. Choosing a shop branch
     # does not put stock there directly — it raises a delivery that branch must
@@ -2565,6 +2858,12 @@ def create_finished_good():
     if not warehouse:
         return jsonify({'status': 'error',
                         'message': 'No warehouse branch is configured. Add one in Settings first.'}), 400
+
+    # Production uses warehouse materials, so only warehouse accounts and
+    # administrators add premade stock
+    error = inventory_branch_error(request.current_user, warehouse.id)
+    if error:
+        return error
 
     production_branch = warehouse
     deliver_to = None if branch.id == warehouse.id else branch
@@ -2594,7 +2893,9 @@ def create_finished_good():
         if not material:
             return jsonify({'status': 'error', 'message': f'Material not found or unavailable at row {idx + 1}'}), 400
 
-        if float(material.stock_quantity) < quantity_used:
+        # The same material on several rows is checked against its stock in total
+        needed = quantity_used + sum(e['quantityUsed'] for e in usage_entries if e['material'].id == material.id)
+        if float(material.stock_quantity) < needed:
             return jsonify({'status': 'error', 'message': f'Insufficient stock for {material.material_type}. Available: {float(material.stock_quantity)}'}), 400
 
         usage_entries.append({'material': material, 'quantityUsed': quantity_used})
@@ -2670,11 +2971,14 @@ def create_finished_good():
 
 @app.route('/api/inventory/finished-goods/<int:item_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('premade.edit')
 def update_finished_good(item_id):
     product = PremadeProduct.query.get(item_id)
     if not product:
         return jsonify({'status': 'error', 'message': 'Premade product not found'}), 404
+    error = inventory_branch_error(request.current_user, product.branch_id)
+    if error:
+        return error
 
     data = request.get_json()
 
@@ -2814,7 +3118,7 @@ def create_premade_transfers(product, allocations, actor, notes='', batch_id=Non
 
 @app.route('/api/inventory/finished-goods/<int:item_id>/distribute', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('premade.distribute')
 def distribute_finished_good(item_id):
     """Give warehouse stock to one or more branches as pending deliveries.
 
@@ -2824,6 +3128,9 @@ def distribute_finished_good(item_id):
     product = PremadeProduct.query.get(item_id)
     if not product:
         return jsonify({'status': 'error', 'message': 'Premade product not found'}), 404
+    error = inventory_branch_error(request.current_user, product.branch_id)
+    if error:
+        return error
     if product.is_archived:
         return jsonify({'status': 'error', 'message': 'This product is archived'}), 400
 
@@ -2871,6 +3178,7 @@ def distribute_finished_good(item_id):
 
 @app.route('/api/inventory/premade-transfers', methods=['GET'])
 @require_auth
+@require_permission('premade.view', 'premade.receive')
 def get_premade_transfers():
     """Premade deliveries. Sales managers only see their own branch."""
     status = request.args.get('status')
@@ -2879,7 +3187,7 @@ def get_premade_transfers():
     query = PremadeStockTransfer.query
     if status:
         query = query.filter(PremadeStockTransfer.status == status)
-    if user.get('role') not in ('administrator', 'supervisor'):
+    if not has_perm(user, 'branches.all', 'premade.distribute'):
         if not user.get('branchId'):
             return jsonify({'status': 'success', 'data': []})
         query = query.filter(PremadeStockTransfer.destination_branch_id == user['branchId'])
@@ -2889,11 +3197,12 @@ def get_premade_transfers():
 
 @app.route('/api/inventory/premade-transfers/<int:transfer_id>/confirm', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('premade.receive')
 def confirm_premade_transfer(transfer_id):
     """Accept a delivery: only now does stock leave the warehouse and appear
     in the destination branch's own row."""
-    transfer = PremadeStockTransfer.query.get(transfer_id)
+    # Row lock: a second confirm waits, then sees it already received
+    transfer = PremadeStockTransfer.query.filter_by(id=transfer_id).with_for_update().first()
     if not transfer:
         return jsonify({'status': 'error', 'message': 'Delivery not found'}), 404
     if transfer.status != 'pending':
@@ -2941,10 +3250,10 @@ def confirm_premade_transfer(transfer_id):
 
 @app.route('/api/inventory/premade-transfers/<int:transfer_id>/cancel', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('premade.receive')
 def cancel_premade_transfer(transfer_id):
     """Reject a delivery. Nothing moved, so the warehouse simply keeps the stock."""
-    transfer = PremadeStockTransfer.query.get(transfer_id)
+    transfer = PremadeStockTransfer.query.filter_by(id=transfer_id).with_for_update().first()
     if not transfer:
         return jsonify({'status': 'error', 'message': 'Delivery not found'}), 404
     if transfer.status != 'pending':
@@ -2966,6 +3275,7 @@ def cancel_premade_transfer(transfer_id):
 
 @app.route('/api/inventory/material-usage', methods=['GET'])
 @require_auth
+@require_permission('inventory.view')
 def get_material_usage_logs():
     branch_id = request.args.get('branchId')
     material_id = request.args.get('materialId')
@@ -3024,6 +3334,7 @@ def get_finished_goods_public():
 
 @app.route('/api/inventory/categories', methods=['GET'])
 @require_auth
+@require_staff
 def get_categories():
     rm_categories = sorted({m.material_type for m in InventoryMaterial.query.filter_by(is_archived=False).all() if m.material_type})
     fg_categories = sorted({p.category for p in PremadeProduct.query.filter_by(is_archived=False).all() if p.category})
@@ -3038,6 +3349,7 @@ def get_categories():
 
 @app.route('/api/inventory/low-stock', methods=['GET'])
 @require_auth
+@require_permission('inventory.view')
 def get_low_stock_items():
     threshold_setting = SystemSetting.query.filter_by(key='inventory_low_stock_threshold').first()
     threshold = float(threshold_setting.value) if threshold_setting and threshold_setting.value else 0
@@ -3079,6 +3391,7 @@ def supplier_to_dict(s):
 
 @app.route('/api/inventory/suppliers', methods=['GET'])
 @require_auth
+@require_permission('suppliers.view', 'purchase_orders.add')
 def get_suppliers():
     include_inactive = request.args.get('includeInactive', 'false').lower() == 'true'
     query = Supplier.query
@@ -3089,7 +3402,7 @@ def get_suppliers():
 
 @app.route('/api/inventory/suppliers', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('suppliers.add')
 def create_supplier():
     data = request.get_json()
     if not data.get('name', '').strip():
@@ -3110,7 +3423,7 @@ def create_supplier():
 
 @app.route('/api/inventory/suppliers/<int:supplier_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('suppliers.edit')
 def update_supplier(supplier_id):
     supplier = Supplier.query.get(supplier_id)
     if not supplier:
@@ -3151,6 +3464,7 @@ def waste_log_to_dict(log):
 
 @app.route('/api/inventory/waste-logs', methods=['GET'])
 @require_auth
+@require_permission('inventory.view')
 def get_waste_logs():
     branch_id = request.args.get('branchId')
     query = MaterialWasteLog.query
@@ -3161,7 +3475,7 @@ def get_waste_logs():
 
 @app.route('/api/inventory/waste-logs', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('inventory.log_waste')
 def create_waste_log():
     data = request.get_json()
     if not data.get('materialId') or not data.get('quantity') or not data.get('reason', '').strip():
@@ -3169,17 +3483,27 @@ def create_waste_log():
     material = InventoryMaterial.query.get(int(data['materialId']))
     if not material:
         return jsonify({'status': 'error', 'message': 'Material not found'}), 404
-    qty = float(data['quantity'])
-    if qty <= 0:
+    error = inventory_branch_error(request.current_user, material.branch_id)
+    if error:
+        return error
+    try:
+        qty = float(data['quantity'])
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Quantity must be a number'}), 400
+    if not qty > 0:
         return jsonify({'status': 'error', 'message': 'Quantity must be positive'}), 400
+    on_hand = float(material.stock_quantity or 0)
+    if qty > on_hand:
+        return jsonify({'status': 'error',
+                        'message': f'Only {on_hand:g} in stock; waste cannot exceed what is on hand'}), 400
     # Deduct from stock
-    material.stock_quantity = max(0, float(material.stock_quantity) - qty)
+    material.stock_quantity = on_hand - qty
     log = MaterialWasteLog(
         material_id=material.id,
         quantity=qty,
         reason=data['reason'].strip(),
         notes=data.get('notes', '').strip() or None,
-        branch_id=int(data.get('branchId', material.branch_id)),
+        branch_id=material.branch_id,  # where the stock was, not what the request says
         logged_by=request.current_user['id'],
     )
     db.session.add(log)
@@ -3190,6 +3514,19 @@ def create_waste_log():
 # ============================================
 # PAYMENTS
 # ============================================
+
+def refresh_job_order_balance(order):
+    """Balance and payment status from what the order costs and what has been
+    paid (down_payment holds the total paid)."""
+    total = float(order.total_price or 0)
+    paid = float(order.down_payment or 0)
+    order.balance = money(max(total - paid, 0))
+    if paid > 0 and paid >= total:
+        order.payment_status = 'paid'
+    elif paid > 0:
+        order.payment_status = 'partial'
+    else:
+        order.payment_status = 'unpaid'
 
 def payment_record_to_dict(p):
     return {
@@ -3208,13 +3545,14 @@ def payment_record_to_dict(p):
 
 @app.route('/api/payments', methods=['GET'])
 @require_auth
+@require_permission('payments.view', 'sales.view')
 def get_payments():
     user = request.current_user
     job_order_id = request.args.get('jobOrderId')
     query = PaymentRecord.query
     if job_order_id:
         query = query.filter_by(job_order_id=int(job_order_id))
-    elif user['role'] != 'administrator':
+    elif not all_job_order_branches(user):
         # Non-admins: only show payments for their branch's job orders
         branch_id = user.get('branchId')
         if branch_id:
@@ -3225,17 +3563,32 @@ def get_payments():
 
 @app.route('/api/payments', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('payments.add')
 def create_payment():
     data = request.get_json()
     if not data.get('jobOrderId') or not data.get('amount'):
         return jsonify({'status': 'error', 'message': 'jobOrderId and amount are required'}), 400
-    job_order = JobOrder.query.get(int(data['jobOrderId']))
+    try:
+        # Row lock: payments for one order are added one at a time
+        job_order = JobOrder.query.filter_by(id=int(data['jobOrderId'])).with_for_update().first()
+        amount = float(data['amount'])
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'jobOrderId and amount must be numbers'}), 400
     if not job_order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    amount = float(data['amount'])
+    error = branch_access_error(request.current_user, job_order.branch_id)
+    if error:
+        return error
+    if job_order.status in ('draft', 'cancelled', 'voided'):
+        return jsonify({'status': 'error', 'message': f'A {job_order.status} job order cannot take payments'}), 400
     if amount <= 0:
         return jsonify({'status': 'error', 'message': 'Amount must be positive'}), 400
+    amount = money(amount)
+    remaining = money(max(float(job_order.total_price or 0) - float(job_order.down_payment or 0), 0))
+    if amount > remaining:
+        return jsonify({'status': 'error',
+                        'message': f'Payment can\'t be more than the remaining balance of ₱{remaining:,.2f}'
+                                   if remaining > 0 else 'This order is already fully paid'}), 400
     payment = PaymentRecord(
         job_order_id=job_order.id,
         amount=amount,
@@ -3245,29 +3598,24 @@ def create_payment():
         recorded_by=request.current_user['id'],
     )
     db.session.add(payment)
-    # Recompute job order totals
-    total_paid = sum(float(p.amount) for p in job_order.payment_records) + amount
-    balance = max(0, float(job_order.total_price or 0) - total_paid)
-    if balance <= 0:
-        job_order.payment_status = 'paid'
-    elif total_paid > 0:
-        job_order.payment_status = 'partial'
-    else:
-        job_order.payment_status = 'unpaid'
-    job_order.down_payment = total_paid
-    job_order.balance = balance
+    db.session.flush()
+    # Total paid = every payment record, the new one included (it is already in
+    # the session, so adding `amount` on top would count it twice)
+    job_order.down_payment = money(db.session.query(db.func.coalesce(db.func.sum(PaymentRecord.amount), 0))
+                                   .filter(PaymentRecord.job_order_id == job_order.id).scalar())
+    refresh_job_order_balance(job_order)
     db.session.commit()
     log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Payment', f"Recorded payment of {amount} for {job_order.job_order_id}", request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': payment_record_to_dict(payment)}), 201
 
 @app.route('/api/payments/summary', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('payments.view')
 def get_payment_summary():
     user = request.current_user
     jo_query = JobOrder.query
     # Non-admins only ever see their own branch (no branch on the account = nothing)
-    if user['role'] != 'administrator':
+    if not all_job_order_branches(user):
         jo_query = jo_query.filter_by(branch_id=user_branch_id(user) or -1)
     orders = jo_query.all()
     total_revenue = sum(float(o.total_price or 0) for o in orders if o.status not in ('voided', 'cancelled', 'draft'))
@@ -3312,14 +3660,20 @@ def payment_override_to_dict(r):
 
 @app.route('/api/payment-overrides', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('payments.request_override')
 def create_payment_override():
     """Supervisor submits a payment override for admin approval. Nothing is
     applied to the job order until an administrator approves it."""
     data = request.get_json() or {}
-    job_order = JobOrder.query.get(int(data.get('jobOrderId', 0)))
+    try:
+        job_order = JobOrder.query.get(int(data.get('jobOrderId', 0)))
+    except (TypeError, ValueError):
+        job_order = None
     if not job_order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
+    error = branch_access_error(request.current_user, job_order.branch_id)
+    if error:
+        return error
     new_status = data.get('paymentStatus')
     if new_status and new_status not in ('unpaid', 'partial', 'paid'):
         return jsonify({'status': 'error', 'message': 'Invalid payment status'}), 400
@@ -3341,14 +3695,14 @@ def create_payment_override():
 
 @app.route('/api/payment-overrides', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('payments.view')
 def list_payment_overrides():
     """Admins see all requests; supervisors see the ones they submitted."""
     user = request.current_user
     status = request.args.get('status')
     job_order_id = request.args.get('jobOrderId')
     query = PaymentOverrideRequest.query
-    if user['role'] != 'administrator':
+    if not has_perm(user, 'payments.approve_override'):
         query = query.filter_by(requested_by=user['id'])
     if status:
         query = query.filter_by(status=status)
@@ -3359,7 +3713,7 @@ def list_payment_overrides():
 
 @app.route('/api/payment-overrides/<int:req_id>/approve', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('payments.approve_override')
 def approve_payment_override(req_id):
     req = PaymentOverrideRequest.query.get(req_id)
     if not req:
@@ -3369,6 +3723,9 @@ def approve_payment_override(req_id):
     job_order = req.job_order
     if not job_order:
         return jsonify({'status': 'error', 'message': 'Job order no longer exists'}), 404
+    error = branch_access_error(request.current_user, job_order.branch_id)
+    if error:
+        return error
     # Apply the requested override to the job order
     if req.new_payment_status:
         job_order.payment_status = req.new_payment_status
@@ -3376,9 +3733,14 @@ def approve_payment_override(req_id):
         job_order.balance = req.new_balance
     if req.new_down_payment is not None:
         job_order.down_payment = req.new_down_payment
+        if req.new_balance is None:
+            # A new amount paid changes what is still owed
+            job_order.balance = money(max(float(job_order.total_price or 0) - float(job_order.down_payment or 0), 0))
+            if not req.new_payment_status:
+                refresh_job_order_balance(job_order)
     req.status = 'approved'
     req.reviewed_by = request.current_user['id']
-    req.review_notes = ((request.get_json() or {}).get('notes') or '').strip() or None
+    req.review_notes = ((request.get_json(silent=True) or {}).get('notes') or '').strip() or None
     req.reviewed_at = datetime.utcnow()
     db.session.commit()
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Payment', f"Approved payment override for {job_order.job_order_id}", request.remote_addr or '0.0.0.0')
@@ -3386,16 +3748,20 @@ def approve_payment_override(req_id):
 
 @app.route('/api/payment-overrides/<int:req_id>/reject', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('payments.approve_override')
 def reject_payment_override(req_id):
     req = PaymentOverrideRequest.query.get(req_id)
     if not req:
         return jsonify({'status': 'error', 'message': 'Override request not found'}), 404
     if req.status != 'pending':
         return jsonify({'status': 'error', 'message': 'This request has already been reviewed'}), 400
+    if req.job_order:
+        error = branch_access_error(request.current_user, req.job_order.branch_id)
+        if error:
+            return error
     req.status = 'rejected'
     req.reviewed_by = request.current_user['id']
-    req.review_notes = ((request.get_json() or {}).get('notes') or '').strip() or None
+    req.review_notes = ((request.get_json(silent=True) or {}).get('notes') or '').strip() or None
     req.reviewed_at = datetime.utcnow()
     db.session.commit()
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Payment', f"Rejected payment override #{req.id}", request.remote_addr or '0.0.0.0')
@@ -3419,6 +3785,17 @@ def item_category(item):
         return 'labor'
     return 'material'
 
+
+def material_quantities(items):
+    """{material key: total quantity} over an order's material lines, to tell
+    whether an edit changes what the order takes from stock."""
+    totals = {}
+    for it in items or []:
+        if item_category(it) != 'material':
+            continue
+        key = f"id:{it['materialId']}" if it.get('materialId') else f"name:{(it.get('name') or '').strip().lower()}"
+        totals[key] = round(totals.get(key, 0) + float(it.get('quantity') or 0), 4)
+    return {k: v for k, v in totals.items() if v}
 
 def job_order_cost(items):
     """What the job costs us: materials + other expenses + labor, where a labor
@@ -3526,6 +3903,21 @@ def sync_labor_assignments(order, previous_items):
     order.items = items
 
 
+def release_pending_assignments(order):
+    """Free the workers booked on an order that will no longer be worked on:
+    delete the assignments that never started and unlink their labor lines, so
+    a line can't point at an id the database later gives another assignment."""
+    released = set()
+    for a in _assignments_for_order(order):
+        if a.status == 'pending':
+            released.add(a.id)
+            db.session.delete(a)
+    if released:
+        order.items = [{k: v for k, v in it.items() if k != 'assignmentId'}
+                       if it.get('assignmentId') in released else it
+                       for it in (order.items or [])]
+
+
 def add_labor_line_for_assignment(order, assignment):
     """Give an assignment made in Worker Management its labor line on the job
     order (or link an existing unlinked line for the same worker and task), so
@@ -3603,6 +3995,7 @@ def record_assignment_pay(assignment):
 
 @app.route('/api/sales/job-orders', methods=['GET'])
 @require_auth
+@require_permission('sales.view', 'item_trail.add', 'workers.assign')
 def get_job_orders():
     user = request.current_user
     status = request.args.get('status')
@@ -3610,7 +4003,7 @@ def get_job_orders():
     # Branch-level access control with database
     query = JobOrder.query
     
-    if user['role'] == 'administrator':
+    if all_job_order_branches(user):
         # Admins see all job orders
         pass
     else:
@@ -3655,6 +4048,9 @@ def get_job_orders():
             'totalPrice': jo.total_price,
             'discountPercent': jo.discount_percent,
             'vatPercent': jo.vat_percent,
+            'vatInclusive': bool(jo.vat_inclusive),
+            # VAT already inside the total, worked out here so every screen agrees
+            'vatAmount': vat_breakdown(jo.total_price, jo.vat_percent)['vat'],
             'status': jo.status,
             'paymentStatus': jo.payment_status,
             'downPayment': jo.down_payment,
@@ -3671,6 +4067,7 @@ def get_job_orders():
 
 @app.route('/api/sales/job-orders/<int:order_id>', methods=['GET'])
 @require_auth
+@require_permission('sales.view', 'item_trail.add', 'workers.assign')
 def get_job_order(order_id):
     user = request.current_user
     order = JobOrder.query.get(order_id)
@@ -3678,7 +4075,7 @@ def get_job_order(order_id):
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
     
     # Branch-level access control
-    if user['role'] != 'administrator':
+    if not all_job_order_branches(user):
         # Use branch_id directly from user if available, otherwise look up by name
         user_branch_id = None
         if user.get('branchId'):
@@ -3710,6 +4107,9 @@ def get_job_order(order_id):
         'totalPrice': order.total_price,
         'discountPercent': order.discount_percent,
         'vatPercent': order.vat_percent,
+        'vatInclusive': bool(order.vat_inclusive),
+        # VAT already inside the total, worked out here so every screen agrees
+        'vatAmount': vat_breakdown(order.total_price, order.vat_percent)['vat'],
         'status': order.status,
         'paymentStatus': order.payment_status,
         'downPayment': order.down_payment,
@@ -3724,31 +4124,71 @@ def get_job_order(order_id):
     
     return jsonify({'status': 'success', 'data': order_dict})
 
-# The price for the work (before discount and VAT) is at most 8 digits
+# The price for the work (VAT included, before discount) is at most 8 digits
 MAX_JOB_ORDER_PRICE = 99_999_999.99
+PRICING_KEYS = ('priceForWork', 'discountPercent', 'vatIncluded', 'totalPrice', 'vatPercent')
 
-def job_order_price_error(total_price, discount_percent, vat_percent):
-    """Error message if a job order's price is out of range, else None.
+def job_order_entered_price(order):
+    """The VAT-inclusive price before discount that gives this order's stored total."""
+    d = float(order.discount_percent or 0)
+    total = float(order.total_price or 0)
+    return money(total / (1 - d / 100)) if d < 100 else total
 
-    Only the final total is stored, so the price for the work is worked back
-    from it the same way the frontend's jobOrderPriceBreakdown() does."""
+def job_order_pricing(data, order=None):
+    """Work out a job order's price on the server. Returns (fields, error).
+
+    What is entered is the price for the work with VAT already included, a
+    discount % and whether VAT applies. The final price is that price less the
+    discount -- VAT is never added on top; its share is taken out of the final
+    price when shown (vat_breakdown). A total or VAT rate sent by the browser is
+    not trusted: the rate comes from Settings, or stays the one the order was
+    priced at. Older browsers that still send totalPrice have it read as the
+    final, VAT-inclusive price."""
     try:
-        total = float(total_price or 0)
-        d = min(max(float(discount_percent or 0), 0), 100)
-        v = max(float(vat_percent or 0), 0)
+        d = float(data['discountPercent'] if 'discountPercent' in data else
+                  (order.discount_percent if order else None) or 0)
+        if 'priceForWork' in data:
+            price = float(data['priceForWork'] or 0)
+        elif 'totalPrice' in data and data['totalPrice'] is not None:
+            price = float(data['totalPrice']) / (1 - d / 100) if d < 100 else float(data['totalPrice'])
+        elif order is not None:
+            price = job_order_entered_price(order)
+        else:
+            price = sum(float(it.get('quantity', 0) or 0) * float(it.get('unitPrice', 0) or 0)
+                        for it in (data.get('items') or []))
     except (TypeError, ValueError):
-        return 'Invalid price'
-    if total < 0:
-        return 'Price cannot be negative'
-    after_discount = total / (1 + v / 100)
-    subtotal = after_discount / (1 - d / 100) if d < 100 else after_discount
-    if round(subtotal, 2) > MAX_JOB_ORDER_PRICE:
-        return 'Price for the work must be less than ₱100,000,000 (up to 8 digits)'
-    return None
+        return None, 'Invalid price'
+    if not (0 <= d <= 100):
+        return None, 'Discount must be between 0 and 100%'
+    if price < 0:
+        return None, 'Price cannot be negative'
+    price = money(price)
+    if price > MAX_JOB_ORDER_PRICE:
+        return None, 'Price for the work must be less than ₱100,000,000 (up to 8 digits)'
+
+    if 'vatIncluded' in data:
+        vat_applies = bool(data['vatIncluded'])
+    elif 'vatPercent' in data:  # older browsers
+        vat_applies = bool(data['vatPercent'])
+    else:
+        vat_applies = bool(order.vat_percent) if order is not None else True
+    if not vat_applies:
+        rate = None
+    elif order is not None and order.vat_percent:
+        rate = order.vat_percent  # keep the rate the order was priced at
+    else:
+        rate = current_vat_percent() or None
+
+    return {
+        'total_price': money(price * (1 - d / 100)),
+        'discount_percent': d or None,
+        'vat_percent': rate,
+        'vat_inclusive': True,
+    }, None
 
 @app.route('/api/sales/job-orders', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.add')
 def create_job_order():
     data = request.get_json()
     is_draft = bool(data.get('isDraft'))
@@ -3766,6 +4206,8 @@ def create_job_order():
     # It is kept as a draft until then, so it stays out of sales figures and
     # worker schedules exactly like any other draft.
     send_quotation = bool(data.get('sendQuotation'))
+    if send_quotation and not has_perm(request.current_user, 'sales.quote'):
+        return jsonify({'status': 'error', 'message': 'You do not have permission to send quotations'}), 403
     appointment = None
     if send_quotation:
         if not all(f in data for f in required):
@@ -3790,21 +4232,29 @@ def create_job_order():
         else:
             return jsonify({'status': 'error',
                             'message': 'Choose the branch where the customer will pay for this quotation.'}), 400
+    error = branch_access_error(request.current_user, branch_db.id, 'branch')
+    if error:
+        return error
 
     job_order_id = generate_job_order_id(branch_db.code)
     
     items = data.get('items') or []
 
-    # Calculate costs
-    total_price = data.get('totalPrice')
-    if total_price is None:
-        total_price = sum(item.get('quantity', 0) * item.get('unitPrice', 0) for item in items)
-    price_error = job_order_price_error(total_price, data.get('discountPercent'), data.get('vatPercent'))
+    # Price, worked out here from what was entered (see job_order_pricing)
+    pricing, price_error = job_order_pricing(data)
     if price_error:
         return jsonify({'status': 'error', 'message': price_error}), 400
+    total_price = pricing['total_price']
     computed_cost = sum(item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0)) for item in items)
     estimated_cost = data.get('estimatedCost') if data.get('estimatedCost') is not None else computed_cost
-    down_payment = 0 if is_draft else data.get('downPayment', 0)
+    try:
+        down_payment = 0 if is_draft else money(float(data.get('downPayment') or 0))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Down payment must be a number'}), 400
+    if down_payment < 0 or down_payment > total_price:
+        return jsonify({'status': 'error', 'message': 'Down payment must be between ₱0 and the order total'}), 400
+    if down_payment > 0 and not has_perm(request.current_user, 'payments.add'):
+        return jsonify({'status': 'error', 'message': 'You do not have permission to record payments'}), 403
     balance = max(total_price - down_payment, 0) if total_price > 0 else 0
     
     # Determine payment status
@@ -3874,8 +4324,9 @@ def create_job_order():
         payment_status=payment_status,
         down_payment=down_payment,
         balance=balance,
-        discount_percent=data.get('discountPercent'),
-        vat_percent=data.get('vatPercent') or None,
+        discount_percent=pricing['discount_percent'],
+        vat_percent=pricing['vat_percent'],
+        vat_inclusive=pricing['vat_inclusive'],
         estimated_completion=estimated_completion,
         created_by=request.current_user['id'],
         quote_status='sent' if send_quotation else None,
@@ -3926,31 +4377,70 @@ def create_job_order():
             'jobOrderId': new_order.job_order_id,
             'branchName': branch_db.name,
             'totalPrice': total_price,
+            'discountPercent': new_order.discount_percent,
+            'vatPercent': new_order.vat_percent,
+            'vatInclusive': True,
+            'vatAmount': vat_breakdown(total_price, new_order.vat_percent)['vat'],
             'status': 'draft' if is_draft else 'pending',
             **({'customerNotified': notify_customer_of_quotation(new_order)} if send_quotation else {}),
         }
     }), 201
 
+# Status changes the job order page offers. Delivered is set by Deliveries and
+# voided by the void action; cancelled, delivered and voided orders are final.
+JOB_ORDER_TRANSITIONS = {
+    'draft': {'pending', 'cancelled'},
+    'pending': {'in_progress', 'cancelled'},
+    'in_progress': {'pending', 'completed', 'cancelled'},
+    'completed': {'in_progress', 'cancelled'},
+}
+
 @app.route('/api/sales/job-orders/<int:order_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.edit')
 def update_job_order(order_id):
-    # Use database instead of in-memory list
-    order = JobOrder.query.get(order_id)
+    # Row lock: concurrent edits of one order (e.g. two "Complete" clicks) run one
+    # after the other, so the second sees the first's stock deduction
+    order = JobOrder.query.filter_by(id=order_id).with_for_update().first()
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
 
     user = request.current_user
+    error = branch_access_error(user, order.branch_id)
+    if error:
+        return error
     is_draft = order.status == 'draft'
-    # Drafts are unpaid by definition, so the down-payment gate would lock sales
-    # managers out of the very orders they are still drafting.
-    if user.get('role') == 'sales_manager' and not is_draft and (order.down_payment or 0) <= 0:
-        return jsonify({'status': 'error', 'message': 'Down payment is required before sales managers can edit this job order'}), 403
+    # A confirmed order needs a down payment before it can be edited, unless the
+    # user may edit unpaid orders (by default administrators and supervisors).
+    # Drafts are unpaid by definition, so they are never held back by this.
+    if not is_draft and (order.down_payment or 0) <= 0 and not has_perm(user, 'sales.edit_unpaid'):
+        return jsonify({'status': 'error', 'message': 'A down payment is required before you can edit this job order'}), 403
 
-    data = request.get_json()
+    data = request.get_json() or {}
+    if data.get('sendQuotation') and not has_perm(user, 'sales.quote'):
+        return jsonify({'status': 'error', 'message': 'You do not have permission to send quotations'}), 403
+    # Money received goes through Payments (and overrides through their approval);
+    # the cost is worked out from the order's lines
+    locked_fields = [f for f in ('downPayment', 'balance', 'paymentStatus', 'actualCost') if f in data]
+    if locked_fields:
+        return jsonify({'status': 'error', 'message': f"{', '.join(locked_fields)} can't be set here. Record payments "
+                                                      f"on the Payments panel or request a payment override."}), 400
 
     # Capture previous status BEFORE any updates
     prev_status = order.status
+    # A finished order's materials have left stock; changing them here would make
+    # stock and costing disagree. Revert it to In Progress first (completing it
+    # again then takes or returns the difference).
+    if prev_status in ('completed', 'delivered') and 'items' in data and \
+            material_quantities(data['items'] or []) != material_quantities(order.items or []):
+        return jsonify({'status': 'error', 'message': 'This order is finished, so its materials have already left stock. '
+                                                      'Revert it to In Progress to change them.'}), 400
+    if 'status' in data and data['status'] != prev_status:
+        allowed = JOB_ORDER_TRANSITIONS.get(prev_status, set())
+        if data['status'] not in allowed:
+            return jsonify({'status': 'error',
+                            'message': f"A {prev_status.replace('_', ' ')} job order can't be changed to "
+                                       f"{str(data['status']).replace('_', ' ')}"}), 400
 
     # While still a draft the whole order is editable — customer details and
     # branch included. Once confirmed these are locked and only the fields
@@ -3973,6 +4463,10 @@ def update_job_order(order_id):
             branch = Branch.query.get(data['branchId'])
             if not branch:
                 return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
+            # Moving the order is as restricted as creating it there
+            error = branch_access_error(user, branch.id, 'branch')
+            if error:
+                return error
             order.branch_id = branch.id
         if 'estimatedCompletion' in data and data['estimatedCompletion']:
             try:
@@ -3985,29 +4479,20 @@ def update_job_order(order_id):
                 return jsonify({'status': 'error', 'message': 'Estimated completion date cannot be in the past'}), 400
             order.estimated_completion = new_completion
 
-    if any(k in data for k in ('totalPrice', 'discountPercent', 'vatPercent')):
-        price_error = job_order_price_error(
-            data.get('totalPrice', order.total_price),
-            data.get('discountPercent', order.discount_percent),
-            data.get('vatPercent', order.vat_percent))
+    pricing = None
+    if any(k in data for k in PRICING_KEYS):
+        pricing, price_error = job_order_pricing(data, order)
         if price_error:
             return jsonify({'status': 'error', 'message': price_error}), 400
 
     # Update allowed fields
     if 'status' in data:
         order.status = data['status']
-    if 'paymentStatus' in data:
-        order.payment_status = data['paymentStatus']
-    if 'downPayment' in data:
-        order.down_payment = data['downPayment']
-    if 'actualCost' in data:
-        order.actual_cost = data['actualCost']
-    if 'totalPrice' in data:
-        order.total_price = data['totalPrice']
-    if 'discountPercent' in data:
-        order.discount_percent = data['discountPercent']
-    if 'vatPercent' in data:
-        order.vat_percent = data['vatPercent'] or None
+    if pricing:
+        order.total_price = pricing['total_price']
+        order.discount_percent = pricing['discount_percent']
+        order.vat_percent = pricing['vat_percent']
+        order.vat_inclusive = pricing['vat_inclusive']
     if 'items' in data:
         previous_items = list(order.items or [])
         order.items = [{k: v for k, v in it.items() if k not in TRANSIENT_ITEM_KEYS} for it in (data['items'] or [])]
@@ -4027,9 +4512,7 @@ def update_job_order(order_id):
 
     if order.status in ('cancelled', 'voided') and prev_status != order.status:
         # Free up workers who were booked on this order but never started
-        for a in _assignments_for_order(order):
-            if a.status == 'pending':
-                db.session.delete(a)
+        release_pending_assignments(order)
     if 'slipData' in data:
         order.slip_data = data['slipData']
 
@@ -4048,28 +4531,21 @@ def update_job_order(order_id):
         log_action(request.current_user['id'], request.current_user['fullName'], 'QUOTATION', 'Sales',
                    f"Re-sent quotation {order.job_order_id} to {order.customer_name}", request.remote_addr or '0.0.0.0')
 
-    # Recalculate balance
-    if 'downPayment' in data or 'totalPrice' in data:
-        order.balance = max(order.total_price - order.down_payment, 0)
-        if order.total_price > 0 and order.down_payment >= order.total_price:
-            order.payment_status = 'paid'
-        elif order.down_payment > 0:
-            order.payment_status = 'partial'
-        elif order.total_price <= 0 and order.down_payment > 0:
-            order.payment_status = 'partial'
-        elif order.total_price <= 0:
-            order.payment_status = 'unpaid'
+    # A new price changes what is still owed
+    if pricing:
+        refresh_job_order_balance(order)
 
-    if data.get('status') == 'completed':
+    if data.get('status') == 'completed' and prev_status != 'completed':
         order.completed_at = datetime.now()
 
     order.updated_at = datetime.now()
 
     # ── Deduct inventory when a job order is completed ──────────────────────
     if data.get('status') == 'completed' and prev_status != 'completed':
-        # Total each material across lines first, then deduct only what earlier
-        # completions haven't — an order reverted to in-progress and completed
-        # again must not take its stock twice.
+        # Total each material across lines first, then take (or give back) only
+        # the difference from what earlier completions took — an order reverted
+        # to in-progress and completed again must not take its stock twice, and
+        # one whose materials were lowered meanwhile returns the difference.
         to_use = {}  # inventory material id -> [material, qty]
         for item in (order.items or []):
             qty = float(item.get('quantity', 0))
@@ -4113,6 +4589,17 @@ def update_job_order(order_id):
         sole_worker_id = next(iter(worker_ids)) if len(worker_ids) == 1 else None
         worker_names = ', '.join(sorted({a.worker.name for a in done if a.worker}))
 
+        # Materials an earlier completion took that are no longer on the order
+        taken_ids = [mid for (mid,) in db.session.query(MaterialUsageLog.material_id).filter(
+            MaterialUsageLog.used_in_type == 'job_order',
+            MaterialUsageLog.used_in_reference == order.job_order_id,
+            MaterialUsageLog.used_by.isnot(None)).distinct()]
+        for mid in taken_ids:
+            if mid not in to_use:
+                gone = InventoryMaterial.query.get(mid)
+                if gone:
+                    to_use[mid] = [gone, 0.0]
+
         for inv_material, qty in to_use.values():
             # Logs with used_by set are the ones written here (and that took stock)
             already = db.session.query(db.func.coalesce(db.func.sum(MaterialUsageLog.quantity_used), 0)).filter(
@@ -4122,15 +4609,18 @@ def update_job_order(order_id):
                 MaterialUsageLog.used_by.isnot(None),
             ).scalar()
             qty = round(qty - float(already or 0), 4)
-            if qty <= 0:
+            if qty == 0:
                 continue
 
+            # A negative qty gives back what the order no longer uses
             inv_material.stock_quantity = float(inv_material.stock_quantity) - qty
-            inv_material.status = 'available'   # clear 'needed' flag
+            if qty > 0:
+                inv_material.status = 'available'   # clear 'needed' flag
             inv_material.updated_at = datetime.now()
 
-            notes = f"Used in job order {order.job_order_id} — {order.customer_name}"
-            if worker_names:
+            notes = (f"Used in job order {order.job_order_id} — {order.customer_name}" if qty > 0 else
+                     f"Returned from job order {order.job_order_id} — materials lowered")
+            if worker_names and qty > 0:
                 notes += f" (by {worker_names})"
             db.session.add(MaterialUsageLog(
                 material_id=inv_material.id,
@@ -4160,6 +4650,9 @@ def update_job_order(order_id):
             'totalPrice': order.total_price,
             'discountPercent': order.discount_percent,
             'vatPercent': order.vat_percent,
+            'vatInclusive': bool(order.vat_inclusive),
+            # VAT already inside the total, worked out here so every screen agrees
+            'vatAmount': vat_breakdown(order.total_price, order.vat_percent)['vat'],
             'items': items_with_assignment_status(order),
             'completedAt': order.completed_at.strftime('%Y-%m-%d') if order.completed_at else None,
             'updatedAt': order.updated_at.strftime('%Y-%m-%d')
@@ -4168,13 +4661,13 @@ def update_job_order(order_id):
 
 @app.route('/api/sales/job-orders/<int:order_id>/void', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('sales.void')
 def void_job_order(order_id):
     user = request.current_user
     order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    if user['role'] != 'administrator' and order.branch_id != user_branch_id(user):
+    if not all_job_order_branches(user) and order.branch_id != user_branch_id(user):
         return jsonify({'status': 'error', 'message': 'Access denied'}), 403
     if order.status in ('voided', 'cancelled', 'draft'):
         return jsonify({'status': 'error', 'message': f'A {order.status} order cannot be voided'}), 400
@@ -4187,9 +4680,7 @@ def void_job_order(order_id):
     order.voided_at = datetime.now().date()
     order.updated_at = datetime.utcnow()
     # Free up workers who were booked but never started
-    for a in _assignments_for_order(order):
-        if a.status == 'pending':
-            db.session.delete(a)
+    release_pending_assignments(order)
     db.session.commit()
 
     log_action(user['id'], user['fullName'], 'VOID', 'Sales', f"Voided job order: {order.job_order_id} (unclaimed after 60 days)", request.remote_addr or '0.0.0.0')
@@ -4280,6 +4771,9 @@ def customer_job_order_dict(o):
         'totalPrice': o.total_price or 0,
         'discountPercent': o.discount_percent,
         'vatPercent': o.vat_percent,
+        'vatInclusive': bool(o.vat_inclusive),
+        # VAT already inside the total, worked out here so every screen agrees
+        'vatAmount': vat_breakdown(o.total_price, o.vat_percent)['vat'],
         'downPayment': o.down_payment or 0,
         'balance': o.balance or 0,
         'estimatedCompletion': o.estimated_completion.strftime('%Y-%m-%d') if o.estimated_completion else None,
@@ -4293,7 +4787,7 @@ def my_customer_record_ids():
 
 @app.route('/api/job-orders/mine', methods=['GET'])
 @require_auth
-@require_roles('customer')
+@require_customer
 def get_my_job_orders():
     """Job orders (and quotations) for the signed-in customer's linked record.
     Staff drafts stay hidden; drafts sent as quotations are shown."""
@@ -4308,7 +4802,7 @@ def get_my_job_orders():
 
 @app.route('/api/job-orders/<int:order_id>/quotation/respond', methods=['POST'])
 @require_auth
-@require_roles('customer')
+@require_customer
 def respond_to_job_order_quotation(order_id):
     """Customer accepts (becomes a pending job order) or rejects (with a reason) a quotation."""
     user = request.current_user
@@ -4338,8 +4832,7 @@ def respond_to_job_order_quotation(order_id):
     order.quote_responded_at = now
     # Sales managers send quotations too, so they hear back as well
     notify_branch_users(order.branch_id, 'quotation_response', title, message,
-                        {'jobOrderId': order.id, 'response': response},
-                        branch_roles=('supervisor', 'sales_manager'))
+                        {'jobOrderId': order.id, 'response': response})
     db.session.commit()
 
     log_action(user['id'], user['fullName'], 'RESPOND', 'Sales',
@@ -4348,13 +4841,13 @@ def respond_to_job_order_quotation(order_id):
 
 @app.route('/api/sales/drafts', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.view')
 def get_draft_job_orders():
     """Draft job orders — saved but not yet confirmed. Kept out of all normal
     order lists and sales/pending counts until confirmed."""
     user = request.current_user
     query = JobOrder.query.filter(JobOrder.status == 'draft')
-    if user['role'] != 'administrator':
+    if not all_job_order_branches(user):
         if user.get('branchId'):
             query = query.filter(JobOrder.branch_id == user['branchId'])
         elif user.get('branch'):
@@ -4383,13 +4876,16 @@ def get_draft_job_orders():
 
 @app.route('/api/sales/job-orders/<int:order_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.delete')
 def delete_job_order(order_id):
     """Delete a job order. Only drafts may be deleted; confirmed orders must be
     voided instead so their history is preserved."""
     order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
+    error = branch_access_error(request.current_user, order.branch_id)
+    if error:
+        return error
     if order.status != 'draft':
         return jsonify({'status': 'error', 'message': 'Only draft orders can be deleted. Void confirmed orders instead.'}), 400
     label = order.job_order_id
@@ -4401,7 +4897,7 @@ def delete_job_order(order_id):
 
 @app.route('/api/sales/all-orders', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.view')
 def get_all_orders():
     """Get both job orders and customer orders - filtered by branch for non-admin users"""
     user = request.current_user
@@ -4412,7 +4908,7 @@ def get_all_orders():
     co_base = CustomerOrder.query.options(joinedload(CustomerOrder.branch))
 
     # Get job orders from database
-    if user['role'] == 'administrator':
+    if all_job_order_branches(user):
         # Administrators can see all orders (drafts are excluded — they live in /api/sales/drafts)
         job_orders_db = jo_base.filter(JobOrder.status != 'draft').order_by(JobOrder.created_at.desc()).all()
         customer_orders_db = co_base.order_by(CustomerOrder.created_at.desc()).all()
@@ -4454,6 +4950,9 @@ def get_all_orders():
             'totalPrice': jo.total_price,
             'discountPercent': jo.discount_percent,
             'vatPercent': jo.vat_percent,
+            'vatInclusive': bool(jo.vat_inclusive),
+            # VAT already inside the total, worked out here so every screen agrees
+            'vatAmount': vat_breakdown(jo.total_price, jo.vat_percent)['vat'],
             'status': jo.status,
             'paymentStatus': jo.payment_status,
             'downPayment': jo.down_payment,
@@ -4500,23 +4999,23 @@ def lineup_slip_to_dict(slip):
 
 
 def can_use_lineup_slip(user, branch_id):
-    return user['role'] == 'administrator' or (branch_id is not None and branch_id == user_branch_id(user))
+    return all_job_order_branches(user) or (branch_id is not None and branch_id == user_branch_id(user))
 
 
 @app.route('/api/sales/lineup-slips', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.view')
 def get_lineup_slips():
     user = request.current_user
     query = LineupSlip.query
-    if user['role'] != 'administrator':
+    if not all_job_order_branches(user):
         query = query.filter(LineupSlip.branch_id == (user_branch_id(user) or -1))
     slips = query.order_by(LineupSlip.created_at.desc()).all()
     return jsonify({'status': 'success', 'data': [lineup_slip_to_dict(s) for s in slips]})
 
 @app.route('/api/sales/lineup-slips', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.add')
 def create_lineup_slip():
     user = request.current_user
     data = request.get_json() or {}
@@ -4549,7 +5048,7 @@ def create_lineup_slip():
 
 @app.route('/api/sales/lineup-slips/<int:slip_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.edit')
 def update_lineup_slip(slip_id):
     user = request.current_user
     slip = LineupSlip.query.get(slip_id)
@@ -4585,19 +5084,26 @@ def user_branch_id(user):
         return b.id if b else None
     return None
 
+def branch_access_error(user, branch_id, what='job order'):
+    """403 response if the user is limited to their own branch and branch_id is
+    another one, else None. Always pass the branch stored on the record, never
+    one taken from the request."""
+    if all_job_order_branches(user) or (branch_id is not None and branch_id == user_branch_id(user)):
+        return None
+    return jsonify({'status': 'error', 'message': f'This {what} belongs to another branch'}), 403
+
 
 def costed_job_orders(user):
     """Job orders the user may see for costing: real orders, not drafts or dead ones."""
     query = JobOrder.query.filter(~JobOrder.status.in_(('draft', 'voided', 'cancelled')))
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         query = query.filter(JobOrder.branch_id == (user_branch_id(user) or -1))
     return query
 
 
 def revenue_ex_vat(order):
     """What the order earns us: its total less any VAT collected for the government."""
-    vat = float(order.vat_percent or 0)
-    return round(float(order.total_price or 0) / (1 + vat / 100), 2)
+    return vat_breakdown(order.total_price, order.vat_percent)['net']
 
 
 def job_order_costing(order):
@@ -4630,7 +5136,7 @@ def job_order_costing(order):
 
 @app.route('/api/costing/all', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('costing.view')
 def get_all_costings():
     orders = costed_job_orders(request.current_user).order_by(JobOrder.created_at.desc()).all()
     result = []
@@ -4651,7 +5157,7 @@ def get_all_costings():
 
 @app.route('/api/costing/job-order/<int:order_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('costing.view')
 def get_job_order_costing(order_id):
     order = costed_job_orders(request.current_user).filter(JobOrder.id == order_id).first()
     if not order:
@@ -4676,7 +5182,7 @@ def get_job_order_costing(order_id):
 
 @app.route('/api/costing/job-order/<int:order_id>/actual', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('costing.edit')
 def update_actual_cost(order_id):
     # Actual cost is now worked out from the order's lines and its workers'
     # pay, so it can't be typed in; edit the order's parts instead.
@@ -4685,9 +5191,9 @@ def update_actual_cost(order_id):
 
 @app.route('/api/costing/variance-report', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('costing.view')
 def get_variance_report():
-    orders = costed_job_orders(request.current_user).filter(JobOrder.status == 'completed').all()
+    orders = costed_job_orders(request.current_user).filter(JobOrder.status.in_(EARNED_STATUSES)).all()
     report = []
     for order in orders:
         c = job_order_costing(order)
@@ -4707,13 +5213,13 @@ def get_variance_report():
 
 @app.route('/api/costing/receipt/<int:order_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.view', 'costing.view')
 def generate_receipt(order_id):
     user = request.current_user
     order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    if user['role'] != 'administrator' and order.branch_id != user_branch_id(user):
+    if not all_job_order_branches(user) and order.branch_id != user_branch_id(user):
         return jsonify({'status': 'error', 'message': 'Access denied'}), 403
 
     receipt = {
@@ -4737,6 +5243,11 @@ def generate_receipt(order_id):
             for item in (order.items or []) if item_category(item) == 'material'
         ],
         'subtotal': order.total_price,
+        # The total already includes VAT; these show its share
+        'total': order.total_price,
+        'vatPercent': order.vat_percent,
+        'vatAmount': vat_breakdown(order.total_price, order.vat_percent)['vat'],
+        'netOfVat': vat_breakdown(order.total_price, order.vat_percent)['net'],
         'downPayment': order.down_payment,
         'balance': order.balance,
         'paymentStatus': order.payment_status
@@ -4749,7 +5260,7 @@ def generate_receipt(order_id):
 
 @app.route('/api/purchase-orders', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('purchase_orders.view')
 def get_purchase_orders():
     status = request.args.get('status')
     query = PurchaseOrder.query
@@ -4780,7 +5291,7 @@ def purchase_order_to_dict(po):
 
 @app.route('/api/purchase-orders/<int:po_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('purchase_orders.view')
 def get_purchase_order(po_id):
     po = PurchaseOrder.query.get(po_id)
     if not po:
@@ -4789,7 +5300,7 @@ def get_purchase_order(po_id):
 
 @app.route('/api/purchase-orders', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('purchase_orders.add')
 def create_purchase_order():
     data = request.get_json() or {}
 
@@ -4806,6 +5317,8 @@ def create_purchase_order():
     } for it in data['items']]
     if any(it['quantity'] <= 0 for it in items):
         return jsonify({'status': 'error', 'message': 'Every item needs a quantity above zero'}), 400
+    if any(it['unitPrice'] < 0 for it in items):
+        return jsonify({'status': 'error', 'message': 'Unit prices cannot be negative'}), 400
 
     supplier_id = data.get('supplierId')
     if supplier_id and not Supplier.query.get(supplier_id):
@@ -4830,7 +5343,7 @@ def create_purchase_order():
 
 @app.route('/api/purchase-orders/<int:po_id>/approve', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('purchase_orders.approve')
 def approve_purchase_order(po_id):
     po = PurchaseOrder.query.get(po_id)
     if not po:
@@ -4849,9 +5362,10 @@ def approve_purchase_order(po_id):
 
 @app.route('/api/purchase-orders/<int:po_id>/receive', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('purchase_orders.receive')
 def receive_purchase_order(po_id):
-    po = PurchaseOrder.query.get(po_id)
+    # Row lock: a second "Receive" waits and then sees the PO already received
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
     if not po:
         return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
 
@@ -4880,11 +5394,11 @@ def receive_purchase_order(po_id):
 
 @app.route('/api/deliveries', methods=['GET'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('item_trail.view')
 def get_deliveries():
     user = request.current_user
     query = Delivery.query
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         bid = user_branch_id(user) or -1
         query = query.filter(db.or_(Delivery.from_branch_id == bid, Delivery.to_branch_id == bid))
     if request.args.get('status'):
@@ -4896,7 +5410,7 @@ def get_deliveries():
 
 @app.route('/api/deliveries/<int:delivery_id>', methods=['GET'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('item_trail.view')
 def get_delivery(delivery_id):
     d = Delivery.query.get(delivery_id)
     if not d:
@@ -4907,13 +5421,17 @@ def get_delivery(delivery_id):
 
 @app.route('/api/deliveries', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('item_trail.add')
 def create_delivery():
     data = request.get_json() or {}
     if not data.get('type') or not data.get('scheduledDate'):
         return jsonify({'status': 'error', 'message': 'Delivery type and date are required'}), 400
 
     job_order = JobOrder.query.get(data['jobOrderId']) if data.get('jobOrderId') else None
+    if job_order:
+        error = branch_access_error(request.current_user, job_order.branch_id)
+        if error:
+            return error
     # Deliver from the branch that did the job, unless one is given
     from_branch_id = data.get('fromBranchId') or (job_order.branch_id if job_order else None) \
         or user_branch_id(request.current_user)
@@ -4952,7 +5470,7 @@ def create_delivery():
 
 @app.route('/api/deliveries/<int:delivery_id>/status', methods=['PUT'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('item_trail.update_status')
 def update_delivery_status(delivery_id):
     user = request.current_user
     d = Delivery.query.get(delivery_id)
@@ -4980,7 +5498,7 @@ def update_delivery_status(delivery_id):
 
 @app.route('/api/deliveries/<int:delivery_id>/receipt', methods=['GET'])
 @require_auth
-@require_roles(*STAFF_ROLES)
+@require_permission('item_trail.view')
 def generate_delivery_receipt(delivery_id):
     d = Delivery.query.get(delivery_id)
     if not d:
@@ -5143,7 +5661,7 @@ def appointment_branch_error(user, appointment=None):
     """Supervisors and sales managers only handle their own branch's
     appointments; administrators handle every branch. Returns an error
     response, or None when access is fine."""
-    if user['role'] == 'administrator':
+    if all_branches(user):
         return None
     if not user.get('branchId'):
         return jsonify({'status': 'error', 'message': 'Your account has no assigned branch'}), 400
@@ -5153,7 +5671,7 @@ def appointment_branch_error(user, appointment=None):
 
 @app.route('/api/appointments', methods=['GET'])
 @require_auth
-@require_roles(*APPOINTMENT_STAFF)
+@require_permission('appointments.view')
 def get_appointments():
     """Get all appointments - staff endpoint"""
     user = request.current_user
@@ -5169,7 +5687,7 @@ def get_appointments():
     error = appointment_branch_error(user)
     if error:
         return error
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         query = query.filter(Appointment.branch_id == user['branchId'])
     
     appointments = query.order_by(Appointment.preferred_date.desc()).all()
@@ -5178,7 +5696,7 @@ def get_appointments():
 
 @app.route('/api/appointments/<int:appointment_id>', methods=['GET'])
 @require_auth
-@require_roles(*APPOINTMENT_STAFF)
+@require_permission('appointments.view')
 def get_appointment(appointment_id):
     """One appointment, e.g. to pre-fill a quotation from it."""
     appointment = Appointment.query.get(appointment_id)
@@ -5191,7 +5709,7 @@ def get_appointment(appointment_id):
 
 @app.route('/api/appointments/<int:appointment_id>', methods=['PUT'])
 @require_auth
-@require_roles(*APPOINTMENT_STAFF)
+@require_permission('appointments.edit')
 def update_appointment(appointment_id):
     """Update an appointment status or notes"""
     appointment = Appointment.query.get(appointment_id)
@@ -5253,7 +5771,7 @@ def get_my_appointments():
 
 @app.route('/api/admin/appointments/<int:appointment_id>/no-show', methods=['POST'])
 @require_auth
-@require_roles(*APPOINTMENT_STAFF)
+@require_permission('appointments.edit')
 def mark_appointment_no_show(appointment_id):
     """Mark a confirmed appointment as no-show and add a strike to the phone number."""
     appointment = Appointment.query.get(appointment_id)
@@ -5289,7 +5807,7 @@ def mark_appointment_no_show(appointment_id):
 
 @app.route('/api/admin/product-orders/<int:order_id>/flag-spam', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.flag_spam')
 def flag_order_spam(order_id):
     """Flag a product order as fake/spam and add a strike to the phone number."""
     order = ProductOrder.query.get(order_id)
@@ -5320,7 +5838,7 @@ def flag_order_spam(order_id):
 
 @app.route('/api/admin/phone-blacklist', methods=['GET'])
 @require_auth
-@require_roles('administrator')
+@require_permission('blacklist.manage')
 def get_phone_blacklist():
     """Get all phone numbers with strikes or blocks."""
     records = PhoneBlacklist.query.order_by(
@@ -5342,7 +5860,7 @@ def get_phone_blacklist():
 
 @app.route('/api/admin/phone-blacklist/<int:record_id>/unblock', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('blacklist.manage')
 def unblock_phone(record_id):
     """Admin unblocks a phone number and resets its strike count."""
     record = PhoneBlacklist.query.get(record_id)
@@ -5365,7 +5883,7 @@ def unblock_phone(record_id):
 
 @app.route('/api/admin/phone-blacklist/<int:record_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator')
+@require_permission('blacklist.manage')
 def delete_phone_record(record_id):
     """Completely remove a phone record from the list."""
     record = PhoneBlacklist.query.get(record_id)
@@ -5411,19 +5929,33 @@ def fmt_dt(dt):
     return dt.isoformat()     # date only
 
 
-def notify_branch_users(branch_id, notif_type, title, message, data=None,
-                        branch_roles=('supervisor',)):
-    """Push an in-app notification to all admins plus the given roles at the
-    branch (supervisors by default)."""
+# Who receives each staff notification: holders of this permission who work at
+# the branch concerned, or who have access to every branch
+NOTIFICATION_PERMISSIONS = {
+    'premade_delivery': 'premade.view',
+    'quotation_response': 'sales.view',
+    'transfer_request': 'product_orders.transfer',
+    'transfer_dispatched': 'product_orders.transfer',
+    'order_ready': 'product_orders.view',
+    'sale_completed': 'product_orders.view',
+    'order_cancelled': 'product_orders.view',
+}
+
+def notify_branch_users(branch_id, notif_type, title, message, data=None):
+    """Push an in-app notification to the staff who handle this kind of event
+    at the branch (see NOTIFICATION_PERMISSIONS)."""
     if branch_id is None:
         return
-    targets = (User.query
-               .join(Role, User.role_id == Role.id)
-               .filter(Role.key.in_(['administrator', *branch_roles]),
-                       User.is_active == True)
-               .all())
-    for u in targets:
-        if u.role.key == 'administrator' or u.branch_id == branch_id:
+    needed = NOTIFICATION_PERMISSIONS[notif_type]
+    staff = (User.query.join(Role, User.role_id == Role.id)
+             .filter(Role.key != 'customer', User.is_active == True).all())
+    overrides = {}
+    for o in UserPermissionOverride.query.filter(
+            UserPermissionOverride.user_id.in_([u.id for u in staff] or [-1])).all():
+        overrides.setdefault(o.user_id, []).append(o)
+    for u in staff:
+        perms = effective_permissions(u.id, u.role.key, overrides.get(u.id, []))
+        if needed in perms and ('branches.all' in perms or u.branch_id == branch_id):
             db.session.add(Notification(
                 user_id=u.id,
                 type=notif_type,
@@ -5570,6 +6102,10 @@ def product_order_to_dict(order):
         'customerAddress': order.customer_address,
         'items': order.items,
         'totalAmount': order.total_amount,
+        # Older orders didn't record a rate; their receipts always used the standard 12%
+        'vatPercent': order.vat_percent if order.vat_percent is not None else DEFAULT_VAT_PERCENT,
+        'vatAmount': vat_breakdown(order.total_amount, order.vat_percent if order.vat_percent is not None
+                                   else DEFAULT_VAT_PERCENT)['vat'],
         'branchId': order.branch_id,
         'branchName': branch_name,
         'groupId': order.group_id,
@@ -5588,17 +6124,13 @@ def product_order_to_dict(order):
 
 def can_manage_product_order(user, order):
     """Check if current user can manage this product order."""
-    if user['role'] == 'administrator':
+    if all_branches(user):
         return True
-
-    if user['role'] == 'supervisor':
-        user_branch_id = user.get('branchId')
-        if not user_branch_id:
-            return False
-        # Source branch supervisor OR pickup branch supervisor can manage
-        return order.branch_id == user_branch_id or order.pickup_branch_id == user_branch_id
-
-    return False
+    user_branch_id = user.get('branchId')
+    if not user_branch_id:
+        return False
+    # Staff at the source or the pickup branch can manage it
+    return order.branch_id == user_branch_id or order.pickup_branch_id == user_branch_id
 
 def build_product_order_timeline(order):
     """Build timeline events for a product order using order fields and audit logs."""
@@ -5700,6 +6232,44 @@ def check_items_availability(items):
 
     return all_ok, report
 
+def order_quantity(raw):
+    """A whole number of units above zero, or None."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value != value or value <= 0 or value != int(value) or value > 1_000_000:
+        return None
+    return int(value)
+
+def stock_taken_at_placement(item):
+    """Checkout orders (place_multi_branch_order) take each item's stock when the
+    order is placed and record the branch it came from; walk-in orders
+    (create_product_order) take it when the order is completed."""
+    return 'sourceBranchId' in item
+
+def return_placement_stock(order):
+    """Put back the stock a checkout order took when it was placed, when the order
+    is cancelled. Items whose transfer already arrived stay at the pickup branch.
+    Returns an error message if items are still in transit, else None."""
+    transfers = {t.source_branch_id: t for t in (order.transfers or []) if t.status != 'cancelled'}
+    if any(t.status == 'transferred' for t in transfers.values()):
+        return 'Some items are on their way to the pickup branch. Receive them first, then cancel.'
+    for item in order.items or []:
+        if not stock_taken_at_placement(item):
+            continue
+        source = item.get('sourceBranchId')
+        transfer = transfers.get(source) if source != order.branch_id else None
+        if transfer is not None and transfer.status == 'received':
+            continue
+        product = PremadeProduct.query.filter_by(id=item.get('productId')).with_for_update().first()
+        if product:
+            product.quantity = float(product.quantity or 0) + float(item.get('quantity') or 0)
+    for transfer in transfers.values():
+        if transfer.status == 'pending':
+            transfer.status = 'cancelled'
+    return None
+
 def place_multi_branch_order(data, user_id):
     """Create one order at the pickup branch, with transfer requests for items
     held at other branches. Shared by the public checkout and draft confirm.
@@ -5722,13 +6292,19 @@ def place_multi_branch_order(data, user_id):
     all_items = []
     items_by_source = {}
     all_deductions = []
+    requested_by_product = {}
     for item_data in data['items']:
         product_id = item_data.get('productId')
-        quantity = int(item_data.get('quantity', 1))
-        product = PremadeProduct.query.filter_by(id=product_id, is_archived=False).first()
+        quantity = order_quantity(item_data.get('quantity', 1))
+        if quantity is None:
+            return None, ({'status': 'error', 'message': 'Each quantity must be a whole number above zero'}, 400)
+        # Row lock: two checkouts for the last units can't both take them
+        product = PremadeProduct.query.filter_by(id=product_id, is_archived=False).with_for_update().first()
         if not product:
             return None, ({'status': 'error', 'message': f'Product {product_id} not found'}, 400)
-        if float(product.quantity) < quantity:
+        # The same product listed twice is checked against its stock once, in total
+        requested_by_product[product.id] = requested_by_product.get(product.id, 0) + quantity
+        if float(product.quantity) < requested_by_product[product.id]:
             return None, ({'status': 'error', 'message': f'Insufficient stock for {product.name}'}, 400)
 
         item_dict = {
@@ -5759,6 +6335,7 @@ def place_multi_branch_order(data, user_id):
         customer_address=data.get('customerAddress', ''),
         items=all_items,
         total_amount=sum(i['total'] for i in all_items),
+        vat_percent=current_vat_percent(),  # product prices include VAT
         branch_id=pickup_branch_id,
         pickup_branch_id=pickup_branch_id,
         shipment_status='pending' if needs_transfers else 'not_needed',
@@ -5824,9 +6401,11 @@ def create_multi_branch_product_order():
 
 @app.route('/api/product-orders/group/<group_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator')
+@require_permission('product_orders.view')
+@require_permission('branches.all')
 def get_product_order_group(group_id):
-    """Get all orders belonging to the same multi-branch group (admin only)."""
+    """Get all orders belonging to the same multi-branch group (spans branches,
+    so it needs cross-branch access)."""
     orders = ProductOrder.query.filter_by(group_id=group_id).order_by(ProductOrder.created_at.asc()).all()
     if not orders:
         return jsonify({'status': 'error', 'message': 'Group not found'}), 404
@@ -5835,11 +6414,11 @@ def get_product_order_group(group_id):
 
 @app.route('/api/product-orders/my-transfer-requests', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_my_transfer_requests():
     """Source branch supervisors see transfer requests assigned to their branch."""
     user = request.current_user
-    if user['role'] == 'supervisor':
+    if not all_branches(user):
         branch_id = user.get('branchId')
         if not branch_id:
             return jsonify({'status': 'success', 'data': []})
@@ -5855,11 +6434,11 @@ def get_my_transfer_requests():
 
 @app.route('/api/product-orders/pickup-queue', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_pickup_queue():
     """Orders where this branch is the pickup location and items come from other branches."""
     user = request.current_user
-    if user['role'] == 'supervisor':
+    if not all_branches(user):
         branch_id = user.get('branchId')
         if not branch_id:
             return jsonify({'status': 'success', 'data': []})
@@ -5881,12 +6460,12 @@ def get_pickup_queue():
 
 @app.route('/api/product-orders/direct-sales', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_direct_sales():
     """Single-branch premade orders where this branch is both the supplier and pickup.
     These don't generate transfers — they're direct sales from the branch's own stock."""
     user = request.current_user
-    if user['role'] == 'supervisor':
+    if not all_branches(user):
         branch_id = user.get('branchId')
         if not branch_id:
             return jsonify({'status': 'success', 'data': []})
@@ -5904,15 +6483,15 @@ def get_direct_sales():
 
 @app.route('/api/product-order-transfers/<int:transfer_id>/mark-transferred', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.transfer')
 def mark_transfer_sent(transfer_id):
     """Source branch marks their items as sent to the pickup branch."""
-    transfer = ProductOrderTransfer.query.get(transfer_id)
+    transfer = ProductOrderTransfer.query.filter_by(id=transfer_id).with_for_update().first()
     if not transfer:
         return jsonify({'status': 'error', 'message': 'Transfer request not found'}), 404
 
     user = request.current_user
-    if user['role'] == 'supervisor' and user.get('branchId') != transfer.source_branch_id:
+    if not all_branches(user) and user.get('branchId') != transfer.source_branch_id:
         return jsonify({'status': 'error', 'message': 'Only the source branch can mark this transfer as sent'}), 403
 
     if transfer.status != 'pending':
@@ -5933,7 +6512,7 @@ def mark_transfer_sent(transfer_id):
     )
     db.session.commit()
 
-    is_override = user['role'] == 'administrator' and user.get('branchId') != transfer.source_branch_id
+    is_override = all_branches(user) and user.get('branchId') != transfer.source_branch_id
     log_action(user['id'], user['fullName'], 'TRANSFER', 'Product Orders',
         f"{'[ADMIN OVERRIDE] ' if is_override else ''}Transfer {transfer_id} for order {transfer.order.order_number if transfer.order else '?'} dispatched from {transfer.source_branch.name if transfer.source_branch else 'N/A'} to {transfer.order.branch.name if (transfer.order and transfer.order.branch) else 'N/A'}.",
         request.remote_addr or '0.0.0.0')
@@ -5943,16 +6522,17 @@ def mark_transfer_sent(transfer_id):
 
 @app.route('/api/product-order-transfers/<int:transfer_id>/confirm-receipt', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.transfer')
 def confirm_transfer_receipt(transfer_id):
     """Pickup branch confirms they received the transferred items; adds to their inventory."""
-    transfer = ProductOrderTransfer.query.get(transfer_id)
+    # Row lock: a second confirm waits, then sees it already received
+    transfer = ProductOrderTransfer.query.filter_by(id=transfer_id).with_for_update().first()
     if not transfer:
         return jsonify({'status': 'error', 'message': 'Transfer request not found'}), 404
 
     user = request.current_user
     order = transfer.order
-    if user['role'] == 'supervisor' and user.get('branchId') != (order.branch_id if order else None):
+    if not all_branches(user) and user.get('branchId') != (order.branch_id if order else None):
         return jsonify({'status': 'error', 'message': 'Only the pickup branch can confirm receipt'}), 403
 
     if transfer.status != 'transferred':
@@ -6004,7 +6584,7 @@ def confirm_transfer_receipt(transfer_id):
 
     db.session.commit()
 
-    is_override = user['role'] == 'administrator' and user.get('branchId') != (order.branch_id if order else None)
+    is_override = all_branches(user) and user.get('branchId') != (order.branch_id if order else None)
     log_action(user['id'], user['fullName'], 'RECEIVE', 'Product Orders',
         f"{'[ADMIN OVERRIDE] ' if is_override else ''}Transfer {transfer_id} received at {pickup_branch.name if pickup_branch else 'N/A'}. Items added to inventory.",
         request.remote_addr or '0.0.0.0')
@@ -6048,16 +6628,22 @@ def create_product_order():
     total_amount = 0
     validated_items = []
     
+    requested_by_product = {}
+    stock_deductions = []
     for item in data['items']:
         product_id = item.get('productId')
-        quantity = item.get('quantity', 1)
+        quantity = order_quantity(item.get('quantity', 1))
+        if quantity is None:
+            return jsonify({'status': 'error', 'message': 'Each quantity must be a whole number above zero'}), 400
 
-        # Find product in database-backed premade products
-        product = PremadeProduct.query.filter_by(id=product_id, is_archived=False).first()
+        # Find product in database-backed premade products. Row lock: two orders
+        # for the last units can't both take them
+        product = PremadeProduct.query.filter_by(id=product_id, is_archived=False).with_for_update().first()
         if not product:
             return jsonify({'status': 'error', 'message': f'Product with ID {product_id} not found'}), 400
 
-        if float(product.quantity) < quantity:
+        requested_by_product[product.id] = requested_by_product.get(product.id, 0) + quantity
+        if float(product.quantity) < requested_by_product[product.id]:
             return jsonify({'status': 'error', 'message': f'Insufficient stock for {product.name}'}), 400
 
         # Enforce that all products come from the selected pickup branch.
@@ -6073,10 +6659,24 @@ def create_product_order():
             'sku': product.sku,
             'quantity': quantity,
             'unitPrice': float(product.price),
-            'total': item_total
+            'total': item_total,
+            # Taken from this branch's stock now, like checkout (stock_taken_at_placement)
+            'sourceBranchId': int(product.branch_id),
         })
+        stock_deductions.append((product, quantity))
     
-    payment_amount = float(data.get('paymentAmount') or 0)
+    try:
+        payment_amount = money(float(data.get('paymentAmount') or 0))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Payment amount must be a number'}), 400
+    # Money taken at the counter is recorded by staff who may take payments,
+    # and can't be more than the order costs
+    payer = get_user_from_token(token) if token else None
+    if payment_amount > 0 and not (payer and has_perm(payer, 'product_orders.payment')):
+        return jsonify({'status': 'error', 'message': 'You do not have permission to record payments'}), 403
+    if payment_amount < 0 or payment_amount > money(total_amount):
+        return jsonify({'status': 'error',
+                        'message': f'Payment must be between ₱0 and the order total of ₱{total_amount:,.2f}'}), 400
     if payment_amount >= total_amount and total_amount > 0:
         initial_payment_status = 'paid'
     elif payment_amount > 0:
@@ -6092,6 +6692,7 @@ def create_product_order():
         customer_address=data.get('customerAddress', ''),
         items=validated_items,
         total_amount=total_amount,
+        vat_percent=current_vat_percent(),  # product prices include VAT
         branch_id=branch_id,
         status='pending',
         payment_status=initial_payment_status,
@@ -6101,6 +6702,9 @@ def create_product_order():
     )
     
     db.session.add(new_order)
+    # The units are taken off the shelf now, so another order can't promise them
+    for product, qty in stock_deductions:
+        product.quantity = float(product.quantity) - qty
     db.session.commit()
 
     log_action(
@@ -6116,7 +6720,7 @@ def create_product_order():
 
 @app.route('/api/product-orders', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_product_orders():
     """Get all product orders - staff endpoint"""
     user = request.current_user
@@ -6128,9 +6732,9 @@ def get_product_orders():
         query = query.filter_by(status=status)
     
     # Supervisors only see orders assigned to their branch.
-    if user['role'] == 'supervisor':
+    if not all_branches(user):
         if not user.get('branchId'):
-            return jsonify({'status': 'error', 'message': 'Supervisor account has no assigned branch'}), 400
+            return jsonify({'status': 'error', 'message': 'Your account has no assigned branch'}), 400
         query = query.filter_by(branch_id=user['branchId'])
     
     orders = query.order_by(ProductOrder.created_at.desc()).all()
@@ -6139,10 +6743,11 @@ def get_product_orders():
 
 @app.route('/api/product-orders/<int:order_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.edit', 'product_orders.payment')
 def update_product_order(order_id):
     """Update a product order status"""
-    order = ProductOrder.query.get(order_id)
+    # Row lock: a double-clicked status change can't take or return stock twice
+    order = ProductOrder.query.filter_by(id=order_id).with_for_update().first()
     if not order:
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     
@@ -6151,6 +6756,10 @@ def update_product_order(order_id):
         return jsonify({'status': 'error', 'message': 'Access denied'}), 403
 
     data = request.get_json()
+    if ('status' in data or 'notes' in data) and not has_perm(user, 'product_orders.edit'):
+        return jsonify({'status': 'error', 'message': 'You do not have permission to edit product orders'}), 403
+    if ('addPayment' in data or 'paymentStatus' in data) and not has_perm(user, 'product_orders.payment'):
+        return jsonify({'status': 'error', 'message': 'You do not have permission to record payments'}), 403
 
     valid_statuses = {'pending', 'processing', 'ready', 'completed', 'cancelled'}
     valid_payment_statuses = {'unpaid', 'partial', 'paid'}
@@ -6178,6 +6787,16 @@ def update_product_order(order_id):
                 }), 400
 
         previous_status = order.status
+        placed_stock = any(stock_taken_at_placement(it) for it in (order.items or []))
+        if previous_status == 'completed' and incoming_status != 'completed':
+            return jsonify({'status': 'error', 'message': "A completed order is final and can't be reopened"}), 400
+        if previous_status == 'cancelled' and incoming_status != 'cancelled' and placed_stock:
+            return jsonify({'status': 'error', 'message': "This order's items went back to stock when it was "
+                                                          "cancelled. Place a new order instead."}), 400
+        if incoming_status == 'cancelled' and previous_status != 'cancelled':
+            error = return_placement_stock(order)
+            if error:
+                return jsonify({'status': 'error', 'message': error}), 400
         if previous_status != incoming_status:
             updated_fields.append(f"status: {previous_status} -> {incoming_status}")
         order.status = incoming_status
@@ -6190,6 +6809,9 @@ def update_product_order(order_id):
                 source_branch_id = item.get('sourceBranchId', order.branch_id)
                 item_sku = item.get('sku', '')
 
+                if source_branch_id == order.branch_id and stock_taken_at_placement(item):
+                    # Checkout order: this item's stock was taken when it was placed
+                    continue
                 if source_branch_id == order.branch_id:
                     # Local item — deduct from the original product at the pickup branch
                     product = PremadeProduct.query.get(item.get('productId'))
@@ -6236,17 +6858,35 @@ def update_product_order(order_id):
     if 'paymentStatus' in data:
         if data['paymentStatus'] not in valid_payment_statuses:
             return jsonify({'status': 'error', 'message': 'Invalid payment status'}), 400
+        paid, total = float(order.amount_paid or 0), float(order.total_amount or 0)
+        # Status and amount paid must agree: "paid" records the rest as received;
+        # the others only describe what is already recorded
+        if data['paymentStatus'] == 'paid':
+            order.amount_paid = money(total)
+        elif data['paymentStatus'] == 'unpaid' and paid > 0:
+            return jsonify({'status': 'error', 'message': f'₱{paid:,.2f} is already recorded as paid on this order'}), 400
+        elif data['paymentStatus'] == 'partial' and not (0 < paid < total):
+            return jsonify({'status': 'error', 'message': 'Add the amount received to mark this order partly paid'}), 400
         if order.payment_status != data['paymentStatus']:
             updated_fields.append(f"payment: {order.payment_status} -> {data['paymentStatus']}")
         order.payment_status = data['paymentStatus']
     
     if 'addPayment' in data:
-        add_amount = float(data.get('addPayment') or 0)
+        try:
+            add_amount = money(float(data.get('addPayment') or 0))
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'Payment amount must be a number'}), 400
+        remaining = money(max(float(order.total_amount or 0) - float(order.amount_paid or 0), 0))
+        if add_amount < 0:
+            return jsonify({'status': 'error', 'message': 'Payment amount must be positive'}), 400
+        if add_amount > remaining:
+            return jsonify({'status': 'error',
+                            'message': f"Payment can't be more than the remaining balance of ₱{remaining:,.2f}"
+                                       if remaining > 0 else 'This order is already fully paid'}), 400
         if add_amount > 0:
             current_paid = order.amount_paid or 0.0
-            order.amount_paid = current_paid + add_amount
+            order.amount_paid = money(current_paid + add_amount)
             if order.amount_paid >= order.total_amount:
-                order.amount_paid = order.total_amount
                 prev = order.payment_status
                 order.payment_status = 'paid'
                 updated_fields.append(f"payment: {prev} -> paid (added ₱{add_amount:,.2f})")
@@ -6276,7 +6916,7 @@ def update_product_order(order_id):
 
 @app.route('/api/product-orders/<int:order_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_product_order(order_id):
     """Get detailed product order by ID for branch admin/supervisor."""
     order = ProductOrder.query.get(order_id)
@@ -6291,7 +6931,7 @@ def get_product_order(order_id):
 
 @app.route('/api/product-orders/<int:order_id>/timeline', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_product_order_timeline(order_id):
     """Get timeline events for a product order."""
     order = ProductOrder.query.get(order_id)
@@ -6476,7 +7116,7 @@ def confirm_my_cart_draft():
 
 @app.route('/api/product-orders/drafts', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('sales.view')
 def get_premade_drafts():
     """Staff view of customers' saved carts that haven't been confirmed yet."""
     drafts = CartDraft.query.order_by(CartDraft.updated_at.desc()).all()
@@ -6492,13 +7132,14 @@ def get_my_product_orders():
 
 @app.route('/api/product-orders/my-orders/<int:order_id>/cancel', methods=['POST'])
 @require_auth
-@require_roles('customer')
+@require_customer
 def cancel_my_product_order(order_id):
     """A customer cancels their own premade order while it is still pending.
     The stock taken when the order was placed goes back on the shelf and any
     transfer requests still waiting to be sent are called off."""
     user = request.current_user
-    order = ProductOrder.query.filter_by(id=order_id, user_id=user['id']).first()
+    # Row lock: a repeated cancel waits, then sees the order already cancelled
+    order = ProductOrder.query.filter_by(id=order_id, user_id=user['id']).with_for_update().first()
     if not order:
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     if order.status != 'pending':
@@ -6508,12 +7149,10 @@ def cancel_my_product_order(order_id):
         return jsonify({'status': 'error',
                         'message': 'Some items are already on their way to your pickup branch. Please contact the shop to cancel.'}), 400
 
-    for item in order.items or []:
-        product = PremadeProduct.query.get(item.get('productId'))
-        if product:
-            product.quantity = float(product.quantity or 0) + float(item.get('quantity') or 0)
-    for t in order.transfers or []:
-        t.status = 'cancelled'
+    # Only stock the order actually took goes back (a walk-in order takes none until completed)
+    error = return_placement_stock(order)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 400
     order.status = 'cancelled'
 
     notify_branch_users(
@@ -6618,13 +7257,13 @@ def delete_notification(notif_id):
 
 @app.route('/api/product-orders/transfer-dashboard', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.view')
 def get_transfer_dashboard():
     user = request.current_user
     now = datetime.utcnow()
     status_filter = request.args.get('status')
 
-    if user['role'] == 'supervisor':
+    if not all_branches(user):
         branch_id = user.get('branchId')
         outgoing = ProductOrderTransfer.query.filter_by(source_branch_id=branch_id).all()
         pickup_ids = [r[0] for r in db.session.query(ProductOrder.id).filter_by(branch_id=branch_id).all()]
@@ -6664,7 +7303,7 @@ def get_transfer_dashboard():
 
 @app.route('/api/product-order-transfers/bulk-action', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('product_orders.transfer')
 def bulk_transfer_action():
     user = request.current_user
     data = request.get_json()
@@ -6675,12 +7314,12 @@ def bulk_transfer_action():
 
     ok, failed = [], []
     for tid in transfer_ids:
-        transfer = ProductOrderTransfer.query.get(int(tid))
+        transfer = ProductOrderTransfer.query.filter_by(id=int(tid)).with_for_update().first()
         if not transfer:
             failed.append({'id': tid, 'reason': 'Not found'}); continue
 
         if action == 'mark-sent':
-            if user['role'] == 'supervisor' and user.get('branchId') != transfer.source_branch_id:
+            if not all_branches(user) and user.get('branchId') != transfer.source_branch_id:
                 failed.append({'id': tid, 'reason': 'Not your branch'}); continue
             if transfer.status != 'pending':
                 failed.append({'id': tid, 'reason': f'Already {transfer.status}'}); continue
@@ -6699,7 +7338,7 @@ def bulk_transfer_action():
 
         elif action == 'confirm-receipt':
             order = transfer.order
-            if user['role'] == 'supervisor' and user.get('branchId') != (order.branch_id if order else None):
+            if not all_branches(user) and user.get('branchId') != (order.branch_id if order else None):
                 failed.append({'id': tid, 'reason': 'Not your branch'}); continue
             if transfer.status != 'transferred':
                 failed.append({'id': tid, 'reason': f'Status is {transfer.status}'}); continue
@@ -6811,13 +7450,13 @@ def place_customer_order():
 
 @app.route('/api/customer-orders', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('custom_requests.view')
 def get_customer_orders():
     """Get customer orders - filtered by branch for non-admin users"""
     user = request.current_user
     
     # Administrators can see all orders
-    if user['role'] == 'administrator':
+    if all_branches(user):
         orders = CustomerOrder.query.order_by(CustomerOrder.created_at.desc()).all()
     else:
         # Other users can only see orders from their branch
@@ -6839,7 +7478,7 @@ def get_customer_orders():
 
 @app.route('/api/customer-orders/<int:order_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('custom_requests.view')
 def get_customer_order(order_id):
     """Get a specific customer order"""
     user = request.current_user
@@ -6848,7 +7487,7 @@ def get_customer_order(order_id):
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     
     # Branch-level access control
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         # Use branch_id directly from user if available, otherwise look up by name
         user_branch_id = None
         if user.get('branchId'):
@@ -6865,7 +7504,7 @@ def get_customer_order(order_id):
 
 @app.route('/api/customer-orders/<int:order_id>/status', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('custom_requests.edit')
 def update_customer_order_status(order_id):
     """Update customer order status"""
     user = request.current_user
@@ -6874,7 +7513,7 @@ def update_customer_order_status(order_id):
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     
     # Branch-level access control
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         user_branch = Branch.query.filter_by(name=user['branch']).first()
         if not user_branch or order.branch_id != user_branch.id:
             return jsonify({'status': 'error', 'message': 'Access denied'}), 403
@@ -7026,7 +7665,7 @@ def register_customer():
 
 @app.route('/api/customer-orders/my-orders', methods=['GET'])
 @require_auth
-@require_roles('customer')
+@require_customer
 def get_my_customer_orders():
     """Get orders for the logged-in customer"""
     user = request.current_user
@@ -7037,7 +7676,7 @@ def get_my_customer_orders():
 
 @app.route('/api/customer-orders/my-orders/<int:order_id>', methods=['GET'])
 @require_auth
-@require_roles('customer')
+@require_customer
 def get_my_customer_order(order_id):
     """Get a specific order for the logged-in customer"""
     user = request.current_user
@@ -7050,7 +7689,7 @@ def get_my_customer_order(order_id):
 
 @app.route('/api/customer-orders/<int:order_id>/quotation', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('custom_requests.quote')
 def set_customer_order_quotation(order_id):
     """Set quotation for a customer order"""
     user = request.current_user
@@ -7060,7 +7699,7 @@ def set_customer_order_quotation(order_id):
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     
     # Branch-level access control
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         user_branch_id = user.get('branchId')
         if not user_branch_id and user.get('branch'):
             user_branch = Branch.query.filter_by(name=user['branch']).first()
@@ -7097,7 +7736,7 @@ def set_customer_order_quotation(order_id):
 
 @app.route('/api/customer-orders/<int:order_id>/respond', methods=['PUT'])
 @require_auth
-@require_roles('customer')
+@require_customer
 def respond_to_quotation(order_id):
     """Customer responds to quotation (accept/reject)"""
     user = request.current_user
@@ -7135,7 +7774,7 @@ def respond_to_quotation(order_id):
 
 @app.route('/api/forecasting/inventory', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('forecasting.view')
 def get_inventory_forecast():
     from sqlalchemy import func
     period = request.args.get('period', 'month')
@@ -7216,14 +7855,14 @@ def get_inventory_forecast():
 def forecast_branch_id():
     """Admins forecast the whole company (or ?branchId=); supervisors their own branch."""
     user = request.current_user
-    if user['role'] == 'administrator':
+    if all_branches(user):
         return request.args.get('branchId', type=int)
     return user_branch_id(user) or -1
 
 
 @app.route('/api/forecasting/demand', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('forecasting.view')
 def get_demand_forecast():
     """Next six months of job orders, projected from the last six months of real
     orders: the average of the latest three months, nudged by the recent trend."""
@@ -7269,7 +7908,7 @@ def get_demand_forecast():
 
 @app.route('/api/forecasting/materials', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('forecasting.view')
 def get_material_forecast():
     """When each material will hit its reorder point, from the last 30 days of real usage."""
     bid = forecast_branch_id()
@@ -7310,7 +7949,7 @@ def get_material_forecast():
 
 @app.route('/api/reports/sales', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('reports.sales')
 def get_sales_report():
     user = request.current_user
     start_date = request.args.get('startDate', (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
@@ -7331,7 +7970,7 @@ def get_sales_report():
     )
 
     user_branch = None
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         user_branch = Branch.query.filter_by(name=user['branch']).first()
         if user_branch:
             jo_query = jo_query.filter(JobOrder.branch_id == user_branch.id)
@@ -7344,7 +7983,7 @@ def get_sales_report():
 
     total_orders = len(orders)
     # Revenue excludes VAT (collected for the government); pending balances below stay as billed
-    total_revenue = sum(revenue_ex_vat(o) for o in orders if o.status == 'completed')
+    total_revenue = sum(revenue_ex_vat(o) for o in orders if o.status in EARNED_STATUSES)
     total_pending_revenue = sum(float(o.balance) for o in orders if o.payment_status != 'paid')
 
     status_breakdown = {}
@@ -7362,7 +8001,7 @@ def get_sales_report():
             if date not in daily_sales:
                 daily_sales[date] = {'orders': 0, 'revenue': 0}
             daily_sales[date]['orders'] += 1
-            if o.status == 'completed':
+            if o.status in EARNED_STATUSES:
                 daily_sales[date]['revenue'] += revenue_ex_vat(o)
 
     # ── Premade Product Orders ──
@@ -7381,7 +8020,7 @@ def get_sales_report():
 
     for po in all_product_orders:
         # Determine how much of this order is attributed to the current branch
-        if user['role'] != 'administrator':
+        if not all_branches(user):
             if not user_branch:
                 continue
             attributed_total = sum(
@@ -7421,7 +8060,7 @@ def get_sales_report():
         'period': {'startDate': start_date, 'endDate': end_date},
         'summary': {
             'totalOrders': total_orders,
-            'completedOrders': sum(1 for o in orders if o.status == 'completed'),
+            'completedOrders': sum(1 for o in orders if o.status in EARNED_STATUSES),
             'totalRevenue': total_revenue,
             'pendingRevenue': total_pending_revenue,
             'averageOrderValue': round(total_revenue / total_orders, 2) if total_orders > 0 else 0
@@ -7449,13 +8088,13 @@ def get_sales_report():
 
 @app.route('/api/reports/inventory', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('reports.inventory')
 def get_inventory_report():
     user = request.current_user
     branch_id = request.args.get('branchId')
 
     # Branch-level access control
-    if user['role'] != 'administrator':
+    if not all_branches(user):
         user_branch = Branch.query.filter_by(name=user['branch']).first()
         if user_branch:
             branch_id = user_branch.id
@@ -7521,7 +8160,7 @@ def get_inventory_report():
 
 @app.route('/api/reports/branch-settlement', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('reports.settlement')
 def get_branch_settlement():
     """Inter-branch settlement ledger.
     For every completed multi-branch order, records how much each source branch
@@ -7544,7 +8183,7 @@ def get_branch_settlement():
               .filter(ProductOrder.shipment_status != 'not_needed')
               .all())
 
-    user_branch_id = user.get('branchId') if user['role'] != 'administrator' else None
+    user_branch_id = user.get('branchId') if not all_branches(user) else None
 
     entries = []
     # branch_pair_totals: (source_branch_id, pickup_branch_id) -> {owed, settled}
@@ -7620,9 +8259,417 @@ def get_branch_settlement():
     })
 
 
+# ============================================
+# EXPENSES (payables) AND OWNER DASHBOARD
+# ============================================
+
+EXPENSE_CATEGORIES = ['Rent', 'Electricity', 'Water', 'Internet & Phone', 'Salaries & Wages', 'Supplies',
+                      'Transportation', 'Repairs & Maintenance', 'Marketing', 'Taxes & Permits', 'Other']
+PAYMENT_METHODS = ['cash', 'gcash', 'maya', 'bank_transfer', 'credit_card', 'debit_card', 'check', 'other']
+
+def parse_period():
+    """(start, end) dates from ?startDate=&endDate= (YYYY-MM-DD); defaults to
+    this year so far. Returns (None, None, error) on bad input."""
+    today = manila_today()
+    try:
+        start = datetime.strptime(request.args['startDate'], '%Y-%m-%d').date() if request.args.get('startDate') \
+            else today.replace(month=1, day=1)
+        end = datetime.strptime(request.args['endDate'], '%Y-%m-%d').date() if request.args.get('endDate') else today
+    except ValueError:
+        return None, None, (jsonify({'status': 'error', 'message': 'Dates must be YYYY-MM-DD'}), 400)
+    if start > end:
+        return None, None, (jsonify({'status': 'error', 'message': 'The start date is after the end date'}), 400)
+    return start, end, None
+
+def expense_to_dict(e):
+    return {
+        'id': e.id,
+        'date': e.expense_date.isoformat() if e.expense_date else None,
+        'category': e.category,
+        'particulars': e.particulars,
+        'amount': float(e.amount or 0),
+        'paymentMethod': e.payment_method,
+        'notes': e.notes,
+        'branchId': e.branch_id,
+        'branchName': e.branch.name if e.branch else None,
+        'createdBy': e.creator.full_name if e.creator else None,
+        'createdAt': to_pht(e.created_at) if e.created_at else None,
+    }
+
+def scoped_expenses(user):
+    q = Expense.query
+    if not all_inventory_branches(user):
+        q = q.filter(Expense.branch_id == (user_branch_id(user) or -1))
+    return q
+
+@app.route('/api/expenses', methods=['GET'])
+@require_auth
+@require_permission('expenses.view', 'expenses.add')
+def list_expenses():
+    start, end, error = parse_period()
+    if error:
+        return error
+    q = scoped_expenses(request.current_user).filter(Expense.expense_date >= start, Expense.expense_date <= end)
+    if request.args.get('category'):
+        q = q.filter(Expense.category == request.args['category'])
+    rows = q.order_by(Expense.expense_date.desc(), Expense.id.desc()).all()
+    return jsonify({'status': 'success', 'data': {
+        'expenses': [expense_to_dict(e) for e in rows],
+        'total': money(sum(float(e.amount or 0) for e in rows)),
+        'categories': EXPENSE_CATEGORIES,
+        'paymentMethods': PAYMENT_METHODS,
+    }})
+
+@app.route('/api/expenses', methods=['POST'])
+@require_auth
+@require_permission('expenses.add')
+def create_expense():
+    user = request.current_user
+    data = request.get_json(silent=True) or {}
+    try:
+        amount = money(float(data.get('amount')))
+        expense_date = datetime.strptime(str(data.get('date') or manila_today()), '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Enter a valid amount and date'}), 400
+    particulars = (data.get('particulars') or '').strip()
+    if not amount > 0:
+        return jsonify({'status': 'error', 'message': 'Amount must be above zero'}), 400
+    if not particulars:
+        return jsonify({'status': 'error', 'message': 'Say what the money was spent on'}), 400
+    if expense_date > manila_today():
+        return jsonify({'status': 'error', 'message': 'The date cannot be in the future'}), 400
+    if data.get('category') not in EXPENSE_CATEGORIES:
+        return jsonify({'status': 'error', 'message': 'Choose a category'}), 400
+    if data.get('paymentMethod') not in PAYMENT_METHODS:
+        return jsonify({'status': 'error', 'message': 'Choose how it was paid'}), 400
+    branch_id = data.get('branchId') or user_branch_id(user)
+    if branch_id and not Branch.query.get(branch_id):
+        return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
+    error = inventory_branch_error(user, branch_id)
+    if error:
+        return jsonify({'status': 'error', 'message': 'You can only log expenses for your own branch'}), 403
+    expense = Expense(expense_date=expense_date, category=data['category'], particulars=particulars[:255],
+                      amount=amount, payment_method=data['paymentMethod'],
+                      notes=(data.get('notes') or '').strip() or None, branch_id=branch_id, created_by=user['id'])
+    db.session.add(expense)
+    db.session.commit()
+    log_action(user['id'], user['fullName'], 'CREATE', 'Expenses',
+               f"Logged expense ₱{amount:,.2f} ({expense.category}): {particulars}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': expense_to_dict(expense)}), 201
+
+@app.route('/api/expenses/<int:expense_id>', methods=['DELETE'])
+@require_auth
+@require_permission('expenses.delete')
+def delete_expense(expense_id):
+    user = request.current_user
+    expense = scoped_expenses(user).filter(Expense.id == expense_id).first()
+    if not expense:
+        return jsonify({'status': 'error', 'message': 'Expense not found'}), 404
+    label = f"₱{float(expense.amount):,.2f} ({expense.category}): {expense.particulars}"
+    db.session.delete(expense)
+    db.session.commit()
+    log_action(user['id'], user['fullName'], 'DELETE', 'Expenses', f"Deleted expense {label}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'message': 'Expense deleted'})
+
+
+def job_order_finished_on(order):
+    """The day a job order's work was finished (older orders: the day created)."""
+    if order.completed_at:
+        return order.completed_at if not isinstance(order.completed_at, datetime) else order.completed_at.date()
+    return (order.created_at + PH_OFFSET).date() if order.created_at else None
+
+def premade_unit_cost(item):
+    product = PremadeProduct.query.get(item.get('productId')) if item.get('productId') else None
+    return float(product.cost or 0) if product else 0.0
+
+def owner_financials(start, end, branch_id=None):
+    """Earned sales and their costs between two dates (inclusive), by month.
+
+    Sales are what finished orders earned, without the VAT inside them: job
+    orders when completed or delivered, premade orders when completed. Cost of
+    goods sold is each job's materials, labor and other job costs (the same
+    figures as Job Order Costing) plus the production cost of premade items
+    sold. Operating expenses are the logged expenses plus material written off
+    as waste."""
+    months = {}
+    def month(d):
+        key = d.strftime('%Y-%m')
+        return months.setdefault(key, {'month': key, 'sales': 0.0, 'cogs': 0.0, 'opex': 0.0})
+
+    jo_q = JobOrder.query.filter(JobOrder.status.in_(EARNED_STATUSES))
+    po_q = ProductOrder.query.filter(ProductOrder.status == 'completed')
+    ex_q = Expense.query.filter(Expense.expense_date >= start, Expense.expense_date <= end)
+    if branch_id:
+        jo_q, po_q = jo_q.filter(JobOrder.branch_id == branch_id), po_q.filter(ProductOrder.branch_id == branch_id)
+        ex_q = ex_q.filter(Expense.branch_id == branch_id)
+
+    t = {'jobSales': 0.0, 'premadeSales': 0.0, 'materials': 0.0, 'labor': 0.0, 'jobOther': 0.0, 'premadeCost': 0.0,
+         'vatCollected': 0.0, 'jobOrders': 0, 'premadeOrders': 0}
+    for o in jo_q.all():
+        d = job_order_finished_on(o)
+        if not d or not (start <= d <= end):
+            continue
+        c = job_order_costing(o)
+        t['jobSales'] += c['revenue']
+        t['materials'] += c['materials']; t['labor'] += c['labor']; t['jobOther'] += c['expenses']
+        t['vatCollected'] += vat_breakdown(o.total_price, o.vat_percent)['vat']
+        t['jobOrders'] += 1
+        m = month(d); m['sales'] += c['revenue']; m['cogs'] += c['totalCost']
+    for o in po_q.all():
+        d = ((o.updated_at or o.created_at) + PH_OFFSET).date()
+        if not (start <= d <= end):
+            continue
+        rate = o.vat_percent if o.vat_percent is not None else DEFAULT_VAT_PERCENT
+        split = vat_breakdown(o.total_amount, rate)
+        cost = sum(premade_unit_cost(it) * float(it.get('quantity') or 0) for it in (o.items or []))
+        t['premadeSales'] += split['net']; t['vatCollected'] += split['vat']; t['premadeCost'] += cost
+        t['premadeOrders'] += 1
+        m = month(d); m['sales'] += split['net']; m['cogs'] += cost
+
+    by_category = {}
+    for e in ex_q.all():
+        by_category[e.category] = by_category.get(e.category, 0.0) + float(e.amount or 0)
+        month(e.expense_date)['opex'] += float(e.amount or 0)
+    waste_q = db.session.query(MaterialWasteLog, InventoryMaterial).join(
+        InventoryMaterial, InventoryMaterial.id == MaterialWasteLog.material_id)
+    if branch_id:
+        waste_q = waste_q.filter(MaterialWasteLog.branch_id == branch_id)
+    waste = 0.0
+    for w, mat in waste_q.all():
+        d = ((w.created_at or datetime.utcnow()) + PH_OFFSET).date()
+        if start <= d <= end:
+            value = float(w.quantity or 0) * float(mat.cost_per_unit or mat.unit_price or 0)
+            waste += value
+            month(d)['opex'] += value
+    if waste:
+        by_category['Material waste'] = waste
+
+    sales = t['jobSales'] + t['premadeSales']
+    cogs = t['materials'] + t['labor'] + t['jobOther'] + t['premadeCost']
+    opex = sum(by_category.values())
+    gross = sales - cogs
+    net = gross - opex
+    monthly = []
+    for key in sorted(months):
+        m = months[key]
+        monthly.append({'month': key, 'sales': money(m['sales']), 'expenses': money(m['cogs'] + m['opex']),
+                        'netIncome': money(m['sales'] - m['cogs'] - m['opex'])})
+    return {
+        'sales': money(sales), 'jobSales': money(t['jobSales']), 'premadeSales': money(t['premadeSales']),
+        'cogs': {'materials': money(t['materials']), 'labor': money(t['labor']), 'otherJobCosts': money(t['jobOther']),
+                 'premadeProducts': money(t['premadeCost']), 'total': money(cogs)},
+        'grossProfit': money(gross),
+        'operatingExpenses': {'byCategory': [{'category': k, 'amount': money(v)}
+                                             for k, v in sorted(by_category.items(), key=lambda kv: -kv[1])],
+                              'total': money(opex)},
+        'totalExpenses': money(cogs + opex),
+        'netIncome': money(net),
+        'profitMargin': round(net / sales * 100, 1) if sales else 0.0,
+        'vatCollected': money(t['vatCollected']),
+        'orderCounts': {'jobOrders': t['jobOrders'], 'premadeOrders': t['premadeOrders']},
+        'monthly': monthly,
+    }
+
+def money_by_method(start, end):
+    """Cash actually received and spent between two dates, by mode of payment."""
+    money_in, money_out = {}, {}
+    for p in PaymentRecord.query.all():
+        d = ((p.created_at or datetime.utcnow()) + PH_OFFSET).date()
+        if start <= d <= end and p.job_order and p.job_order.status not in ('draft',):
+            key = p.payment_method or 'cash'
+            money_in[key] = money_in.get(key, 0.0) + float(p.amount or 0)
+    for o in ProductOrder.query.filter(ProductOrder.amount_paid > 0).all():
+        d = ((o.created_at or datetime.utcnow()) + PH_OFFSET).date()
+        if start <= d <= end:
+            # Premade orders don't record how they were paid
+            money_in['not_recorded'] = money_in.get('not_recorded', 0.0) + float(o.amount_paid or 0)
+    for e in Expense.query.filter(Expense.expense_date >= start, Expense.expense_date <= end).all():
+        money_out[e.payment_method] = money_out.get(e.payment_method, 0.0) + float(e.amount or 0)
+    as_list = lambda d: [{'method': k, 'amount': money(v)} for k, v in sorted(d.items(), key=lambda kv: -kv[1])]
+    return {'in': as_list(money_in), 'out': as_list(money_out),
+            'totalIn': money(sum(money_in.values())), 'totalOut': money(sum(money_out.values()))}
+
+@app.route('/api/owner/summary', methods=['GET'])
+@require_auth
+@require_permission('owner.view')
+def owner_summary():
+    """Executive dashboard: this year so far."""
+    today = manila_today()
+    start = today.replace(month=1, day=1)
+    f = owner_financials(start, today)
+    cash = money_by_method(start, today)
+    month_start = today.replace(day=1)
+    this_month = owner_financials(month_start, today)
+    receivable = sum(max(float(o.total_price or 0) - float(o.down_payment or 0), 0) for o in
+                     JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided'))).all()) + \
+        sum(max(float(o.total_amount or 0) - float(o.amount_paid or 0), 0) for o in
+            ProductOrder.query.filter(ProductOrder.status != 'cancelled').all())
+    return jsonify({'status': 'success', 'data': {
+        'period': {'startDate': start.isoformat(), 'endDate': today.isoformat()},
+        'ytd': {k: f[k] for k in ('sales', 'totalExpenses', 'netIncome', 'profitMargin', 'grossProfit', 'vatCollected')},
+        'thisMonth': {k: this_month[k] for k in ('sales', 'totalExpenses', 'netIncome')},
+        'receivables': money(receivable),
+        'monthly': f['monthly'],
+        'cashflowByMethod': cash,
+    }})
+
+@app.route('/api/owner/pnl', methods=['GET'])
+@require_auth
+@require_permission('owner.view')
+def owner_pnl():
+    start, end, error = parse_period()
+    if error:
+        return error
+    branch_id = request.args.get('branchId', type=int)
+    data = owner_financials(start, end, branch_id)
+    data['period'] = {'startDate': start.isoformat(), 'endDate': end.isoformat(), 'branchId': branch_id}
+    return jsonify({'status': 'success', 'data': data})
+
+@app.route('/api/owner/job-costing', methods=['GET'])
+@require_auth
+@require_permission('owner.view')
+def owner_job_costing():
+    """Every finished job order in the period with its margin, least profitable first."""
+    start, end, error = parse_period()
+    if error:
+        return error
+    rows = []
+    for o in JobOrder.query.filter(JobOrder.status.in_(EARNED_STATUSES)).all():
+        d = job_order_finished_on(o)
+        if not d or not (start <= d <= end):
+            continue
+        c = job_order_costing(o)
+        lines = []
+        for it in o.items or []:
+            cat = item_category(it)
+            qty = float(it.get('quantity') or 0)
+            if cat == 'labor':
+                cost = float(it['actualLaborCost']) if it.get('actualLaborCost') is not None else qty * float(it.get('laborCost') or 0)
+            else:
+                cost = qty * float(it.get('materialCost') or 0)
+            lines.append({'name': it.get('name') or '', 'category': cat, 'quantity': qty,
+                          'unitCost': float(it.get('materialCost') or it.get('laborCost') or 0), 'cost': money(cost)})
+        split = vat_breakdown(o.total_price, o.vat_percent)
+        rows.append({
+            'id': o.id, 'jobOrderId': o.job_order_id, 'customerName': o.customer_name,
+            'description': o.description, 'branchName': o.branch.name if o.branch else None,
+            'finishedOn': d.isoformat(), 'status': o.status,
+            'customerPrice': split['gross'], 'vat': split['vat'], 'sellingPrice': c['revenue'],
+            'materials': c['materials'], 'labor': c['labor'], 'otherCosts': c['expenses'],
+            'grossMargin': c['grossProfit'], 'marginPercent': c['profitMargin'], 'lines': lines,
+        })
+    rows.sort(key=lambda r: r['marginPercent'])
+    total_sell = sum(r['sellingPrice'] for r in rows)
+    total_margin = sum(r['grossMargin'] for r in rows)
+    return jsonify({'status': 'success', 'data': {
+        'jobs': rows,
+        'totals': {'sellingPrice': money(total_sell), 'materials': money(sum(r['materials'] for r in rows)),
+                   'labor': money(sum(r['labor'] for r in rows)), 'otherCosts': money(sum(r['otherCosts'] for r in rows)),
+                   'grossMargin': money(total_margin),
+                   'marginPercent': round(total_margin / total_sell * 100, 1) if total_sell else 0.0},
+    }})
+
+@app.route('/api/owner/receivables', methods=['GET'])
+@require_auth
+@require_permission('owner.view')
+def owner_receivables():
+    """Every customer invoice (job orders and premade orders) with what is still owed."""
+    invoices = []
+    for o in JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided'))).all():
+        total, paid = float(o.total_price or 0), float(o.down_payment or 0)
+        invoices.append({
+            'type': 'job_order', 'id': o.id, 'reference': o.job_order_id, 'customerName': o.customer_name,
+            'branchName': o.branch.name if o.branch else None, 'orderStatus': o.status,
+            'date': to_pht(o.created_at) if o.created_at else None,
+            'subtotal': money(total), 'vat': vat_breakdown(total, o.vat_percent)['vat'],
+            'totalPaid': money(paid), 'balance': money(max(total - paid, 0)),
+            'paymentStatus': 'paid' if total > 0 and paid >= total else 'partial' if paid > 0 else 'unpaid',
+            'payments': [{'date': to_pht(p.created_at) if p.created_at else None, 'amount': float(p.amount),
+                          'method': p.payment_method, 'reference': p.reference_number,
+                          'recordedBy': p.recorder.full_name if p.recorder else None}
+                         for p in sorted(o.payment_records, key=lambda p: p.created_at or datetime.min)],
+        })
+    for o in ProductOrder.query.filter(ProductOrder.status != 'cancelled').all():
+        total, paid = float(o.total_amount or 0), float(o.amount_paid or 0)
+        rate = o.vat_percent if o.vat_percent is not None else DEFAULT_VAT_PERCENT
+        invoices.append({
+            'type': 'product_order', 'id': o.id, 'reference': o.order_number, 'customerName': o.customer_name,
+            'branchName': o.branch.name if o.branch else None, 'orderStatus': o.status,
+            'date': to_pht(o.created_at) if o.created_at else None,
+            'subtotal': money(total), 'vat': vat_breakdown(total, rate)['vat'],
+            'totalPaid': money(paid), 'balance': money(max(total - paid, 0)),
+            'paymentStatus': 'paid' if total > 0 and paid >= total else 'partial' if paid > 0 else 'unpaid',
+            # Premade orders keep a running total, not individual payments
+            'payments': [{'date': None, 'amount': money(paid), 'method': 'not_recorded', 'reference': None,
+                          'recordedBy': None}] if paid > 0 else [],
+        })
+    invoices.sort(key=lambda i: i['date'] or '', reverse=True)
+    status = request.args.get('status')
+    if status in ('paid', 'partial', 'unpaid'):
+        invoices = [i for i in invoices if i['paymentStatus'] == status]
+    return jsonify({'status': 'success', 'data': {
+        'invoices': invoices,
+        'totals': {'subtotal': money(sum(i['subtotal'] for i in invoices)),
+                   'totalPaid': money(sum(i['totalPaid'] for i in invoices)),
+                   'balance': money(sum(i['balance'] for i in invoices))},
+    }})
+
+@app.route('/api/owner/inventory', methods=['GET'])
+@require_auth
+@require_permission('owner.view')
+def owner_inventory():
+    """Where capital sits in stock, what was used up, and what needs restocking."""
+    today = manila_today()
+    setting = SystemSetting.query.filter_by(key='inventory_low_stock_threshold').first()
+    try:
+        global_threshold = float(setting.value) if setting else 0.0
+    except ValueError:
+        global_threshold = 0.0
+    materials = InventoryMaterial.query.filter(InventoryMaterial.is_archived.is_(False)).all()
+    restock, materials_value = [], 0.0
+    for m in materials:
+        unit_cost = float(m.cost_per_unit or 0) or float(m.unit_price or 0)
+        stock = float(m.stock_quantity or 0)
+        materials_value += max(stock, 0) * unit_cost
+        threshold = float(m.low_stock_threshold or 0) or global_threshold
+        state = 'out' if stock <= 0 else 'low' if threshold and stock <= threshold else None
+        if state:
+            restock.append({'id': m.id, 'name': m.material_type, 'color': m.color, 'branchName': m.branch.name if m.branch else None,
+                            'stock': stock, 'threshold': threshold, 'status': state})
+    premade = PremadeProduct.query.filter(PremadeProduct.is_archived.is_(False)).all()
+    premade_value = sum(max(float(p.quantity or 0), 0) * float(p.cost or 0) for p in premade)
+
+    movements = []
+    for log in MaterialUsageLog.query.order_by(MaterialUsageLog.created_at.desc()).limit(40).all():
+        movements.append({'date': to_pht(log.created_at) if log.created_at else None, 'direction': 'out' if log.quantity_used >= 0 else 'in',
+                          'item': log.material.material_type if log.material else '', 'quantity': abs(float(log.quantity_used)),
+                          'reason': log.notes or log.used_in_reference, 'branchName': log.branch.name if log.branch else None})
+    for w in MaterialWasteLog.query.order_by(MaterialWasteLog.created_at.desc()).limit(20).all():
+        movements.append({'date': to_pht(w.created_at) if w.created_at else None, 'direction': 'out',
+                          'item': w.material.material_type if w.material else '', 'quantity': float(w.quantity),
+                          'reason': f'Waste: {w.reason}', 'branchName': w.branch.name if w.branch else None})
+    for po in PurchaseOrder.query.filter(PurchaseOrder.status == 'received').order_by(PurchaseOrder.received_at.desc()).limit(20).all():
+        for it in po.items or []:
+            movements.append({'date': to_pht(po.received_at) if po.received_at else None, 'direction': 'in',
+                              'item': it.get('name') or '', 'quantity': float(it.get('quantity') or 0),
+                              'reason': f'Received {po.po_number} from {po.supplier_name}', 'branchName': None})
+    movements.sort(key=lambda m: m['date'] or '', reverse=True)
+
+    cogs = owner_financials(today.replace(month=1, day=1), today)['cogs']
+    restock.sort(key=lambda r: (r['status'] != 'out', r['name']))
+    return jsonify({'status': 'success', 'data': {
+        'materialsValue': money(materials_value), 'premadeValue': money(premade_value),
+        'totalValue': money(materials_value + premade_value),
+        'cogsYtd': cogs,
+        'restock': restock,
+        'outOfStock': sum(1 for r in restock if r['status'] == 'out'),
+        'lowStock': sum(1 for r in restock if r['status'] == 'low'),
+        'movements': movements[:50],
+    }})
+
 @app.route('/api/reports/audit-trail', methods=['GET'])
 @require_auth
-@require_roles('administrator')
+@require_permission('reports.audit_trail')
 def get_audit_trail():
     start_date = request.args.get('startDate')
     end_date = request.args.get('endDate')
@@ -7652,7 +8699,7 @@ def get_audit_trail():
 
 @app.route('/api/settings/users', methods=['GET'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def get_users():
     include_inactive = request.args.get('includeInactive', 'false').lower() == 'true'
     
@@ -7665,7 +8712,7 @@ def get_users():
 
 @app.route('/api/settings/users', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def create_user():
     data = request.get_json()
     
@@ -7682,7 +8729,10 @@ def create_user():
     role = Role.query.filter_by(key=data['role']).first()
     if not role:
         return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
-    
+    error = delegation_error(request.current_user, set(), ROLE_DEFAULT_PERMISSIONS.get(role.key, ()), role.key)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
+
     # Handle branch - support both branchId and branch (string)
     branch_id = data.get('branchId')
     branch_name = data.get('branch')
@@ -7738,11 +8788,14 @@ def create_user():
 
 @app.route('/api/settings/users/<int:user_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def update_user(user_id):
     user = User.query.get(user_id)
     if not user:
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
+    error = target_account_error(request.current_user, user)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
 
     data = request.get_json()
 
@@ -7781,7 +8834,19 @@ def update_user(user_id):
         role = Role.query.filter_by(key=data['role']).first()
         if not role:
             return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
-        user.role_id = role.id
+        perms_after = effective_permissions(user.id, role.key)
+        if role.id != user.role_id:
+            error = delegation_error(request.current_user, effective_permissions(user.id, old_role_key),
+                                     perms_after, role.key)
+            if error:
+                return jsonify({'status': 'error', 'message': error}), 403
+        if user.id == request.current_user['id'] and 'users.manage' not in perms_after:
+            return jsonify({'status': 'error', 'message': "You can't remove your own access to user management"}), 400
+        if user.is_active and would_leave_no_user_manager(user.id, perms_after):
+            return jsonify({'status': 'error', 'message': 'At least one active account must be able to manage users'}), 400
+        if role.id != user.role_id:
+            user.role_id = role.id
+            prune_redundant_overrides(user.id, role.key)
     if resetting_password:
         user.password = hash_password(data['password'])
         user.failed_login_attempts = 0
@@ -7799,9 +8864,10 @@ def update_user(user_id):
                            f"right away.</p><p>Seatmakers Avenue</p>")
             threading.Thread(target=send_email, args=(user.email, user.full_name, 'Your password was changed',
                                                       notice, notice_html), daemon=True).start()
-    
+
+    bump_auth_version(user)  # role or branch may have changed
     db.session.commit()
-    
+
     # Handle Worker profile when role changes
     worker_roles = ['seat_maker', 'sewer']
     new_role_key = user.role.key if user.role else None
@@ -7837,7 +8903,7 @@ def update_user(user_id):
 
 @app.route('/api/settings/users/<int:user_id>/archive', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def archive_user(user_id):
     user = User.query.get(user_id)
     if not user:
@@ -7845,28 +8911,39 @@ def archive_user(user_id):
     
     if user.id == request.current_user['id']:
         return jsonify({'status': 'error', 'message': 'Cannot archive yourself'}), 400
+    error = target_account_error(request.current_user, user)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
 
     # Archiving blocks login, so the last administrator must stay active.
     if user.role and user.role.key == 'administrator' and last_active_administrator(user):
         return jsonify({'status': 'error',
                         'message': 'Cannot archive the last active administrator'}), 400
+    if would_leave_no_user_manager(user.id, set()):
+        return jsonify({'status': 'error',
+                        'message': 'Cannot archive the last account that can manage users'}), 400
 
     user.is_active = False
+    bump_auth_version(user)  # their open sessions stop working on every worker
     db.session.commit()
-    
+
     log_action(request.current_user['id'], request.current_user['fullName'], 'ARCHIVE', 'Settings', f"Archived user: {user.username}", request.remote_addr or '0.0.0.0')
     
     return jsonify({'status': 'success', 'message': 'User archived'})
 
 @app.route('/api/settings/users/<int:user_id>/restore', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def restore_user(user_id):
     user = User.query.get(user_id)
     if not user:
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
-    
+    error = target_account_error(request.current_user, user)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
+
     user.is_active = True
+    bump_auth_version(user)
     db.session.commit()
     
     log_action(request.current_user['id'], request.current_user['fullName'], 'RESTORE', 'Settings', f"Restored user: {user.username}", request.remote_addr or '0.0.0.0')
@@ -7911,7 +8988,7 @@ def user_history_blockers(user_id):
 
 @app.route('/api/settings/users/<int:user_id>/delete-check', methods=['GET'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def check_user_deletable(user_id):
     """Tell the UI whether this account can be permanently deleted, and why not.
 
@@ -7924,6 +9001,9 @@ def check_user_deletable(user_id):
     if user.id == request.current_user['id']:
         return jsonify({'status': 'success', 'data': {
             'canDelete': False, 'reason': 'You cannot delete your own account.', 'blockers': []}})
+    error = target_account_error(request.current_user, user)
+    if error:
+        return jsonify({'status': 'success', 'data': {'canDelete': False, 'reason': error, 'blockers': []}})
 
     if user.role and user.role.key == 'administrator' and last_active_administrator(user):
         return jsonify({'status': 'success', 'data': {
@@ -7940,6 +9020,146 @@ def check_user_deletable(user_id):
 
     return jsonify({'status': 'success', 'data': {'canDelete': True, 'reason': '', 'blockers': []}})
 
+def would_leave_no_user_manager(user_id, perms_after):
+    """True if user_id ending up with perms_after would leave no active account
+    able to manage users (nobody could then fix permissions again)."""
+    if 'users.manage' in perms_after:
+        return False
+    others = (User.query.join(Role, User.role_id == Role.id)
+              .filter(User.is_active == True, User.id != user_id, Role.key != 'customer').all())
+    return not any('users.manage' in effective_permissions(u.id, u.role.key) for u in others)
+
+def prune_redundant_overrides(user_id, role_key):
+    """After a role change, drop grants the new role already has and revokes of
+    things it doesn't have, so the overrides list stays meaningful."""
+    defaults = ROLE_DEFAULT_PERMISSIONS.get(role_key, frozenset())
+    for o in UserPermissionOverride.query.filter_by(user_id=user_id).all():
+        if role_key == 'customer' or (o.effect == 'grant') == (o.permission in defaults):
+            db.session.delete(o)
+
+def permissions_version(role_key, overrides):
+    """Fingerprint of a user's role and overrides. The permissions dialog sends
+    back the one it loaded, so a save made from a stale copy is refused instead
+    of silently replacing someone else's changes."""
+    state = json.dumps([role_key, sorted((o.permission, o.effect) for o in overrides)])
+    return hashlib.sha256(state.encode()).hexdigest()[:16]
+
+def user_permissions_payload(user, actor):
+    role_key = user.role.key if user.role else None
+    overrides = UserPermissionOverride.query.filter_by(user_id=user.id).all()
+    # Customer accounts are self-service only
+    read_only_reason = ('Customer accounts can\'t be given staff permissions.' if role_key == 'customer'
+                        else target_account_error(actor, user))
+    return {
+        'userId': user.id,
+        'role': role_key,
+        'roleDefaults': sorted(ROLE_DEFAULT_PERMISSIONS.get(role_key, ())),
+        'grants': sorted(o.permission for o in overrides if o.effect == 'grant'),
+        'revokes': sorted(o.permission for o in overrides if o.effect == 'revoke'),
+        'effective': sorted(effective_permissions(user.id, role_key, overrides)),
+        'version': permissions_version(role_key, overrides),
+        'editable': read_only_reason is None,
+        'readOnlyReason': read_only_reason,
+        # Permissions this actor may not hand out or take away (see delegation_error)
+        'locked': [] if is_administrator(actor) else sorted(
+            PRIVILEGED_PERMISSIONS | (set(PERMISSIONS) - set(actor.get('permissions') or ()))),
+    }
+
+@app.route('/api/permissions', methods=['GET'])
+@require_auth
+@require_permission('users.manage')
+def get_permission_catalogue():
+    """Every permission grouped by module, plus each role's defaults."""
+    modules = [{
+        'key': module,
+        'label': label,
+        'permissions': [{'key': f'{module}.{action}', 'action': action, 'label': action_label}
+                        for action, action_label in actions],
+    } for module, label, actions in PERMISSION_MODULES]
+    return jsonify({'status': 'success', 'data': {
+        'modules': modules,
+        'roleDefaults': {role: sorted(perms) for role, perms in ROLE_DEFAULT_PERMISSIONS.items()},
+    }})
+
+@app.route('/api/users/<int:user_id>/permissions', methods=['GET'])
+@require_auth
+@require_permission('users.manage')
+def get_user_permissions(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'status': 'error', 'message': 'User not found'}), 404
+    return jsonify({'status': 'success', 'data': user_permissions_payload(user, request.current_user)})
+
+@app.route('/api/users/<int:user_id>/permissions', methods=['PUT'])
+@require_auth
+@require_permission('users.manage')
+def set_user_permissions(user_id):
+    """Replace a user's overrides. Body: {grants: [...], revokes: [...], version};
+    empty lists reset them to their role's defaults. `version` is the one the
+    caller loaded; if the permissions changed since, the save is refused (409)."""
+    # Row lock: two saves for the same user run one after the other, so the
+    # second one sees the first one's version and is refused
+    user = User.query.filter_by(id=user_id).with_for_update().first()
+    if not user:
+        return jsonify({'status': 'error', 'message': 'User not found'}), 404
+    me = request.current_user
+    role_key = user.role.key if user.role else None
+    if role_key == 'customer':
+        return jsonify({'status': 'error', 'message': 'Customer accounts cannot be given staff permissions'}), 400
+    error = target_account_error(me, user)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
+
+    data = request.get_json(silent=True) or {}
+    current = UserPermissionOverride.query.filter_by(user_id=user.id).all()
+    if not data.get('version'):
+        return jsonify({'status': 'error', 'message': 'Reload the permissions and try again.'}), 400
+    if data['version'] != permissions_version(role_key, current):
+        return jsonify({'status': 'error', 'code': 'stale',
+                        'message': "Someone else changed this user's permissions while you were editing. "
+                                   "Reload to see the latest, then make your changes again."}), 409
+    grants, revokes = data.get('grants') or [], data.get('revokes') or []
+    if not isinstance(grants, list) or not isinstance(revokes, list):
+        return jsonify({'status': 'error', 'message': 'grants and revokes must be lists'}), 400
+    grants, revokes = {str(g) for g in grants}, {str(r) for r in revokes}
+    unknown = (grants | revokes) - set(PERMISSIONS)
+    if unknown:
+        return jsonify({'status': 'error', 'message': f"Unknown permission(s): {', '.join(sorted(unknown))}"}), 400
+    if grants & revokes:
+        return jsonify({'status': 'error', 'message': 'A permission cannot be both granted and revoked'}), 400
+
+    defaults = ROLE_DEFAULT_PERMISSIONS.get(role_key, frozenset())
+    # Granting what the role already has, or revoking what it lacks, changes nothing
+    grants -= defaults
+    revokes &= defaults
+    perms_after = (set(defaults) | grants) - revokes
+    error = delegation_error(me, effective_permissions(user.id, role_key, current), perms_after)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
+
+    if user.id == me['id'] and 'users.manage' not in perms_after:
+        return jsonify({'status': 'error', 'message': "You can't remove your own access to user management"}), 400
+    if user.is_active and would_leave_no_user_manager(user.id, perms_after):
+        return jsonify({'status': 'error', 'message': 'At least one active account must be able to manage users'}), 400
+
+    UserPermissionOverride.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+    for perm in grants:
+        db.session.add(UserPermissionOverride(user_id=user.id, permission=perm, effect='grant', created_by=me['id']))
+    for perm in revokes:
+        db.session.add(UserPermissionOverride(user_id=user.id, permission=perm, effect='revoke', created_by=me['id']))
+    bump_auth_version(user)
+    db.session.commit()
+
+    summary = []
+    if grants:
+        summary.append(f"granted {', '.join(sorted(grants))}")
+    if revokes:
+        summary.append(f"revoked {', '.join(sorted(revokes))}")
+    log_action(me['id'], me['fullName'], 'PERMISSIONS', 'Settings',
+               f"Set permissions of {user.username}: {'; '.join(summary) or 'reset to role defaults'}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': user_permissions_payload(user, me)})
+
 def last_active_administrator(user):
     """True if removing/deactivating `user` would leave no active administrator."""
     return User.query.join(Role).filter(
@@ -7950,7 +9170,7 @@ def last_active_administrator(user):
 
 @app.route('/api/settings/users/<int:user_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator')
+@require_permission('users.manage')
 def delete_user(user_id):
     """Permanently delete a user account.
 
@@ -7963,10 +9183,16 @@ def delete_user(user_id):
 
     if user.id == request.current_user['id']:
         return jsonify({'status': 'error', 'message': 'You cannot delete your own account'}), 400
+    error = target_account_error(request.current_user, user)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 403
 
     if user.role and user.role.key == 'administrator' and last_active_administrator(user):
         return jsonify({'status': 'error',
                         'message': 'Cannot delete the last active administrator'}), 400
+    if user.is_active and would_leave_no_user_manager(user.id, set()):
+        return jsonify({'status': 'error',
+                        'message': 'Cannot delete the last account that can manage users'}), 400
 
     blockers = user_history_blockers(user.id)
     if blockers:
@@ -7986,9 +9212,15 @@ def delete_user(user_id):
         UserSession.query.filter_by(user_id=user.id).delete(synchronize_session=False)
         PasswordResetCode.query.filter_by(user_id=user.id).delete(synchronize_session=False)
         EmailChangeCode.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+        # Their own permission changes go with the account; changes they made to
+        # other users stay in force, just without the author
+        UserPermissionOverride.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+        UserPermissionOverride.query.filter_by(created_by=user.id).update(
+            {'created_by': None}, synchronize_session=False)
         # The customer record (and its job orders) stays, just without the online account
         Customer.query.filter_by(user_id=user.id).update({'user_id': None}, synchronize_session=False)
         # Announcements outlive their author — keep the post, drop the byline.
+        Expense.query.filter_by(created_by=user.id).update({'created_by': None}, synchronize_session=False)
         Announcement.query.filter_by(created_by_id=user.id).update(
             {'created_by_id': None}, synchronize_session=False)
 
@@ -8013,6 +9245,7 @@ def delete_user(user_id):
 
 @app.route('/api/settings/roles', methods=['GET'])
 @require_auth
+@require_permission('users.manage')
 def get_roles():
     roles = Role.query.all()
     role_list = [
@@ -8027,6 +9260,7 @@ def get_roles():
 
 @app.route('/api/settings/branches', methods=['GET'])
 @require_auth
+@require_staff
 def get_branches():
     """Get all branches from database"""
     include_inactive = request.args.get('includeInactive', 'false').lower() == 'true'
@@ -8046,7 +9280,7 @@ def get_branches_public():
 
 @app.route('/api/settings/branches', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('branches.manage')
 def create_branch():
     """Create a new branch"""
     data = request.get_json()
@@ -8078,7 +9312,7 @@ def create_branch():
 
 @app.route('/api/settings/branches/<int:branch_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator')
+@require_permission('branches.manage')
 def update_branch(branch_id):
     """Update a branch"""
     branch = Branch.query.get(branch_id)
@@ -8112,16 +9346,22 @@ def update_branch(branch_id):
 
 @app.route('/api/settings/system', methods=['GET'])
 @require_auth
+@require_staff
 def get_system_settings():
     settings = SystemSetting.query.all()
     return jsonify({'status': 'success', 'data': {s.key: s.value for s in settings}})
 
 @app.route('/api/settings/system/<key>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('settings.edit')
 def update_system_setting(key):
-    data = request.get_json()
-    value = str(data.get('value', ''))
+    data = request.get_json() or {}
+    value = str(data.get('value', '')).strip()
+    if key == 'vat_percent':
+        error = vat_percent_error(value)
+        if error:
+            return jsonify({'status': 'error', 'message': error}), 400
+        value = str(Decimal(value).normalize() if Decimal(value) != 0 else 0)  # '12.00' -> '12'
     setting = SystemSetting.query.filter_by(key=key).first()
     if not setting:
         setting = SystemSetting(key=key, value=value)
@@ -8138,7 +9378,7 @@ def update_system_setting(key):
 
 @app.route('/api/managed-workers', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.view', 'sales.edit')
 def list_managed_workers():
     workers = ManagedWorker.query.order_by(ManagedWorker.name).all()
     return jsonify({
@@ -8161,7 +9401,7 @@ def list_managed_workers():
 
 @app.route('/api/managed-workers', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('workers.add')
 def create_managed_worker():
     data = request.get_json()
     name = (data.get('name') or '').strip()
@@ -8191,7 +9431,7 @@ def create_managed_worker():
 
 @app.route('/api/managed-workers/<int:worker_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator')
+@require_permission('workers.edit')
 def update_managed_worker(worker_id):
     worker = ManagedWorker.query.get(worker_id)
     if not worker:
@@ -8224,7 +9464,7 @@ def update_managed_worker(worker_id):
 
 @app.route('/api/managed-workers/<int:worker_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator')
+@require_permission('workers.delete')
 def deactivate_managed_worker(worker_id):
     worker = ManagedWorker.query.get(worker_id)
     if not worker:
@@ -8235,7 +9475,7 @@ def deactivate_managed_worker(worker_id):
 
 @app.route('/api/worker-assignments', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.view')
 def list_worker_assignments():
     worker_id = request.args.get('workerId', type=int)
     query = WorkerAssignment.query
@@ -8281,7 +9521,7 @@ def list_worker_assignments():
 
 @app.route('/api/worker-assignments', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.assign')
 def create_worker_assignment():
     data = request.get_json()
     worker_id = data.get('workerId')
@@ -8302,6 +9542,8 @@ def create_worker_assignment():
                  else JobOrder.query.filter_by(job_order_id=job_order_ref).first())
         if not order:
             return jsonify({'error': 'Job order not found'}), 404
+        if branch_access_error(request.current_user, order.branch_id):
+            return jsonify({'error': 'This job order belongs to another branch'}), 403
         if order.status in ('draft', 'cancelled', 'voided'):
             return jsonify({'error': f'Workers cannot be assigned to a {order.status} job order'}), 400
         if not description:
@@ -8370,11 +9612,16 @@ def create_worker_assignment():
 
 @app.route('/api/worker-assignments/<int:assignment_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.assign')
 def update_worker_assignment(assignment_id):
     assignment = WorkerAssignment.query.get(assignment_id)
     if not assignment:
         return jsonify({'error': 'Assignment not found'}), 404
+    # Finishing an assignment writes its pay onto the job order
+    order = (JobOrder.query.get(assignment.job_order_db_id) if assignment.job_order_db_id
+             else JobOrder.query.filter_by(job_order_id=assignment.job_order_ref).first())
+    if order and branch_access_error(request.current_user, order.branch_id):
+        return jsonify({'error': 'This job order belongs to another branch'}), 403
     data = request.get_json()
     new_status = data.get('status')
     if new_status:
@@ -8455,7 +9702,7 @@ def update_worker_assignment(assignment_id):
 
 @app.route('/api/worker-assignments/calendar', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.view')
 def get_assignments_calendar():
     """Return all assignments for a worker in a given month, keyed by date."""
     worker_id = request.args.get('workerId', type=int)
@@ -8491,7 +9738,7 @@ def get_assignments_calendar():
 
 @app.route('/api/worker-assignments/<int:assignment_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator')
+@require_permission('workers.delete_assignment')
 def delete_worker_assignment(assignment_id):
     assignment = WorkerAssignment.query.get(assignment_id)
     if not assignment:
@@ -8499,6 +9746,8 @@ def delete_worker_assignment(assignment_id):
     # Its labor line goes with it, so both screens keep showing the same workers
     order = (JobOrder.query.get(assignment.job_order_db_id) if assignment.job_order_db_id
              else JobOrder.query.filter_by(job_order_id=assignment.job_order_ref).first())
+    if order and branch_access_error(request.current_user, order.branch_id):
+        return jsonify({'error': 'This job order belongs to another branch'}), 403
     if order and any(it.get('assignmentId') == assignment.id for it in (order.items or [])):
         items = [dict(it) for it in order.items if it.get('assignmentId') != assignment.id]
         order.items = items
@@ -8513,7 +9762,7 @@ def delete_worker_assignment(assignment_id):
 
 @app.route('/api/worker-availability', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.view')
 def get_worker_availability():
     """Get availability schedule entries for a worker, optionally filtered by month (YYYY-MM)."""
     worker_id = request.args.get('workerId', type=int)
@@ -8552,7 +9801,7 @@ def get_worker_availability():
 
 @app.route('/api/worker-availability', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('workers.assign')
 def set_worker_availability():
     """Upsert an availability entry. Send isAvailable=null or omit to delete."""
     data = request.get_json()
@@ -8645,7 +9894,7 @@ def get_catalog():
 
 @app.route('/api/catalog', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('catalog.manage')
 def create_catalog_item():
     data = request.get_json()
     if not data or not data.get('title', '').strip():
@@ -8668,7 +9917,7 @@ def create_catalog_item():
 
 @app.route('/api/catalog/<int:item_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator')
+@require_permission('catalog.manage')
 def update_catalog_item(item_id):
     item = CatalogItem.query.get(item_id)
     if not item:
@@ -8693,7 +9942,7 @@ def update_catalog_item(item_id):
 
 @app.route('/api/catalog/<int:item_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator')
+@require_permission('catalog.manage')
 def delete_catalog_item(item_id):
     item = CatalogItem.query.get(item_id)
     if not item:
@@ -8705,7 +9954,7 @@ def delete_catalog_item(item_id):
 
 @app.route('/api/catalog/<int:item_id>/image', methods=['POST'])
 @require_auth
-@require_roles('administrator')
+@require_permission('catalog.manage')
 def upload_catalog_image(item_id):
     item = CatalogItem.query.get(item_id)
     if not item:
@@ -8894,7 +10143,7 @@ def _run_predictions_background(app_obj):
 
 @app.route('/api/inventory/ai/upload-historical', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('forecasting.manage')
 def upload_historical_inventory():
     try:
         import pandas as pd
@@ -9010,6 +10259,7 @@ def upload_historical_inventory():
 
 @app.route('/api/inventory/ai/predictions', methods=['GET'])
 @require_auth
+@require_permission('forecasting.view', 'inventory.view')
 def get_ai_predictions():
     cache = AIPredictionCache.query.first()
     if not cache:
@@ -9044,7 +10294,7 @@ def get_ai_predictions():
 
 @app.route('/api/inventory/ai/recompute', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('forecasting.manage')
 def recompute_ai_predictions():
     cache = AIPredictionCache.query.first()
     if not cache or cache.upload_rows == 0:
@@ -9105,7 +10355,7 @@ def customer_order_counts(customers):
 
 @app.route('/api/customers/search', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('customers.view')
 def search_customers():
     q = request.args.get('q', '').strip()
     if len(q) < 2:
@@ -9122,7 +10372,7 @@ def search_customers():
 
 @app.route('/api/customers', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('customers.view')
 def get_customers():
     q = request.args.get('q', '').strip()
     query = Customer.query
@@ -9149,7 +10399,7 @@ def get_customers():
 
 @app.route('/api/customers', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('customers.add')
 def create_customer():
     data = request.get_json()
     if not data.get('name'):
@@ -9170,7 +10420,7 @@ def create_customer():
 
 @app.route('/api/customers/<int:customer_id>', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('customers.view')
 def get_customer(customer_id):
     customer = Customer.query.get_or_404(customer_id)
     orders = JobOrder.query.filter_by(customer_id=customer_id).order_by(JobOrder.created_at.desc()).all()
@@ -9208,7 +10458,7 @@ def get_customer(customer_id):
 
 @app.route('/api/customers/<int:customer_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor', 'sales_manager')
+@require_permission('customers.edit')
 def update_customer(customer_id):
     customer = Customer.query.get_or_404(customer_id)
     data = request.get_json()
@@ -9258,15 +10508,13 @@ def announcement_to_dict(a):
 
 @app.route('/api/announcements', methods=['GET'])
 @require_auth
+@require_permission('announcements.view')
 def get_announcements():
-    # Only staff can see announcements — customers are excluded via require_auth + role check
-    if request.current_user.get('role') == 'customer':
-        return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
-    # Archived announcements are an admin view only: ordinary staff always see the
-    # active board, so an archived notice can never resurface for them.
+    # Archived announcements are for those who manage the board: everyone else
+    # always sees the active board, so an archived notice can never resurface.
     include_archived = (
         request.args.get('includeArchived', 'false').lower() == 'true'
-        and request.current_user.get('role') in ('administrator', 'supervisor')
+        and has_perm(request.current_user, 'announcements.manage')
     )
     query = Announcement.query
     if not include_archived:
@@ -9276,7 +10524,7 @@ def get_announcements():
 
 @app.route('/api/announcements', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('announcements.manage')
 def create_announcement():
     data = request.get_json()
     if not data.get('title', '').strip():
@@ -9302,7 +10550,7 @@ def create_announcement():
 
 @app.route('/api/announcements/<int:ann_id>', methods=['PUT'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('announcements.manage')
 def update_announcement(ann_id):
     a = Announcement.query.get(ann_id)
     if not a:
@@ -9321,7 +10569,7 @@ def update_announcement(ann_id):
 
 @app.route('/api/announcements/<int:ann_id>', methods=['DELETE'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('announcements.manage')
 def delete_announcement(ann_id):
     a = Announcement.query.get(ann_id)
     if not a:
@@ -9355,7 +10603,7 @@ def chat_message_to_dict(m):
 
 @app.route('/api/chat/messages', methods=['GET'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('chat.use')
 def get_chat_messages():
     since = request.args.get('since')
     query = ChatMessage.query
@@ -9370,7 +10618,7 @@ def get_chat_messages():
 
 @app.route('/api/chat/messages', methods=['POST'])
 @require_auth
-@require_roles('administrator', 'supervisor')
+@require_permission('chat.use')
 def send_chat_message():
     data = request.get_json()
     content = (data.get('content') or '').strip()

@@ -4,12 +4,16 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useAuth, hasAccess } from '@/context/AuthContext';
 import { useNotifications } from '@/context/NotificationContext';
 import { formatDateTime } from '@/lib/dateUtils';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useConfirm } from './ConfirmDialog';
 
 interface NavigationProps {
   collapsed: boolean;
   onToggle: () => void;
+  // Below the md breakpoint the sidebar is a drawer instead of a fixed column
+  mobileOpen: boolean;
+  onMobileOpen: () => void;
+  onMobileClose: () => void;
 }
 
 const HomeIcon = () => (
@@ -20,6 +24,16 @@ const HomeIcon = () => (
 const DashboardIcon = () => (
   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+  </svg>
+);
+const OwnerIcon = () => (
+  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+  </svg>
+);
+const ExpensesIcon = () => (
+  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z" />
   </svg>
 );
 const SalesIcon = () => (
@@ -104,16 +118,26 @@ const LogoutIcon = () => (
   </svg>
 );
 
-export default function Navigation({ collapsed, onToggle }: NavigationProps) {
+export default function Navigation({ collapsed: collapsedSetting, onToggle, mobileOpen, onMobileOpen, onMobileClose }: NavigationProps) {
+  // The open drawer always shows full labels, whatever the desktop collapse setting is
+  const collapsed = collapsedSetting && !mobileOpen;
   const pathname = usePathname();
   const router = useRouter();
-  const { user, isAuthenticated, logout, isLoading } = useAuth();
+  const { user, isAuthenticated, logout, isLoading, can } = useAuth();
   const { notifications, unreadCount, markRead, markAllRead, archived, loadArchived, archive, restore, remove } = useNotifications();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const { confirm, confirmDialog } = useConfirm();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [showArchive, setShowArchive] = useState(false);
+
+  // Escape closes the phone drawer
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onMobileClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [mobileOpen, onMobileClose]);
 
   const publicRoutes = ['/', '/login', '/register', '/place-order'];
 
@@ -208,27 +232,31 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
     );
   }
 
-  const navItems = [
-    { name: 'Home', path: '/', icon: HomeIcon, roles: ['administrator', 'supervisor', 'sales_manager', 'seat_maker', 'sewer', 'customer'] },
+  // Staff items need any one of their permissions; customer pages are by account type
+  const navItems: { name: string; path: string; icon: () => React.JSX.Element; perms?: string[]; roles?: string[] }[] = [
+    { name: 'Home', path: '/', icon: HomeIcon },
     { name: 'My Orders', path: '/my-orders', icon: OrdersIcon, roles: ['customer'] },
     { name: 'Shop Products', path: '/place-order', icon: ShoppingIcon, roles: ['customer'] },
-    { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, roles: ['administrator'] },
-    { name: 'Sales', path: '/sales', icon: SalesIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Customers', path: '/customers', icon: CustomersIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Payments', path: '/payments', icon: PaymentsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Appointments', path: '/appointments', icon: AppointmentsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Inventory', path: '/inventory', icon: InventoryIcon, roles: ['administrator', 'supervisor'] },
-    { name: 'Product Orders', path: '/product-orders', icon: ShoppingIcon, roles: ['administrator', 'supervisor'] },
-    { name: 'Costing', path: '/costing', icon: CostingIcon, roles: ['administrator', 'supervisor'] },
-    { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, roles: ['administrator', 'supervisor'] },
-    { name: 'Item Trail', path: '/delivery', icon: DeliveryIcon, roles: ['administrator', 'supervisor'] },
-    { name: 'Reports', path: '/reports', icon: ReportsIcon, roles: ['administrator', 'supervisor', 'sales_manager'] },
-    { name: 'Settings', path: '/settings', icon: SettingsIcon, roles: ['administrator', 'supervisor'] },
+    { name: 'Owner Dashboard', path: '/owner', icon: OwnerIcon, perms: ['owner.view'] },
+    { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, perms: ['dashboard.view'] },
+    { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, perms: ['announcements.view'] },
+    { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, perms: ['workers.add', 'workers.edit', 'workers.delete'] },
+    { name: 'Sales', path: '/sales', icon: SalesIcon, perms: ['sales.view'] },
+    { name: 'Customers', path: '/customers', icon: CustomersIcon, perms: ['customers.view'] },
+    { name: 'Payments', path: '/payments', icon: PaymentsIcon, perms: ['payments.view'] },
+    { name: 'Expenses', path: '/expenses', icon: ExpensesIcon, perms: ['expenses.view', 'expenses.add'] },
+    { name: 'Appointments', path: '/appointments', icon: AppointmentsIcon, perms: ['appointments.view'] },
+    { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'premade.receive', 'suppliers.view'] },
+    { name: 'Product Orders', path: '/product-orders', icon: ShoppingIcon, perms: ['product_orders.view'] },
+    { name: 'Costing', path: '/costing', icon: CostingIcon, perms: ['costing.view'] },
+    { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, perms: ['forecasting.view'] },
+    { name: 'Item Trail', path: '/delivery', icon: DeliveryIcon, perms: ['item_trail.view'] },
+    { name: 'Reports', path: '/reports', icon: ReportsIcon, perms: ['reports.sales', 'reports.inventory', 'reports.settlement', 'reports.audit_trail'] },
+    { name: 'Settings', path: '/settings', icon: SettingsIcon, perms: ['settings.edit', 'users.manage', 'branches.manage'] },
   ];
 
-  const filteredNavItems = navItems.filter((item) => hasAccess(user?.role, item.roles));
+  const filteredNavItems = navItems.filter((item) =>
+    item.roles ? hasAccess(user?.role, item.roles) : item.perms ? can(...item.perms) : true);
 
   const handleLogout = async () => {
     const ok = await confirm({
@@ -249,10 +277,37 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
 
   return (
     <>
+    {/* Phones: top bar with the menu button (the sidebar opens as a drawer) */}
+    <header className="md:hidden fixed top-0 inset-x-0 h-14 z-30 bg-white border-b border-gray-200 shadow-sm flex items-center gap-2 px-3">
+      <button onClick={onMobileOpen} aria-label="Open menu" aria-expanded={mobileOpen}
+        className="p-2 -ml-1 rounded-lg text-gray-600 hover:text-[#011c72] hover:bg-gray-100 transition-colors">
+        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+        </svg>
+      </button>
+      <Link href="/" className="flex items-center gap-2 min-w-0 flex-1">
+        <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0">
+          <LogoIcon />
+        </div>
+        <span className="font-bold text-gray-900 text-sm truncate">Seatmakers Ave</span>
+      </Link>
+      <button onClick={() => setNotifOpen(o => !o)} aria-label="Notifications"
+        className="relative p-2 rounded-lg text-gray-600 hover:text-[#011c72] hover:bg-gray-100 transition-colors">
+        <BellIcon />
+        {unreadCount > 0 && (
+          <span className="absolute top-1 right-1 min-w-[14px] h-3.5 px-0.5 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
+            {unreadCount > 9 ? '9+' : unreadCount}
+          </span>
+        )}
+      </button>
+    </header>
+    {mobileOpen && (
+      <div className="md:hidden fixed inset-0 z-30 bg-black/40" onClick={onMobileClose} aria-hidden="true" />
+    )}
     <aside
-      className={`fixed left-0 top-0 h-full bg-white border-r border-gray-200 z-40 flex flex-col shadow-sm transition-all duration-300 ${
+      className={`fixed top-0 h-full bg-white border-r border-gray-200 z-40 flex flex-col shadow-sm transition-all duration-300 ${
         collapsed ? 'w-16' : 'w-64'
-      }`}
+      } ${mobileOpen ? 'left-0' : '-left-64'} md:left-0`}
     >
       {/* Header */}
       <div className={`flex items-center h-16 px-3 border-b border-gray-200 shrink-0 ${collapsed ? 'justify-center' : 'gap-2'}`}>
@@ -266,9 +321,15 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
             </span>
           )}
         </Link>
+        <button onClick={onMobileClose} aria-label="Close menu"
+          className="md:hidden p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0">
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
         <button
           onClick={onToggle}
-          className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0"
+          className="hidden md:block p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0"
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -334,6 +395,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
             <Link
               key={item.path}
               href={item.path}
+              onClick={onMobileClose}
               title={collapsed ? item.name : undefined}
               className={`flex items-center rounded-lg text-sm font-medium transition-colors ${
                 collapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
@@ -377,8 +439,8 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
       {notifOpen && (
         <>
           <div className="fixed inset-0 z-30" onClick={() => { setNotifOpen(false); setShowArchive(false); }} />
-          <div className="fixed top-20 z-40 w-80 bg-white rounded-xl shadow-xl border border-gray-200 overflow-hidden"
-            style={{ left: collapsed ? '4.5rem' : '16.5rem' }}>
+          <div className={`fixed top-16 md:top-20 inset-x-2 md:inset-x-auto z-40 md:w-80 bg-white rounded-xl shadow-xl border border-gray-200 overflow-hidden ${
+            collapsed ? 'md:left-[4.5rem]' : 'md:left-[16.5rem]'}`}>
             <div className="px-4 pt-3 pb-2 border-b border-gray-100">
               <p className="text-sm font-bold text-gray-900">{showArchive ? 'Archived Notifications' : 'Notifications'}</p>
               <div className="flex items-center justify-between mt-1.5">
@@ -406,7 +468,7 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
                   {showArchive ? 'No archived notifications' : 'No notifications'}
                 </p>
               ) : (showArchive ? archived : notifications).map(n => {
-                const href = notificationHref(n.type, n.data, user?.role);
+                const href = notificationHref(n.type, n.data, user?.role, can);
                 const unread = !showArchive && !n.isRead;
                 const body = (
                   <div className="flex items-start gap-2">
@@ -487,7 +549,8 @@ export default function Navigation({ collapsed, onToggle }: NavigationProps) {
  * Where a notification leads, or null when it has nowhere to go for this role
  * (the row is then shown as plain text rather than a link).
  */
-function notificationHref(type: string, data: unknown, role: string | undefined): string | null {
+function notificationHref(type: string, data: unknown, role: string | undefined,
+  can: (...permissions: string[]) => boolean): string | null {
   const d = (data || {}) as { orderId?: number; jobOrderId?: number; kind?: 'job' | 'product' | 'request' };
   switch (type) {
     case 'transfer_request':
@@ -495,12 +558,12 @@ function notificationHref(type: string, data: unknown, role: string | undefined)
     case 'order_cancelled':
     case 'order_ready':
     case 'sale_completed':
-      return d.orderId && hasAccess(role, ['administrator', 'supervisor']) ? `/product-orders/${d.orderId}` : null;
+      return d.orderId && can('product_orders.view') ? `/product-orders/${d.orderId}` : null;
     case 'premade_delivery':
       // Incoming premade stock is confirmed on the Finished Goods tab
-      return hasAccess(role, ['administrator', 'supervisor']) ? '/inventory?tab=finished-goods' : null;
+      return can('premade.view', 'premade.receive') ? '/inventory?tab=finished-goods' : null;
     case 'quotation_response':
-      return d.jobOrderId && hasAccess(role, ['administrator', 'supervisor', 'sales_manager'])
+      return d.jobOrderId && can('sales.view')
         ? `/sales/${d.jobOrderId}` : null;
     case 'order_status':
     case 'quotation_ready':

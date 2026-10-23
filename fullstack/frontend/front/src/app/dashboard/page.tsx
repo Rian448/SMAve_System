@@ -1,20 +1,20 @@
 ﻿'use client';
 import { useState, useEffect } from 'react';
-import { useAuth, hasAccess } from '@/context/AuthContext';
+import { useAuth } from '@/context/AuthContext';
 import { api, DashboardStats, Alert, Activity } from '@/lib/api';
 import { formatDateTime as formatDate } from '@/lib/dateUtils';
 import Link from 'next/link';
 
 export default function Dashboard() {
-  const { user, isLoading: authLoading } = useAuth();
+  const { user, isLoading: authLoading, can } = useAuth();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [alerts, setAlerts] = useState<Array<Alert & { rowKey: string }>>([]);
   const [activities, setActivities] = useState<Array<Activity & { rowKey: string; user: string; action: string; details: string }>>([]);
   const [loading, setLoading] = useState(true);
   // Administrators can narrow the dashboard to one branch ('' = whole company);
   // everyone else always sees only their own branch.
-  const isAdmin = user?.role === 'administrator';
-  const isStaff = hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager']);
+  const isAdmin = can('branches.all');
+  const isStaff = can('dashboard.view');
   const isWorkerAccount = user?.role === 'seat_maker' || user?.role === 'sewer';
   const [branchFilter, setBranchFilter] = useState('');
   const [branches, setBranches] = useState<{ id: number; name: string; isWarehouse: boolean }[]>([]);
@@ -95,16 +95,16 @@ export default function Dashboard() {
   const getAlertHref = (alert: Alert): string | null => {
     switch (alert.type) {
       case 'low_stock':
-        if (!hasAccess(user?.role, ['administrator', 'supervisor'])) return null;
+        if (!can('inventory.view')) return null;
         // Land on the raw-materials tab, filtered to low stock and this material.
         return `/inventory?tab=raw-materials&status=low-stock${
           alert.itemName ? `&q=${encodeURIComponent(alert.itemName)}` : ''
         }`;
       case 'delivery_due':
-        if (!hasAccess(user?.role, ['administrator', 'supervisor'])) return null;
+        if (!can('item_trail.view')) return null;
         return alert.itemId ? `/delivery/${alert.itemId}` : '/delivery';
       case 'overdue_order':
-        if (!hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager'])) return null;
+        if (!can('sales.view')) return null;
         return alert.itemId ? `/sales/${alert.itemId}` : '/sales';
       default:
         return null;
@@ -115,10 +115,10 @@ export default function Dashboard() {
   const getActivityHref = (activity: Activity): string | null => {
     switch (activity.type) {
       case 'job_order':
-        if (!hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager'])) return null;
+        if (!can('sales.view')) return null;
         return activity.id ? `/sales/${activity.id}` : '/sales';
       case 'delivery':
-        if (!hasAccess(user?.role, ['administrator', 'supervisor'])) return null;
+        if (!can('item_trail.view')) return null;
         return activity.id ? `/delivery/${activity.id}` : '/delivery';
       default:
         return null;
@@ -311,7 +311,7 @@ export default function Dashboard() {
                 </svg>
               </div>
             </div>
-            {hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager']) && (
+            {can('sales.view') && (
               <span className="text-sm text-[#011c72] mt-4 inline-block">
                 Review jobs →
               </span>
@@ -350,7 +350,7 @@ export default function Dashboard() {
                 </svg>
               </div>
             </div>
-            {hasAccess(user?.role, ['administrator', 'supervisor']) && (
+            {can('reports.inventory') && (
               <span className="text-sm text-green-600 mt-4 inline-block">
                 View reports →
               </span>
@@ -372,7 +372,7 @@ export default function Dashboard() {
                 </svg>
               </div>
             </div>
-            {hasAccess(user?.role, ['administrator', 'supervisor']) && (
+            {can('inventory.view') && (
               <span className="text-sm text-[#011c72] mt-4 inline-block">
                 Manage inventory →
               </span>
@@ -394,7 +394,7 @@ export default function Dashboard() {
                 </svg>
               </div>
             </div>
-            {hasAccess(user?.role, ['administrator', 'supervisor']) && (
+            {can('item_trail.view') && (
               <span className="text-sm text-blue-600 mt-4 inline-block">
                 Track deliveries →
               </span>
@@ -416,7 +416,7 @@ export default function Dashboard() {
                 </svg>
               </div>
             </div>
-            {hasAccess(user?.role, ['administrator', 'supervisor']) && (
+            {can('reports.inventory') && (
               <span className="text-sm text-emerald-600 mt-4 inline-block">
                 View reports →
               </span>
@@ -549,10 +549,11 @@ export default function Dashboard() {
         )}
 
         {/* Quick Actions */}
-        {hasAccess(user?.role, ['administrator', 'supervisor', 'sales_manager']) && (
+        {can('sales.add', 'purchase_orders.add', 'item_trail.add', 'reports.inventory') && (
           <div className="mt-8">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h2>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              {can('sales.add') && (
               <Link
                 href="/sales/new"
                 className="flex flex-col items-center justify-center p-6 bg-white rounded-xl border border-gray-200 hover:border-[#011c72] hover:shadow-md transition-all group"
@@ -564,9 +565,10 @@ export default function Dashboard() {
                 </div>
                 <span className="text-sm font-medium text-gray-900">New Job Order</span>
               </Link>
+              )}
 
-              {hasAccess(user?.role, ['administrator', 'supervisor']) && (
-                <>
+              <>
+                  {can('purchase_orders.add') && (
                   <Link
                     href="/inventory/purchase-orders/new"
                     className="flex flex-col items-center justify-center p-6 bg-white rounded-xl border border-gray-200 hover:border-green-500 hover:shadow-md transition-all group"
@@ -578,7 +580,9 @@ export default function Dashboard() {
                     </div>
                     <span className="text-sm font-medium text-gray-900">Purchase Order</span>
                   </Link>
+                  )}
 
+                  {can('item_trail.add') && (
                   <Link
                     href="/delivery/new"
                     className="flex flex-col items-center justify-center p-6 bg-white rounded-xl border border-gray-200 hover:border-blue-500 hover:shadow-md transition-all group"
@@ -590,7 +594,9 @@ export default function Dashboard() {
                     </div>
                     <span className="text-sm font-medium text-gray-900">Schedule Delivery</span>
                   </Link>
+                  )}
 
+                  {can('reports.inventory') && (
                   <Link
                     href="/reports"
                     className="flex flex-col items-center justify-center p-6 bg-white rounded-xl border border-gray-200 hover:border-purple-500 hover:shadow-md transition-all group"
@@ -602,8 +608,8 @@ export default function Dashboard() {
                     </div>
                     <span className="text-sm font-medium text-gray-900">View Reports</span>
                   </Link>
-                </>
-              )}
+                  )}
+              </>
             </div>
           </div>
         )}

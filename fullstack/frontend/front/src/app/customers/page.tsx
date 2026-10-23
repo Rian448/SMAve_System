@@ -6,8 +6,8 @@ import { useAuth } from '@/context/AuthContext';
 
 export default function CustomersPage() {
   const router = useRouter();
-  const { user } = useAuth();
-  const canCreate = ['administrator', 'supervisor'].includes(user?.role || '');
+  const { can } = useAuth();
+  const canCreate = can('customers.add');
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');

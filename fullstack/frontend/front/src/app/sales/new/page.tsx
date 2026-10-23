@@ -5,9 +5,10 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import {
   api, type Customer, type FinishedGood, type RawMaterial, type Appointment, type QuoteStatus, type Branch,
-  DEFAULT_VAT_PERCENT, jobOrderTotalFrom, jobOrderPriceBreakdown, MAX_JOB_ORDER_PRICE, isValidPriceInput,
+  vatBreakdown, jobOrderTotalFrom, jobOrderPriceBreakdown, MAX_JOB_ORDER_PRICE, isValidPriceInput,
 } from '@/lib/api';
 import Combobox from '@/components/Combobox';
+import { useVatRate } from '@/lib/useVatRate';
 
 interface MaterialItem {
   id: string;
@@ -100,6 +101,12 @@ function NewJobOrderForm() {
   const [retailBranches, setRetailBranches] = useState<Branch[]>([]);
   const [quoteBranchId, setQuoteBranchId] = useState<number | ''>('');
   const { user } = useAuth();
+  // Warehouse accounts are general, so they choose which branch a job order is
+  // for; everyone else's orders go to their own branch. (Quotations choose theirs above.)
+  const choosesBranch = !!user?.atWarehouse && !quoteMode;
+  const [orderBranchId, setOrderBranchId] = useState<number | ''>('');
+  // Must be one of the retail branches listed (a draft saved before may point at the warehouse)
+  const orderBranchValid = orderBranchId !== '' && retailBranches.some((b) => b.id === orderBranchId);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [orderType, setOrderType] = useState<'normal' | 'premade'>('normal');
@@ -123,7 +130,9 @@ function NewJobOrderForm() {
   const [linkedCustomerId, setLinkedCustomerId] = useState<number | null>(null);
   const [linkedCustomerDiscount, setLinkedCustomerDiscount] = useState<number | null>(null);
   const [orderDiscount, setOrderDiscount] = useState<string>('');  // editable per-order discount %
-  const [vatOn, setVatOn] = useState(false);
+  // Prices include VAT by default; untick for a sale without VAT
+  const [vatOn, setVatOn] = useState(true);
+  const vatRate = useVatRate();
   const [customerSuggestions, setCustomerSuggestions] = useState<Customer[]>([]);
   const [searchingCustomer, setSearchingCustomer] = useState(false);
   const customerSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -348,11 +357,12 @@ function NewJobOrderForm() {
   // Per-order discount: clamp 0–100, derive the discounted total and savings.
   const orderDiscountPct = Math.min(Math.max(Number(orderDiscount) || 0, 0), 100);
   const discountAmount = estimatedTotal > 0 ? Math.round(estimatedTotal * (orderDiscountPct / 100) * 100) / 100 : 0;
-  const discountedTotal = estimatedTotal > 0 ? Math.round((estimatedTotal - discountAmount) * 100) / 100 : 0;
-  // Optional VAT on top of the discounted price; this is what the customer pays
-  const vatPct = vatOn ? DEFAULT_VAT_PERCENT : 0;
-  const finalTotal = estimatedTotal > 0 ? jobOrderTotalFrom(estimatedTotal, orderDiscountPct, vatPct) : 0;
-  const vatAmount = Math.round((finalTotal - discountedTotal) * 100) / 100;
+  // The price already includes VAT: the customer pays the discounted price, and
+  // VAT is the share of it shown below (never added on top). The server works
+  // the total out again with the rate saved in Settings.
+  const vatPct = vatOn ? vatRate : 0;
+  const finalTotal = estimatedTotal > 0 ? jobOrderTotalFrom(estimatedTotal, orderDiscountPct) : 0;
+  const vatAmount = vatBreakdown(finalTotal, vatPct).vat;
 
   const goNext = () => {
     setError('');
@@ -385,11 +395,13 @@ function NewJobOrderForm() {
           setEditingQuoteReason(d.quoteRejectReason || '');
           if (d.branchId) setQuoteBranchId(d.branchId);
         }
+        if (d.branchId) setOrderBranchId(d.branchId);
         if (d.discountPercent != null) setOrderDiscount(String(d.discountPercent));
         setVatOn(Number(d.vatPercent) > 0);
         // Restore the price (it used to be lost when reopening a draft)
+        // As a VAT-inclusive price, so saving keeps the draft's total (older drafts too)
         if (Number(d.totalPrice) > 0) {
-          setEstimatedTotal(jobOrderPriceBreakdown(Number(d.totalPrice), d.discountPercent, d.vatPercent).subtotal);
+          setEstimatedTotal(jobOrderPriceBreakdown(Number(d.totalPrice), d.discountPercent, d.vatPercent, true).subtotal);
         }
         if (d.notes) setNotes(d.notes);
         if (d.estimatedCompletion) setEstimatedCompletionDate(String(d.estimatedCompletion).slice(0, 10));
@@ -435,16 +447,18 @@ function NewJobOrderForm() {
   }, [editingDraftId]);
 
   useEffect(() => {
-    if (!quoteMode) return;
+    if (!quoteMode && !user?.atWarehouse) return;
     api.settings.getBranchesPublic()
       .then((res) => {
         const retail = (res.data || []).filter((b) => !b.isWarehouse && b.isActive);
         setRetailBranches(retail);
+        // A reopened draft keeps its branch only if it is still a retail branch
+        setOrderBranchId((cur) => (cur && retail.some((b) => b.id === cur) ? cur : ''));
         // No branch yet (e.g. a phone-call appointment): use the staff member's own retail branch
         setQuoteBranchId((cur) => cur || (retail.some((b) => b.id === user?.branchId) ? (user?.branchId as number) : ''));
       })
       .catch(() => setRetailBranches([]));
-  }, [quoteMode, user?.branchId]);
+  }, [quoteMode, user?.branchId, user?.atWarehouse]);
 
   // ── Pre-fill a quotation from an appointment (?appointmentId=…) ─────────────
   useEffect(() => {
@@ -479,7 +493,13 @@ function NewJobOrderForm() {
     if (!customerName.trim()) { setError('Enter a customer name to save a draft.'); return; }
     setLoading(true); setError('');
     try {
-      const branchId = quoteMode && quoteBranchId ? quoteBranchId : (user?.branchId || 1);
+      if (choosesBranch && !orderBranchValid) {
+        setError('Choose which branch this job order is for.');
+        setLoading(false);
+        return;
+      }
+      const branchId = quoteMode && quoteBranchId ? quoteBranchId
+        : choosesBranch ? (orderBranchId as number) : (user?.branchId || 1);
 
       const selectedServices: string[] = [];
       if (flooring.selected) selectedServices.push('flooring');
@@ -515,8 +535,8 @@ function NewJobOrderForm() {
         items: normalizedItems,
         notes,
         ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
-        vatPercent: vatPct || null,
-        ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, totalPrice: finalTotal } : {}),
+        vatIncluded: vatOn,
+        ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, priceForWork: estimatedTotal } : {}),
       };
 
       if (editingDraftId) {
@@ -538,6 +558,7 @@ function NewJobOrderForm() {
 
     if (orderType === 'normal' && step < 5) {
       if (step === 1) {
+        if (choosesBranch && !orderBranchValid) { setError('Choose which branch this job order is for.'); return; }
         if (!customerName.trim()) { setError('Customer name is required.'); return; }
         if (!customerPhone.trim()) { setError('Phone number is required.'); return; }
       }
@@ -687,7 +708,13 @@ function NewJobOrderForm() {
       setLoading(false);
       return;
     }
-    const branchId = quoteMode ? (quoteBranchId as number) : (user?.branchId || 1);
+    if (choosesBranch && !orderBranchValid) {
+      setError('Choose which branch this job order is for.');
+      setLoading(false);
+      return;
+    }
+    const branchId = quoteMode ? (quoteBranchId as number)
+      : choosesBranch ? (orderBranchId as number) : (user?.branchId || 1);
 
     // Add typed-in materials to inventory first (flagged as needed), so the order's
     // lines carry their inventory id and the stock is deducted when the job completes.
@@ -755,7 +782,7 @@ function NewJobOrderForm() {
     } : undefined;
 
     const grossTotal = estimatedTotal > 0 ? estimatedTotal : materialTotal;
-    const orderTotal = jobOrderTotalFrom(grossTotal, orderDiscountPct, vatPct);
+    const orderTotal = jobOrderTotalFrom(grossTotal, orderDiscountPct);
     // A quotation takes no payment: the customer pays once they have accepted it
     const finalDown = quoteMode ? 0 : estimatedTotal > 0 ? Math.round((orderTotal / 2) * 100) / 100 : 0;
 
@@ -772,15 +799,19 @@ function NewJobOrderForm() {
         paymentMethod,
         notes,
         ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
-        ...(vatPct > 0 ? { vatPercent: vatPct } : {}),
+        vatIncluded: vatOn,
         ...(slipData ? { slipData } : {}),
-        ...(orderTotal > 0 ? { estimatedCost: grossTotal, totalPrice: orderTotal } : {}),
+        ...(orderTotal > 0 ? { estimatedCost: grossTotal, priceForWork: grossTotal } : {}),
       };
 
       if (quoteMode) {
         if (editingDraftId) {
-          // Revised quotation: update it in place and send it to the customer again
-          await api.sales.updateJobOrder(editingDraftId, { ...jobOrderData, sendQuotation: true });
+          // Revised quotation: update it in place and send it to the customer again.
+          // A quotation takes no payment, and payments aren't set through this update.
+          const quoteUpdates = { ...jobOrderData, sendQuotation: true };
+          delete quoteUpdates.downPayment;
+          delete quoteUpdates.paymentMethod;
+          await api.sales.updateJobOrder(editingDraftId, quoteUpdates);
         } else {
           await api.sales.createJobOrder({ ...jobOrderData, isDraft: true, sendQuotation: true, appointmentId: quoteAppointmentId });
         }
@@ -1051,6 +1082,26 @@ function NewJobOrderForm() {
               <h3 className="text-xl font-bold text-gray-900">Customer Information</h3>
               <p className="text-sm text-gray-500 mt-1">Who is this job order for?</p>
             </div>
+
+            {/* Warehouse accounts are general: say which branch the work is for */}
+            {choosesBranch && (
+              <div>
+                <label htmlFor="order-branch" className="block text-sm font-medium text-gray-700 mb-2">
+                  Branch <span className="text-red-500">*</span>
+                </label>
+                <select id="order-branch" value={orderBranchId}
+                  onChange={(e) => { setOrderBranchId(e.target.value ? Number(e.target.value) : ''); setError(''); }}
+                  className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
+                  <option value="">Select the branch this order is for</option>
+                  {retailBranches.map((b) => (
+                    <option key={b.id} value={b.id}>{b.name}</option>
+                  ))}
+                </select>
+                <p className="text-xs text-gray-400 mt-1">
+                  Your account is based at the warehouse, so choose the branch where this work or order belongs.
+                </p>
+              </div>
+            )}
 
             {/* Linked account banner */}
             {linkedCustomerId && (
@@ -1582,6 +1633,15 @@ function NewJobOrderForm() {
               </div>
             </div>
 
+            {choosesBranch && (
+              <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Branch</p>
+                <p className="font-semibold text-gray-900">
+                  {retailBranches.find((b) => b.id === orderBranchId)?.name || 'Not chosen'}
+                </p>
+              </div>
+            )}
+
             {/* Services */}
             <div className="bg-[#eef1fb] rounded-xl p-4 border border-[#c7d2f5]">
               <p className="text-xs font-medium text-[#011c72] uppercase tracking-wide mb-2">Selected Services</p>
@@ -1666,7 +1726,7 @@ function NewJobOrderForm() {
             <div className="space-y-3">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Price for the Work <span className="text-xs font-normal text-gray-400">(before discount and VAT)</span>
+                  Price for the Work <span className="text-xs font-normal text-gray-400">(VAT included, before discount)</span>
                 </label>
                 <div className="relative">
                   <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">₱</span>
@@ -1706,7 +1766,7 @@ function NewJobOrderForm() {
               <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
                 <input type="checkbox" checked={vatOn} onChange={(e) => setVatOn(e.target.checked)}
                   className="w-4 h-4 rounded border-gray-300 text-[#011c72]" />
-                Add {DEFAULT_VAT_PERCENT}% VAT
+                Price includes {vatRate}% VAT
               </label>
 
               {estimatedTotal > 0 && (orderDiscountPct > 0 || vatPct > 0) && (
@@ -1721,16 +1781,16 @@ function NewJobOrderForm() {
                       <span>− ₱{discountAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
                   )}
-                  {vatPct > 0 && (
-                    <div className="flex items-center justify-between text-gray-600">
-                      <span>VAT ({vatPct}%)</span>
-                      <span>+ ₱{vatAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                    </div>
-                  )}
                   <div className="flex items-center justify-between font-semibold text-gray-900 pt-1 border-t border-gray-200">
                     <span>Total</span>
                     <span>₱{finalTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   </div>
+                  {vatPct > 0 && (
+                    <div className="flex items-center justify-between text-xs text-gray-500">
+                      <span>Includes VAT ({vatPct}%) · ₱{(finalTotal - vatAmount).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} before VAT</span>
+                      <span>₱{vatAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                  )}
                 </div>
               )}
 

@@ -248,7 +248,7 @@ function SpecialTaskModal({
 export default function WorkerDashboard() {
   const { confirm, confirmDialog } = useConfirm();
   const router = useRouter();
-  const { user, isLoading: authLoading } = useAuth();
+  const { user, isLoading: authLoading, can } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>('assign');
 
   // Data
@@ -303,7 +303,7 @@ export default function WorkerDashboard() {
   useEffect(() => {
     if (!authLoading) {
       if (!user) router.push('/login');
-      else if (user.role !== 'administrator') router.push('/dashboard');
+      else if (!can('workers.add', 'workers.edit', 'workers.delete')) router.push('/dashboard');
       else { fetchWorkers(); fetchJobOrders(); fetchAssignments(); }
     }
   }, [user, authLoading]);

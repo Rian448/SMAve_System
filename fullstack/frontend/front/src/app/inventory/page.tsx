@@ -1,8 +1,8 @@
 ﻿'use client';
 import { formatDate, formatDateTime } from '@/lib/dateUtils';
-import { useState, useEffect, useMemo, useRef, Suspense } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { useAuth, hasAccess } from '@/context/AuthContext';
+import { useAuth } from '@/context/AuthContext';
 import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus, PremadeTransfer } from '@/lib/api';
 import { useConfirm } from '@/components/ConfirmDialog';
 import Link from 'next/link';
@@ -10,6 +10,16 @@ import Link from 'next/link';
 type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'purchase-orders' | 'suppliers' | 'waste-log' | 'ai-predictions';
 
 const TAB_IDS: TabType[] = ['raw-materials', 'finished-goods', 'material-usage', 'purchase-orders', 'suppliers', 'waste-log', 'ai-predictions'];
+// Permissions that show each tab (any one is enough), matching what its data needs
+const TAB_PERMISSIONS: Record<TabType, string[]> = {
+  'raw-materials': ['inventory.view'],
+  'finished-goods': ['premade.view', 'premade.receive'],  // receivers confirm incoming deliveries here
+  'material-usage': ['inventory.view'],
+  'purchase-orders': ['purchase_orders.view'],
+  'suppliers': ['suppliers.view'],
+  'waste-log': ['inventory.view'],
+  'ai-predictions': ['forecasting.view'],
+};
 
 export default function InventoryPage() {
   // useSearchParams needs a Suspense boundary for this route to prerender.
@@ -25,7 +35,7 @@ export default function InventoryPage() {
 }
 
 function InventoryContent() {
-  const { user } = useAuth();
+  const { user, can } = useAuth();
   const { confirm, confirmDialog } = useConfirm();
   const searchParams = useSearchParams();
   // Deep links from the dashboard's low-stock alerts arrive as
@@ -33,6 +43,16 @@ function InventoryContent() {
   const tabParam = searchParams.get('tab');
   const initialTab: TabType = TAB_IDS.includes(tabParam as TabType) ? (tabParam as TabType) : 'raw-materials';
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
+  const tabAllowed = useCallback((tab: TabType) => can(...TAB_PERMISSIONS[tab]), [can]);
+  // The stock-out banner reads predictions too; the server lets inventory viewers see them
+  const canReadPredictions = can('forecasting.view', 'inventory.view');
+
+  // Someone who can't open the requested tab (e.g. premade access only) starts on one they can
+  useEffect(() => {
+    if (!user || tabAllowed(activeTab)) return;
+    const first = TAB_IDS.find(tabAllowed);
+    if (first) setActiveTab(first);
+  }, [user, activeTab, tabAllowed]);
   const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([]);
   const [finishedGoods, setFinishedGoods] = useState<FinishedGood[]>([]);
   const [materialUsageLogs, setMaterialUsageLogs] = useState<MaterialUsageLog[]>([]);
@@ -136,13 +156,16 @@ function InventoryContent() {
   // Which location's finished goods to show: 'all', or a branch/warehouse id.
   const [premadeBranchFilter, setPremadeBranchFilter] = useState<string>('all');
 
-  const canDistribute = hasAccess(user?.role, ['administrator', 'supervisor']);
+  // Administrators and warehouse accounts manage every branch's stock; others only
+  // their own. Premade stock is produced and sent out from the warehouse.
+  const managesAllInventory = can('branches.all') || !!user?.atWarehouse;
+  const canDistribute = can('premade.distribute') && managesAllInventory;
   /** Admin/supervisor approve on someone's behalf, so they get a confirm step first. */
-  const confirmsViaDialog = hasAccess(user?.role, ['administrator', 'supervisor']);
+  const confirmsViaDialog = can('branches.all', 'premade.distribute');
 
   useEffect(() => {
-    if (activeTab !== 'ai-predictions') fetchInventory();
-  }, [activeTab]);
+    if (activeTab !== 'ai-predictions' && tabAllowed(activeTab)) fetchInventory();
+  }, [activeTab, tabAllowed]);
 
   const fetchAIPredictions = async () => {
     setAiLoading(true);
@@ -153,14 +176,16 @@ function InventoryContent() {
     finally { setAiLoading(false); }
   };
 
-  // Fetch AI predictions on mount (for notification banner) and when tab is opened
+  // Predictions are optional here: fetched on mount for the stock-out banner and
+  // when their tab opens, only for users allowed to read them. A failure just
+  // leaves the banner hidden.
   useEffect(() => {
-    fetchAIPredictions();
-  }, []);
+    if (canReadPredictions) fetchAIPredictions();
+  }, [canReadPredictions]);
 
   useEffect(() => {
-    if (activeTab === 'ai-predictions') fetchAIPredictions();
-  }, [activeTab]);
+    if (activeTab === 'ai-predictions' && can('forecasting.view')) fetchAIPredictions();
+  }, [activeTab, can]);
 
   useEffect(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -205,12 +230,12 @@ function InventoryContent() {
   }, [user?.branchId]);
 
   useEffect(() => {
-    if (activeTab === 'finished-goods' && newPremade.branchId) {
+    if (activeTab === 'finished-goods' && newPremade.branchId && can('inventory.view', 'sales.add', 'sales.edit', 'purchase_orders.add')) {
       api.inventory.getRawMaterials({ branchId: Number(newPremade.branchId), includeWarehouse: true })
         .then(res => setRawMaterials(res.data || []))
         .catch(() => {});
     }
-  }, [newPremade.branchId, activeTab]);
+  }, [newPremade.branchId, activeTab, can]);
 
   const fetchInventory = async () => {
     setLoading(true);
@@ -218,7 +243,10 @@ function InventoryContent() {
       if (activeTab === 'raw-materials') {
         const [matRes, supRes] = await Promise.all([
           api.inventory.getRawMaterials({ branchId: user?.branchId }),
-          api.inventory.getSuppliers(),
+          // Only feeds the supplier picker; someone without supplier access still sees the stock
+          can('suppliers.view', 'purchase_orders.add')
+            ? api.inventory.getSuppliers().catch(() => ({ data: [] }))
+            : Promise.resolve({ data: [] }),
         ]);
         setRawMaterials(matRes.data || []);
         setSuppliers(supRes.data || []);
@@ -226,7 +254,10 @@ function InventoryContent() {
         const targetBranchId = Number(newPremade.branchId) || user?.branchId;
         const [finishedGoodsResponse, rawMaterialsResponse, transfersResponse] = await Promise.all([
           api.inventory.getFinishedGoods(),
-          api.inventory.getRawMaterials({ branchId: targetBranchId, includeWarehouse: true }),
+          // Materials only feed the "made from" picker when adding stock
+          can('inventory.view', 'sales.add', 'sales.edit', 'purchase_orders.add')
+            ? api.inventory.getRawMaterials({ branchId: targetBranchId, includeWarehouse: true }).catch(() => ({ data: [] }))
+            : Promise.resolve({ data: [] }),
           // Pending deliveries are optional context — don't fail the tab over them.
           api.inventory.getPremadeTransfers({ status: 'pending' }).catch(() => ({ data: [] })),
         ]);
@@ -839,7 +870,7 @@ function InventoryContent() {
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
       </svg>
     )},
-  ];
+  ].filter((tab) => tabAllowed(tab.id));
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -851,8 +882,8 @@ function InventoryContent() {
             <p className="text-gray-500 mt-1">Manage raw materials and finished goods</p>
           </div>
           <div className="mt-4 sm:mt-0 flex flex-wrap items-center gap-3">
-            {/* Global Low Stock Threshold Setting — admin/supervisor only */}
-            {(user?.role === 'administrator' || user?.role === 'supervisor') && (
+            {/* Global Low Stock Threshold Setting */}
+            {can('settings.edit') && (
               <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-50 border border-orange-200">
                 <svg className="w-4 h-4 text-orange-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
@@ -1028,7 +1059,7 @@ function InventoryContent() {
                 type="text"
                 value={newMaterial.itemId}
                 onChange={(e) => setNewMaterial((prev) => ({ ...prev, itemId: e.target.value }))}
-                placeholder="Item ID (e.g. FAB001)"
+                placeholder="Item ID (e.g. LTH-001)"
                 className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
               />
               <input
@@ -1144,7 +1175,7 @@ function InventoryContent() {
         )}
 
         {/* Add Premade Form */}
-        {activeTab === 'finished-goods' && (
+        {activeTab === 'finished-goods' && can('premade.add') && managesAllInventory && (
           <form onSubmit={handleCreatePremade} className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Add Premade Product</h2>
             <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
@@ -1261,7 +1292,7 @@ function InventoryContent() {
         )}
 
         {/* Add Supplier Form */}
-        {activeTab === 'suppliers' && (user?.role === 'administrator' || user?.role === 'supervisor') && (
+        {activeTab === 'suppliers' && can('suppliers.view') && (
           <form onSubmit={handleCreateSupplier} className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Add Supplier</h2>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -1334,7 +1365,7 @@ function InventoryContent() {
         })()}
 
         {/* AI Historical Upload */}
-        {activeTab === 'ai-predictions' && (user?.role === 'administrator' || user?.role === 'supervisor') && (
+        {activeTab === 'ai-predictions' && can('forecasting.view') && (
           <div className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
               <div>
@@ -1402,7 +1433,7 @@ function InventoryContent() {
         )}
 
         {/* Add Waste Log Form */}
-        {activeTab === 'waste-log' && (user?.role === 'administrator' || user?.role === 'supervisor') && (
+        {activeTab === 'waste-log' && can('inventory.view') && (
           <form onSubmit={handleCreateWasteLog} className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Log Waste / Scrap</h2>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -1754,7 +1785,7 @@ function InventoryContent() {
                   <ul className="space-y-2">
                     {transfers.map((t) => {
                       const mine = user?.branchId === t.destinationBranchId;
-                      const canAct = canDistribute || (user?.role === 'sales_manager' && mine);
+                      const canAct = canDistribute || can('branches.all') || (can('premade.receive') && mine);
                       return (
                         <li key={t.id}
                           className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3">
@@ -2093,7 +2124,7 @@ function InventoryContent() {
                           ) : (
                             <div className="flex items-center justify-end gap-3">
                               <button onClick={() => startEditSupplier(s)} className="text-[#011c72] text-sm font-medium">Edit</button>
-                              {s.isActive && (user?.role === 'administrator' || user?.role === 'supervisor') && (
+                              {s.isActive && can('suppliers.edit') && (
                                 <button onClick={() => handleDeactivateSupplier(s.id)} className="text-red-500 text-sm font-medium">Deactivate</button>
                               )}
                             </div>
