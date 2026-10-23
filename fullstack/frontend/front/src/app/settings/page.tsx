@@ -39,8 +39,7 @@ export default function SettingsPage() {
     const [roleFilter, setRoleFilter] = useState('all');
     const filteredUsers = users.filter((u) => {
       if (roleFilter === 'all') return true;
-      if (roleFilter === 'group:staff') return u.role !== 'customer';       // all employees
-      if (roleFilter === 'group:customers') return u.role === 'customer';
+      if (roleFilter === 'group:staff') return true;                        // all employees
       if (roleFilter === 'group:workers') return u.role === 'seat_maker' || u.role === 'sewer';
       return u.role === roleFilter;                                          // a specific role
     });
@@ -535,7 +534,6 @@ export default function SettingsPage() {
                     <optgroup label="General">
                       <option value="group:staff">All Staff</option>
                       <option value="group:workers">Workers (Seat Makers &amp; Sewers)</option>
-                      <option value="group:customers">Customers</option>
                     </optgroup>
                   </select>
                 </div>
@@ -630,16 +628,14 @@ export default function SettingsPage() {
                               >
                           Edit
                         </button>
-                              {u.role !== 'customer' && (
-                                <button
-                                  onClick={() => setPermTarget(u)}
-                                  disabled={!!offLimitsReason(u)}
-                                  title={offLimitsReason(u) || undefined}
-                                  className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300"
-                                >
-                                  Permissions
-                                </button>
-                              )}
+                              <button
+                                onClick={() => setPermTarget(u)}
+                                disabled={!!offLimitsReason(u)}
+                                title={offLimitsReason(u) || undefined}
+                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300"
+                              >
+                                Permissions
+                              </button>
                               <button
                                 onClick={() => handleToggleUserStatus(u)}
                                 disabled={!!protectedReason(u)}
@@ -967,7 +963,7 @@ export default function SettingsPage() {
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="e.g., 0917-123-4567"
                 />
-                <p className="text-xs text-gray-500 mt-1">Displayed to customers when booking appointments</p>
+                <p className="text-xs text-gray-500 mt-1">Shown to visitors on the website&apos;s Branches section</p>
               </div>
 
               <div className="flex items-center">

@@ -17,7 +17,7 @@ export interface User {
   username: string;
   email: string;
   fullName: string;
-  role: 'administrator' | 'supervisor' | 'sales_manager' | 'seat_maker' | 'sewer' | 'customer' | 'owner';
+  role: 'administrator' | 'supervisor' | 'sales_manager' | 'seat_maker' | 'sewer' | 'owner';
   roleName?: string;
   branch: string;
   branchId?: number;
@@ -57,14 +57,6 @@ export interface UserPermissions {
   locked: string[];
 }
 
-export interface SignupDetails {
-  username: string;
-  password: string;
-  email: string;
-  fullName: string;
-  phone: string;
-}
-
 export interface AuthResponse {
   token: string;
   user: User;
@@ -74,8 +66,14 @@ export interface DashboardStats {
   totalJobOrders: number;
   pendingOrders: number;
   inProgressOrders: number;
+  /** Job orders finished in the chosen period */
   completedOrders: number;
+  /** Sales in the chosen period: job orders + premade, VAT excluded (same as the Owner P&L) */
   totalRevenue: number;
+  jobOrderRevenue?: number;
+  premadeRevenue?: number;
+  completedPremadeOrders?: number;
+  /** Cost of goods sold in the chosen period */
   totalCost: number;
   profit: number;
   profitMargin: number;
@@ -88,7 +86,10 @@ export interface DashboardStats {
   /** Branch these figures cover; null means the whole company (admins only) */
   scopeBranchId?: number | null;
   scopeBranchName?: string | null;
+  period?: { key: DashboardPeriod; startDate: string; endDate: string };
 }
+
+export type DashboardPeriod = 'today' | 'week' | 'month' | 'year' | 'all';
 
 export interface Activity {
   /** 'job_order' | 'delivery' — decides which record page this row opens. */
@@ -181,77 +182,61 @@ export interface PhoneBlacklistRecord {
   createdAt: string;
 }
 
-export interface Appointment {
+/** One line of a premade draft, re-checked against stock every time it is loaded */
+export interface PremadeDraftLine {
+  productId: number;
+  name: string;
+  sku?: string;
+  quantity: number;
+  /** Stock on hand now (0 when the product is no longer sold at the branch) */
+  available: number;
+  /** Current price, used when the draft is confirmed */
+  unitPrice: number;
+  /** Price when the line was saved */
+  savedUnitPrice: number;
+  total: number;
+  /** null when the line can be sold as it stands */
+  issue: 'unavailable' | 'out_of_stock' | 'insufficient' | null;
+  message: string;
+}
+
+/** A premade job order being prepared by staff: no stock is taken until it is confirmed */
+export interface PremadeDraft {
   id: number;
-  appointmentNumber: string;
+  draftNumber: string;
+  status: 'draft' | 'confirmed';
+  branchId: number;
+  branchName?: string | null;
+  customerId?: number | null;
   customerName: string;
   customerPhone: string;
-  customerEmail?: string;
-  contactMethod: 'branch_visit' | 'phone_call';
-  branchId?: number;
-  branchName?: string;
-  preferredDate: string;
-  preferredTime?: string;
-  description?: string;
-  vehicleInfo?: VehicleInfo;
-  status: 'pending' | 'confirmed' | 'completed' | 'cancelled';
-  confirmedTime?: string;
-  confirmedBy?: number;
-  confirmedByName?: string;
-  confirmedByRole?: string;
-  adminNotes?: string;
+  customerEmail: string;
+  customerAddress: string;
+  notes: string;
+  paymentMethod: string;
+  items: PremadeDraftLine[];
+  itemCount: number;
+  totalAmount: number;
+  /** False when any line is out of stock, short or no longer sold: it can't be confirmed yet */
+  isAvailable: boolean;
+  productOrderId?: number | null;
+  productOrderNumber?: string | null;
+  createdByName?: string | null;
+  updatedByName?: string | null;
   createdAt: string;
-  updatedAt?: string;
-  /** Booked from a signed-in customer account (a quotation can be sent to it) */
-  hasAccount?: boolean;
-  /** The latest quotation made from this appointment */
-  quotation?: AppointmentQuotation | null;
+  updatedAt: string;
 }
 
-export interface AppointmentQuotation {
-  id: number;
-  jobOrderId: string;
-  status: string;
-  quoteStatus: QuoteStatus | null;
-  quoteRejectReason?: string | null;
-}
-
-/** A job order sent to the customer as a quotation: sent → accepted | rejected */
-export type QuoteStatus = 'sent' | 'accepted' | 'rejected';
-
-export interface QuoteFields {
-  quoteStatus?: QuoteStatus | null;
-  quoteRejectReason?: string | null;
-  quoteSentAt?: string | null;
-  quoteRespondedAt?: string | null;
-  appointmentId?: number | null;
-}
-
-/** A customer's own job order or quotation, as shown in My Orders (no costs) */
-export interface CustomerJobOrder extends QuoteFields {
-  id: number;
-  jobOrderId: string;
-  description: string;
-  vehicleInfo?: VehicleInfo | null;
-  branchName: string;
-  status: string;
-  paymentStatus: string;
-  totalPrice: number;
-  discountPercent?: number | null;
-  vatPercent?: number | null;
-  /** True if the price was entered with VAT included (VAT not added on top) */
-  vatInclusive?: boolean;
-  /** VAT inside totalPrice, as worked out by the server */
-  vatAmount?: number;
-  downPayment: number;
-  balance: number;
-  estimatedCompletion: string | null;
-  completedAt?: string | null;
-  createdAt: string | null;
-  /** Specification from the order slip, e.g. center/side/back material, stitching */
-  specs: { label: string; value: string }[];
-  /** Work steps written on the order slip */
-  workSteps: string[];
+export interface PremadeDraftInput {
+  branchId?: number;
+  customerId?: number | null;
+  customerName?: string;
+  customerPhone?: string;
+  customerEmail?: string;
+  customerAddress?: string;
+  notes?: string;
+  paymentMethod?: string;
+  items?: Array<{ productId: number; quantity: number }>;
 }
 
 export interface ProductOrderItem {
@@ -263,43 +248,6 @@ export interface ProductOrderItem {
   total: number;
   sourceBranchId?: number;
   sourceBranchName?: string;
-}
-
-/** One line of a saved cart re-checked against current stock. */
-export interface AvailabilityRow {
-  productId: number;
-  name: string;
-  sku?: string;
-  requested: number;
-  available: number;
-  currentPrice: number | null;
-  savedPrice?: number;
-  /** null when the line is fine; otherwise why it blocks confirmation. */
-  issue: 'unavailable' | 'out_of_stock' | 'insufficient' | 'invalid' | null;
-  message: string;
-}
-
-/** A customer's saved premade cart, not yet a real order. */
-export interface CartDraft {
-  id: number;
-  kind: 'premade';
-  userId: number;
-  customerName: string;
-  customerPhone: string;
-  customerEmail: string;
-  customerAddress: string;
-  pickupBranchId?: number | null;
-  pickupBranchName?: string | null;
-  notes: string;
-  items: ProductOrderItem[];
-  itemCount: number;
-  /** Total at *current* prices, counting only lines with no issue. */
-  totalAmount: number;
-  availability: AvailabilityRow[];
-  /** False when any line is out of stock or short — confirmation is blocked. */
-  isAvailable: boolean;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface AppNotification {
@@ -381,20 +329,6 @@ export interface ProductOrderTimelineEvent {
   by?: string;
 }
 
-export interface PublicProduct {
-  id: number;
-  name: string;
-  sku: string;
-  quantity: number;
-  unit: string;
-  category: string;
-  price: number;
-  branchId: number;
-  branchName?: string;
-  /** False when out of stock (only sent with includeUnavailable) */
-  isAvailable?: boolean;
-}
-
 export interface RawMaterial {
   id: number;
   itemId: string;
@@ -410,6 +344,7 @@ export interface RawMaterial {
   sku?: string;
   stockQuantity: number;
   lowStockThreshold: number;
+  branchName?: string | null;
   supplierId?: number;
   supplierName?: string;
   branchId: number;
@@ -448,6 +383,14 @@ export interface MaterialWasteLog {
   loggedBy: number;
   loggedByName?: string;
   createdAt: string;
+  /** Set when this was extra material issued for a job order */
+  jobOrderId?: number | null;
+  jobOrderNumber?: string | null;
+  workerId?: number | null;
+  workerName?: string | null;
+  /** Cost per unit when it was logged */
+  unitCost?: number;
+  value?: number;
 }
 
 export interface AIPrediction {
@@ -607,7 +550,8 @@ export interface PremadeProductInput {
   unit?: string;
   category: string;
   price: number;
-  cost: number;
+  /** Leave out to have the server work it out from the materials used */
+  cost?: number;
   branchId: number;
   sku?: string;
   materialsUsed?: PremadeMaterialUsageInput[];
@@ -824,7 +768,11 @@ export interface JobOrder {
     sewerName?: string;
   } | null;
   estimatedCost: number;
+  /** Planned lines plus any extra material issued for the order */
   actualCost: number;
+  /** Extra material issued beyond the plan (only for users who see costs) */
+  extraMaterials?: MaterialWasteLog[];
+  extraMaterialsCost?: number;
   totalPrice: number;
   discountPercent?: number | null;
   vatPercent?: number | null;
@@ -841,19 +789,6 @@ export interface JobOrder {
   createdAt: string;
   createdBy: number;
   updatedAt: string;
-  quoteStatus?: QuoteStatus | null;
-  quoteRejectReason?: string | null;
-  quoteSentAt?: string | null;
-  quoteRespondedAt?: string | null;
-  appointmentId?: number | null;
-}
-
-export interface QuotationItem {
-  name: string;
-  description?: string;
-  quantity: number;
-  unitPrice: number;
-  total: number;
 }
 
 export interface CustomerOrder {
@@ -877,15 +812,7 @@ export interface CustomerOrder {
   branchId?: number;
   branchName?: string;
   createdAt: string;
-  // Quotation fields
   userId?: number;
-  quotationItems?: QuotationItem[];
-  quotationTotal?: number;
-  quotationStatus?: 'pending_quotation' | 'quoted' | 'accepted' | 'rejected';
-  quotationNotes?: string;
-  customerResponseNotes?: string;
-  quotedAt?: string;
-  respondedAt?: string;
 }
 
 export interface PurchaseOrderItem {
@@ -954,7 +881,13 @@ export interface JobOrderCost {
   overheadCost: number;
   totalAmount: number;
   status: string;
+  extraMaterialsCost?: number;
+  estimatedCost?: number;
+  actualCost?: number;
+  variance?: number;
 }
+
+export interface CostComparison { estimated: number; actual: number; variance: number }
 
 export interface CostingData {
   /** Job order database id (for links); jobOrderId is its display number */
@@ -971,6 +904,15 @@ export interface CostingData {
   grossProfit: number;
   profitMargin: number;
   variance: number;
+  customerName?: string;
+  status?: string;
+  /** Estimated vs actual per component */
+  components?: { materials: CostComparison; labor: CostComparison; overhead: CostComparison; total: CostComparison };
+  /** Each line with what it costs (not its selling price) */
+  lines?: { name: string; category: 'material' | 'labor' | 'expense'; quantity: number; unitCost: number;
+            estimatedCost: number; actualCost: number; workerName?: string | null }[];
+  extraMaterials?: MaterialWasteLog[];
+  extraMaterialsCost?: number;
 }
 
 export interface Receipt {
@@ -1165,7 +1107,8 @@ export interface JobCostingRow {
   finishedOn: string; status: string;
   customerPrice: number; vat: number; sellingPrice: number;
   materials: number; labor: number; otherCosts: number; grossMargin: number; marginPercent: number;
-  lines: { name: string; category: 'material' | 'labor' | 'expense'; quantity: number; unitCost: number; cost: number }[];
+  estimatedCost?: number; actualCost?: number; extraMaterials?: number;
+  lines: { name: string; category: 'material' | 'labor' | 'expense'; quantity: number; unitCost: number; cost: number; extra?: boolean }[];
 }
 
 export interface OwnerJobCosting {
@@ -1206,6 +1149,7 @@ export interface ExpenseList { expenses: Expense[]; total: number; categories: s
 export const PAYMENT_METHOD_LABELS: Record<string, string> = {
   cash: 'Cash', gcash: 'GCash', maya: 'Maya', bank_transfer: 'Bank Transfer', credit_card: 'Credit Card',
   debit_card: 'Debit Card', check: 'Cheque', other: 'Other', not_recorded: 'Premade sales (method not recorded)',
+  adjustment: 'Approved payment override',
 };
 
 const periodQuery = (p?: { startDate?: string; endDate?: string; branchId?: number | '' }) => {
@@ -1301,19 +1245,6 @@ export const api = {
     
     me: () => fetchApi<User>('/api/auth/me'),
 
-    /** Sign-up step 1: checks the details and emails a 6-digit code */
-    sendSignupCode: (data: SignupDetails) =>
-      fetchApi<null>('/api/auth/register/send-code', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-
-    /** Sign-up step 2: creates the account once the emailed code checks out */
-    register: (data: SignupDetails & { code: string }) =>
-      fetchApi<AuthResponse>('/api/auth/register', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
   },
 
   // ==================
@@ -1345,26 +1276,15 @@ export const api = {
   },
 
   // ==================
-  // MY JOB ORDERS (customer side: staff-made job orders and quotations)
-  // ==================
-  myJobOrders: {
-    list: () => fetchApi<CustomerJobOrder[]>('/api/job-orders/mine'),
-
-    /** Accept turns the quotation into a job order; reject needs a reason */
-    respondToQuotation: (id: number, response: 'accept' | 'reject', reason?: string) =>
-      fetchApi<CustomerJobOrder>(`/api/job-orders/${id}/quotation/respond`, {
-        method: 'POST',
-        body: JSON.stringify({ response, reason }),
-      }),
-  },
-
-  // ==================
   // DASHBOARD
   // ==================
   dashboard: {
     // branchId is honoured for administrators only; everyone else always gets their own branch
-    getStats: (branchId?: number) =>
-      fetchApi<DashboardStats>(`/api/dashboard/stats${branchId ? `?branchId=${branchId}` : ''}`),
+    getStats: (branchId?: number, period: DashboardPeriod = 'month') => {
+      const q = new URLSearchParams({ period });
+      if (branchId) q.set('branchId', String(branchId));
+      return fetchApi<DashboardStats>(`/api/dashboard/stats?${q}`);
+    },
     
     getRecentActivity: (branchId?: number) =>
       fetchApi<Activity[]>(`/api/dashboard/recent-activity${branchId ? `?branchId=${branchId}` : ''}`),
@@ -1455,15 +1375,6 @@ export const api = {
       return fetchApi<MaterialUsageLog[]>(`/api/inventory/material-usage?${query}`);
     },
     
-    // Public Products (for customer ordering)
-    getPublicProducts: (params?: { branchId?: number; category?: string; includeUnavailable?: boolean }) => {
-      const query = new URLSearchParams();
-      if (params?.branchId) query.append('branchId', params.branchId.toString());
-      if (params?.category) query.append('category', params.category);
-      if (params?.includeUnavailable) query.append('includeUnavailable', 'true');
-      return fetchApi<PublicProduct[]>(`/api/inventory/finished-goods/public?${query}`);
-    },
-
     // Suppliers
     getSuppliers: (includeInactive?: boolean) => {
       const q = includeInactive ? '?includeInactive=true' : '';
@@ -1579,6 +1490,12 @@ export const api = {
         body: JSON.stringify(updates),
       }),
 
+    /** Extra material issued for a job order beyond its plan (a recut after a mistake, defects, rework) */
+    getExtraMaterials: (jobOrderId: number) =>
+      fetchApi<MaterialWasteLog[]>(`/api/sales/job-orders/${jobOrderId}/extra-materials`),
+    issueExtraMaterials: (jobOrderId: number, data: { materialId: number; quantity: number; reason: string; workerId?: number; notes?: string }) =>
+      fetchApi<MaterialWasteLog>(`/api/sales/job-orders/${jobOrderId}/extra-materials`, { method: 'POST', body: JSON.stringify(data) }),
+
     // Draft job orders — saved but not confirmed; excluded from normal lists/counts
     getDrafts: () => fetchApi<JobOrder[]>('/api/sales/drafts'),
 
@@ -1688,63 +1605,6 @@ export const api = {
         body: JSON.stringify({ status }),
       }),
 
-    // Customer's own orders
-    getMyOrders: () => fetchApi<CustomerOrder[]>('/api/customer-orders/my-orders'),
-
-    getMyOrder: (id: number) => fetchApi<CustomerOrder>(`/api/customer-orders/my-orders/${id}`),
-
-    // Quotation management
-    setQuotation: (id: number, data: {
-      items: Array<{ name: string; description?: string; quantity: number; unitPrice: number }>;
-      notes?: string;
-    }) =>
-      fetchApi<CustomerOrder>(`/api/customer-orders/${id}/quotation`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-
-    respondToQuotation: (id: number, response: 'accept' | 'reject', notes?: string) =>
-      fetchApi<CustomerOrder>(`/api/customer-orders/${id}/respond`, {
-        method: 'PUT',
-        body: JSON.stringify({ response, notes }),
-      }),
-  },
-
-  // ==================
-  // APPOINTMENTS
-  // ==================
-  appointments: {
-    create: (data: {
-      customerName: string;
-      customerPhone: string;
-      customerEmail?: string;
-      contactMethod: 'branch_visit' | 'phone_call';
-      branchId: number;
-      preferredDate: string;
-      preferredTime?: string;
-      description?: string;
-      vehicleInfo?: VehicleInfo;
-    }) =>
-      fetchApi<Appointment>('/api/appointments', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-
-    getAll: (status?: string) => {
-      const query = status ? `?status=${status}` : '';
-      return fetchApi<Appointment[]>(`/api/appointments${query}`);
-    },
-
-    update: (id: number, data: { status?: string; adminNotes?: string; confirmedTime?: string }) =>
-      fetchApi<Appointment>(`/api/appointments/${id}`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-
-    getMyAppointments: () => fetchApi<Appointment[]>('/api/appointments/my-appointments'),
-    get: (id: number) => fetchApi<Appointment>(`/api/appointments/${id}`),
-    markNoShow: (id: number) =>
-      fetchApi<{ strikeCount: number; isBlocked: boolean }>(`/api/admin/appointments/${id}/no-show`, { method: 'POST' }),
   },
 
   spamControl: {
@@ -1758,46 +1618,7 @@ export const api = {
   // PRODUCT ORDERS (Premade Products)
   // ==================
   productOrders: {
-    /** The logged-in customer's saved cart, or null if they have none. */
-    getCartDraft: () => fetchApi<CartDraft | null>('/api/product-orders/draft'),
-
-    saveCartDraft: (data: {
-      items: Array<{ productId: number; quantity: number }>;
-      pickupBranchId?: number | null;
-      customerName?: string;
-      customerPhone?: string;
-      customerEmail?: string;
-      customerAddress?: string;
-      notes?: string;
-    }) =>
-      fetchApi<CartDraft>('/api/product-orders/draft', {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-
-    deleteCartDraft: () =>
-      fetchApi<{ message: string }>('/api/product-orders/draft', { method: 'DELETE' }),
-
-    /**
-     * Confirms the saved cart into a real order. Rejects with status 409 and an
-     * `availability` report when stock has moved since the cart was saved.
-     */
-    confirmCartDraft: (data?: {
-      customerName?: string;
-      customerPhone?: string;
-      customerEmail?: string;
-      customerAddress?: string;
-      pickupBranchId?: number;
-      notes?: string;
-    }) =>
-      fetchApi<ProductOrder>('/api/product-orders/draft/confirm', {
-        method: 'POST',
-        body: JSON.stringify(data || {}),
-      }),
-
-    /** Staff view of all customers' unconfirmed saved carts. */
-    getPremadeDrafts: () => fetchApi<CartDraft[]>('/api/product-orders/drafts'),
-
+    /** Staff record a premade product sale at a branch */
     create: (data: {
       customerName: string;
       customerPhone: string;
@@ -1828,28 +1649,25 @@ export const api = {
         body: JSON.stringify(data),
       }),
 
-    multiCreate: (data: {
-      customerName: string;
-      customerPhone: string;
-      customerEmail?: string;
-      customerAddress?: string;
-      items: Array<{ productId: number; quantity: number }>;
-      pickupBranchId: number;
-      notes?: string;
-    }) =>
-      fetchApi<ProductOrder>('/api/product-orders/multi-branch', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-
-    getMyOrders: () => fetchApi<ProductOrder[]>('/api/product-orders/my-orders'),
-    /** Customer cancels their own order; only allowed while it is pending */
-    cancelMyOrder: (id: number) =>
-      fetchApi<ProductOrder>(`/api/product-orders/my-orders/${id}/cancel`, { method: 'POST' }),
-
     getPickupQueue: () => fetchApi<ProductOrder[]>('/api/product-orders/pickup-queue'),
 
     getDirectSales: () => fetchApi<ProductOrder[]>('/api/product-orders/direct-sales'),
+  },
+
+  // ==================
+  // PREMADE JOB ORDER DRAFTS (saved, not yet recorded; no stock taken)
+  // ==================
+  premadeDrafts: {
+    list: () => fetchApi<PremadeDraft[]>('/api/premade-drafts'),
+    get: (id: number) => fetchApi<PremadeDraft>(`/api/premade-drafts/${id}`),
+    create: (data: PremadeDraftInput & { branchId: number; customerName: string }) =>
+      fetchApi<PremadeDraft>('/api/premade-drafts', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: number, data: PremadeDraftInput) =>
+      fetchApi<PremadeDraft>(`/api/premade-drafts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    remove: (id: number) => fetchApi<null>(`/api/premade-drafts/${id}`, { method: 'DELETE' }),
+    /** Records the draft as a premade order. Stock is re-checked on the server; a 409 carries the flagged draft */
+    confirm: (id: number, data: { paymentAmount?: number; paymentMethod?: string }) =>
+      fetchApi<ProductOrder>(`/api/premade-drafts/${id}/confirm`, { method: 'POST', body: JSON.stringify(data) }),
   },
 
   // ==================

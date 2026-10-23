@@ -17,7 +17,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   const mobileOpen = drawerPath === pathname;
   const setMobileOpen = (open: boolean) => setDrawerPath(open ? pathname : null);
 
-  const authlessPages = ['/login', '/register'];
+  const authlessPages = ['/login'];
   const showSidebar = isAuthenticated && !isLoading && !authlessPages.includes(pathname);
   const showPublicTopNav = !isAuthenticated && !isLoading && !authlessPages.includes(pathname);
 

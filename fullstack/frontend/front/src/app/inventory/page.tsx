@@ -162,10 +162,20 @@ function InventoryContent() {
   const canDistribute = can('premade.distribute') && managesAllInventory;
   /** Admin/supervisor approve on someone's behalf, so they get a confirm step first. */
   const confirmsViaDialog = can('branches.all', 'premade.distribute');
+  // Administrators, owners, supervisors and warehouse accounts see every branch's
+  // inventory (the server enforces the same rule); others see their own branch.
+  // Changing stock is still limited to the branches each account manages.
+  const seesAllInventory = managesAllInventory || user?.role === 'supervisor';
+  const [inventoryBranch, setInventoryBranch] = useState<string>('all');
+  const listBranchId = seesAllInventory
+    ? (inventoryBranch === 'all' ? undefined : Number(inventoryBranch))
+    : user?.branchId;
+  const canChangeMaterial = (m: RawMaterial) => managesAllInventory || m.branchId === user?.branchId;
 
   useEffect(() => {
     if (activeTab !== 'ai-predictions' && tabAllowed(activeTab)) fetchInventory();
-  }, [activeTab, tabAllowed]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, tabAllowed, inventoryBranch]);
 
   const fetchAIPredictions = async () => {
     setAiLoading(true);
@@ -242,7 +252,7 @@ function InventoryContent() {
     try {
       if (activeTab === 'raw-materials') {
         const [matRes, supRes] = await Promise.all([
-          api.inventory.getRawMaterials({ branchId: user?.branchId }),
+          api.inventory.getRawMaterials({ branchId: listBranchId }),
           // Only feeds the supplier picker; someone without supplier access still sees the stock
           can('suppliers.view', 'purchase_orders.add')
             ? api.inventory.getSuppliers().catch(() => ({ data: [] }))
@@ -265,15 +275,16 @@ function InventoryContent() {
         setRawMaterials(rawMaterialsResponse.data || []);
         setTransfers(transfersResponse.data || []);
       } else if (activeTab === 'material-usage') {
-        const response = await api.inventory.getMaterialUsage({ branchId: user?.branchId });
+        const response = await api.inventory.getMaterialUsage({ branchId: listBranchId });
         setMaterialUsageLogs(response.data || []);
       } else if (activeTab === 'suppliers') {
         const res = await api.inventory.getSuppliers(true);
         setSuppliers(res.data || []);
       } else if (activeTab === 'waste-log') {
         const [wasteRes, matRes] = await Promise.all([
-          api.inventory.getWasteLogs({ branchId: user?.branchId }),
-          api.inventory.getRawMaterials({ branchId: user?.branchId }),
+          api.inventory.getWasteLogs({ branchId: listBranchId }),
+          // The picker only offers materials this account may log waste for
+          api.inventory.getRawMaterials({ branchId: managesAllInventory ? listBranchId : user?.branchId }),
         ]);
         setWasteLogs(wasteRes.data || []);
         setRawMaterials(matRes.data || []);
@@ -467,7 +478,7 @@ function InventoryContent() {
         unit: 'pcs',
         category: newPremade.category,
         price,
-        cost: 0,
+        // No cost: the server works it out from the materials used
         branchId,
         materialsUsed: parsedMaterialsUsed
       });
@@ -768,11 +779,18 @@ function InventoryContent() {
   const formatCurrency = (amount: number) =>
     new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(amount);
 
-  const getStockStatus = (quantity: number) => {
+  /** Reorder level: the material's own, else the one in Settings (same rule as the server) */
+  const reorderLevel = (own?: number) => (own && own > 0 ? own : globalThreshold);
+  const isLowStock = (quantity: number, own?: number) => {
+    const level = reorderLevel(own);
+    return quantity > 0 && level > 0 && quantity <= level;
+  };
+
+  const getStockStatus = (quantity: number, ownThreshold?: number) => {
     if (quantity <= 0) {
       return { label: 'Out of Stock', class: 'bg-red-100 text-red-700' };
     }
-    if (globalThreshold > 0 && quantity <= globalThreshold) {
+    if (isLowStock(quantity, ownThreshold)) {
       return { label: 'Low Stock', class: 'bg-orange-100 text-orange-700' };
     }
     return { label: 'In Stock', class: 'bg-green-100 text-green-700' };
@@ -796,10 +814,11 @@ function InventoryContent() {
       const matchesStatus =
         statusFilter === 'all' ||
         (statusFilter === 'out-of-stock' && qty <= 0) ||
-        (statusFilter === 'low-stock' && globalThreshold > 0 && qty > 0 && qty <= globalThreshold) ||
-        (statusFilter === 'in-stock' && qty > (globalThreshold > 0 ? globalThreshold : 0));
+        (statusFilter === 'low-stock' && isLowStock(qty, m.lowStockThreshold)) ||
+        (statusFilter === 'in-stock' && qty > 0 && !isLowStock(qty, m.lowStockThreshold));
       return matchesSearch && matchesType && matchesStatus;
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rawMaterials, searchTerm, statusFilter, materialTypeFilter, globalThreshold]);
 
   const filteredFinishedGoods = useMemo(() => {
@@ -823,9 +842,8 @@ function InventoryContent() {
     finishedGoods.filter((item) => item.branchId === branchId).length;
 
   const lowStockItems = useMemo(() =>
-    globalThreshold > 0
-      ? rawMaterials.filter(m => m.stockQuantity > 0 && m.stockQuantity <= globalThreshold)
-      : [],
+    rawMaterials.filter(m => isLowStock(m.stockQuantity, m.lowStockThreshold)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [rawMaterials, globalThreshold]
   );
 
@@ -1433,9 +1451,10 @@ function InventoryContent() {
         )}
 
         {/* Add Waste Log Form */}
-        {activeTab === 'waste-log' && can('inventory.view') && (
+        {activeTab === 'waste-log' && can('inventory.log_waste') && (
           <form onSubmit={handleCreateWasteLog} className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Log Waste / Scrap</h2>
+            <h2 className="text-lg font-semibold text-gray-900 mb-1">Log Waste / Scrap</h2>
+            <p className="text-xs text-gray-500 mb-4">For waste not tied to a job order (damaged or spoiled stock). Extra material used on a job order is recorded on that job order&apos;s page so it counts in its cost.</p>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
               <select value={newWaste.materialId} onChange={e => setNewWaste(p => ({ ...p, materialId: e.target.value }))} className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900">
                 <option value="">Select Material *</option>
@@ -1526,6 +1545,18 @@ function InventoryContent() {
                   )}
                 </>
               )}
+              {seesAllInventory && ['raw-materials', 'material-usage', 'waste-log'].includes(activeTab) && (
+                <select
+                  value={inventoryBranch}
+                  onChange={(e) => setInventoryBranch(e.target.value)}
+                  aria-label="Branch"
+                  className="px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                >
+                  <option value="all">All Branches</option>
+                  {warehouse && <option value={warehouse.id}>{warehouse.name}</option>}
+                  {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>
+              )}
               {activeTab === 'finished-goods' && (
                 <>
                   <select
@@ -1586,7 +1617,7 @@ function InventoryContent() {
                 </div>
               ) : (
                 filteredRawMaterials.map((material) => {
-                  const status = getStockStatus(material.stockQuantity);
+                  const status = getStockStatus(material.stockQuantity, material.lowStockThreshold);
                   const isEditing = editingMaterialId === material.id;
                   return (
                     <div key={material.id} className="px-5 py-4 hover:bg-gray-50 transition-colors">
@@ -1730,6 +1761,9 @@ function InventoryContent() {
                               {material.supplierName && (
                                 <span className="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700">{material.supplierName}</span>
                               )}
+                              {seesAllInventory && material.branchName && (
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-[#eef1fb] text-[#011c72]">{material.branchName}</span>
+                              )}
                             </div>
                             <div className="mt-1 flex items-center gap-4 text-xs text-gray-500 flex-wrap">
                               {material.costPerUnit != null && material.costPerUnit > 0 && (
@@ -1746,12 +1780,14 @@ function InventoryContent() {
                             <span className={`px-2 py-1 text-xs font-medium rounded-full ${status.class}`}>
                               {status.label}
                             </span>
-                            <button
-                              onClick={() => startEditMaterial(material)}
-                              className="text-sm font-medium text-[#011c72] hover:text-[#011c72] transition-colors"
-                            >
-                              Edit
-                            </button>
+                            {canChangeMaterial(material) && (
+                              <button
+                                onClick={() => startEditMaterial(material)}
+                                className="text-sm font-medium text-[#011c72] hover:text-[#011c72] transition-colors"
+                              >
+                                Edit
+                              </button>
+                            )}
                           </div>
                         </div>
                       )}
@@ -1993,6 +2029,9 @@ function InventoryContent() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Where Used</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">How Much</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Used By</th>
+                      {seesAllInventory && (
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Branch</th>
+                      )}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
@@ -2031,6 +2070,9 @@ function InventoryContent() {
                               </span>
                             ) : (log.usedByName || 'System')}
                           </td>
+                          {seesAllInventory && (
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{log.branchName || '—'}</td>
+                          )}
                         </tr>
                       ))}
                   </tbody>
@@ -2352,6 +2394,8 @@ function InventoryContent() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Material</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Qty Wasted</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reason</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Job Order</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cost</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Branch</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Logged By</th>
                     </tr>
@@ -2360,7 +2404,8 @@ function InventoryContent() {
                     {wasteLogs.filter(l => {
                       if (!wasteSearch) return true;
                       const q = wasteSearch.toLowerCase();
-                      return (l.materialName || '').toLowerCase().includes(q) || l.reason.toLowerCase().includes(q) || (l.loggedByName || '').toLowerCase().includes(q);
+                      return (l.materialName || '').toLowerCase().includes(q) || l.reason.toLowerCase().includes(q) || (l.loggedByName || '').toLowerCase().includes(q)
+                        || (l.jobOrderNumber || '').toLowerCase().includes(q) || (l.workerName || '').toLowerCase().includes(q);
                     }).map(l => (
                       <tr key={l.id} className="hover:bg-gray-50 transition-colors">
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
@@ -2376,6 +2421,15 @@ function InventoryContent() {
                         <td className="px-6 py-4 whitespace-nowrap">
                           <span className="text-sm text-gray-600">{l.reason}</span>
                           {l.notes && <p className="text-xs text-gray-400">{l.notes}</p>}
+                          {l.workerName && <p className="text-xs text-gray-400">Worker: {l.workerName}</p>}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                          {l.jobOrderId ? (
+                            <a href={`/sales/${l.jobOrderId}`} className="text-[#011c72] hover:underline">{l.jobOrderNumber}</a>
+                          ) : <span className="text-gray-400">—</span>}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                          {typeof l.value === 'number' ? `₱${l.value.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{l.branchName || '—'}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{l.loggedByName || 'System'}</td>

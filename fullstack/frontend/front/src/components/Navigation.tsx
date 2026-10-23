@@ -1,7 +1,7 @@
 ﻿'use client';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useAuth, hasAccess } from '@/context/AuthContext';
+import { useAuth } from '@/context/AuthContext';
 import { useNotifications } from '@/context/NotificationContext';
 import { formatDateTime } from '@/lib/dateUtils';
 import { useEffect, useState } from 'react';
@@ -82,16 +82,6 @@ const CustomersIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
   </svg>
 );
-const AppointmentsIcon = () => (
-  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-  </svg>
-);
-const OrdersIcon = () => (
-  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-  </svg>
-);
 const ShoppingIcon = () => (
   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
@@ -139,9 +129,10 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     return () => window.removeEventListener('keydown', onKey);
   }, [mobileOpen, onMobileClose]);
 
-  const publicRoutes = ['/', '/login', '/register', '/place-order'];
+  // The promotional website and the staff sign-in are the only pages open to visitors
+  const publicRoutes = ['/', '/login'];
 
-  if (pathname === '/login' || pathname === '/register') return null;
+  if (pathname === '/login') return null;
   if (isLoading) return null;
 
   // Unauthenticated: show minimal top bar
@@ -151,12 +142,14 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
       return null;
     }
     const navLinks = [
-      { label: 'Home',         href: '/#home' },
-      { label: 'Why Us',       href: '/#why-us' },
-      { label: 'How It Works', href: '/#process' },
-      { label: 'Catalog',      href: '/#catalog' },
-      { label: 'FAQ',          href: '/#faq' },
-      { label: 'Contact',      href: '/#contact' },
+      { label: 'Home',       href: '/#home' },
+      { label: 'Track Order', href: '/#track' },
+      { label: 'About Us',   href: '/#about' },
+      { label: 'Products & Services', href: '/#products' },
+      { label: 'Promotions', href: '/#promotions' },
+      { label: 'Gallery',    href: '/#gallery' },
+      { label: 'Branches',   href: '/#branches' },
+      { label: 'Contact Us', href: '/#contact' },
     ];
 
     return (
@@ -173,7 +166,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
             </Link>
 
             {/* Desktop nav links */}
-            <div className="hidden md:flex items-center gap-1 ml-6 flex-1">
+            <div className="hidden lg:flex items-center gap-1 ml-6 flex-1">
               {navLinks.map(link => (
                 <a
                   key={link.label}
@@ -185,18 +178,18 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
               ))}
             </div>
 
-            {/* Right side: Login + hamburger */}
+            {/* Right side: staff sign-in + hamburger */}
             <div className="ml-auto flex items-center gap-3">
               <Link
                 href="/login"
-                className="px-5 py-2 rounded-md bg-[#011c72] hover:bg-[#01268c] text-white text-sm font-semibold uppercase tracking-wide transition-colors shadow-sm"
+                className="px-4 py-2 rounded-md border border-gray-300 hover:border-[#011c72] text-gray-700 hover:text-[#011c72] text-xs font-semibold uppercase tracking-wide transition-colors"
               >
-                Login
+                Staff Login
               </Link>
               {/* Mobile hamburger */}
               <button
                 onClick={() => setMobileMenuOpen(o => !o)}
-                className="md:hidden p-2 rounded-md text-gray-600 hover:text-[#011c72] hover:bg-gray-50 transition-colors"
+                className="lg:hidden p-2 rounded-md text-gray-600 hover:text-[#011c72] hover:bg-gray-50 transition-colors"
                 aria-label="Toggle menu"
               >
                 {mobileMenuOpen ? (
@@ -215,7 +208,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
 
         {/* Mobile dropdown */}
         {mobileMenuOpen && (
-          <div className="md:hidden border-t border-gray-100 bg-white px-4 py-3 space-y-1">
+          <div className="lg:hidden border-t border-gray-100 bg-white px-4 py-3 space-y-1">
             {navLinks.map(link => (
               <a
                 key={link.label}
@@ -232,11 +225,9 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     );
   }
 
-  // Staff items need any one of their permissions; customer pages are by account type
-  const navItems: { name: string; path: string; icon: () => React.JSX.Element; perms?: string[]; roles?: string[] }[] = [
-    { name: 'Home', path: '/', icon: HomeIcon },
-    { name: 'My Orders', path: '/my-orders', icon: OrdersIcon, roles: ['customer'] },
-    { name: 'Shop Products', path: '/place-order', icon: ShoppingIcon, roles: ['customer'] },
+  // Each item needs any one of its permissions
+  const navItems: { name: string; path: string; icon: () => React.JSX.Element; perms?: string[] }[] = [
+    { name: 'Website', path: '/', icon: HomeIcon },
     { name: 'Owner Dashboard', path: '/owner', icon: OwnerIcon, perms: ['owner.view'] },
     { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, perms: ['dashboard.view'] },
     { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, perms: ['announcements.view'] },
@@ -245,7 +236,6 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     { name: 'Customers', path: '/customers', icon: CustomersIcon, perms: ['customers.view'] },
     { name: 'Payments', path: '/payments', icon: PaymentsIcon, perms: ['payments.view'] },
     { name: 'Expenses', path: '/expenses', icon: ExpensesIcon, perms: ['expenses.view', 'expenses.add'] },
-    { name: 'Appointments', path: '/appointments', icon: AppointmentsIcon, perms: ['appointments.view'] },
     { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'premade.receive', 'suppliers.view'] },
     { name: 'Product Orders', path: '/product-orders', icon: ShoppingIcon, perms: ['product_orders.view'] },
     { name: 'Costing', path: '/costing', icon: CostingIcon, perms: ['costing.view'] },
@@ -255,8 +245,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     { name: 'Settings', path: '/settings', icon: SettingsIcon, perms: ['settings.edit', 'users.manage', 'branches.manage'] },
   ];
 
-  const filteredNavItems = navItems.filter((item) =>
-    item.roles ? hasAccess(user?.role, item.roles) : item.perms ? can(...item.perms) : true);
+  const filteredNavItems = navItems.filter((item) => item.perms ? can(...item.perms) : true);
 
   const handleLogout = async () => {
     const ok = await confirm({
@@ -468,7 +457,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
                   {showArchive ? 'No archived notifications' : 'No notifications'}
                 </p>
               ) : (showArchive ? archived : notifications).map(n => {
-                const href = notificationHref(n.type, n.data, user?.role, can);
+                const href = notificationHref(n.type, n.data, can);
                 const unread = !showArchive && !n.isRead;
                 const body = (
                   <div className="flex items-start gap-2">
@@ -549,9 +538,9 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
  * Where a notification leads, or null when it has nowhere to go for this role
  * (the row is then shown as plain text rather than a link).
  */
-function notificationHref(type: string, data: unknown, role: string | undefined,
+function notificationHref(type: string, data: unknown,
   can: (...permissions: string[]) => boolean): string | null {
-  const d = (data || {}) as { orderId?: number; jobOrderId?: number; kind?: 'job' | 'product' | 'request' };
+  const d = (data || {}) as { orderId?: number; jobOrderId?: number };
   switch (type) {
     case 'transfer_request':
     case 'transfer_dispatched':
@@ -562,17 +551,6 @@ function notificationHref(type: string, data: unknown, role: string | undefined,
     case 'premade_delivery':
       // Incoming premade stock is confirmed on the Finished Goods tab
       return can('premade.view', 'premade.receive') ? '/inventory?tab=finished-goods' : null;
-    case 'quotation_response':
-      return d.jobOrderId && can('sales.view')
-        ? `/sales/${d.jobOrderId}` : null;
-    case 'order_status':
-    case 'quotation_ready':
-      // The customer's own order: custom requests have a page, the rest open on My Orders
-      if (role !== 'customer' || !d.orderId) return null;
-      if (d.kind === 'request') return `/my-orders/${d.orderId}`;
-      if (d.kind === 'job') return `/my-orders?tab=custom&job=${d.orderId}`;
-      if (d.kind === 'product') return `/my-orders?tab=premade&order=${d.orderId}`;
-      return null;
     default:
       return null;
   }

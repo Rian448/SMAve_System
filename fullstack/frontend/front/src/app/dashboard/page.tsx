@@ -1,9 +1,17 @@
 ﻿'use client';
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, DashboardStats, Alert, Activity } from '@/lib/api';
+import { api, DashboardStats, Alert, Activity, type DashboardPeriod } from '@/lib/api';
 import { formatDateTime as formatDate } from '@/lib/dateUtils';
 import Link from 'next/link';
+
+const PERIOD_OPTIONS: { value: DashboardPeriod; label: string }[] = [
+  { value: 'today', label: 'Today' },
+  { value: 'week', label: 'This Week' },
+  { value: 'month', label: 'This Month' },
+  { value: 'year', label: 'This Year' },
+  { value: 'all', label: 'All Time' },
+];
 
 export default function Dashboard() {
   const { user, isLoading: authLoading, can } = useAuth();
@@ -17,6 +25,9 @@ export default function Dashboard() {
   const isStaff = can('dashboard.view');
   const isWorkerAccount = user?.role === 'seat_maker' || user?.role === 'sewer';
   const [branchFilter, setBranchFilter] = useState('');
+  // Period the sales figures cover
+  const [period, setPeriod] = useState<DashboardPeriod>('month');
+  const periodLabel = PERIOD_OPTIONS.find(p => p.value === period)?.label || '';
   const [branches, setBranches] = useState<{ id: number; name: string; isWarehouse: boolean }[]>([]);
 
   useEffect(() => {
@@ -42,13 +53,13 @@ export default function Dashboard() {
       fetchDashboardData();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading, user, branchFilter]);
+  }, [authLoading, user, branchFilter, period]);
 
   const fetchDashboardData = async () => {
     const branchId = isAdmin && branchFilter ? Number(branchFilter) : undefined;
     try {
       const [statsData, alertsData, activitiesData] = await Promise.all([
-        api.dashboard.getStats(branchId),
+        api.dashboard.getStats(branchId, period),
         api.dashboard.getAlerts(branchId),
         api.dashboard.getRecentActivity(branchId)
       ]);
@@ -180,33 +191,28 @@ export default function Dashboard() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="mb-8">
-          {user?.role === 'customer' && (
-            <Link
-              href="/"
-              className="inline-flex items-center gap-2 text-sm text-gray-600 hover:text-[#011c72] transition-colors mb-3"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-              </svg>
-              Back to website
-            </Link>
-          )}
           <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
             <div>
               <h1 className="text-2xl font-bold text-gray-900">
                 Welcome back, {user?.fullName?.split(' ')[0]}!
               </h1>
               <p className="text-gray-500 mt-1">
-                {user?.role === 'customer'
-                  ? 'Track your orders and view quotations here.'
-                  : `Here's what's happening at ${
-                      isAdmin
-                        ? (stats?.scopeBranchName || 'all branches')
-                        : (stats?.scopeBranchName || user?.branch || 'your branch')
-                    } today.`
-                }
+                {`Here's what's happening at ${
+                  isAdmin
+                    ? (stats?.scopeBranchName || 'all branches')
+                    : (stats?.scopeBranchName || user?.branch || 'your branch')
+                } today.`}
               </p>
             </div>
+            <div className="flex flex-wrap gap-2">
+            <select
+              value={period}
+              onChange={(e) => setPeriod(e.target.value as DashboardPeriod)}
+              aria-label="Sales period"
+              className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
+            >
+              {PERIOD_OPTIONS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+            </select>
             {isAdmin && (
               <select
                 value={branchFilter}
@@ -220,66 +226,9 @@ export default function Dashboard() {
                 ))}
               </select>
             )}
+            </div>
           </div>
         </div>
-
-        {/* Customer Dashboard */}
-        {user?.role === 'customer' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-              <div className="flex items-center space-x-4 mb-4">
-                <div className="w-12 h-12 rounded-xl bg-[#dde6ff] flex items-center justify-center">
-                  <svg className="w-6 h-6 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                  </svg>
-                </div>
-                <div>
-                  <h2 className="text-lg font-semibold text-gray-900">My Orders</h2>
-                  <p className="text-sm text-gray-500">View and track your placed orders</p>
-                </div>
-              </div>
-              <p className="text-sm text-gray-600 mb-4">
-                Check the status of your orders, view quotations, and respond to price offers from our team.
-              </p>
-              <Link 
-                href="/my-orders" 
-                className="inline-flex items-center px-4 py-2 bg-[#011c72] text-white rounded-lg hover:bg-[#01268c] transition-colors font-medium"
-              >
-                <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                </svg>
-                View My Orders
-              </Link>
-            </div>
-
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-              <div className="flex items-center space-x-4 mb-4">
-                <div className="w-12 h-12 rounded-xl bg-green-100 flex items-center justify-center">
-                  <svg className="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                  </svg>
-                </div>
-                <div>
-                  <h2 className="text-lg font-semibold text-gray-900">Place New Order</h2>
-                  <p className="text-sm text-gray-500">Request a service for your vehicle</p>
-                </div>
-              </div>
-              <p className="text-sm text-gray-600 mb-4">
-                Submit a new order request for flooring, reupholstery, ceiling, sidings, or seat covers.
-              </p>
-              <Link 
-                href="/place-order" 
-                className="inline-flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium"
-              >
-                <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                </svg>
-                Place New Order
-              </Link>
-            </div>
-          </div>
-        )}
 
         {/* Worker accounts: their tasks are run from Worker Management by an admin */}
         {isWorkerAccount && (
@@ -339,10 +288,13 @@ export default function Dashboard() {
           <Link href="/reports" className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:border-green-500 hover:shadow-md transition-all block">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Completed</p>
+                <p className="text-sm font-medium text-gray-500">Completed · {periodLabel}</p>
                 <p className="text-3xl font-bold text-green-600 mt-1">
                   {stats?.completedOrders || 0}
                 </p>
+                {(stats?.completedPremadeOrders || 0) > 0 && (
+                  <p className="text-xs text-gray-500 mt-1">+ {stats?.completedPremadeOrders} premade sale{stats?.completedPremadeOrders === 1 ? '' : 's'}</p>
+                )}
               </div>
               <div className="w-12 h-12 rounded-xl bg-green-100 flex items-center justify-center">
                 <svg className="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -405,9 +357,13 @@ export default function Dashboard() {
           <Link href="/reports" className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:border-emerald-500 hover:shadow-md transition-all block">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Total Revenue</p>
+                <p className="text-sm font-medium text-gray-500">Sales · {periodLabel}</p>
                 <p className="text-3xl font-bold text-emerald-600 mt-1">
                   {formatCurrency(stats?.totalRevenue || 0)}
+                </p>
+                <p className="text-xs text-gray-500 mt-1">
+                  Job orders {formatCurrency(stats?.jobOrderRevenue || 0)} · Premade {formatCurrency(stats?.premadeRevenue || 0)}
+                  <span className="block text-gray-400">VAT excluded</span>
                 </p>
               </div>
               <div className="w-12 h-12 rounded-xl bg-emerald-100 flex items-center justify-center">

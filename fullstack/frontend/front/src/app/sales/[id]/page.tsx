@@ -76,6 +76,15 @@ export default function JobOrderDetailPage() {
   const [partsMsg, setPartsMsg] = useState('');
   const [error, setError] = useState('');
 
+  // Extra materials: material issued beyond the plan (a recut after a mistake,
+  // defective material, rework). Leaves stock and adds to the job's actual cost.
+  const [showExtra, setShowExtra] = useState(false);
+  const [extraForm, setExtraForm] = useState({ materialId: '', quantity: '', reason: '', workerId: '', notes: '' });
+  const [extraMaterialsList, setExtraMaterialsList] = useState<RawMaterial[]>([]);
+  const [extraSaving, setExtraSaving] = useState(false);
+  const [extraError, setExtraError] = useState('');
+  const [extraMsg, setExtraMsg] = useState('');
+
   // Payment states
   const [paymentRecords, setPaymentRecords] = useState<PaymentRecord[]>([]);
   const [loadingPayments, setLoadingPayments] = useState(false);
@@ -243,6 +252,61 @@ export default function JobOrderDetailPage() {
   // Those who can't approve overrides themselves send a request for approval instead
   const canRequestOverride = can('payments.request_override') && !can('payments.approve_override');
   const canCreateNewMaterial = can('inventory.add');
+  const canIssueExtra = can('inventory.log_waste');
+
+  const reloadJobOrder = async () => {
+    if (!jobOrder) return;
+    const res = await api.sales.getJobOrder(jobOrder.id);
+    if (res.data) setJobOrder(res.data);
+  };
+
+  const openExtra = async () => {
+    if (!jobOrder) return;
+    setExtraError('');
+    setExtraMsg('');
+    setExtraForm({ materialId: '', quantity: '', reason: '', workerId: '', notes: '' });
+    setShowExtra(true);
+    try {
+      const res = await api.inventory.getRawMaterials(
+        jobOrder.branchId ? { branchId: jobOrder.branchId, includeWarehouse: true } : undefined
+      );
+      setExtraMaterialsList((res.data || []).filter(m => !m.isArchived && Number(m.stockQuantity) > 0));
+    } catch {
+      setExtraError('Could not load the materials. Please try again.');
+    }
+  };
+
+  const submitExtra = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!jobOrder) return;
+    const qty = Number(extraForm.quantity);
+    if (!extraForm.materialId) { setExtraError('Please choose the material that was used.'); return; }
+    if (!(qty > 0)) { setExtraError('Please enter a quantity more than zero.'); return; }
+    if (!extraForm.reason.trim()) { setExtraError('Please give a reason.'); return; }
+    const chosen = extraMaterialsList.find(m => String(m.id) === extraForm.materialId);
+    if (chosen && qty > Number(chosen.stockQuantity)) {
+      setExtraError(`Only ${chosen.stockQuantity} in stock.`);
+      return;
+    }
+    setExtraSaving(true);
+    setExtraError('');
+    try {
+      await api.sales.issueExtraMaterials(jobOrder.id, {
+        materialId: Number(extraForm.materialId),
+        quantity: qty,
+        reason: extraForm.reason.trim(),
+        workerId: extraForm.workerId ? Number(extraForm.workerId) : undefined,
+        notes: extraForm.notes.trim() || undefined,
+      });
+      setShowExtra(false);
+      setExtraMsg('Extra material recorded. It was taken from stock and added to this job\'s actual cost.');
+      await reloadJobOrder();
+    } catch (err) {
+      setExtraError(err instanceof Error ? err.message : 'Could not record the extra material.');
+    } finally {
+      setExtraSaving(false);
+    }
+  };
 
   useEffect(() => {
     const isFinished = jobOrder?.status === 'completed' || jobOrder?.status === 'delivered';
@@ -1624,6 +1688,82 @@ export default function JobOrderDetailPage() {
           </div>
         )}
 
+        {/* ── Extra Materials (internal cost, not billed to the customer) ── */}
+        {jobOrder.extraMaterials !== undefined && (
+          <div className="no-print mb-5 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+            <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+              <div>
+                <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                  <svg className="w-5 h-5 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  Extra Materials
+                </h2>
+                <p className="text-xs text-gray-500 mt-1">
+                  Material used beyond the plan, such as a recut after a mistake. It is taken from stock and added to
+                  this job&apos;s actual cost. The customer&apos;s price does not change.
+                </p>
+              </div>
+              {canIssueExtra && (jobOrder.status === 'in_progress' || jobOrder.status === 'completed') && (
+                <button
+                  type="button"
+                  onClick={openExtra}
+                  className="inline-flex items-center px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors"
+                >
+                  + Issue Extra Materials
+                </button>
+              )}
+            </div>
+            {extraMsg && <p className="mb-3 text-sm text-green-700">{extraMsg}</p>}
+            {jobOrder.extraMaterials.length === 0 ? (
+              <p className="text-sm text-gray-500">
+                No extra materials issued.
+                {canIssueExtra && jobOrder.status !== 'in_progress' && jobOrder.status !== 'completed' &&
+                  ' Extra materials can be issued while the order is In Progress or Completed.'}
+              </p>
+            ) : (
+              <div className="overflow-x-auto border border-gray-200 rounded-lg">
+                <table className="w-full min-w-[640px]">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Material</th>
+                      <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Reason</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Worker</th>
+                      <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {jobOrder.extraMaterials.map(x => (
+                      <tr key={x.id}>
+                        <td className="px-4 py-2 text-sm text-gray-600 whitespace-nowrap">{formatDate(x.createdAt)}</td>
+                        <td className="px-4 py-2 text-sm text-gray-900">
+                          {x.materialName || '—'}{x.materialColor ? ` - ${x.materialColor}` : ''}
+                        </td>
+                        <td className="px-4 py-2 text-sm text-right text-gray-700">{x.quantity}</td>
+                        <td className="px-4 py-2 text-sm text-gray-700">
+                          {x.reason}
+                          {x.notes && <span className="block text-xs text-gray-400">{x.notes}</span>}
+                          <span className="block text-[11px] text-gray-400">by {x.loggedByName || 'staff'}</span>
+                        </td>
+                        <td className="px-4 py-2 text-sm text-gray-700">{x.workerName || '—'}</td>
+                        <td className="px-4 py-2 text-sm text-right font-medium text-red-600">{formatCurrency(x.value || 0)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-gray-50">
+                      <td colSpan={5} className="px-4 py-2 text-sm font-semibold text-gray-700 text-right">Total extra material cost</td>
+                      <td className="px-4 py-2 text-sm text-right font-bold text-red-600">{formatCurrency(jobOrder.extraMaterialsCost || 0)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ── Payment Information ── */}
         <div className="mb-5 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
           <h2 className="text-base font-semibold text-gray-900 mb-5 flex items-center gap-2">
@@ -1895,7 +2035,7 @@ export default function JobOrderDetailPage() {
               ) : (
                 <div className="border border-amber-200 rounded-lg p-4 bg-amber-50/40 space-y-3">
                   <p className="text-sm font-semibold text-amber-800">Request Payment Override</p>
-                  <p className="text-xs text-amber-700">This will be sent to an administrator for approval and won't take effect until approved.</p>
+                  <p className="text-xs text-amber-700">This will be sent to an administrator for approval and won&apos;t take effect until approved.</p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs font-medium text-gray-600 mb-1">New Payment Status</label>
@@ -2144,7 +2284,8 @@ export default function JobOrderDetailPage() {
             </svg>
             Print Receipt
           </button>
-          {canEditParts && jobOrder.status !== 'cancelled' && jobOrder.status !== 'delivered' && (
+          {/* A completed order's materials have been used, so it can't be cancelled */}
+          {canEditParts && !['cancelled', 'delivered', 'completed'].includes(jobOrder.status) && (
             <button
               onClick={() => updateStatus('cancelled')}
               disabled={updating}
@@ -2284,6 +2425,95 @@ export default function JobOrderDetailPage() {
           </div>
 
         </div>
+
+        {/* Issue extra materials */}
+        {showExtra && (
+          <div className="no-print fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+            <form onSubmit={submitExtra} className="w-full max-w-lg bg-white rounded-xl shadow-xl p-5 max-h-[90vh] overflow-y-auto">
+              <h3 className="text-base font-bold text-gray-900">Issue Extra Materials</h3>
+              <p className="text-xs text-gray-500 mt-1 mb-4">
+                For {jobOrder.jobOrderId}. Use this when more material had to be taken than planned, for example after a
+                cutting or sewing mistake. The quantity leaves stock now and is added to this job&apos;s actual cost.
+              </p>
+              <div className="space-y-3">
+                <label className="block">
+                  <span className="text-sm font-medium text-gray-700">Material used *</span>
+                  <select
+                    value={extraForm.materialId}
+                    onChange={e => setExtraForm(f => ({ ...f, materialId: e.target.value }))}
+                    className="mt-1 w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
+                  >
+                    <option value="">Select material</option>
+                    {extraMaterialsList.map(m => (
+                      <option key={m.id} value={m.id}>
+                        {m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''}
+                        {' '}· {m.stockQuantity} in stock{m.branchName ? ` · ${m.branchName}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-sm font-medium text-gray-700">Quantity *</span>
+                  <input
+                    type="number" min="0.01" step="0.01" inputMode="decimal"
+                    value={extraForm.quantity}
+                    onChange={e => setExtraForm(f => ({ ...f, quantity: e.target.value }))}
+                    className="mt-1 w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-sm font-medium text-gray-700">Reason *</span>
+                  <input
+                    type="text" list="extra-reasons" maxLength={255}
+                    value={extraForm.reason}
+                    onChange={e => setExtraForm(f => ({ ...f, reason: e.target.value }))}
+                    placeholder="e.g. Cutting mistake"
+                    className="mt-1 w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
+                  />
+                  <datalist id="extra-reasons">
+                    <option value="Cutting mistake" />
+                    <option value="Sewing error" />
+                    <option value="Defective material" />
+                    <option value="Rework requested" />
+                    <option value="Wrong measurement" />
+                  </datalist>
+                </label>
+                <label className="block">
+                  <span className="text-sm font-medium text-gray-700">Worker responsible (optional)</span>
+                  <select
+                    value={extraForm.workerId}
+                    onChange={e => setExtraForm(f => ({ ...f, workerId: e.target.value }))}
+                    className="mt-1 w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
+                  >
+                    <option value="">Not specified</option>
+                    {managedWorkers.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-sm font-medium text-gray-700">Notes (optional)</span>
+                  <input
+                    type="text"
+                    value={extraForm.notes}
+                    onChange={e => setExtraForm(f => ({ ...f, notes: e.target.value }))}
+                    placeholder="e.g. front row panel recut"
+                    className="mt-1 w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
+                  />
+                </label>
+              </div>
+              {extraError && <p className="mt-3 text-sm text-red-600">{extraError}</p>}
+              <div className="mt-5 flex justify-end gap-2">
+                <button type="button" onClick={() => setShowExtra(false)} disabled={extraSaving}
+                  className="px-4 py-2 rounded-lg border border-gray-200 text-gray-700 text-sm font-medium">
+                  Cancel
+                </button>
+                <button type="submit" disabled={extraSaving}
+                  className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-sm font-medium disabled:opacity-60">
+                  {extraSaving ? 'Saving...' : 'Take from stock'}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
 
       </main>
     </div>
