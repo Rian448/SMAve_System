@@ -8,6 +8,21 @@ const ROLE_COLOR: Record<string, string> = {
   supervisor:    'bg-purple-700',
 };
 
+const ROLE_LABEL: Record<string, string> = {
+  administrator: 'Admin',
+  supervisor:    'Supervisor',
+  sales_manager: 'Sales Manager',
+  owner:         'Owner',
+};
+
+// Shown above each message as Role(Username), e.g. Admin(carol)
+function senderLabel(m: ChatMessage) {
+  const role = ROLE_LABEL[m.senderRole]
+    || m.senderRole.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  const name = m.senderUsername || m.senderName;
+  return role ? `${role}(${name})` : name;
+}
+
 function initials(name: string) {
   return name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
 }
@@ -191,7 +206,7 @@ export default function ChatBubble() {
                         <div className={`flex flex-col min-w-0 max-w-50 ${isMe ? 'items-end' : 'items-start'}`}>
                           {!prevSame && (
                             <span className="text-[10px] text-gray-400 mb-0.5 px-1">
-                              {isMe ? 'You' : m.senderName}
+                              {senderLabel(m)}
                             </span>
                           )}
                           {/* wrap-anywhere: an unbroken word (a long link, "ahhhh…") wraps inside the bubble */}

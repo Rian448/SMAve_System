@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus, PremadeTransfer } from '@/lib/api';
 import { useConfirm } from '@/components/ConfirmDialog';
+import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import Link from 'next/link';
 
 type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'purchase-orders' | 'suppliers' | 'waste-log' | 'ai-predictions';
@@ -67,6 +68,8 @@ function InventoryContent() {
   );
   const [materialTypeFilter, setMaterialTypeFilter] = useState('');
   const [formError, setFormError] = useState('');
+  // Problems with a specific field are shown next to it; formError is for the rest
+  const fe = useFieldErrors();
 
   const [newMaterial, setNewMaterial] = useState({
     itemId: '',
@@ -300,32 +303,17 @@ function InventoryContent() {
     e.preventDefault();
     setFormError('');
 
-    if (!newMaterial.materialType.trim()) {
-      setFormError('Material Type is required.');
-      return;
-    }
-
     const costPerUnit = Number(newMaterial.costPerUnit);
     const markupPercent = Number(newMaterial.markupPercent);
     const stockQuantity = Number(newMaterial.stockQuantity);
-
-    if (Number.isNaN(stockQuantity)) {
-      setFormError('Stock Quantity must be a valid number.');
-      return;
-    }
-    if (newMaterial.priceMode === 'markup') {
-      if (Number.isNaN(costPerUnit) || costPerUnit <= 0) {
-        setFormError('Enter a valid Cost per Unit.');
-        return;
-      }
-      if (Number.isNaN(markupPercent)) {
-        setFormError('Enter a valid markup %.');
-        return;
-      }
-    } else if (Number.isNaN(Number(newMaterial.unitPrice))) {
-      setFormError('Selling Price must be a valid number.');
-      return;
-    }
+    const byMarkup = newMaterial.priceMode === 'markup';
+    if (fe.show({
+      'new-materialType': !newMaterial.materialType.trim() && 'Enter the material name.',
+      'new-stockQuantity': Number.isNaN(stockQuantity) && 'Stock quantity must be a number.',
+      'new-costPerUnit': byMarkup && (Number.isNaN(costPerUnit) || costPerUnit <= 0) && 'Enter the cost per unit (more than ₱0).',
+      'new-markupPercent': byMarkup && Number.isNaN(markupPercent) && 'Markup must be a number.',
+      'new-unitPrice': !byMarkup && Number.isNaN(Number(newMaterial.unitPrice)) && 'Selling price must be a number.',
+    })) return;
 
     const itemId = newMaterial.itemId.trim() || undefined;
 
@@ -355,6 +343,7 @@ function InventoryContent() {
   };
 
   const startEditMaterial = (material: RawMaterial) => {
+    fe.clear();
     setEditingMaterialId(material.id);
     setEditMaterial({
       materialType: material.materialType,
@@ -376,15 +365,12 @@ function InventoryContent() {
     const costPerUnit = Number(editMaterial.costPerUnit);
     const markupPercent = Number(editMaterial.markupPercent);
     const stockQuantity = Number(editMaterial.stockQuantity);
-
-    if (Number.isNaN(stockQuantity)) {
-      setFormError('Stock Quantity must be a valid number.');
-      return;
-    }
-    if (editMaterial.priceMode === 'manual' && Number.isNaN(Number(editMaterial.unitPrice))) {
-      setFormError('Selling Price must be a valid number.');
-      return;
-    }
+    if (fe.show({
+      'edit-materialType': !editMaterial.materialType.trim() && 'Enter the material name.',
+      'edit-stockQuantity': Number.isNaN(stockQuantity) && 'Stock quantity must be a number.',
+      'edit-unitPrice': editMaterial.priceMode === 'manual' && Number.isNaN(Number(editMaterial.unitPrice))
+        && 'Selling price must be a number.',
+    })) return;
 
     setSaving(true);
     try {
@@ -413,43 +399,23 @@ function InventoryContent() {
     e.preventDefault();
     setFormError('');
 
-    if (!newPremade.name.trim()) {
-      setFormError('Premade product name is required.');
-      return;
-    }
-
     const quantity = Number(newPremade.quantity);
     const price = Number(newPremade.price);
-
-    if (Number.isNaN(quantity) || Number.isNaN(price)) {
-      setFormError('Premade product quantity and price must be valid numbers.');
-      return;
-    }
-
-    const parsedMaterialsUsed: Array<{ materialId: number; quantityUsed: number }> = [];
-    for (let index = 0; index < premadeMaterials.length; index += 1) {
-      const entry = premadeMaterials[index];
-      const materialId = Number(entry.materialId);
-      const quantityUsed = Number(entry.quantityUsed);
-
-      if (!materialId || Number.isNaN(quantityUsed) || quantityUsed <= 0) {
-        setFormError(`Please select a material and enter valid quantity for row ${index + 1}.`);
-        return;
-      }
-
-      parsedMaterialsUsed.push({ materialId, quantityUsed });
-    }
-
-    if (parsedMaterialsUsed.length === 0) {
-      setFormError('Please add at least one material used.');
-      return;
-    }
-
     const branchId = Number(newPremade.branchId) || user?.branchId;
-    if (!branchId) {
-      setFormError('Please select a location for this product.');
-      return;
-    }
+    const parsedMaterialsUsed = premadeMaterials.map((entry) => ({
+      materialId: Number(entry.materialId), quantityUsed: Number(entry.quantityUsed),
+    }));
+    if (fe.show({
+      'premade-name': !newPremade.name.trim() && 'Enter the product name.',
+      'premade-quantity': Number.isNaN(quantity) && 'Amount must be a number.',
+      'premade-price': Number.isNaN(price) && 'Price must be a number.',
+      'premade-branch': !branchId && 'Choose where this product goes.',
+      'premade-materials': parsedMaterialsUsed.length === 0 && 'Add at least one material used.',
+      ...Object.fromEntries(parsedMaterialsUsed.map((m, index) => [`premade-material-${index}`,
+        !m.materialId ? 'Select the material used.'
+          : (Number.isNaN(m.quantityUsed) || m.quantityUsed <= 0) && 'Enter how much was used (more than 0).',
+      ])),
+    }) || !branchId) return;
 
     // Choosing a shop branch raises a delivery that branch must accept, so make
     // that consequence explicit before saving.
@@ -518,6 +484,7 @@ function InventoryContent() {
   // ── Distribution ──────────────────────────────────────────────────────────
 
   const openDistribute = (item: FinishedGood) => {
+    fe.clear();
     setDistributing(item);
     setAllocations({});
     setAllBranchesQty('');
@@ -537,17 +504,11 @@ function InventoryContent() {
     const perBranch = Number(allBranchesQty) || 0;
     const total = toAll ? perBranch * branches.length : allocationTotal;
 
-    if (total <= 0) {
-      setDistributeError('Enter a quantity greater than zero.');
-      return;
-    }
     // Checked here for immediate feedback; the server enforces it regardless.
-    if (total > available) {
-      setDistributeError(
-        `Not enough stock. ${available} available to give out, but that totals ${total}.`,
-      );
-      return;
-    }
+    if (fe.show({
+      [toAll ? 'distribute-all' : 'distribute-each']: total <= 0 ? 'Enter a quantity greater than zero.'
+        : total > available && `Not enough stock. ${available} available to give out, but that totals ${total}.`,
+    })) return;
 
     const ok = await confirm({
       title: toAll ? `Give ${perBranch} to each of ${branches.length} branches?` : 'Send this stock?',
@@ -647,6 +608,7 @@ function InventoryContent() {
   };
 
   const startEditPremade = (item: FinishedGood) => {
+    fe.clear();
     setEditingPremadeId(item.id);
     setEditPremade({ quantity: String(item.quantity), price: String(item.price) });
   };
@@ -655,11 +617,10 @@ function InventoryContent() {
     setFormError('');
     const quantity = Number(editPremade.quantity);
     const price = Number(editPremade.price);
-
-    if (Number.isNaN(quantity) || Number.isNaN(price)) {
-      setFormError('Premade product quantity and price must be valid numbers.');
-      return;
-    }
+    if (fe.show({
+      'editPremade-quantity': Number.isNaN(quantity) && 'Must be a number.',
+      'editPremade-price': Number.isNaN(price) && 'Must be a number.',
+    })) return;
 
     setSaving(true);
     try {
@@ -675,8 +636,8 @@ function InventoryContent() {
 
   const handleCreateSupplier = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newSupplier.name.trim()) { setFormError('Supplier name is required.'); return; }
     setFormError('');
+    if (fe.show({ 'supplier-name': !newSupplier.name.trim() && 'Enter the supplier name.' })) return;
     setSaving(true);
     try {
       await api.inventory.createSupplier(newSupplier);
@@ -713,11 +674,12 @@ function InventoryContent() {
 
   const handleCreateWasteLog = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newWaste.materialId || !newWaste.quantity || !newWaste.reason.trim()) {
-      setFormError('Material, quantity, and reason are required.');
-      return;
-    }
     setFormError('');
+    if (fe.show({
+      'waste-material': !newWaste.materialId && 'Select the material.',
+      'waste-quantity': !(Number(newWaste.quantity) > 0) && 'Enter how much was wasted.',
+      'waste-reason': !newWaste.reason.trim() && 'Give a reason.',
+    })) return;
     setSaving(true);
     try {
       await api.inventory.createWasteLog({
@@ -731,6 +693,29 @@ function InventoryContent() {
       await fetchInventory();
     } catch (err: any) { setFormError(err?.message || 'Failed to log waste.'); }
     finally { setSaving(false); }
+  };
+
+  /** Undo a waste entry made by mistake: the quantity goes back into stock */
+  const undoWaste = async (l: MaterialWasteLog) => {
+    const ok = await confirm({
+      title: 'Undo this waste entry?',
+      message: (
+        <>
+          {l.quantity} of <span className="font-medium text-gray-900">{l.materialName}</span> goes back into stock
+          {l.jobOrderNumber ? <> and comes off {l.jobOrderNumber}&apos;s cost</> : null}.
+        </>
+      ),
+      confirmLabel: 'Undo',
+      variant: 'warning',
+    });
+    if (!ok) return;
+    setFormError('');
+    try {
+      await api.inventory.undoWasteLog(l.id);
+      await fetchInventory();
+    } catch (err: any) {
+      setFormError(err?.message || 'Could not undo the waste entry.');
+    }
   };
 
   const handleSaveThreshold = async () => {
@@ -1070,7 +1055,7 @@ function InventoryContent() {
 
         {/* Add Material Form */}
         {activeTab === 'raw-materials' && (
-          <form onSubmit={handleCreateMaterial} className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <form onSubmit={handleCreateMaterial} noValidate className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Add Inventory Item</h2>
             <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
               <input
@@ -1080,13 +1065,16 @@ function InventoryContent() {
                 placeholder="Item ID (e.g. LTH-001)"
                 className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
               />
-              <input
-                type="text"
-                value={newMaterial.materialType}
-                onChange={(e) => setNewMaterial((prev) => ({ ...prev, materialType: e.target.value }))}
-                placeholder="Material Name"
-                className="md:col-span-2 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
-              />
+              <div {...fe.field('new-materialType')} className="md:col-span-2">
+                <input
+                  type="text"
+                  value={newMaterial.materialType}
+                  onChange={(e) => setNewMaterial((prev) => ({ ...prev, materialType: e.target.value }))}
+                  placeholder="Material Name"
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
+                />
+                <FieldError message={fe.errors['new-materialType']} />
+              </div>
               <input
                 type="text"
                 value={newMaterial.sku}
@@ -1118,15 +1106,18 @@ function InventoryContent() {
                 placeholder="Pattern (optional)"
                 className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
               />
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={newMaterial.stockQuantity}
-                onChange={(e) => setNewMaterial((prev) => ({ ...prev, stockQuantity: e.target.value }))}
-                placeholder="Stock Quantity"
-                className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
-              />
+              <div {...fe.field('new-stockQuantity')}>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={newMaterial.stockQuantity}
+                  onChange={(e) => setNewMaterial((prev) => ({ ...prev, stockQuantity: e.target.value }))}
+                  placeholder="Stock Quantity"
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
+                />
+                <FieldError message={fe.errors['new-stockQuantity']} />
+              </div>
             </div>
 
             {/* Pricing: cost -> selling price via markup, or manual override */}
@@ -1147,22 +1138,24 @@ function InventoryContent() {
                 </div>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
-                <div>
+                <div {...fe.field('new-costPerUnit')}>
                   <label className="block text-xs text-gray-500 mb-1">Cost per Unit (₱)</label>
                   <input type="number" min="0" step="0.01" value={newMaterial.costPerUnit}
                     onChange={(e) => setNewMaterial((prev) => ({ ...prev, costPerUnit: e.target.value }))}
                     placeholder="0.00"
                     className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
+                  <FieldError message={fe.errors['new-costPerUnit']} />
                 </div>
-                <div>
+                <div {...fe.field('new-markupPercent')}>
                   <label className="block text-xs text-gray-500 mb-1">Markup %</label>
                   <input type="number" min="0" step="0.01" value={newMaterial.markupPercent}
                     disabled={newMaterial.priceMode === 'manual'}
                     onChange={(e) => setNewMaterial((prev) => ({ ...prev, markupPercent: e.target.value }))}
                     placeholder="25"
                     className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 disabled:bg-gray-100 disabled:text-gray-400" />
+                  <FieldError message={fe.errors['new-markupPercent']} />
                 </div>
-                <div>
+                <div {...fe.field('new-unitPrice')}>
                   <label className="block text-xs text-gray-500 mb-1">Selling Price (₱)</label>
                   {newMaterial.priceMode === 'manual' ? (
                     <input type="number" min="0" step="0.01" value={newMaterial.unitPrice}
@@ -1174,6 +1167,7 @@ function InventoryContent() {
                       {formatCurrency(Number(newMaterial.costPerUnit || 0) * (1 + Number(newMaterial.markupPercent || 0) / 100))}
                     </div>
                   )}
+                  <FieldError message={fe.errors['new-unitPrice']} />
                 </div>
                 <p className="text-xs text-gray-400 pb-2">
                   This selling price is used when picking materials for products and job orders.
@@ -1194,34 +1188,43 @@ function InventoryContent() {
 
         {/* Add Premade Form */}
         {activeTab === 'finished-goods' && can('premade.add') && managesAllInventory && (
-          <form onSubmit={handleCreatePremade} className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <form onSubmit={handleCreatePremade} noValidate className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Add Premade Product</h2>
             <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
-              <input
-                type="text"
-                value={newPremade.name}
-                onChange={(e) => setNewPremade((prev) => ({ ...prev, name: e.target.value }))}
-                placeholder="Product name"
-                className="md:col-span-2 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
-              />
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={newPremade.quantity}
-                onChange={(e) => setNewPremade((prev) => ({ ...prev, quantity: e.target.value }))}
-                placeholder="Amount"
-                className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
-              />
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={newPremade.price}
-                onChange={(e) => setNewPremade((prev) => ({ ...prev, price: e.target.value }))}
-                placeholder="Price"
-                className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
-              />
+              <div {...fe.field('premade-name')} className="md:col-span-2">
+                <input
+                  type="text"
+                  value={newPremade.name}
+                  onChange={(e) => setNewPremade((prev) => ({ ...prev, name: e.target.value }))}
+                  placeholder="Product name"
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
+                />
+                <FieldError message={fe.errors['premade-name']} />
+              </div>
+              <div {...fe.field('premade-quantity')}>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={newPremade.quantity}
+                  onChange={(e) => setNewPremade((prev) => ({ ...prev, quantity: e.target.value }))}
+                  placeholder="Amount"
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
+                />
+                <FieldError message={fe.errors['premade-quantity']} />
+              </div>
+              <div {...fe.field('premade-price')}>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={newPremade.price}
+                  onChange={(e) => setNewPremade((prev) => ({ ...prev, price: e.target.value }))}
+                  placeholder="Price"
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
+                />
+                <FieldError message={fe.errors['premade-price']} />
+              </div>
               <input
                 type="text"
                 value={newPremade.category}
@@ -1229,26 +1232,29 @@ function InventoryContent() {
                 placeholder="Category"
                 className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
               />
-              <select
-                value={newPremade.branchId}
-                onChange={(e) => {
-                  setNewPremade((prev) => ({ ...prev, branchId: e.target.value }));
-                  setPremadeMaterials([{ materialId: '', quantityUsed: '' }]);
-                }}
-                required
-                className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
-              >
-                <option value="">Select location *</option>
-                {warehouse && (
-                  <option value={warehouse.id}>{warehouse.name} (stock room)</option>
-                )}
-                {branches.map(b => (
-                  <option key={b.id} value={b.id}>{b.name} (send as delivery)</option>
-                ))}
-              </select>
+              <div {...fe.field('premade-branch')}>
+                <select
+                  value={newPremade.branchId}
+                  onChange={(e) => {
+                    setNewPremade((prev) => ({ ...prev, branchId: e.target.value }));
+                    setPremadeMaterials([{ materialId: '', quantityUsed: '' }]);
+                  }}
+                  required
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
+                >
+                  <option value="">Select location *</option>
+                  {warehouse && (
+                    <option value={warehouse.id}>{warehouse.name} (stock room)</option>
+                  )}
+                  {branches.map(b => (
+                    <option key={b.id} value={b.id}>{b.name} (send as delivery)</option>
+                  ))}
+                </select>
+                <FieldError message={fe.errors['premade-branch']} />
+              </div>
             </div>
 
-            <div className="mt-4">
+            <div className="mt-4" {...fe.field('premade-materials', true)}>
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-sm font-semibold text-gray-700">Materials Used (Required)</h3>
                 <button
@@ -1261,7 +1267,7 @@ function InventoryContent() {
               </div>
               <div className="space-y-2">
                 {premadeMaterials.map((entry, index) => (
-                  <div key={index} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center">
+                  <div key={index} {...fe.field(`premade-material-${index}`)} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center">
                     <select
                       value={entry.materialId}
                       onChange={(e) => updatePremadeMaterialRow(index, 'materialId', e.target.value)}
@@ -1290,9 +1296,11 @@ function InventoryContent() {
                     >
                       Remove
                     </button>
+                    <FieldError message={fe.errors[`premade-material-${index}`]} className="md:col-span-12 mt-0" />
                   </div>
                 ))}
               </div>
+              <FieldError message={fe.errors['premade-materials']} />
               <p className="mt-2 text-xs text-gray-500">
                 Stock will be deducted automatically based on the material quantities you enter.
               </p>
@@ -1311,10 +1319,13 @@ function InventoryContent() {
 
         {/* Add Supplier Form */}
         {activeTab === 'suppliers' && can('suppliers.view') && (
-          <form onSubmit={handleCreateSupplier} className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <form onSubmit={handleCreateSupplier} noValidate className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Add Supplier</h2>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <input type="text" value={newSupplier.name} onChange={e => setNewSupplier(p => ({ ...p, name: e.target.value }))} placeholder="Supplier Name *" className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
+              <div {...fe.field('supplier-name')}>
+                <input type="text" value={newSupplier.name} onChange={e => setNewSupplier(p => ({ ...p, name: e.target.value }))} placeholder="Supplier Name *" className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
+                <FieldError message={fe.errors['supplier-name']} />
+              </div>
               <input type="text" value={newSupplier.contactPerson} onChange={e => setNewSupplier(p => ({ ...p, contactPerson: e.target.value }))} placeholder="Contact Person" className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
               <input type="text" value={newSupplier.phone} onChange={e => setNewSupplier(p => ({ ...p, phone: e.target.value }))} placeholder="Phone" className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
               <input type="email" value={newSupplier.email} onChange={e => setNewSupplier(p => ({ ...p, email: e.target.value }))} placeholder="Email" className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
@@ -1452,18 +1463,27 @@ function InventoryContent() {
 
         {/* Add Waste Log Form */}
         {activeTab === 'waste-log' && can('inventory.log_waste') && (
-          <form onSubmit={handleCreateWasteLog} className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <form onSubmit={handleCreateWasteLog} noValidate className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-1">Log Waste / Scrap</h2>
             <p className="text-xs text-gray-500 mb-4">For waste not tied to a job order (damaged or spoiled stock). Extra material used on a job order is recorded on that job order&apos;s page so it counts in its cost.</p>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-              <select value={newWaste.materialId} onChange={e => setNewWaste(p => ({ ...p, materialId: e.target.value }))} className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900">
-                <option value="">Select Material *</option>
-                {rawMaterials.map(m => (
-                  <option key={m.id} value={m.id}>{m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} available)</option>
-                ))}
-              </select>
-              <input type="number" min="0.01" step="0.01" value={newWaste.quantity} onChange={e => setNewWaste(p => ({ ...p, quantity: e.target.value }))} placeholder="Quantity Wasted *" className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
-              <input type="text" value={newWaste.reason} onChange={e => setNewWaste(p => ({ ...p, reason: e.target.value }))} placeholder="Reason (e.g. cutting error) *" className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
+              <div {...fe.field('waste-material')}>
+                <select value={newWaste.materialId} onChange={e => setNewWaste(p => ({ ...p, materialId: e.target.value }))} className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900">
+                  <option value="">Select Material *</option>
+                  {rawMaterials.map(m => (
+                    <option key={m.id} value={m.id}>{m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} available)</option>
+                  ))}
+                </select>
+                <FieldError message={fe.errors['waste-material']} />
+              </div>
+              <div {...fe.field('waste-quantity')}>
+                <input type="number" min="0.01" step="0.01" value={newWaste.quantity} onChange={e => setNewWaste(p => ({ ...p, quantity: e.target.value }))} placeholder="Quantity Wasted *" className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
+                <FieldError message={fe.errors['waste-quantity']} />
+              </div>
+              <div {...fe.field('waste-reason')}>
+                <input type="text" value={newWaste.reason} onChange={e => setNewWaste(p => ({ ...p, reason: e.target.value }))} placeholder="Reason (e.g. cutting error) *" className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
+                <FieldError message={fe.errors['waste-reason']} />
+              </div>
               <input type="text" value={newWaste.notes} onChange={e => setNewWaste(p => ({ ...p, notes: e.target.value }))} placeholder="Notes (optional)" className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
             </div>
             <div className="mt-4">
@@ -1625,13 +1645,16 @@ function InventoryContent() {
                         /* Edit mode — inline grid */
                         <div className="space-y-3">
                           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
-                            <input
-                              type="text"
-                              value={editMaterial.materialType}
-                              onChange={(e) => setEditMaterial((prev) => ({ ...prev, materialType: e.target.value }))}
-                              placeholder="Material Name"
-                              className="md:col-span-2 px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
-                            />
+                            <div {...fe.field('edit-materialType')} className="md:col-span-2">
+                              <input
+                                type="text"
+                                value={editMaterial.materialType}
+                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, materialType: e.target.value }))}
+                                placeholder="Material Name"
+                                className="w-full px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
+                              />
+                              <FieldError message={fe.errors['edit-materialType']} />
+                            </div>
                             <input
                               type="text"
                               value={editMaterial.sku}
@@ -1649,15 +1672,18 @@ function InventoryContent() {
                                 <option key={s.id} value={s.id}>{s.name}</option>
                               ))}
                             </select>
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              value={editMaterial.stockQuantity}
-                              onChange={(e) => setEditMaterial((prev) => ({ ...prev, stockQuantity: e.target.value }))}
-                              placeholder="Stock Qty"
-                              className="px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
-                            />
+                            <div {...fe.field('edit-stockQuantity')}>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={editMaterial.stockQuantity}
+                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, stockQuantity: e.target.value }))}
+                                placeholder="Stock Qty"
+                                className="w-full px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
+                              />
+                              <FieldError message={fe.errors['edit-stockQuantity']} />
+                            </div>
                             <input
                               type="text"
                               value={editMaterial.color}
@@ -1706,7 +1732,7 @@ function InventoryContent() {
                                   placeholder="25"
                                   className="w-full px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 disabled:bg-gray-100 disabled:text-gray-400" />
                               </div>
-                              <div>
+                              <div {...fe.field('edit-unitPrice')}>
                                 <label className="block text-xs text-gray-500 mb-1">Selling (₱)</label>
                                 {editMaterial.priceMode === 'manual' ? (
                                   <input type="number" min="0" step="0.01" value={editMaterial.unitPrice}
@@ -1718,6 +1744,7 @@ function InventoryContent() {
                                     {formatCurrency(Number(editMaterial.costPerUnit || 0) * (1 + Number(editMaterial.markupPercent || 0) / 100))}
                                   </div>
                                 )}
+                                <FieldError message={fe.errors['edit-unitPrice']} />
                               </div>
                             </div>
                           </div>
@@ -1925,14 +1952,17 @@ function InventoryContent() {
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
                             {editingPremadeId === item.id ? (
-                              <input
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                value={editPremade.quantity}
-                                onChange={(e) => setEditPremade((prev) => ({ ...prev, quantity: e.target.value }))}
-                                className="w-24 px-2 py-1 rounded border border-gray-200 bg-white text-sm text-gray-900"
-                              />
+                              <div {...fe.field('editPremade-quantity')}>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={editPremade.quantity}
+                                  onChange={(e) => setEditPremade((prev) => ({ ...prev, quantity: e.target.value }))}
+                                  className="w-24 px-2 py-1 rounded border border-gray-200 bg-white text-sm text-gray-900"
+                                />
+                                <FieldError message={fe.errors['editPremade-quantity']} />
+                              </div>
                             ) : (
                               <div>
                                 <span className="text-sm font-medium text-gray-900">{item.quantity}</span>
@@ -1948,14 +1978,17 @@ function InventoryContent() {
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                             {editingPremadeId === item.id ? (
-                              <input
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                value={editPremade.price}
-                                onChange={(e) => setEditPremade((prev) => ({ ...prev, price: e.target.value }))}
-                                className="w-28 px-2 py-1 rounded border border-gray-200 bg-white text-sm text-gray-900"
-                              />
+                              <div {...fe.field('editPremade-price')}>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={editPremade.price}
+                                  onChange={(e) => setEditPremade((prev) => ({ ...prev, price: e.target.value }))}
+                                  className="w-28 px-2 py-1 rounded border border-gray-200 bg-white text-sm text-gray-900"
+                                />
+                                <FieldError message={fe.errors['editPremade-price']} />
+                              </div>
                             ) : (
                               formatCurrency(item.price)
                             )}
@@ -2398,6 +2431,7 @@ function InventoryContent() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cost</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Branch</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Logged By</th>
+                      {can('inventory.log_waste') && <th className="px-4 py-3"></th>}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
@@ -2433,6 +2467,12 @@ function InventoryContent() {
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{l.branchName || '—'}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{l.loggedByName || 'System'}</td>
+                        {can('inventory.log_waste') && (
+                          <td className="px-4 py-4 whitespace-nowrap text-right">
+                            <button type="button" onClick={() => undoWaste(l)} title="Undo: return it to stock"
+                              className="text-xs text-gray-500 hover:text-red-600 hover:underline">Undo</button>
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>
@@ -2533,7 +2573,7 @@ function InventoryContent() {
                 <p className="text-sm text-gray-500">There are no active branches to give stock to.</p>
               ) : (
                 <>
-                  <div>
+                  <div {...fe.field('distribute-all')}>
                     <h3 className="mb-2 text-sm font-semibold text-gray-700">Give the same amount to every branch</h3>
                     <div className="flex items-center gap-2">
                       <input
@@ -2557,9 +2597,10 @@ function InventoryContent() {
                         Total needed: {Number(allBranchesQty) * branches.length} {distributing.unit || 'pcs'}
                       </p>
                     )}
+                    <FieldError message={fe.errors['distribute-all']} />
                   </div>
 
-                  <div className="border-t border-gray-100 pt-5">
+                  <div className="border-t border-gray-100 pt-5" {...fe.field('distribute-each', true)}>
                     <h3 className="mb-2 text-sm font-semibold text-gray-700">Or set each branch</h3>
                     <div className="space-y-2">
                       {branches.map((b) => (
@@ -2590,6 +2631,7 @@ function InventoryContent() {
                         {distributeSaving ? 'Sending…' : 'Send'}
                       </button>
                     </div>
+                    <FieldError message={fe.errors['distribute-each']} />
                   </div>
                 </>
               )}
