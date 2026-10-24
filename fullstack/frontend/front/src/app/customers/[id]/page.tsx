@@ -1,8 +1,10 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import { api, type Customer, type CustomerOrderSummary, type CustomerOnlineOrder } from '@/lib/api';
+import { api, type Customer, type CustomerOrderSummary, type CustomerOnlineOrder, type ExcessPayment } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
+import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
+import ExcessPayments from '@/components/ExcessPayments';
 
 const STATUS_COLORS: Record<string, string> = {
   pending: 'bg-yellow-100 text-yellow-800',
@@ -12,6 +14,9 @@ const STATUS_COLORS: Record<string, string> = {
   cancelled: 'bg-red-100 text-red-800',
 };
 
+const peso = (n: number) =>
+  new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(n || 0);
+
 export default function CustomerProfilePage() {
   const router = useRouter();
   const params = useParams();
@@ -19,6 +24,7 @@ export default function CustomerProfilePage() {
   const { can } = useAuth();
   // Premade product orders are only viewable by administrators and supervisors
   const canOpenProductOrders = can('product_orders.view');
+  const canManagePayments = can('payments.add');
 
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [orders, setOrders] = useState<CustomerOrderSummary[]>([]);
@@ -26,6 +32,7 @@ export default function CustomerProfilePage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const fe = useFieldErrors();
   const [saved, setSaved] = useState(false);
 
   // Editable profile fields
@@ -40,11 +47,31 @@ export default function CustomerProfilePage() {
   const [promoCode, setPromoCode] = useState('');
   const [promoDiscount, setPromoDiscount] = useState<string>('');
 
+  // What they owe and what the shop holds of theirs
+  const [balances, setBalances] = useState<{
+    unpaidTotal: number; excessTotal: number; unpaidOrders: CustomerOrderSummary[]; excessPayments: ExcessPayment[];
+  }>({ unpaidTotal: 0, excessTotal: 0, unpaidOrders: [], excessPayments: [] });
+  const applyBalances = (c: Customer) => setBalances({
+    unpaidTotal: c.unpaidTotal || 0,
+    excessTotal: c.excessTotal || 0,
+    unpaidOrders: c.unpaidOrders || [],
+    excessPayments: c.excessPayments || [],
+  });
+  /** After a refund or an apply: the balances and the order list's balances change */
+  const reloadBalances = () => {
+    api.customers.get(id).then((res) => {
+      if (!res.data) return;
+      applyBalances(res.data);
+      setOrders(res.data.orderHistory || []);
+    }).catch(() => {});
+  };
+
   useEffect(() => {
     api.customers.get(id)
       .then((res) => {
         const c = res.data!;
         setCustomer(c);
+        applyBalances(c);
         setName(c.name);
         setPhone(c.phone);
         setEmail(c.email);
@@ -61,9 +88,12 @@ export default function CustomerProfilePage() {
   }, [id]);
 
   const handleSave = async () => {
-    if (!name.trim()) { setError('Name is required.'); return; }
-    setSaving(true);
     setError('');
+    if (fe.show({
+      'customer-name': !name.trim() && 'Enter the customer name.',
+      'customer-email': emailProblem(email),
+    })) return;
+    setSaving(true);
     try {
       const res = await api.customers.update(id, {
         name: name.trim(),
@@ -151,17 +181,19 @@ export default function CustomerProfilePage() {
           {/* Profile */}
           <div className="bg-white rounded-2xl border border-gray-200 p-6 space-y-4">
             <h2 className="font-semibold text-gray-900">Profile</h2>
-            <div>
+            <div {...fe.field('customer-name')}>
               <label className="block text-xs font-medium text-gray-500 mb-1.5">Full Name <span className="text-red-500">*</span></label>
               <input type="text" value={name} onChange={(e) => setName(e.target.value)} className={inputCls} />
+              <FieldError message={fe.errors['customer-name']} />
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1.5">Phone</label>
               <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} className={inputCls} />
             </div>
-            <div>
+            <div {...fe.field('customer-email')}>
               <label className="block text-xs font-medium text-gray-500 mb-1.5">Email</label>
               <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className={inputCls} />
+              <FieldError message={fe.errors['customer-email']} />
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1.5">Address</label>
@@ -226,6 +258,57 @@ export default function CustomerProfilePage() {
               )}
             </div>
           </div>
+        </div>
+
+        {/* Balance: unpaid orders and excess payments to return */}
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="font-semibold text-gray-900">Balance</h2>
+            <div className="flex flex-wrap gap-2">
+              <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold ${balances.unpaidTotal > 0 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+                {balances.unpaidTotal > 0 ? `Unpaid ${peso(balances.unpaidTotal)}` : 'Nothing unpaid'}
+              </span>
+              {balances.excessTotal > 0 && (
+                <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold bg-amber-100 text-amber-800">
+                  Excess to return {peso(balances.excessTotal)}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {balances.unpaidOrders.length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-gray-700 mb-2">Orders with a balance</h3>
+              <div className="divide-y divide-gray-100 border border-gray-200 rounded-xl">
+                {balances.unpaidOrders.map((o) => (
+                  <button key={o.id} type="button" onClick={() => router.push(`/sales/${o.id}`)}
+                    className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-left text-sm hover:bg-gray-50">
+                    <span className="font-medium text-[#011c72]">{o.jobOrderId}</span>
+                    <span className="text-gray-500">paid {peso(o.downPayment || 0)} of {peso(o.totalPrice || 0)}</span>
+                    <span className="font-semibold text-red-600">{peso(o.balance)}</span>
+                  </button>
+                ))}
+              </div>
+              {balances.unpaidTotal > balances.unpaidOrders.reduce((s, o) => s + (o.balance || 0), 0) + 0.005 && (
+                <p className="text-xs text-gray-500 mt-2">The total also includes unpaid orders from their online account.</p>
+              )}
+            </div>
+          )}
+
+          {balances.excessPayments.length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-gray-700 mb-1">Excess payments</h3>
+              <p className="text-xs text-gray-500 mb-2">
+                Paid beyond an order&apos;s balance (e.g. a GCash transfer for more than was owed). Refund it, or apply it to one of the orders above.
+              </p>
+              <ExcessPayments
+                items={balances.excessPayments}
+                unpaidOrders={balances.unpaidOrders}
+                canManage={canManagePayments}
+                onChanged={reloadBalances}
+              />
+            </div>
+          )}
         </div>
 
         {/* Order History */}

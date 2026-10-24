@@ -44,6 +44,12 @@ if DATABASE_URL.startswith('postgresql://'):
     DATABASE_URL = 'postgresql+psycopg2://' + DATABASE_URL[len('postgresql://'):]
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+if DATABASE_URL.startswith('postgresql'):
+    # The hosted database (Neon) suspends after a few idle minutes and closes
+    # open connections. Test each pooled connection before use (replacing a dead
+    # one instead of failing the request), and retire connections before
+    # Neon's ~5-minute idle cutoff.
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {'pool_pre_ping': True, 'pool_recycle': 240}
 
 CATALOG_UPLOAD_FOLDER = os.path.join(BASE_DIR, 'static', 'catalog')
 os.makedirs(CATALOG_UPLOAD_FOLDER, exist_ok=True)
@@ -140,6 +146,13 @@ class Branch(db.Model):
     is_warehouse = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # Lifecycle: deactivated -> (optionally) archived -> deleted. A branch with
+    # records can only be deleted 30 days after deactivation.
+    deactivated_at = db.Column(db.DateTime, nullable=True)
+    archived_at = db.Column(db.DateTime, nullable=True)
+    # Deleted branches stay as a row so the history that points at them keeps
+    # its branch, but they are hidden everywhere.
+    deleted_at = db.Column(db.DateTime, nullable=True)
 
 class Customer(db.Model):
     __tablename__ = 'customers'
@@ -204,6 +217,8 @@ class JobOrder(db.Model):
     actual_cost = db.Column(db.Float, default=0)
     total_price = db.Column(db.Float, nullable=False)
     status = db.Column(db.String(50), default='pending')  # pending, in_progress, completed, voided, cancelled
+    # How urgent the work is; Worker Management lists higher priority first
+    priority = db.Column(db.String(20), default='normal')  # low, normal, high, urgent
     payment_status = db.Column(db.String(50), default='unpaid')  # unpaid, partial, paid
     down_payment = db.Column(db.Float, default=0)
     balance = db.Column(db.Float, default=0)
@@ -660,6 +675,34 @@ class PaymentRecord(db.Model):
     job_order = db.relationship('JobOrder', backref='payment_records')
     recorder = db.relationship('User', foreign_keys=[recorded_by])
 
+class ExcessPayment(db.Model):
+    """Money received on a job order beyond its balance (e.g. a GCash transfer for
+    more than was owed). It is not a payment on the order: the shop holds it until
+    it is refunded or applied to another of the customer's orders."""
+    __tablename__ = 'excess_payments'
+    id = db.Column(db.Integer, primary_key=True)
+    job_order_id = db.Column(db.Integer, db.ForeignKey('job_orders.id'), nullable=False)
+    customer_id = db.Column(db.Integer, nullable=True, index=True)
+    amount = db.Column(db.Float, nullable=False)
+    payment_method = db.Column(db.String(50), nullable=False)
+    reference_number = db.Column(db.String(100), nullable=True)
+    notes = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(20), default='open')  # open, refunded, applied
+    received_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # How it was settled
+    resolved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    resolved_at = db.Column(db.DateTime, nullable=True)
+    refund_method = db.Column(db.String(50), nullable=True)
+    refund_reference = db.Column(db.String(100), nullable=True)
+    resolution_notes = db.Column(db.Text, nullable=True)
+    applied_job_order_id = db.Column(db.Integer, db.ForeignKey('job_orders.id'), nullable=True)
+
+    job_order = db.relationship('JobOrder', foreign_keys=[job_order_id])
+    applied_job_order = db.relationship('JobOrder', foreign_keys=[applied_job_order_id])
+    receiver = db.relationship('User', foreign_keys=[received_by])
+    resolver = db.relationship('User', foreign_keys=[resolved_by])
+
 class PaymentOverrideRequest(db.Model):
     """A supervisor-initiated override of a job order's payment status/balance
     that must be approved by an administrator before it is applied."""
@@ -690,8 +733,12 @@ class ManagedWorker(db.Model):
     rate_per_hour = db.Column(db.Float, nullable=False, default=0)  # rate value (unit depends on pay_mode)
     pay_mode = db.Column(db.String(20), default='per_hour')  # per_hour | per_day | per_piece
     is_active = db.Column(db.Boolean, default=True)
+    # The worker's own login (a seat maker or sewer account), so they can see their work
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = db.relationship('User', foreign_keys=[user_id])
 
 class WorkerAssignment(db.Model):
     __tablename__ = 'worker_assignments'
@@ -978,6 +1025,18 @@ def has_perm(user, *permissions):
     granted = user.get('permissions') or ()
     return any(p in granted for p in permissions)
 
+# Workers' pay on a job order is payroll: only these roles see or change it.
+# Everyone else gets the labor lines without rates or pay.
+LABOR_COST_ROLES = ('administrator', 'owner', 'supervisor')
+
+def sees_labor_cost(user):
+    return user.get('role') in LABOR_COST_ROLES
+
+def without_labor_cost(items):
+    """Labor lines with their rate and pay taken out, for roles that may not see them."""
+    return [{k: v for k, v in it.items() if k not in ('laborCost', 'actualLaborCost')}
+            if it.get('category') == 'labor' else it for it in items or []]
+
 def all_branches(user):
     """Whether the user sees every branch rather than only their own."""
     return has_perm(user, 'branches.all')
@@ -1082,6 +1141,9 @@ def branch_to_dict(branch):
         'phone': branch.phone,
         'isWarehouse': branch.is_warehouse,
         'isActive': branch.is_active,
+        'isArchived': branch.archived_at is not None,
+        'deactivatedAt': fmt_dt(branch.deactivated_at),
+        'archivedAt': fmt_dt(branch.archived_at),
         'createdAt': fmt_dt(branch.created_at)
     }
 
@@ -1165,6 +1227,8 @@ def run_migrations():
         "ALTER TABLE inventory_materials ADD COLUMN IF NOT EXISTS low_stock_threshold REAL DEFAULT 0",
         "ALTER TABLE inventory_materials ADD COLUMN IF NOT EXISTS supplier_id INTEGER REFERENCES suppliers(id)",
         "ALTER TABLE product_orders ADD COLUMN IF NOT EXISTS amount_paid REAL DEFAULT 0.0",
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS priority VARCHAR(20) DEFAULT 'normal'",
+        "ALTER TABLE managed_workers ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)",
         "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS confirmed_by INTEGER REFERENCES users(id)",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS lockout_until TIMESTAMP",
@@ -1224,6 +1288,12 @@ def run_migrations():
         "ALTER TABLE material_waste_logs ADD COLUMN IF NOT EXISTS managed_worker_id INTEGER REFERENCES managed_workers(id)",
         "ALTER TABLE material_waste_logs ADD COLUMN IF NOT EXISTS unit_cost REAL",
         "CREATE INDEX IF NOT EXISTS ix_material_waste_logs_job_order_id ON material_waste_logs (job_order_id)",
+        # Branch lifecycle (deactivate / archive / delete)
+        "ALTER TABLE branches ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMP",
+        "ALTER TABLE branches ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP",
+        "ALTER TABLE branches ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP",
+        # Branches deactivated before the column existed start their 30-day clock now
+        "UPDATE branches SET deactivated_at = CURRENT_TIMESTAMP WHERE is_active = FALSE AND deactivated_at IS NULL",
     ]
     is_sqlite = db.engine.dialect.name == 'sqlite'
     for sql in migrations:
@@ -1274,7 +1344,9 @@ def init_db():
         {'name': 'Branch C', 'code': 'BC', 'address': '321 Branch C St', 'is_warehouse': False},
     ]
     
-    for branch_data in default_branches:
+    # Only on a brand-new database: branch codes can be edited, so matching by
+    # code would re-create a default branch whose code was changed.
+    for branch_data in (default_branches if Branch.query.count() == 0 else []):
         existing = Branch.query.filter_by(code=branch_data['code']).first()
         if not existing:
             db.session.add(Branch(
@@ -1304,7 +1376,8 @@ def init_db():
             db.session.add(item)
         db.session.commit()
 
-SESSION_TTL = timedelta(days=7)  # signed out after a week without using the system
+SESSION_TTL = timedelta(hours=12)  # signed out after 12 hours without using the system
+SESSION_REFRESH = timedelta(minutes=10)  # how often a session in use has its expiry pushed back
 SESSION_CACHE_SECONDS = 60
 
 # Per-process cache of token -> (user dict, cached_at, auth_version), so a burst
@@ -1362,8 +1435,8 @@ def get_user_from_token(token):
         return None
     version = row.auth_version or 0
 
-    # Sliding expiry, written at most once a day per session
-    if row.expires_at - now < SESSION_TTL - timedelta(days=1):
+    # Sliding expiry, written at most once every SESSION_REFRESH per session
+    if row.expires_at - now < SESSION_TTL - SESSION_REFRESH:
         UserSession.query.filter_by(token_hash=token_hash).update(
             {'expires_at': now + SESSION_TTL}, synchronize_session=False)
         db.session.commit()
@@ -3613,6 +3686,39 @@ def create_waste_log():
     return jsonify({'status': 'success', 'data': waste_log_to_dict(log)}), 201
 
 
+@app.route('/api/inventory/waste-logs/<int:log_id>', methods=['DELETE'])
+@require_auth
+@require_permission('inventory.log_waste')
+def undo_waste_log(log_id):
+    """Undo a waste entry made by mistake: the quantity goes back into stock (and,
+    for extra material on a job order, comes off that job's cost)."""
+    log = MaterialWasteLog.query.get(log_id)
+    if not log:
+        return jsonify({'status': 'error', 'message': 'That waste entry was not found'}), 404
+    order = JobOrder.query.filter_by(id=log.job_order_id).with_for_update().first() if log.job_order_id else None
+    if order:
+        error = branch_access_error(request.current_user, order.branch_id)
+        if error:
+            return error
+    material = InventoryMaterial.query.filter_by(id=log.material_id).with_for_update().first()
+    error = inventory_branch_error(request.current_user, material.branch_id if material else log.branch_id)
+    if error:
+        return error
+    if material:
+        material.stock_quantity = round(float(material.stock_quantity or 0) + float(log.quantity or 0), 4)
+        material.updated_at = datetime.now()
+    summary = f"{float(log.quantity):g} of {material.material_type if material else 'a removed material'}"
+    db.session.delete(log)
+    db.session.flush()
+    if order:
+        order.actual_cost = job_order_actual_cost(order)
+        order.updated_at = datetime.utcnow()
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'DELETE', 'Inventory',
+               f"Undid waste entry: {summary}, returned to stock{f' (job order {order.job_order_id})' if order else ''}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'message': 'Returned to stock'})
+
 @app.route('/api/sales/job-orders/<int:order_id>/extra-materials', methods=['GET'])
 @require_auth
 # Internal cost, so only for those who see job costs
@@ -3641,9 +3747,11 @@ def issue_job_order_extra_materials(order_id):
     error = branch_access_error(request.current_user, order.branch_id)
     if error:
         return error
-    if order.status not in EXTRA_MATERIAL_STATUSES:
-        return jsonify({'status': 'error', 'message': 'Extra materials can only be issued while the job order is '
-                                                      'In Progress or Completed.'}), 400
+    # A worker may have started on it while the order itself still says Pending
+    work_started = order.status == 'pending' and any(a.status == 'in_progress' for a in _assignments_for_order(order))
+    if order.status not in EXTRA_MATERIAL_STATUSES and not work_started:
+        return jsonify({'status': 'error', 'message': 'Extra materials can only be issued once work on the job '
+                                                      'order has started.'}), 400
     data = request.get_json(silent=True) or {}
     log, error = record_waste(data.get('materialId'), data.get('quantity'), data.get('reason'), data.get('notes'),
                               job_order=order, worker_id=data.get('workerId'))
@@ -3659,6 +3767,55 @@ def issue_job_order_extra_materials(order_id):
                f"Issued extra material for {order.job_order_id}: {log.quantity:g} of {log.material.material_type}, "
                f"reason: {log.reason}{who}", request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': waste_log_to_dict(log)}), 201
+
+@app.route('/api/sales/job-orders/<int:order_id>/extra-materials/<int:log_id>', methods=['DELETE'])
+@require_auth
+@require_permission('inventory.log_waste')
+def undo_job_order_extra_material(order_id, log_id):
+    """Undo extra material recorded by mistake: the quantity goes back into stock
+    and comes off the job's actual cost."""
+    order = JobOrder.query.filter_by(id=order_id).with_for_update().first()
+    if not order:
+        return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
+    error = branch_access_error(request.current_user, order.branch_id)
+    if error:
+        return error
+    log = MaterialWasteLog.query.filter_by(id=log_id, job_order_id=order.id).first()
+    if not log:
+        return jsonify({'status': 'error', 'message': 'That extra material entry was not found'}), 404
+    material = InventoryMaterial.query.filter_by(id=log.material_id).with_for_update().first()
+    if material:
+        error = inventory_branch_error(request.current_user, material.branch_id)
+        if error:
+            return error
+        material.stock_quantity = round(float(material.stock_quantity or 0) + float(log.quantity or 0), 4)
+        material.updated_at = datetime.now()
+    summary = (f"{float(log.quantity):g} of {material.material_type if material else 'a removed material'}"
+               f"{f' (worker: {log.worker.name})' if log.worker else ''}")
+    db.session.delete(log)
+    db.session.flush()
+    order.actual_cost = job_order_actual_cost(order)
+    order.updated_at = datetime.utcnow()
+    db.session.commit()
+    reason = ((request.get_json(silent=True) or {}).get('reason') or '').strip()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'DELETE', 'Sales',
+               f"Undid extra material for {order.job_order_id}: {summary}, returned to stock"
+               f"{f'. Reason: {reason}' if reason else ''}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'message': 'Returned to stock'})
+
+@app.route('/api/worker-extra-materials', methods=['GET'])
+@require_auth
+@require_permission('workers.view')
+def get_worker_extra_materials():
+    """Extra material issued under a worker's name, newest first. Filter by
+    workerId and/or jobOrderId; with neither, every entry that names a worker."""
+    query = MaterialWasteLog.query.filter(MaterialWasteLog.managed_worker_id.isnot(None))
+    if request.args.get('workerId'):
+        query = query.filter(MaterialWasteLog.managed_worker_id == request.args.get('workerId', type=int))
+    if request.args.get('jobOrderId'):
+        query = query.filter(MaterialWasteLog.job_order_id == request.args.get('jobOrderId', type=int))
+    logs = query.order_by(MaterialWasteLog.created_at.desc()).all()
+    return jsonify({'status': 'success', 'data': [waste_log_to_dict(l) for l in logs]})
 
 # ============================================
 # PAYMENTS
@@ -3736,16 +3893,31 @@ def create_payment():
         return jsonify({'status': 'error', 'message': 'Amount must be positive'}), 400
     amount = money(amount)
     remaining = money(max(float(job_order.total_price or 0) - float(job_order.down_payment or 0), 0))
+    method = data.get('paymentMethod', 'cash')
+    reference = (data.get('referenceNumber') or '').strip() or None
+    notes = (data.get('notes') or '').strip() or None
+    excess = None
     if amount > remaining:
-        return jsonify({'status': 'error',
-                        'message': f'Payment can\'t be more than the remaining balance of ₱{remaining:,.2f}'
-                                   if remaining > 0 else 'This order is already fully paid'}), 400
+        if remaining <= 0:
+            return jsonify({'status': 'error', 'message': 'This order is already fully paid'}), 400
+        # Cash over the balance is change, handed back on the spot. Money sent
+        # online can't be, so the extra is kept on record until it is returned.
+        if method == 'cash' or not data.get('recordExcess'):
+            return jsonify({'status': 'error',
+                            'message': f'Payment can\'t be more than the remaining balance of ₱{remaining:,.2f}'}), 400
+        excess = ExcessPayment(
+            job_order_id=job_order.id, customer_id=job_order.customer_id,
+            amount=money(amount - remaining), payment_method=method, reference_number=reference,
+            notes=notes, received_by=request.current_user['id'],
+        )
+        db.session.add(excess)
+        amount = remaining
     payment = PaymentRecord(
         job_order_id=job_order.id,
         amount=amount,
-        payment_method=data.get('paymentMethod', 'cash'),
-        reference_number=data.get('referenceNumber', '').strip() or None,
-        notes=data.get('notes', '').strip() or None,
+        payment_method=method,
+        reference_number=reference,
+        notes=notes,
         recorded_by=request.current_user['id'],
     )
     db.session.add(payment)
@@ -3757,7 +3929,161 @@ def create_payment():
     refresh_job_order_balance(job_order)
     db.session.commit()
     log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Payment', f"Recorded payment of {amount} for {job_order.job_order_id}", request.remote_addr or '0.0.0.0')
-    return jsonify({'status': 'success', 'data': payment_record_to_dict(payment)}), 201
+    if excess:
+        log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Payment',
+                   f"Recorded excess of {excess.amount} on {job_order.job_order_id}, to be returned to the customer",
+                   request.remote_addr or '0.0.0.0')
+    result = payment_record_to_dict(payment)
+    result['excess'] = excess_payment_to_dict(excess) if excess else None
+    return jsonify({'status': 'success', 'data': result}), 201
+
+# ── Excess payments: money received beyond a job order's balance ─────────────
+
+def excess_payment_to_dict(e):
+    return {
+        'id': e.id,
+        'jobOrderId': e.job_order_id,
+        'jobOrderRef': e.job_order.job_order_id if e.job_order else None,
+        'customerId': e.customer_id,
+        'customerName': e.job_order.customer_name if e.job_order else None,
+        'amount': float(e.amount),
+        'paymentMethod': e.payment_method,
+        'referenceNumber': e.reference_number,
+        'notes': e.notes,
+        'status': e.status,
+        'receivedByName': e.receiver.full_name if e.receiver else None,
+        'createdAt': fmt_dt(e.created_at),
+        'resolvedByName': e.resolver.full_name if e.resolver else None,
+        'resolvedAt': fmt_dt(e.resolved_at) if e.resolved_at else None,
+        'refundMethod': e.refund_method,
+        'refundReference': e.refund_reference,
+        'resolutionNotes': e.resolution_notes,
+        'appliedJobOrderId': e.applied_job_order_id,
+        'appliedJobOrderRef': e.applied_job_order.job_order_id if e.applied_job_order else None,
+    }
+
+def open_excess_by_customer(customer_ids):
+    """{customer id: total excess still to be returned}"""
+    if not customer_ids:
+        return {}
+    rows = (db.session.query(ExcessPayment.customer_id, db.func.sum(ExcessPayment.amount))
+            .filter(ExcessPayment.customer_id.in_(customer_ids), ExcessPayment.status == 'open')
+            .group_by(ExcessPayment.customer_id))
+    return {cid: money(total or 0) for cid, total in rows}
+
+@app.route('/api/excess-payments', methods=['GET'])
+@require_auth
+@require_permission('payments.view', 'sales.view', 'customers.view')
+def get_excess_payments():
+    user = request.current_user
+    query = ExcessPayment.query
+    if request.args.get('jobOrderId'):
+        query = query.filter(db.or_(ExcessPayment.job_order_id == request.args.get('jobOrderId', type=int),
+                                    ExcessPayment.applied_job_order_id == request.args.get('jobOrderId', type=int)))
+    if request.args.get('customerId'):
+        query = query.filter_by(customer_id=request.args.get('customerId', type=int))
+    if request.args.get('status'):
+        query = query.filter_by(status=request.args['status'])
+    rows = query.order_by(ExcessPayment.created_at.desc()).all()
+    if not all_job_order_branches(user):
+        rows = [e for e in rows if e.job_order and e.job_order.branch_id == user.get('branchId')]
+    return jsonify({'status': 'success', 'data': [excess_payment_to_dict(e) for e in rows]})
+
+def open_excess_or_error(excess_id):
+    """(the open excess row, locked, or None, error response)"""
+    excess = ExcessPayment.query.filter_by(id=excess_id).with_for_update().first()
+    if not excess:
+        return None, (jsonify({'status': 'error', 'message': 'Excess payment not found'}), 404)
+    error = branch_access_error(request.current_user, excess.job_order.branch_id)
+    if error:
+        return None, error
+    if excess.status != 'open':
+        return None, (jsonify({'status': 'error', 'message': f'This excess was already {excess.status}'}), 400)
+    return excess, None
+
+@app.route('/api/excess-payments/<int:excess_id>/refund', methods=['POST'])
+@require_auth
+@require_permission('payments.add')
+def refund_excess_payment(excess_id):
+    """The excess was sent back to the customer."""
+    excess, error = open_excess_or_error(excess_id)
+    if error:
+        return error
+    data = request.get_json() or {}
+    method = data.get('refundMethod')
+    if method not in PAYMENT_METHODS:
+        return jsonify({'status': 'error', 'message': 'Choose how the money was returned'}), 400
+    excess.status = 'refunded'
+    excess.refund_method = method
+    excess.refund_reference = (data.get('referenceNumber') or '').strip() or None
+    excess.resolution_notes = (data.get('notes') or '').strip() or None
+    excess.resolved_by = request.current_user['id']
+    excess.resolved_at = datetime.utcnow()
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Payment',
+               f"Refunded excess of {excess.amount} from {excess.job_order.job_order_id} via {method}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': excess_payment_to_dict(excess)})
+
+@app.route('/api/excess-payments/<int:excess_id>/apply', methods=['POST'])
+@require_auth
+@require_permission('payments.add')
+def apply_excess_payment(excess_id):
+    """Use the excess as payment on another of the same customer's orders. If it is
+    more than that order's balance, the rest stays open."""
+    excess, error = open_excess_or_error(excess_id)
+    if error:
+        return error
+    data = request.get_json() or {}
+    target = JobOrder.query.filter_by(id=data.get('jobOrderId')).with_for_update().first() \
+        if isinstance(data.get('jobOrderId'), int) else None
+    if not target:
+        return jsonify({'status': 'error', 'message': 'Choose the order to apply it to'}), 400
+    error = branch_access_error(request.current_user, target.branch_id)
+    if error:
+        return error
+    if not excess.customer_id or target.customer_id != excess.customer_id:
+        return jsonify({'status': 'error', 'message': 'It can only be applied to an order of the same customer'}), 400
+    if target.id == excess.job_order_id:
+        return jsonify({'status': 'error', 'message': 'Choose a different order'}), 400
+    if target.status in ('draft', 'cancelled', 'voided'):
+        return jsonify({'status': 'error', 'message': f'A {target.status} job order cannot take payments'}), 400
+    remaining = money(max(float(target.total_price or 0) - float(target.down_payment or 0), 0))
+    if remaining <= 0:
+        return jsonify({'status': 'error', 'message': f'{target.job_order_id} is already fully paid'}), 400
+
+    applied = min(money(excess.amount), remaining)
+    now = datetime.utcnow()
+    source_ref = excess.job_order.job_order_id
+    db.session.add(PaymentRecord(
+        job_order_id=target.id, amount=applied, payment_method=excess.payment_method,
+        reference_number=excess.reference_number, notes=f'Excess payment from {source_ref}',
+        recorded_by=request.current_user['id'],
+    ))
+    if applied < excess.amount:
+        # Split: the applied part is recorded as its own settled row, the rest stays open
+        settled = ExcessPayment(
+            job_order_id=excess.job_order_id, customer_id=excess.customer_id, amount=applied,
+            payment_method=excess.payment_method, reference_number=excess.reference_number,
+            notes=excess.notes, received_by=excess.received_by, created_at=excess.created_at,
+        )
+        db.session.add(settled)
+        excess.amount = money(excess.amount - applied)
+    else:
+        settled = excess
+    settled.status = 'applied'
+    settled.applied_job_order_id = target.id
+    settled.resolved_by = request.current_user['id']
+    settled.resolved_at = now
+    db.session.flush()
+    target.down_payment = money(db.session.query(db.func.coalesce(db.func.sum(PaymentRecord.amount), 0))
+                                .filter(PaymentRecord.job_order_id == target.id).scalar())
+    refresh_job_order_balance(target)
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Payment',
+               f"Applied {applied} excess from {source_ref} to {target.job_order_id}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': excess_payment_to_dict(settled)})
 
 @app.route('/api/payments/summary', methods=['GET'])
 @require_auth
@@ -4269,7 +4595,7 @@ def get_job_orders():
             'branchName': jo.branch.name if jo.branch else '',
             'description': jo.description,
             'vehicleInfo': jo.vehicle_info,
-            'items': jo.items,
+            'items': jo.items if sees_labor_cost(user) else without_labor_cost(jo.items),
             'slipData': jo.slip_data,
             'estimatedCost': jo.estimated_cost,
             'actualCost': jo.actual_cost,
@@ -4280,6 +4606,7 @@ def get_job_orders():
             # VAT already inside the total, worked out here so every screen agrees
             'vatAmount': vat_breakdown(jo.total_price, jo.vat_percent)['vat'],
             'status': jo.status,
+            'priority': jo.priority or 'normal',
             'paymentStatus': jo.payment_status,
             'downPayment': jo.down_payment,
             'balance': jo.balance,
@@ -4327,7 +4654,8 @@ def get_job_order(order_id):
         'branchName': order.branch.name if order.branch else '',
         'description': order.description,
         'vehicleInfo': order.vehicle_info,
-        'items': items_with_assignment_status(order),
+        'items': items_with_assignment_status(order) if sees_labor_cost(user)
+                 else without_labor_cost(items_with_assignment_status(order)),
         'slipData': order.slip_data,
         'estimatedCost': order.estimated_cost,
         'actualCost': order.actual_cost,
@@ -4338,6 +4666,7 @@ def get_job_order(order_id):
         # VAT already inside the total, worked out here so every screen agrees
         'vatAmount': vat_breakdown(order.total_price, order.vat_percent)['vat'],
         'status': order.status,
+        'priority': order.priority or 'normal',
         'paymentStatus': order.payment_status,
         'downPayment': order.down_payment,
         'balance': order.balance,
@@ -4358,6 +4687,7 @@ def get_job_order(order_id):
 # The price for the work (VAT included, before discount) is at most 8 digits
 MAX_JOB_ORDER_PRICE = 99_999_999.99
 PRICING_KEYS = ('priceForWork', 'discountPercent', 'vatIncluded', 'totalPrice', 'vatPercent')
+JOB_ORDER_PRIORITIES = ('low', 'normal', 'high', 'urgent')
 
 def job_order_entered_price(order):
     """The VAT-inclusive price before discount that gives this order's stored total."""
@@ -4376,8 +4706,9 @@ def job_order_pricing(data, order=None):
     priced at. Older browsers that still send totalPrice have it read as the
     final, VAT-inclusive price."""
     try:
-        d = float(data['discountPercent'] if 'discountPercent' in data else
-                  (order.discount_percent if order else None) or 0)
+        # No discount may come as null (the job order page sends that), which means 0
+        d = float((data['discountPercent'] if 'discountPercent' in data else
+                   (order.discount_percent if order else None)) or 0)
         if 'priceForWork' in data:
             price = float(data['priceForWork'] or 0)
         elif 'totalPrice' in data and data['totalPrice'] is not None:
@@ -4520,11 +4851,14 @@ def create_job_order():
         description=data.get('description', '') or '',
         vehicle_info=data.get('vehicleInfo'),
         items=items,
-        slip_data=data.get('slipData'),
+        # The cutter and sewer on the slip are set by those who manage labor
+        slip_data=data.get('slipData') if sees_labor_cost(request.current_user) or not data.get('slipData')
+                  else {k: v for k, v in data['slipData'].items() if k not in ('cutterName', 'sewerName')},
         estimated_cost=estimated_cost,
         actual_cost=0,
         total_price=total_price,
         status='draft' if is_draft else 'pending',
+        priority=data.get('priority') if data.get('priority') in JOB_ORDER_PRIORITIES else 'normal',
         payment_status=payment_status,
         down_payment=down_payment,
         balance=balance,
@@ -4641,6 +4975,12 @@ def update_job_order(order_id):
         return jsonify({'status': 'error', 'message': f"{', '.join(locked_fields)} can't be set here. Record payments "
                                                       f"on the Payments panel or request a payment override."}), 400
 
+    # Other roles never received the labor rates, so their copy of the labor lines
+    # can't be saved back: keep the order's own labor lines as they are
+    if 'items' in data and not sees_labor_cost(user):
+        data['items'] = [it for it in (data['items'] or []) if it.get('category') != 'labor'] + \
+                        [it for it in (order.items or []) if it.get('category') == 'labor']
+
     # Capture previous status and branch BEFORE any updates
     prev_status = order.status
     prev_branch_id = order.branch_id
@@ -4720,6 +5060,10 @@ def update_job_order(order_id):
             return jsonify({'status': 'error', 'message': material_error}), 400
 
     # Update allowed fields
+    if 'priority' in data:
+        if data['priority'] not in JOB_ORDER_PRIORITIES:
+            return jsonify({'status': 'error', 'message': 'Priority must be low, normal, high or urgent'}), 400
+        order.priority = data['priority']
     if 'status' in data:
         order.status = data['status']
     if pricing:
@@ -4748,7 +5092,14 @@ def update_job_order(order_id):
         # Free up workers who were booked on this order but never started
         release_pending_assignments(order)
     if 'slipData' in data:
-        order.slip_data = data['slipData']
+        slip = dict(data['slipData'] or {})
+        # The cutter and sewer on the slip are set by those who manage labor
+        if not sees_labor_cost(user):
+            for key in ('cutterName', 'sewerName'):
+                slip.pop(key, None)
+                if (order.slip_data or {}).get(key):
+                    slip[key] = order.slip_data[key]
+        order.slip_data = slip
 
     # A new price changes what is still owed
     if pricing:
@@ -4862,6 +5213,7 @@ def update_job_order(order_id):
             'id': order.id,
             'jobOrderId': order.job_order_id,
             'status': order.status,
+            'priority': order.priority or 'normal',
             'paymentStatus': order.payment_status,
             'downPayment': order.down_payment,
             'balance': order.balance,
@@ -4872,7 +5224,8 @@ def update_job_order(order_id):
             'vatInclusive': bool(order.vat_inclusive),
             # VAT already inside the total, worked out here so every screen agrees
             'vatAmount': vat_breakdown(order.total_price, order.vat_percent)['vat'],
-            'items': items_with_assignment_status(order),
+            'items': items_with_assignment_status(order) if sees_labor_cost(user)
+                     else without_labor_cost(items_with_assignment_status(order)),
             'completedAt': order.completed_at.strftime('%Y-%m-%d') if order.completed_at else None,
             'updatedAt': order.updated_at.strftime('%Y-%m-%d')
         }
@@ -5009,7 +5362,7 @@ def get_all_orders():
             'branchName': jo.branch.name if jo.branch else '',
             'description': jo.description,
             'vehicleInfo': jo.vehicle_info,
-            'items': jo.items,
+            'items': jo.items if sees_labor_cost(user) else without_labor_cost(jo.items),
             'slipData': jo.slip_data,
             'estimatedCost': jo.estimated_cost,
             'actualCost': jo.actual_cost,
@@ -5020,6 +5373,7 @@ def get_all_orders():
             # VAT already inside the total, worked out here so every screen agrees
             'vatAmount': vat_breakdown(jo.total_price, jo.vat_percent)['vat'],
             'status': jo.status,
+            'priority': jo.priority or 'normal',
             'paymentStatus': jo.payment_status,
             'downPayment': jo.down_payment,
             'balance': jo.balance,
@@ -7318,6 +7672,47 @@ def ph_report_period():
         return None, None, None, None, (jsonify({'status': 'error', 'message': 'Invalid date format'}), 400)
     return start_date, end_date, start_utc, end_utc, None
 
+@app.route('/api/reports/extra-materials', methods=['GET'])
+@require_auth
+@require_permission('reports.inventory')
+def get_extra_materials_report():
+    """Extra material issued for job orders in the period (recuts, defects,
+    rework): totals by worker and by reason, plus each entry."""
+    start_date, end_date, start_dt, end_dt, error = ph_report_period()
+    if error:
+        return error
+    branch_ids, error = inventory_read_branches(request.current_user, request.args.get('branchId'))
+    if error:
+        return error
+    query = MaterialWasteLog.query.filter(MaterialWasteLog.job_order_id.isnot(None),
+                                          MaterialWasteLog.created_at >= start_dt,
+                                          MaterialWasteLog.created_at <= end_dt)
+    if branch_ids is not None:
+        query = query.filter(MaterialWasteLog.branch_id.in_(branch_ids or [-1]))
+    logs = query.order_by(MaterialWasteLog.created_at.desc()).all()
+    entries = [waste_log_to_dict(l) for l in logs]
+
+    def group(key, label):
+        out = {}
+        for e in entries:
+            row = out.setdefault(key(e), {'key': key(e), 'label': label(e), 'count': 0, 'value': 0.0})
+            row['count'] += 1
+            row['value'] += e['value']
+        return sorted(({**r, 'value': money(r['value'])} for r in out.values()), key=lambda r: -r['value'])
+
+    return jsonify({'status': 'success', 'data': {
+        'period': {'startDate': start_date, 'endDate': end_date},
+        'summary': {
+            'count': len(entries),
+            'totalValue': money(sum(e['value'] for e in entries)),
+            'jobOrders': len({e['jobOrderId'] for e in entries}),
+            'unassigned': sum(1 for e in entries if not e['workerId']),
+        },
+        'byWorker': group(lambda e: e['workerId'] or 0, lambda e: e['workerName'] or 'No worker named'),
+        'byReason': group(lambda e: (e['reason'] or '').strip().lower(), lambda e: (e['reason'] or '').strip() or '—'),
+        'entries': entries,
+    }})
+
 @app.route('/api/reports/sales', methods=['GET'])
 @require_auth
 @require_permission('reports.sales')
@@ -8652,11 +9047,15 @@ def get_roles():
 def get_branches():
     """Get all branches from database"""
     include_inactive = request.args.get('includeInactive', 'false').lower() == 'true'
-    
-    if include_inactive:
-        branches_list = Branch.query.all()
-    else:
-        branches_list = Branch.query.filter_by(is_active=True).all()
+    include_archived = request.args.get('includeArchived', 'false').lower() == 'true'
+
+    # Deleted branches never come back; archived ones only when asked for
+    query = Branch.query.filter(Branch.deleted_at.is_(None))
+    if not include_inactive:
+        query = query.filter_by(is_active=True)
+    elif not include_archived:
+        query = query.filter(Branch.archived_at.is_(None))
+    branches_list = query.all()
     
     return jsonify({'status': 'success', 'data': [branch_to_dict(b) for b in branches_list]})
 
@@ -8686,7 +9085,9 @@ def create_branch():
     # Check if code already exists
     existing = Branch.query.filter_by(code=data['code']).first()
     if existing:
-        return jsonify({'status': 'error', 'message': 'Branch code already exists'}), 400
+        message = ('Branch code already exists' if existing.deleted_at is None
+                   else 'This code belonged to a deleted branch. Choose another code.')
+        return jsonify({'status': 'error', 'message': message}), 400
     
     new_branch = Branch(
         name=data['name'],
@@ -8710,7 +9111,7 @@ def create_branch():
 def update_branch(branch_id):
     """Update a branch"""
     branch = Branch.query.get(branch_id)
-    if not branch:
+    if not branch or branch.deleted_at is not None:
         return jsonify({'status': 'error', 'message': 'Branch not found'}), 404
     
     data = request.get_json()
@@ -8718,17 +9119,30 @@ def update_branch(branch_id):
     if 'name' in data:
         branch.name = data['name']
     if 'code' in data:
-        # Check if new code conflicts with another branch
-        existing = Branch.query.filter_by(code=data['code']).first()
+        new_code = str(data['code'] or '').strip().upper()
+        if not new_code:
+            return jsonify({'status': 'error', 'message': 'Branch code is required'}), 400
+        # Check if new code conflicts with another branch (deleted ones keep theirs)
+        existing = Branch.query.filter_by(code=new_code).first()
         if existing and existing.id != branch_id:
-            return jsonify({'status': 'error', 'message': 'Branch code already exists'}), 400
-        branch.code = data['code']
+            message = ('Branch code already exists' if existing.deleted_at is None
+                       else 'This code belonged to a deleted branch. Choose another code.')
+            return jsonify({'status': 'error', 'message': message}), 400
+        if new_code != branch.code:
+            rename_branch_sku_suffixes(branch, branch.code, new_code)
+            branch.code = new_code
     if 'address' in data:
         branch.address = data['address']
     if 'isWarehouse' in data:
         branch.is_warehouse = data['isWarehouse']
-    if 'isActive' in data:
-        branch.is_active = data['isActive']
+    if 'isActive' in data and bool(data['isActive']) != bool(branch.is_active):
+        branch.is_active = bool(data['isActive'])
+        if branch.is_active:
+            # Reactivating restarts the lifecycle (and the 30-day delete clock)
+            branch.deactivated_at = None
+            branch.archived_at = None
+        else:
+            branch.deactivated_at = datetime.utcnow()
     if 'phone' in data:
         branch.phone = data['phone'] or None
 
@@ -8737,6 +9151,137 @@ def update_branch(branch_id):
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Settings', f"Updated branch: {branch.name}", request.remote_addr or '0.0.0.0')
     
     return jsonify({'status': 'success', 'data': branch_to_dict(branch)})
+
+def rename_branch_sku_suffixes(branch, old_code, new_code):
+    """Stock received at a branch gets a SKU ending in the branch code
+    (e.g. FG-001-BA, or FG-001-BA-2), and lookups rebuild that SKU from the
+    current code. Carry the branch's SKUs over to the new code so items already
+    received are still found. A SKU whose new form is taken is left as is."""
+    pattern = re.compile(rf'-{re.escape(old_code)}(-\d+)?$')
+    for product in PremadeProduct.query.filter_by(branch_id=branch.id).all():
+        match = pattern.search(product.sku or '')
+        if not match:
+            continue
+        new_sku = product.sku[:match.start()] + f'-{new_code}' + (match.group(1) or '')
+        if not PremadeProduct.query.filter(PremadeProduct.sku == new_sku, PremadeProduct.id != product.id).first():
+            product.sku = new_sku
+
+BRANCH_DELETE_WAIT_DAYS = 30
+
+def branch_record_blockers(branch):
+    """Every record that points at this branch, as human-readable counts.
+
+    Found from the foreign keys themselves, so a new table that references
+    branches is covered without updating a list here."""
+    blockers = []
+    for table in db.metadata.sorted_tables:
+        if table.name == 'branches':
+            continue
+        cols = [c for c in table.columns
+                if any(fk.target_fullname == 'branches.id' for fk in c.foreign_keys)]
+        if not cols:
+            continue
+        count = db.session.execute(
+            db.select(db.func.count()).select_from(table)
+            .where(db.or_(*[c == branch.id for c in cols]))
+        ).scalar()
+        if count:
+            blockers.append(f"{count} {table.name.replace('_', ' ')}")
+    return blockers
+
+def branch_delete_check(branch):
+    """(can_delete, reason, blockers) for deleting this branch."""
+    if branch.is_warehouse and Branch.query.filter(
+            Branch.is_warehouse.is_(True), Branch.deleted_at.is_(None), Branch.id != branch.id).count() == 0:
+        return False, 'This is the only warehouse. Stock flows depend on it, so it cannot be deleted.', []
+
+    active_users = User.query.filter(
+        User.is_active.is_(True),
+        db.or_(User.branch_id == branch.id, User.branch == branch.name)).count()
+    if active_users:
+        return (False,
+                f"{active_users} active user account{'s are' if active_users != 1 else ' is'} assigned to this branch. "
+                'Move them to another branch or deactivate them first.', [])
+
+    blockers = branch_record_blockers(branch)
+    if not blockers:
+        return True, '', []
+
+    if branch.is_active or branch.deactivated_at is None:
+        return (False,
+                f'This branch has existing records. Deactivate it first; it can be deleted '
+                f'{BRANCH_DELETE_WAIT_DAYS} days after deactivation.', blockers)
+    eligible_at = branch.deactivated_at + timedelta(days=BRANCH_DELETE_WAIT_DAYS)
+    now = datetime.utcnow()
+    if now < eligible_at:
+        days_left = (eligible_at - now).days + 1
+        return (False,
+                f'This branch has existing records, so it must stay deactivated for '
+                f'{BRANCH_DELETE_WAIT_DAYS} days before it can be deleted. '
+                f"{days_left} day{'s' if days_left != 1 else ''} left.", blockers)
+    return True, '', blockers
+
+@app.route('/api/settings/branches/<int:branch_id>/archive', methods=['POST'])
+@require_auth
+@require_permission('branches.manage')
+def archive_branch(branch_id):
+    """Archive a branch: deactivated and hidden from the branch list."""
+    branch = Branch.query.get(branch_id)
+    if not branch or branch.deleted_at is not None:
+        return jsonify({'status': 'error', 'message': 'Branch not found'}), 404
+    now = datetime.utcnow()
+    if branch.is_active:
+        branch.is_active = False
+        branch.deactivated_at = now
+    branch.archived_at = branch.archived_at or now
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Settings', f"Archived branch: {branch.name}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': branch_to_dict(branch)})
+
+@app.route('/api/settings/branches/<int:branch_id>/unarchive', methods=['POST'])
+@require_auth
+@require_permission('branches.manage')
+def unarchive_branch(branch_id):
+    """Bring an archived branch back to the list. It stays deactivated."""
+    branch = Branch.query.get(branch_id)
+    if not branch or branch.deleted_at is not None:
+        return jsonify({'status': 'error', 'message': 'Branch not found'}), 404
+    branch.archived_at = None
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Settings', f"Restored archived branch: {branch.name}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': branch_to_dict(branch)})
+
+@app.route('/api/settings/branches/<int:branch_id>/delete-check', methods=['GET'])
+@require_auth
+@require_permission('branches.manage')
+def check_branch_deletable(branch_id):
+    """Lets the confirmation dialog say up front whether the delete will go through."""
+    branch = Branch.query.get(branch_id)
+    if not branch or branch.deleted_at is not None:
+        return jsonify({'status': 'error', 'message': 'Branch not found'}), 404
+    can_delete, reason, blockers = branch_delete_check(branch)
+    return jsonify({'status': 'success', 'data': {
+        'canDelete': can_delete, 'reason': reason, 'blockers': blockers}})
+
+@app.route('/api/settings/branches/<int:branch_id>', methods=['DELETE'])
+@require_auth
+@require_permission('branches.manage')
+def delete_branch(branch_id):
+    """Delete a branch. The row is kept (marked deleted) so the records that
+    point at it keep their branch; it no longer appears anywhere."""
+    branch = Branch.query.get(branch_id)
+    if not branch or branch.deleted_at is not None:
+        return jsonify({'status': 'error', 'message': 'Branch not found'}), 404
+    can_delete, reason, _ = branch_delete_check(branch)
+    if not can_delete:
+        return jsonify({'status': 'error', 'message': reason}), 400
+    now = datetime.utcnow()
+    branch.is_active = False
+    branch.deactivated_at = branch.deactivated_at or now
+    branch.deleted_at = now
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'DELETE', 'Settings', f"Deleted branch: {branch.name}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': None})
 
 @app.route('/api/settings/system', methods=['GET'])
 @require_auth
@@ -8772,28 +9317,43 @@ def update_system_setting(key):
 # MANAGED WORKERS & ASSIGNMENTS
 # ============================================
 
+# Login roles a Worker Management worker can be linked to
+WORKER_ACCOUNT_ROLES = ('seat_maker', 'sewer')
+
+def managed_worker_to_dict(w):
+    return {
+        'id': w.id,
+        'name': w.name,
+        'workType': w.work_type,
+        # Pay rates are payroll: only for those who see labor cost
+        'ratePerHour': w.rate_per_hour if sees_labor_cost(request.current_user) else None,
+        'payMode': w.pay_mode or 'per_hour',
+        'isActive': w.is_active,
+        'createdAt': fmt_dt(w.created_at),
+        'userId': w.user_id,
+        'userName': (w.user.full_name or w.user.username) if w.user else None,
+    }
+
 @app.route('/api/managed-workers', methods=['GET'])
 @require_auth
 @require_permission('workers.view', 'sales.edit')
 def list_managed_workers():
     workers = ManagedWorker.query.order_by(ManagedWorker.name).all()
-    return jsonify({
-        'status': 'success',
-        'data': {
-            'workers': [
-                {
-                    'id': w.id,
-                    'name': w.name,
-                    'workType': w.work_type,
-                    'ratePerHour': w.rate_per_hour,
-                    'payMode': w.pay_mode or 'per_hour',
-                    'isActive': w.is_active,
-                    'createdAt': fmt_dt(w.created_at),
-                }
-                for w in workers
-            ]
-        }
-    })
+    return jsonify({'status': 'success', 'data': {'workers': [managed_worker_to_dict(w) for w in workers]}})
+
+@app.route('/api/managed-workers/linkable-accounts', methods=['GET'])
+@require_auth
+@require_permission('workers.edit')
+def list_linkable_worker_accounts():
+    """Seat maker and sewer logins, with the worker each is linked to (if any)."""
+    linked = dict(db.session.query(ManagedWorker.user_id, ManagedWorker.id).filter(ManagedWorker.user_id.isnot(None)))
+    users = (User.query.join(Role, Role.id == User.role_id)
+             .filter(Role.key.in_(WORKER_ACCOUNT_ROLES), User.is_active.is_(True))
+             .order_by(User.full_name).all())
+    return jsonify({'status': 'success', 'data': [
+        {'id': u.id, 'fullName': u.full_name, 'username': u.username, 'linkedWorkerId': linked.get(u.id)}
+        for u in users
+    ]})
 
 @app.route('/api/managed-workers', methods=['POST'])
 @require_auth
@@ -8810,20 +9370,32 @@ def create_managed_worker():
         return jsonify({'error': 'name and workType are required'}), 400
     worker = ManagedWorker(name=name, work_type=work_type, rate_per_hour=rate, pay_mode=pay_mode)
     db.session.add(worker)
+    db.session.flush()
+    error = link_worker_account(worker, data)
+    if error:
+        db.session.rollback()
+        return error
     db.session.commit()
-    return jsonify({
-        'status': 'success',
-        'data': {
-            'worker': {
-                'id': worker.id,
-                'name': worker.name,
-                'workType': worker.work_type,
-                'ratePerHour': worker.rate_per_hour,
-                'payMode': worker.pay_mode or 'per_hour',
-                'isActive': worker.is_active,
-            }
-        }
-    }), 201
+    return jsonify({'status': 'success', 'data': {'worker': managed_worker_to_dict(worker)}}), 201
+
+def link_worker_account(worker, data):
+    """Set or clear the worker's login from data['userId'] (if given). Error response or None."""
+    if 'userId' not in data:
+        return None
+    if not data['userId']:
+        worker.user_id = None
+        return None
+    try:
+        account = User.query.get(int(data['userId']))
+    except (TypeError, ValueError):
+        account = None
+    if not account or not account.role or account.role.key not in WORKER_ACCOUNT_ROLES:
+        return jsonify({'status': 'error', 'message': 'Choose a seat maker or sewer account'}), 400
+    other = ManagedWorker.query.filter(ManagedWorker.user_id == account.id, ManagedWorker.id != worker.id).first()
+    if other:
+        return jsonify({'status': 'error', 'message': f'That account is already linked to {other.name}'}), 400
+    worker.user_id = account.id
+    return None
 
 @app.route('/api/managed-workers/<int:worker_id>', methods=['PUT'])
 @require_auth
@@ -8843,20 +9415,41 @@ def update_managed_worker(worker_id):
         worker.pay_mode = data['payMode']
     if 'isActive' in data:
         worker.is_active = bool(data['isActive'])
+    error = link_worker_account(worker, data)
+    if error:
+        db.session.rollback()
+        return error
     db.session.commit()
-    return jsonify({
-        'status': 'success',
-        'data': {
-            'worker': {
-                'id': worker.id,
-                'name': worker.name,
-                'workType': worker.work_type,
-                'ratePerHour': worker.rate_per_hour,
-                'payMode': worker.pay_mode or 'per_hour',
-                'isActive': worker.is_active,
-            }
-        }
-    })
+    return jsonify({'status': 'success', 'data': {'worker': managed_worker_to_dict(worker)}})
+
+@app.route('/api/my-work', methods=['GET'])
+@require_auth
+def get_my_work():
+    """A worker's own assignments, for the seat maker / sewer dashboard."""
+    worker = ManagedWorker.query.filter_by(user_id=request.current_user['id']).first()
+    if not worker:
+        return jsonify({'status': 'success', 'data': {'linked': False}})
+    rows = WorkerAssignment.query.filter_by(worker_id=worker.id).order_by(WorkerAssignment.created_at.desc()).all()
+    order_ids = {a.job_order_db_id for a in rows if a.job_order_db_id}
+    orders = {o.id: o for o in JobOrder.query.filter(JobOrder.id.in_(order_ids))} if order_ids else {}
+    return jsonify({'status': 'success', 'data': {
+        'linked': True,
+        'worker': {'name': worker.name, 'workType': worker.work_type, 'payMode': worker.pay_mode or 'per_hour'},
+        'assignments': [{
+            'id': a.id,
+            'jobOrderRef': a.job_order_ref,
+            'title': a.special_task_title if a.assignment_type == 'special_task' else a.job_order_ref,
+            'description': a.description,
+            'customerName': orders[a.job_order_db_id].customer_name if a.job_order_db_id in orders else None,
+            'vehicle': orders[a.job_order_db_id].vehicle_info if a.job_order_db_id in orders else None,
+            'priority': (orders[a.job_order_db_id].priority if a.job_order_db_id in orders else None) or 'normal',
+            'scheduledDate': a.scheduled_date.isoformat() if a.scheduled_date else None,
+            'status': a.status,
+            'hoursWorked': a.hours_worked,
+            'pay': a.pay if a.status == 'completed' else None,
+            'endTime': fmt_dt(a.end_time),
+        } for a in rows],
+    }})
 
 @app.route('/api/managed-workers/<int:worker_id>', methods=['DELETE'])
 @require_auth
@@ -8878,6 +9471,9 @@ def list_worker_assignments():
     if worker_id:
         query = query.filter_by(worker_id=worker_id)
     assignments = query.order_by(WorkerAssignment.created_at.desc()).all()
+    order_ids = {a.job_order_db_id for a in assignments if a.job_order_db_id}
+    priorities = dict(db.session.query(JobOrder.id, JobOrder.priority).filter(JobOrder.id.in_(order_ids))) \
+        if order_ids else {}
     result = []
     for a in assignments:
         is_overdue = False
@@ -8896,6 +9492,7 @@ def list_worker_assignments():
             'payMode': (a.worker.pay_mode or 'per_hour') if a.worker else 'per_hour',
             'jobOrderRef': a.job_order_ref,
             'jobOrderDbId': a.job_order_db_id,
+            'jobOrderPriority': priorities.get(a.job_order_db_id) or 'normal',
             'description': a.description,
             'expectedHours': a.expected_hours,
             'startTime': fmt_dt(a.start_time),
@@ -8953,7 +9550,20 @@ def create_worker_assignment():
         existing = WorkerAssignment.query.filter_by(
             worker_id=worker_id, job_order_db_id=order.id, description=description,
         ).first()
+    scheduled_date = None
+    if data.get('scheduledDate'):
+        try:
+            from datetime import date as _date
+            scheduled_date = _date.fromisoformat(data['scheduledDate'])
+        except Exception:
+            pass
     if existing:
+        # Assigning it again with a date (dropped on the calendar) schedules the
+        # existing assignment for that day instead of being silently ignored
+        if scheduled_date and existing.status != 'completed' and existing.scheduled_date != scheduled_date:
+            existing.scheduled_date = scheduled_date
+            existing.updated_at = datetime.utcnow()
+            db.session.commit()
         return jsonify({
             'status': 'success',
             'data': {
@@ -8963,18 +9573,12 @@ def create_worker_assignment():
                     'workerName': worker.name,
                     'jobOrderRef': existing.job_order_ref,
                     'description': existing.description,
+                    'scheduledDate': existing.scheduled_date.isoformat() if existing.scheduled_date else None,
                     'status': existing.status,
                 }
             }
         })
     special_task_title = (data.get('specialTaskTitle') or '').strip() or None
-    scheduled_date = None
-    if data.get('scheduledDate'):
-        try:
-            from datetime import date as _date
-            scheduled_date = _date.fromisoformat(data['scheduledDate'])
-        except Exception:
-            pass
     assignment = WorkerAssignment(
         worker_id=worker_id,
         job_order_ref=order.job_order_id if order else job_order_ref,
@@ -9023,6 +9627,52 @@ def update_worker_assignment(assignment_id):
     if new_status and new_status not in ASSIGNMENT_STATUSES:
         msg = 'Status must be pending, in progress or completed'
         return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
+
+    # Move a task that hasn't started to another worker
+    if data.get('workerId') and finite_number(data['workerId']) and int(data['workerId']) != assignment.worker_id:
+        if assignment.status != 'pending':
+            msg = 'Only a task that has not started can move to another worker'
+            return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
+        new_worker = ManagedWorker.query.get(int(data['workerId']))
+        if not new_worker or not new_worker.is_active:
+            msg = 'Worker not found'
+            return jsonify({'status': 'error', 'error': msg, 'message': msg}), 404
+        if order and WorkerAssignment.query.filter(
+                WorkerAssignment.worker_id == new_worker.id, WorkerAssignment.job_order_db_id == order.id,
+                WorkerAssignment.description == assignment.description, WorkerAssignment.id != assignment.id).first():
+            msg = f'{new_worker.name} already has this task on {order.job_order_id}'
+            return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
+        old_worker = assignment.worker
+        assignment.worker_id = new_worker.id
+        if order:
+            # The job order's labor line follows: new name, and their rate unless a custom one was set
+            items = [dict(it) for it in (order.items or [])]
+            for it in items:
+                if it.get('assignmentId') == assignment.id:
+                    it['workerId'] = new_worker.id
+                    it['workerName'] = new_worker.name
+                    if old_worker and float(it.get('laborCost') or 0) == float(old_worker.rate_per_hour or 0):
+                        it['laborCost'] = float(new_worker.rate_per_hour or 0)
+            order.items = items
+            order.actual_cost = job_order_actual_cost(order, items)
+        log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Workers',
+                   f"Moved {assignment.job_order_ref} ({assignment.description or 'task'}) from "
+                   f"{old_worker.name if old_worker else 'a worker'} to {new_worker.name}",
+                   request.remote_addr or '0.0.0.0')
+
+    # Reopening a finished task: its recorded time and pay no longer stand
+    if new_status and assignment.status == 'completed' and new_status != 'completed':
+        assignment.end_time = None
+        assignment.hours_worked = None
+        assignment.pay = None
+        assignment.pay_override = None
+        assignment.materials_used = None
+        if new_status == 'pending':
+            assignment.start_time = None
+        log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Workers',
+                   f"Reopened {assignment.job_order_ref} ({assignment.description or 'task'}) for "
+                   f"{assignment.worker.name if assignment.worker else 'a worker'}; its pay was cleared",
+                   request.remote_addr or '0.0.0.0')
     for key in ('hoursWorked', 'payOverride', 'unitsWorked', 'expectedHours'):
         if data.get(key) not in (None, ''):
             value = finite_number(data[key])
@@ -9109,7 +9759,8 @@ def update_worker_assignment(assignment_id):
 @require_auth
 @require_permission('workers.view')
 def get_assignments_calendar():
-    """Return all assignments for a worker in a given month, keyed by date."""
+    """Scheduled assignments in a month, keyed by date: one worker's, or every
+    worker's when no workerId is given (the team view)."""
     worker_id = request.args.get('workerId', type=int)
     month = request.args.get('month')  # YYYY-MM
     query = WorkerAssignment.query.filter(WorkerAssignment.scheduled_date.isnot(None))
@@ -9127,18 +9778,28 @@ def get_assignments_calendar():
         except Exception:
             pass
     items = query.all()
+    order_ids = {a.job_order_db_id for a in items if a.job_order_db_id}
+    priorities = dict(db.session.query(JobOrder.id, JobOrder.priority).filter(JobOrder.id.in_(order_ids)))         if order_ids else {}
+    rank = {'urgent': 0, 'high': 1, 'normal': 2, 'low': 3}
     result = {}
     for a in items:
         d = a.scheduled_date.isoformat()
         result.setdefault(d, []).append({
             'id': a.id,
+            'workerId': a.worker_id,
             'jobOrderRef': a.job_order_ref,
+            'jobOrderDbId': a.job_order_db_id,
+            'jobOrderPriority': priorities.get(a.job_order_db_id) or 'normal',
             'assignmentType': a.assignment_type or 'job_order',
             'specialTaskTitle': a.special_task_title,
             'workerName': a.worker.name if a.worker else '',
             'status': a.status,
             'description': a.description,
+            'scheduledDate': d,
         })
+    # Most urgent first within each day
+    for day in result.values():
+        day.sort(key=lambda x: rank.get(x['jobOrderPriority'], 2))
     return jsonify({'status': 'success', 'data': result})
 
 @app.route('/api/worker-assignments/<int:assignment_id>', methods=['DELETE'])
@@ -9858,6 +10519,29 @@ def customer_order_counts(customers):
                 counts[user_to_customer[uid]] += n
     return counts
 
+UNBILLED_JOB_STATUSES = ('draft', 'cancelled', 'voided')
+
+def customer_unpaid_totals(customers):
+    """{customer id: what they still owe}: balances on their job orders plus, for
+    customers with an online account, unpaid product orders."""
+    ids = [c.id for c in customers]
+    user_to_customer = {c.user_id: c.id for c in customers if c.user_id}
+    owed = dict.fromkeys(ids, 0.0)
+    if ids:
+        for cid, total in (db.session.query(JobOrder.customer_id, db.func.sum(JobOrder.balance))
+                           .filter(JobOrder.customer_id.in_(ids), JobOrder.balance > 0,
+                                   JobOrder.status.notin_(UNBILLED_JOB_STATUSES))
+                           .group_by(JobOrder.customer_id)):
+            owed[cid] += float(total or 0)
+    if user_to_customer:
+        for uid, total, paid in (db.session.query(ProductOrder.user_id, db.func.sum(ProductOrder.total_amount),
+                                                  db.func.sum(db.func.coalesce(ProductOrder.amount_paid, 0)))
+                                 .filter(ProductOrder.user_id.in_(list(user_to_customer)),
+                                         ProductOrder.status != 'cancelled')
+                                 .group_by(ProductOrder.user_id)):
+            owed[user_to_customer[uid]] += max(float(total or 0) - float(paid or 0), 0)
+    return {cid: money(v) for cid, v in owed.items()}
+
 @app.route('/api/customers/search', methods=['GET'])
 @require_auth
 @require_permission('customers.view')
@@ -9892,12 +10576,16 @@ def get_customers():
         )
     customers = query.order_by(Customer.name.asc()).all()
     counts = customer_order_counts(customers)
+    unpaid = customer_unpaid_totals(customers)
+    excess = open_excess_by_customer([c.id for c in customers])
     usernames = dict(db.session.query(User.id, User.username)
                      .filter(User.id.in_([c.user_id for c in customers if c.user_id])))
     data = []
     for c in customers:
         row = customer_to_dict(c)
         row['orderCount'] = counts.get(c.id, 0)
+        row['unpaidTotal'] = unpaid.get(c.id, 0)
+        row['excessTotal'] = excess.get(c.id, 0)
         row['username'] = usernames.get(c.user_id)
         data.append(row)
     return jsonify({'status': 'success', 'data': data})
@@ -9959,6 +10647,15 @@ def get_customer(customer_id):
                            'createdAt': o.created_at.strftime('%Y-%m-%d') if o.created_at else None})
         online.sort(key=lambda o: o['createdAt'] or '', reverse=True)
     result['onlineOrders'] = online
+
+    # What they owe, and what the shop holds of theirs
+    result['unpaidTotal'] = customer_unpaid_totals([customer]).get(customer.id, 0)
+    result['unpaidOrders'] = [o for o in order_history
+                              if (o['balance'] or 0) > 0 and o['status'] not in UNBILLED_JOB_STATUSES]
+    excess_rows = ExcessPayment.query.filter_by(customer_id=customer.id) \
+        .order_by(ExcessPayment.created_at.desc()).all()
+    result['excessPayments'] = [excess_payment_to_dict(e) for e in excess_rows]
+    result['excessTotal'] = money(sum(e.amount for e in excess_rows if e.status == 'open'))
     return jsonify({'status': 'success', 'data': result})
 
 @app.route('/api/customers/<int:customer_id>', methods=['PUT'])
@@ -10101,6 +10798,7 @@ def chat_message_to_dict(m):
         'id': m.id,
         'senderId': m.sender_id,
         'senderName': m.sender.full_name if m.sender else 'Unknown',
+        'senderUsername': m.sender.username if m.sender else '',
         'senderRole': m.sender.role.key if (m.sender and m.sender.role) else '',
         'content': m.content,
         'createdAt': m.created_at.strftime('%Y-%m-%dT%H:%M:%S') if m.created_at else None,

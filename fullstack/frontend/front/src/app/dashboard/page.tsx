@@ -4,6 +4,7 @@ import { useAuth } from '@/context/AuthContext';
 import { api, DashboardStats, Alert, Activity, type DashboardPeriod } from '@/lib/api';
 import { formatDateTime as formatDate } from '@/lib/dateUtils';
 import Link from 'next/link';
+import MyWork from '@/components/MyWork';
 
 const PERIOD_OPTIONS: { value: DashboardPeriod; label: string }[] = [
   { value: 'today', label: 'Today' },
@@ -230,17 +231,8 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Worker accounts: their tasks are run from Worker Management by an admin */}
-        {isWorkerAccount && (
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-8 max-w-2xl">
-            <h2 className="text-lg font-semibold text-gray-900">Your work assignments</h2>
-            <p className="text-sm text-gray-600 mt-2">
-              Jobs are assigned to you by your supervisor or administrator through Worker Management.
-              Ask them for your schedule, and let them know when you start and finish a task so your
-              hours and pay are recorded.
-            </p>
-          </div>
-        )}
+        {/* Worker accounts: their own tasks, assigned and run from Worker Management */}
+        {isWorkerAccount && <MyWork />}
 
         {/* Stats Cards - For staff only */}
         {isStaff && (

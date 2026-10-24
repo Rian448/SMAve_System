@@ -149,6 +149,37 @@ export interface Customer {
   orderCount?: number;
   /** Detail only: orders placed through the online account */
   onlineOrders?: CustomerOnlineOrder[];
+  /** What they still owe across their orders */
+  unpaidTotal?: number;
+  /** Excess payments the shop still has to return (refund or apply) */
+  excessTotal?: number;
+  /** Detail only: job orders with a balance left */
+  unpaidOrders?: CustomerOrderSummary[];
+  /** Detail only: every excess payment, open and settled */
+  excessPayments?: ExcessPayment[];
+}
+
+/** Money received on a job order beyond its balance, held until returned */
+export interface ExcessPayment {
+  id: number;
+  jobOrderId: number;
+  jobOrderRef?: string | null;
+  customerId?: number | null;
+  customerName?: string | null;
+  amount: number;
+  paymentMethod: string;
+  referenceNumber?: string | null;
+  notes?: string | null;
+  status: 'open' | 'refunded' | 'applied';
+  receivedByName?: string | null;
+  createdAt: string;
+  resolvedByName?: string | null;
+  resolvedAt?: string | null;
+  refundMethod?: string | null;
+  refundReference?: string | null;
+  resolutionNotes?: string | null;
+  appliedJobOrderId?: number | null;
+  appliedJobOrderRef?: string | null;
 }
 
 export interface CustomerOnlineOrder {
@@ -566,6 +597,7 @@ export interface ChatMessage {
   id: number;
   senderId: number;
   senderName: string;
+  senderUsername?: string;
   senderRole: string;
   content: string;
   createdAt: string;
@@ -691,11 +723,43 @@ export interface ManagedWorker {
   id: number;
   name: string;
   workType: string;
+  /** Hidden (0) for roles that may not see labor cost */
   ratePerHour: number;
   /** per_hour | per_day | per_piece */
   payMode: 'per_hour' | 'per_day' | 'per_piece';
   isActive: boolean;
   createdAt?: string;
+  /** The worker's own login (a seat maker or sewer account), if linked */
+  userId?: number | null;
+  userName?: string | null;
+}
+
+/** A seat maker or sewer login that a worker can be linked to */
+export interface LinkableWorkerAccount {
+  id: number;
+  fullName: string;
+  username: string;
+  linkedWorkerId?: number | null;
+}
+
+/** What a seat maker or sewer sees of their own work */
+export interface MyWork {
+  linked: boolean;
+  worker?: { name: string; workType: string; payMode: string };
+  assignments?: {
+    id: number;
+    jobOrderRef: string;
+    title: string;
+    description?: string | null;
+    customerName?: string | null;
+    vehicle?: { make?: string; model?: string; year?: number; plateNumber?: string } | null;
+    priority: JobOrderPriority;
+    scheduledDate?: string | null;
+    status: 'pending' | 'in_progress' | 'completed';
+    hoursWorked?: number | null;
+    pay?: number | null;
+    endTime?: string | null;
+  }[];
 }
 
 export interface WorkerAssignment {
@@ -707,6 +771,8 @@ export interface WorkerAssignment {
   payMode: 'per_hour' | 'per_day' | 'per_piece';
   jobOrderRef: string;
   jobOrderDbId?: number;
+  /** The job order's priority (normal for special tasks) */
+  jobOrderPriority?: JobOrderPriority;
   description?: string;
   expectedHours?: number;
   startTime?: string;
@@ -742,10 +808,35 @@ export interface VehicleInfo {
   color?: string;
 }
 
+export type JobOrderPriority = 'low' | 'normal' | 'high' | 'urgent';
+
+/** An assignment as the Worker Management calendar shows it on its day */
+export interface CalendarAssignment {
+  id: number;
+  workerId: number;
+  workerName: string;
+  jobOrderRef: string;
+  jobOrderDbId?: number | null;
+  jobOrderPriority?: JobOrderPriority;
+  assignmentType: string;
+  specialTaskTitle?: string;
+  status: string;
+  description?: string;
+  scheduledDate: string;
+}
+
+/** Order to work through job orders in: most urgent first */
+export const PRIORITY_RANK: Record<JobOrderPriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+
+export const PRIORITY_LABELS: Record<JobOrderPriority, string> = {
+  urgent: 'Urgent', high: 'High', normal: 'Normal', low: 'Low',
+};
+
 export interface JobOrder {
   id: number;
   jobOrderId: string;
   customerId?: number;
+  priority?: JobOrderPriority;
   customerName: string;
   customerPhone: string;
   customerEmail: string;
@@ -1003,6 +1094,15 @@ export interface BranchSettlementSummary {
   completedOrders: number;
 }
 
+/** Extra material issued for job orders in a period, by worker and by reason */
+export interface ExtraMaterialsReport {
+  period: { startDate: string; endDate: string };
+  summary: { count: number; totalValue: number; jobOrders: number; unassigned: number };
+  byWorker: { key: number; label: string; count: number; value: number }[];
+  byReason: { key: string; label: string; count: number; value: number }[];
+  entries: MaterialWasteLog[];
+}
+
 export interface BranchSettlementReport {
   period: { startDate: string; endDate: string };
   summary: BranchSettlementSummary[];
@@ -1028,6 +1128,9 @@ export interface Branch {
   phone?: string;
   isWarehouse: boolean;
   isActive: boolean;
+  isArchived?: boolean;
+  deactivatedAt?: string | null;
+  archivedAt?: string | null;
   createdAt?: string;
 }
 
@@ -1041,20 +1144,24 @@ export interface Role {
 // AUTH TOKEN MANAGEMENT
 // ============================================
 
+// Kept in sessionStorage, so closing the browser signs the user out — shop
+// computers are shared, and the next person shouldn't find someone else signed in.
 let authToken: string | null = null;
 
 export const setAuthToken = (token: string | null) => {
   authToken = token;
   if (token) {
-    localStorage.setItem('authToken', token);
+    sessionStorage.setItem('authToken', token);
   } else {
-    localStorage.removeItem('authToken');
+    sessionStorage.removeItem('authToken');
   }
 };
 
 export const getAuthToken = (): string | null => {
   if (!authToken && typeof window !== 'undefined') {
-    authToken = localStorage.getItem('authToken');
+    // A token left over from when it was kept for good is dropped, not reused
+    localStorage.removeItem('authToken');
+    authToken = sessionStorage.getItem('authToken');
   }
   return authToken;
 };
@@ -1392,6 +1499,9 @@ export const api = {
     },
     createWasteLog: (data: { materialId: number; quantity: number; reason: string; notes?: string; branchId?: number }) =>
       fetchApi<MaterialWasteLog>('/api/inventory/waste-logs', { method: 'POST', body: JSON.stringify(data) }),
+    /** Undo a waste entry made by mistake: the quantity goes back into stock */
+    undoWasteLog: (id: number) =>
+      fetchApi<void>(`/api/inventory/waste-logs/${id}`, { method: 'DELETE' }),
 
     // AI Predictions
     ai: {
@@ -1421,9 +1531,25 @@ export const api = {
       const q = params?.jobOrderId ? `?jobOrderId=${params.jobOrderId}` : '';
       return fetchApi<PaymentRecord[]>(`/api/payments${q}`);
     },
-    create: (data: { jobOrderId: number; amount: number; paymentMethod: string; referenceNumber?: string; notes?: string }) =>
-      fetchApi<PaymentRecord>('/api/payments', { method: 'POST', body: JSON.stringify(data) }),
+    /** recordExcess: for non-cash payments over the balance, keep the extra as an excess payment */
+    create: (data: { jobOrderId: number; amount: number; paymentMethod: string; referenceNumber?: string; notes?: string; recordExcess?: boolean }) =>
+      fetchApi<PaymentRecord & { excess?: ExcessPayment | null }>('/api/payments', { method: 'POST', body: JSON.stringify(data) }),
     getSummary: () => fetchApi<PaymentSummary>('/api/payments/summary'),
+  },
+
+  excessPayments: {
+    list: (params: { jobOrderId?: number; customerId?: number; status?: string }) => {
+      const q = new URLSearchParams();
+      if (params.jobOrderId) q.set('jobOrderId', String(params.jobOrderId));
+      if (params.customerId) q.set('customerId', String(params.customerId));
+      if (params.status) q.set('status', params.status);
+      return fetchApi<ExcessPayment[]>(`/api/excess-payments?${q}`);
+    },
+    refund: (id: number, data: { refundMethod: string; referenceNumber?: string; notes?: string }) =>
+      fetchApi<ExcessPayment>(`/api/excess-payments/${id}/refund`, { method: 'POST', body: JSON.stringify(data) }),
+    /** Pays another of the same customer's orders with it; any rest stays open */
+    apply: (id: number, jobOrderId: number) =>
+      fetchApi<ExcessPayment>(`/api/excess-payments/${id}/apply`, { method: 'POST', body: JSON.stringify({ jobOrderId }) }),
   },
 
   // ==================
@@ -1495,6 +1621,9 @@ export const api = {
       fetchApi<MaterialWasteLog[]>(`/api/sales/job-orders/${jobOrderId}/extra-materials`),
     issueExtraMaterials: (jobOrderId: number, data: { materialId: number; quantity: number; reason: string; workerId?: number; notes?: string }) =>
       fetchApi<MaterialWasteLog>(`/api/sales/job-orders/${jobOrderId}/extra-materials`, { method: 'POST', body: JSON.stringify(data) }),
+    /** Undo an extra material entry made by mistake: it goes back into stock */
+    undoExtraMaterial: (jobOrderId: number, logId: number) =>
+      fetchApi<void>(`/api/sales/job-orders/${jobOrderId}/extra-materials/${logId}`, { method: 'DELETE' }),
 
     // Draft job orders — saved but not confirmed; excluded from normal lists/counts
     getDrafts: () => fetchApi<JobOrder[]>('/api/sales/drafts'),
@@ -1745,6 +1874,13 @@ export const api = {
       return fetchApi<AuditLog[]>(`/api/reports/audit-trail?${query}`);
     },
 
+    getExtraMaterialsReport: (params: { startDate?: string; endDate?: string; branchId?: number }) => {
+      const q = new URLSearchParams();
+      if (params.startDate) q.set('startDate', params.startDate);
+      if (params.endDate) q.set('endDate', params.endDate);
+      if (params.branchId) q.set('branchId', String(params.branchId));
+      return fetchApi<ExtraMaterialsReport>(`/api/reports/extra-materials?${q}`);
+    },
     getSettlementReport: (params?: { startDate?: string; endDate?: string }) => {
       const query = new URLSearchParams();
       if (params?.startDate) query.append('startDate', params.startDate);
@@ -1834,10 +1970,26 @@ export const api = {
     getRoles: () => fetchApi<Role[]>('/api/settings/roles'),
     
     // Branches
-    getBranches: (includeInactive?: boolean) => {
-      const query = includeInactive ? '?includeInactive=true' : '';
+    getBranches: (includeInactive?: boolean, includeArchived?: boolean) => {
+      const query = includeInactive
+        ? `?includeInactive=true${includeArchived ? '&includeArchived=true' : ''}`
+        : '';
       return fetchApi<Branch[]>(`/api/settings/branches${query}`);
     },
+
+    archiveBranch: (id: number) =>
+      fetchApi<Branch>(`/api/settings/branches/${id}/archive`, { method: 'POST' }),
+
+    unarchiveBranch: (id: number) =>
+      fetchApi<Branch>(`/api/settings/branches/${id}/unarchive`, { method: 'POST' }),
+
+    checkBranchDeletable: (id: number) =>
+      fetchApi<{ canDelete: boolean; reason: string; blockers: string[] }>(
+        `/api/settings/branches/${id}/delete-check`,
+      ),
+
+    deleteBranch: (id: number) =>
+      fetchApi<null>(`/api/settings/branches/${id}`, { method: 'DELETE' }),
     
     getBranchesPublic: () => fetchApi<Branch[]>('/api/settings/branches/public'),
     
@@ -1866,12 +2018,23 @@ export const api = {
   managedWorkers: {
     list: () =>
       fetchApi<{ workers: ManagedWorker[] }>('/api/managed-workers'),
-    create: (data: { name: string; workType: string; ratePerHour: number; payMode?: string }) =>
+    /** Seat maker and sewer logins a worker can be linked to */
+    linkableAccounts: () => fetchApi<LinkableWorkerAccount[]>('/api/managed-workers/linkable-accounts'),
+    /** The signed-in worker's own assignments */
+    myWork: () => fetchApi<MyWork>('/api/my-work'),
+    /** Extra material issued under workers' names (filter by worker and/or job order) */
+    extraMaterials: (params: { workerId?: number; jobOrderId?: number } = {}) => {
+      const q = new URLSearchParams();
+      if (params.workerId) q.set('workerId', String(params.workerId));
+      if (params.jobOrderId) q.set('jobOrderId', String(params.jobOrderId));
+      return fetchApi<MaterialWasteLog[]>(`/api/worker-extra-materials?${q}`);
+    },
+    create: (data: { name: string; workType: string; ratePerHour: number; payMode?: string; userId?: number | null }) =>
       fetchApi<{ worker: ManagedWorker }>('/api/managed-workers', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: number, data: Partial<{ name: string; workType: string; ratePerHour: number; payMode: string; isActive: boolean }>) =>
+    update: (id: number, data: Partial<{ name: string; workType: string; ratePerHour: number; payMode: string; isActive: boolean; userId: number | null }>) =>
       fetchApi<{ worker: ManagedWorker }>(`/api/managed-workers/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -1883,16 +2046,18 @@ export const api = {
       const query = workerId ? `?workerId=${workerId}` : '';
       return fetchApi<{ assignments: WorkerAssignment[] }>(`/api/worker-assignments${query}`);
     },
-    getCalendar: (params: { workerId: number; month: string }) =>
-      fetchApi<Record<string, Array<{ id: number; jobOrderRef: string; assignmentType: string; specialTaskTitle?: string; workerName: string; status: string; description?: string }>>>(
-        `/api/worker-assignments/calendar?workerId=${params.workerId}&month=${params.month}`
+    /** Scheduled work by date: one worker's, or everyone's when workerId is left out */
+    getCalendar: (params: { workerId?: number; month: string }) =>
+      fetchApi<Record<string, CalendarAssignment[]>>(
+        `/api/worker-assignments/calendar?month=${params.month}${params.workerId ? `&workerId=${params.workerId}` : ''}`
       ),
     create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string; scheduledDate?: string; assignmentType?: string; specialTaskTitle?: string }) =>
       fetchApi<{ assignment: WorkerAssignment }>('/api/worker-assignments', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: number, data: Partial<{ status: string; hoursWorked: number; unitsWorked: number; payOverride: number; materialsUsed: object[]; expectedHours: number; notes: string; description: string; scheduledDate: string }>) =>
+    /** workerId moves a task that hasn't started to another worker */
+    update: (id: number, data: Partial<{ status: string; hoursWorked: number; unitsWorked: number; payOverride: number; materialsUsed: object[]; expectedHours: number; notes: string; description: string; scheduledDate: string; workerId: number }>) =>
       fetchApi<{ assignment: WorkerAssignment }>(`/api/worker-assignments/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),

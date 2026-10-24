@@ -1,15 +1,16 @@
 'use client';
-import { formatDate, manilaDateString } from '@/lib/dateUtils';
+import { formatDate, manilaDateString, nextSaturdayManila } from '@/lib/dateUtils';
 import { useEffect, useRef, useState, Suspense, type ReactElement } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import {
   api, ApiError, type Customer, type FinishedGood, type RawMaterial, type Branch,
-  type PremadeDraft,
+  type PremadeDraft, type ManagedWorker,
   vatBreakdown, jobOrderTotalFrom, jobOrderPriceBreakdown, MAX_JOB_ORDER_PRICE, isValidPriceInput,
 } from '@/lib/api';
 import Combobox from '@/components/Combobox';
 import { useVatRate } from '@/lib/useVatRate';
+import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
 
 interface MaterialItem {
   id: string;
@@ -100,6 +101,8 @@ function NewJobOrderForm() {
   const orderBranchValid = orderBranchId !== '' && retailBranches.some((b) => b.id === orderBranchId);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // Problems with a specific field are shown next to it; `error` is for the rest
+  const fe = useFieldErrors();
   // ?premadeDraftId=… : editing a saved premade draft (no stock is taken until it is confirmed)
   const premadeDraftParam = searchParams.get('premadeDraftId');
   const editingPremadeDraftId = premadeDraftParam ? Number(premadeDraftParam) : null;
@@ -157,7 +160,8 @@ function NewJobOrderForm() {
   );
 
   // Service Information
-  const [estimatedCompletionDate, setEstimatedCompletionDate] = useState('');
+  // Defaults to the next Saturday; staff can pick another date
+  const [estimatedCompletionDate, setEstimatedCompletionDate] = useState(() => nextSaturdayManila());
   const [priority, setPriority] = useState('normal');
 
   // Services Selection
@@ -189,8 +193,18 @@ function NewJobOrderForm() {
   const [pockets, setPockets] = useState('');
   const [logo, setLogo] = useState('');
   const [specification, setSpecification] = useState('');
+  // Cutter and sewer are picked from the workers of that type, by those who manage labor
+  const seesLaborCost = !!user && ['administrator', 'owner', 'supervisor'].includes(user.role);
   const [cutterName, setCutterName] = useState('');
   const [sewerName, setSewerName] = useState('');
+  const [slipWorkers, setSlipWorkers] = useState<ManagedWorker[]>([]);
+
+  useEffect(() => {
+    if (!seesLaborCost) return;
+    api.managedWorkers.list().then(res => {
+      setSlipWorkers((res.data?.workers || []).filter(w => w.isActive));
+    }).catch(() => {});
+  }, [seesLaborCost]);
 
   // Payment
   const [paymentMethod, setPaymentMethod] = useState('cash');
@@ -420,7 +434,7 @@ function NewJobOrderForm() {
   const vatAmount = vatBreakdown(finalTotal, vatPct).vat;
 
   const goNext = () => {
-    setError('');
+    setError(''); fe.clear();
     setStep((s) => s + 1);
   };
 
@@ -454,6 +468,7 @@ function NewJobOrderForm() {
           setEstimatedTotal(jobOrderPriceBreakdown(Number(d.totalPrice), d.discountPercent, d.vatPercent, true).subtotal);
         }
         if (d.notes) setNotes(d.notes);
+        if (d.priority) setPriority(d.priority);
         if (d.estimatedCompletion) setEstimatedCompletionDate(String(d.estimatedCompletion).slice(0, 10));
 
         const v = d.vehicleInfo || {};
@@ -511,14 +526,15 @@ function NewJobOrderForm() {
   // Save the current (possibly incomplete) job order as a draft so work isn't lost.
   // Drafts stay out of sales/pending counts until confirmed.
   const saveDraft = async () => {
-    if (!customerName.trim()) { setError('Enter a customer name to save a draft.'); return; }
-    setLoading(true); setError('');
+    setError('');
+    const draftProblems = {
+      orderBranch: choosesBranch && !orderBranchValid && 'Choose which branch this job order is for.',
+      customerName: !customerName.trim() && 'Enter a customer name to save a draft.',
+      customerEmail: emailProblem(customerEmail),
+    };
+    if (Object.values(draftProblems).some(Boolean)) { setStep(1); fe.show(draftProblems); return; }
+    setLoading(true);
     try {
-      if (choosesBranch && !orderBranchValid) {
-        setError('Choose which branch this job order is for.');
-        setLoading(false);
-        return;
-      }
       const branchId = choosesBranch ? (orderBranchId as number) : (user?.branchId || 1);
 
       const selectedServices: string[] = [];
@@ -554,6 +570,7 @@ function NewJobOrderForm() {
         vehicleInfo,
         items: normalizedItems,
         notes,
+        priority,
         ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
         vatIncluded: vatOn,
         ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, priceForWork: estimatedTotal } : {}),
@@ -577,49 +594,40 @@ function NewJobOrderForm() {
     e.preventDefault();
 
     if (orderType === 'normal' && step < 5) {
-      if (step === 1) {
-        if (choosesBranch && !orderBranchValid) { setError('Choose which branch this job order is for.'); return; }
-        if (!customerName.trim()) { setError('Customer name is required.'); return; }
-      }
+      setError('');
+      if (step === 1 && fe.show({
+        orderBranch: choosesBranch && !orderBranchValid && 'Choose which branch this job order is for.',
+        customerName: !customerName.trim() && 'Customer name is required.',
+        customerEmail: emailProblem(customerEmail),
+      })) return;
       if (step === 3) {
-        if (estimatedCompletionDate && estimatedCompletionDate < manilaDateString()) {
-          setError('Estimated completion date cannot be in the past.');
-          return;
-        }
         const anyService = flooring.selected || reupholstery.selected || ceiling.selected ||
           sidings.selected || seatCovers.selected || otherServices.selected;
-        if (!anyService) { setError('Please select at least one service.'); return; }
-        if (reupholstery.selected && !reupholsteryItemType.trim()) {
-          setError('Please specify what item will be reupholstered.');
-          return;
-        }
+        if (fe.show({
+          services: !anyService && 'Please select at least one service.',
+          reupholsteryItem: reupholstery.selected && !reupholsteryItemType.trim() && 'Please specify what item will be reupholstered.',
+          completionDate: estimatedCompletionDate && estimatedCompletionDate < manilaDateString()
+            && 'Estimated completion date cannot be in the past.',
+        })) return;
       }
-      if (step === 4) {
-        for (const m of materials) {
-          if (m.materialSource === 'inventory' && !m.materialId) {
-            setError('Please select an inventory material or switch to "Type new material".');
-            return;
-          }
-          if (!m.name.trim()) { setError('Please provide a name for all material rows.'); return; }
-        }
-      }
+      if (step === 4 && fe.show(Object.fromEntries(materials.map((m) => [`material-${m.id}`,
+        m.materialSource === 'inventory' && !m.materialId ? 'Select a material from inventory, or switch this row to "Type New".'
+          : !m.name.trim() ? 'Enter a name for this material.' : '',
+      ])))) return;
       goNext();
       return;
     }
 
     // Premade step 1 → 2
     if (orderType === 'premade' && premadeStep === 1) {
-      if (!customerName.trim()) {
-        setError('Customer name is required.');
-        return;
-      }
-      const hasItems = premadeSelections.some((s) => s.productId);
-      if (!hasItems) { setError('Please select at least one premade inventory item.'); return; }
-      if (premadeHasStockIssue) {
-        setError('Some items are out of stock or short. Lower or remove them, or save the draft and wait for stock.');
-        return;
-      }
       setError('');
+      const hasItems = premadeSelections.some((s) => s.productId);
+      if (fe.show({
+        customerName: !customerName.trim() && 'Customer name is required.',
+        customerEmail: emailProblem(customerEmail),
+        premadeItems: !hasItems ? 'Please select at least one premade inventory item.'
+          : premadeHasStockIssue && 'Some items are out of stock or short. Lower or remove them, or save the draft and wait for stock.',
+      })) return;
       setPremadeStep(2);
       return;
     }
@@ -630,23 +638,21 @@ function NewJobOrderForm() {
     // ── Premade order submit ──────────────────────────────────────────────────
     if (orderType === 'premade') {
       const selected = premadeSelections.filter((s) => s.productId && s.quantity > 0);
-      if (!customerName.trim()) {
-        setError('Customer name is required.');
+      const premadeProblems = {
+        customerName: !customerName.trim() && 'Customer name is required.',
+        customerEmail: emailProblem(customerEmail),
+        premadeItems: selected.length === 0 ? 'Please select at least one premade inventory item.'
+          : editingPremadeDraftId && premadeHasStockIssue
+          && 'Some items are out of stock or short. Edit the draft, remove them, or wait for stock.',
+      };
+      if (Object.values(premadeProblems).some(Boolean)) {
         setLoading(false);
-        return;
-      }
-      if (selected.length === 0) {
-        setError('Please select at least one premade inventory item.');
-        setLoading(false);
+        setPremadeStep(1);
+        fe.show(premadeProblems);
         return;
       }
 
       if (editingPremadeDraftId) {
-        if (premadeHasStockIssue) {
-          setError('Some items are out of stock or short. Edit the draft, remove them, or wait for stock.');
-          setLoading(false);
-          return;
-        }
         try {
           // Save what is on screen first, so the recorded order matches it
           await api.premadeDrafts.update(editingPremadeDraftId, premadeDraftInput());
@@ -739,19 +745,20 @@ function NewJobOrderForm() {
     if (seatCovers.selected) selectedServices.push({ type: 'seat_covers', design: seatCovers.design, material: seatCovers.material, pocket: seatCovers.pocket, others: seatCovers.others });
     if (otherServices.selected) selectedServices.push({ type: 'other', description: otherServices.description });
 
-    if (selectedServices.length === 0) {
-      setError('Please select at least one service');
-      setLoading(false);
-      return;
-    }
-    if (estimatedCompletionDate && estimatedCompletionDate < manilaDateString()) {
-      setError('Estimated completion date cannot be in the past.');
-      setLoading(false);
-      return;
-    }
+    // Checked on their own steps too; these catch what changed since (e.g. the date passed)
     if (choosesBranch && !orderBranchValid) {
-      setError('Choose which branch this job order is for.');
-      setLoading(false);
+      setLoading(false); setStep(1);
+      fe.show({ orderBranch: 'Choose which branch this job order is for.' });
+      return;
+    }
+    const serviceProblems = {
+      services: selectedServices.length === 0 && 'Please select at least one service.',
+      completionDate: estimatedCompletionDate && estimatedCompletionDate < manilaDateString()
+        && 'Estimated completion date cannot be in the past.',
+    };
+    if (Object.values(serviceProblems).some(Boolean)) {
+      setLoading(false); setStep(3);
+      fe.show(serviceProblems);
       return;
     }
     const branchId = choosesBranch ? (orderBranchId as number) : (user?.branchId || 1);
@@ -811,14 +818,13 @@ function NewJobOrderForm() {
 
     const hasSlipData = slipRows.some((r) => r.description || r.hr) ||
       materialCenter || materialSides || materialBack ||
-      dStitch || piping || pockets || logo || specification ||
-      cutterName || sewerName;
+      dStitch || piping || pockets || logo || specification || cutterName || sewerName;
 
     const slipData = hasSlipData ? {
       rows: slipRows,
       materialCenter, materialSides, materialBack,
       dStitch, piping, pockets, logo, specification,
-      cutterName, sewerName,
+      ...(seesLaborCost ? { cutterName, sewerName } : {}),
     } : undefined;
 
     const grossTotal = estimatedTotal > 0 ? estimatedTotal : materialTotal;
@@ -837,6 +843,7 @@ function NewJobOrderForm() {
         downPayment: finalDown,
         paymentMethod,
         notes,
+        priority,
         ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
         vatIncluded: vatOn,
         ...(slipData ? { slipData } : {}),
@@ -869,10 +876,14 @@ function NewJobOrderForm() {
   // saving again updates the same draft instead of making another.
   const savePremadeDraft = async () => {
     setError(''); setNotice('');
-    if (!customerName.trim()) { setError('Enter the customer name to save a draft.'); return; }
     const firstProduct = premadeItems.find((i) => premadeSelections.some((s) => s.productId === i.id));
     const branchId = premadeBranchId || user?.branchId || firstProduct?.branchId;
-    if (!branchId) { setError('Select at least one product so the draft knows which branch it sells from.'); return; }
+    const draftProblems = {
+      customerName: !customerName.trim() && 'Enter the customer name to save a draft.',
+      customerEmail: emailProblem(customerEmail),
+      premadeItems: !branchId && 'Select at least one product so the draft knows which branch it sells from.',
+    };
+    if (!branchId || Object.values(draftProblems).some(Boolean)) { setPremadeStep(1); fe.show(draftProblems); return; }
     setSavingPremadeDraft(true);
     try {
       if (editingPremadeDraftId) {
@@ -915,11 +926,12 @@ function NewJobOrderForm() {
               {premadeDraft?.branchName ? ` · ${premadeDraft.branchName}` : ''}
             </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
+              <div {...fe.field('customerName')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Customer Name *</label>
                 <input type="text" value={customerName} onChange={(e) => { setCustomerName(e.target.value); unlinkCustomer(); }} required
                   className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="Customer name" />
+                <FieldError message={fe.errors.customerName} />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Phone Number <span className="font-normal text-gray-400">(optional)</span></label>
@@ -927,11 +939,12 @@ function NewJobOrderForm() {
                   className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="09XX XXX XXXX" />
               </div>
-              <div>
+              <div {...fe.field('customerEmail')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
                 <input type="email" value={customerEmail} onChange={(e) => setCustomerEmail(e.target.value)}
                   className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="customer@email.com" />
+                <FieldError message={fe.errors.customerEmail} />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Address</label>
@@ -969,7 +982,7 @@ function NewJobOrderForm() {
             )}
           </div>
 
-          <div>
+          <div {...fe.field('premadeItems', true)}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-gray-900">Finished Goods</h3>
               <button type="button" onClick={addPremadeSelection}
@@ -1042,6 +1055,7 @@ function NewJobOrderForm() {
                 </div>
               </>
             )}
+            <FieldError message={fe.errors.premadeItems} />
           </div>
 
           <div className="bg-[#eef1fb] border border-[#c7d2f5] rounded-xl p-4 flex justify-between items-center">
@@ -1195,7 +1209,7 @@ function NewJobOrderForm() {
 
             {/* Warehouse accounts are general: say which branch the work is for */}
             {choosesBranch && (
-              <div>
+              <div {...fe.field('orderBranch')}>
                 <label htmlFor="order-branch" className="block text-sm font-medium text-gray-700 mb-2">
                   Branch <span className="text-red-500">*</span>
                 </label>
@@ -1210,6 +1224,7 @@ function NewJobOrderForm() {
                 <p className="text-xs text-gray-400 mt-1">
                   Your account is based at the warehouse, so choose the branch where this work or order belongs.
                 </p>
+                <FieldError message={fe.errors.orderBranch} />
               </div>
             )}
 
@@ -1233,13 +1248,14 @@ function NewJobOrderForm() {
             )}
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-              <div>
+              <div {...fe.field('customerName')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Customer Name <span className="text-red-500">*</span>
                 </label>
                 <input type="text" value={customerName}
                   onChange={(e) => { setCustomerName(e.target.value); unlinkCustomer(); }}
                   required className={inputCls} placeholder="e.g. Juan dela Cruz" autoFocus />
+                <FieldError message={fe.errors.customerName} />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -1249,11 +1265,12 @@ function NewJobOrderForm() {
                   onChange={(e) => { setCustomerPhone(e.target.value); unlinkCustomer(); }}
                   className={inputCls} placeholder="09XX XXX XXXX" />
               </div>
-              <div>
+              <div {...fe.field('customerEmail')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
                 <input type="email" value={customerEmail}
                   onChange={(e) => { setCustomerEmail(e.target.value); unlinkCustomer(); }}
                   className={inputCls} placeholder="customer@email.com" />
+                <FieldError message={fe.errors.customerEmail} />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Address</label>
@@ -1349,9 +1366,10 @@ function NewJobOrderForm() {
             <div>
               <h3 className="text-xl font-bold text-gray-900">Select Services</h3>
               <p className="text-sm text-gray-500 mt-1">Choose one or more services needed</p>
+              <FieldError message={fe.errors.services} />
             </div>
 
-            <div className="grid grid-cols-1 gap-3">
+            <div className="grid grid-cols-1 gap-3" {...fe.field('services', true)}>
               {/* Flooring */}
               <div onClick={() => setFlooring({ ...flooring, selected: !flooring.selected })}
                 className={`cursor-pointer rounded-xl border-2 p-4 transition-all ${flooring.selected ? 'border-[#011c72] bg-[#eef1fb]' : 'border-gray-200 hover:border-[#011c72]'}`}>
@@ -1396,8 +1414,11 @@ function NewJobOrderForm() {
                     </ul>
                     {reupholstery.selected && (
                       <div className="mt-3 space-y-2" onClick={(e) => e.stopPropagation()}>
-                        <input type="text" value={reupholsteryItemType} onChange={(e) => setReupholsteryItemType(e.target.value)}
-                          placeholder="Item to reupholster (e.g. Sofa set, dining chair)" className={smallInputCls} />
+                        <div {...fe.field('reupholsteryItem')}>
+                          <input type="text" value={reupholsteryItemType} onChange={(e) => setReupholsteryItemType(e.target.value)}
+                            placeholder="Item to reupholster (e.g. Sofa set, dining chair)" className={smallInputCls} />
+                          <FieldError message={fe.errors.reupholsteryItem} />
+                        </div>
                         <input type="text" value={reupholstery.material}
                           onChange={(e) => setReupholstery({ ...reupholstery, material: e.target.value })}
                           placeholder="Specify material" className={smallInputCls} />
@@ -1516,11 +1537,12 @@ function NewJobOrderForm() {
                   <option value="urgent">Urgent</option>
                 </select>
               </div>
-              <div>
+              <div {...fe.field('completionDate')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Estimated Completion Date</label>
                 {/* Completion can't be in the past (Manila date) */}
                 <input type="date" value={estimatedCompletionDate} min={manilaDateString()}
                   onChange={(e) => setEstimatedCompletionDate(e.target.value)} className={inputCls} />
+                <FieldError message={fe.errors.completionDate} />
               </div>
             </div>
           </div>
@@ -1607,20 +1629,26 @@ function NewJobOrderForm() {
               </div>
 
               {/* Cutter & Sewer */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">CUTTER</label>
-                  <input type="text" value={cutterName} onChange={(e) => setCutterName(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                    placeholder="Cutter name" />
+              {seesLaborCost && (
+                <div className="grid grid-cols-2 gap-3">
+                  {[
+                    { label: 'Cutter', type: 'cutter', value: cutterName, set: setCutterName },
+                    { label: 'Sewer', type: 'sewer', value: sewerName, set: setSewerName },
+                  ].map(({ label, type, value, set }) => {
+                    const choices = slipWorkers.filter(w => w.workType.toLowerCase() === type);
+                    return (
+                      <div key={label}>
+                        <label className="block text-xs text-gray-500 mb-1">{label}</label>
+                        <select value={value} onChange={(e) => set(e.target.value)}
+                          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
+                          <option value="">{choices.length ? '— Select —' : `No active ${type}s`}</option>
+                          {choices.map(w => <option key={w.id} value={w.name}>{w.name}</option>)}
+                        </select>
+                      </div>
+                    );
+                  })}
                 </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">SEWER</label>
-                  <input type="text" value={sewerName} onChange={(e) => setSewerName(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                    placeholder="Sewer name" />
-                </div>
-              </div>
+              )}
             </div>
 
             {/* Material Items List */}
@@ -1654,7 +1682,8 @@ function NewJobOrderForm() {
                     <div className="col-span-1"></div>
                   </div>
                   {materials.map((m) => (
-                    <div key={m.id} className="grid grid-cols-12 gap-2 items-center p-3 bg-gray-50 rounded-lg border border-gray-200">
+                    <div key={m.id} {...fe.field(`material-${m.id}`)}
+                      className={`grid grid-cols-12 gap-2 items-center p-3 rounded-lg border ${fe.errors[`material-${m.id}`] ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'}`}>
                       <div className="col-span-4">
                         <select value={m.materialSource}
                           onChange={(e) => updateMaterial(m.id, 'materialSource', e.target.value as 'inventory' | 'custom')}
@@ -1697,6 +1726,7 @@ function NewJobOrderForm() {
                           </svg>
                         </button>
                       </div>
+                      <FieldError message={fe.errors[`material-${m.id}`]} className="col-span-12 mt-0" />
                     </div>
                   ))}
                   {materialTotal > 0 && (
@@ -1981,7 +2011,7 @@ function NewJobOrderForm() {
         <div className="mb-6 bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
           <p className="text-sm font-semibold text-gray-700 mb-3">Order Type</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <button type="button" onClick={() => { setOrderType('normal'); setStep(1); setError(''); }}
+            <button type="button" onClick={() => { setOrderType('normal'); setStep(1); setError(''); fe.clear(); }}
               className={`text-left px-4 py-3.5 rounded-xl border-2 transition-all ${orderType === 'normal' ? 'border-[#011c72] bg-[#eef1fb] text-[#011c72] shadow-sm' : 'border-gray-200 text-gray-700 hover:border-[#011c72]'}`}>
               <div className="flex items-center gap-2 mb-1">
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1991,7 +2021,7 @@ function NewJobOrderForm() {
               </div>
               <div className="text-xs opacity-70">Custom service work order flow</div>
             </button>
-            <button type="button" onClick={() => { setOrderType('premade'); setError(''); }}
+            <button type="button" onClick={() => { setOrderType('premade'); setError(''); fe.clear(); }}
               className={`text-left px-4 py-3.5 rounded-xl border-2 transition-all ${orderType === 'premade' ? 'border-[#011c72] bg-[#eef1fb] text-[#011c72] shadow-sm' : 'border-gray-200 text-gray-700 hover:border-[#011c72]'}`}>
               <div className="flex items-center gap-2 mb-1">
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -2012,7 +2042,7 @@ function NewJobOrderForm() {
               {STEPS.map((s, index) => (
                 <div key={s.num} className="flex items-start flex-1">
                   <div className="flex flex-col items-center">
-                    <button type="button" onClick={() => { if (s.num < step) { setError(''); setStep(s.num); } }}
+                    <button type="button" onClick={() => { if (s.num < step) { setError(''); fe.clear(); setStep(s.num); } }}
                       className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold text-sm transition-all duration-200 ${
                         step > s.num ? 'bg-[#011c72] text-white shadow-md cursor-pointer'
                         : step === s.num ? 'bg-[#011c72] text-white shadow-lg ring-4 ring-amber-200'
@@ -2052,7 +2082,8 @@ function NewJobOrderForm() {
         )}
 
         {/* Form Card */}
-        <form onSubmit={handleSubmit}>
+        {/* noValidate: problems are shown next to their fields, not as browser bubbles */}
+        <form onSubmit={handleSubmit} noValidate>
           <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-5">
             {orderType === 'normal' ? renderStep() : renderPremadeForm()}
           </div>
@@ -2060,7 +2091,7 @@ function NewJobOrderForm() {
           {/* Navigation Buttons */}
           {orderType === 'normal' ? (
             <div className="flex justify-between items-center gap-3">
-              <button type="button" onClick={() => { setError(''); setStep(step - 1); }} disabled={step === 1}
+              <button type="button" onClick={() => { setError(''); fe.clear(); setStep(step - 1); }} disabled={step === 1}
                 className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors ${
                   step === 1 ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'
                 }`}>
@@ -2114,7 +2145,7 @@ function NewJobOrderForm() {
                   Cancel
                 </button>
               ) : (
-                <button type="button" onClick={() => { setError(''); setPremadeStep(1); }}
+                <button type="button" onClick={() => { setError(''); fe.clear(); setPremadeStep(1); }}
                   className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 transition-colors">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />

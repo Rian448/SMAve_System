@@ -33,6 +33,14 @@ export function manilaDateString(date: Date = new Date()): string {
   }).format(date);
 }
 
+/** The next Saturday in Manila as YYYY-MM-DD (a week ahead, if today is a Saturday). */
+export function nextSaturdayManila(date: Date = new Date()): string {
+  const [y, m, d] = manilaDateString(date).split('-').map(Number);
+  const day = new Date(Date.UTC(y, m - 1, d));
+  day.setUTCDate(d + ((6 - day.getUTCDay() + 7) % 7 || 7));
+  return day.toISOString().slice(0, 10);
+}
+
 /** Current hour (0-23) in Manila, whatever the device's own time zone. */
 export function manilaHour(date: Date = new Date()): number {
   return Number(new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: 'numeric', hourCycle: 'h23' }).format(date));
