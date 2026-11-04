@@ -92,10 +92,10 @@ function NewJobOrderForm() {
   const editingDraftId = draftId ? Number(draftId) : null;
   const [loadingDraft, setLoadingDraft] = useState(!!editingDraftId);
   const [retailBranches, setRetailBranches] = useState<Branch[]>([]);
-  const { user } = useAuth();
-  // Warehouse accounts are general, so they choose which branch a job order is
-  // for; everyone else's orders go to their own branch.
-  const choosesBranch = !!user?.atWarehouse;
+  const { user, can } = useAuth();
+  // Accounts with all-branch access choose which branch a job order is for;
+  // everyone else's orders go to their own branch.
+  const choosesBranch = can('branches.all');
   const [orderBranchId, setOrderBranchId] = useState<number | ''>('');
   // Must be one of the retail branches listed (a draft saved before may point at the warehouse)
   const orderBranchValid = orderBranchId !== '' && retailBranches.some((b) => b.id === orderBranchId);
@@ -512,7 +512,7 @@ function NewJobOrderForm() {
   }, [editingDraftId]);
 
   useEffect(() => {
-    if (!user?.atWarehouse) return;
+    if (!choosesBranch) return;
     api.settings.getBranchesPublic()
       .then((res) => {
         const retail = (res.data || []).filter((b) => !b.isWarehouse && b.isActive);
@@ -521,7 +521,7 @@ function NewJobOrderForm() {
         setOrderBranchId((cur) => (cur && retail.some((b) => b.id === cur) ? cur : ''));
       })
       .catch(() => setRetailBranches([]));
-  }, [user?.atWarehouse]);
+  }, [choosesBranch]);
 
   // Save the current (possibly incomplete) job order as a draft so work isn't lost.
   // Drafts stay out of sales/pending counts until confirmed.
@@ -1207,7 +1207,7 @@ function NewJobOrderForm() {
               <p className="text-sm text-gray-500 mt-1">Who is this job order for?</p>
             </div>
 
-            {/* Warehouse accounts are general: say which branch the work is for */}
+            {/* All-branch accounts say which branch the work is for */}
             {choosesBranch && (
               <div {...fe.field('orderBranch')}>
                 <label htmlFor="order-branch" className="block text-sm font-medium text-gray-700 mb-2">
@@ -1222,7 +1222,7 @@ function NewJobOrderForm() {
                   ))}
                 </select>
                 <p className="text-xs text-gray-400 mt-1">
-                  Your account is based at the warehouse, so choose the branch where this work or order belongs.
+                  Your account works across branches, so choose the branch where this work or order belongs.
                 </p>
                 <FieldError message={fe.errors.orderBranch} />
               </div>

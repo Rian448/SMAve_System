@@ -31,7 +31,7 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
 
   const canAdd = can('expenses.add');
   const canDelete = can('expenses.delete');
-  const managesAllBranches = can('branches.all') || !!user?.atWarehouse;
+  const managesAllBranches = can('branches.all');
   const blankForm = { date: today, category: '', particulars: '', amount: '', paymentMethod: 'cash', notes: '', branchId: '' };
   const [form, setForm] = useState(blankForm);
   const [formError, setFormError] = useState('');

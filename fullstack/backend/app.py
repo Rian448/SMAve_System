@@ -1038,26 +1038,27 @@ def without_labor_cost(items):
             if it.get('category') == 'labor' else it for it in items or []]
 
 def all_branches(user):
-    """Whether the user sees every branch rather than only their own."""
+    """Whether the user sees every branch rather than only their own. branches.all
+    is the only way to get cross-branch access, in every module: the warehouse
+    is run by administrators, so being based there grants nothing extra."""
     return has_perm(user, 'branches.all')
 
-def all_inventory_branches(user):
-    """Inventory of every branch: administrators (all-branch access) and accounts
-    based at the warehouse. Everyone else changes only their own branch's stock."""
-    return all_branches(user) or bool(user.get('atWarehouse'))
+# Roles limited to one shop. They can't be based at the warehouse.
+BRANCH_LIMITED_ROLES = ('supervisor', 'sales_manager')
+
+def warehouse_role_error(role_key, branch):
+    """Why an account with this role can't be based at this branch, or None."""
+    if role_key in BRANCH_LIMITED_ROLES and branch is not None and branch.is_warehouse:
+        return ('The warehouse is run by administrators: supervisors and sales managers '
+                'must be assigned to a shop branch.')
+    return None
 
 def inventory_branch_error(user, branch_id):
     """403 response if the user may not change stock held at branch_id, else None.
     Pass the branch stored on the record (or the one it is moving to)."""
-    if all_inventory_branches(user) or (branch_id is not None and branch_id == user_branch_id(user)):
+    if all_branches(user) or (branch_id is not None and branch_id == user_branch_id(user)):
         return None
     return jsonify({'status': 'error', 'message': 'You can only change inventory for your own branch'}), 403
-
-def all_job_order_branches(user):
-    """Job orders (and their payments and lineup slips) of every branch. Accounts
-    based at the warehouse are general: they take orders for any branch and keep
-    managing them. Other modules still follow all_branches."""
-    return all_branches(user) or bool(user.get('atWarehouse'))
 
 # Delegation policy. Administrators may change anyone's access. Anyone else who
 # manages users can't change their own account, can't touch administrator
@@ -1107,7 +1108,7 @@ def user_to_dict(user):
         'branch': user.branch,
         'branchId': user.branch_id,
         'branchName': user.branch_rel.name if user.branch_rel else user.branch,
-        # Warehouse-based accounts pick the branch a job order is for
+        # Based at the warehouse (administrators only); grants no extra access
         'atWarehouse': bool(user.branch_rel and user.branch_rel.is_warehouse),
         'isActive': user.is_active,
         'phone': user.phone,
@@ -2492,12 +2493,9 @@ def low_stock_condition(global_threshold):
     return cond
 
 # ── Who sees which branch's inventory ─────────────────────────────────────────
-# Administrators, owners, supervisors and warehouse accounts see every branch;
-# everyone else only their own (plus the warehouse's raw materials, which their
-# job orders draw from). Changing stock stays limited by inventory_branch_error.
-
-def sees_all_inventory(user):
-    return all_inventory_branches(user) or user.get('role') == 'supervisor'
+# Accounts with branches.all see every branch; everyone else only their own (plus
+# the warehouse's raw materials, which their job orders draw from). Changing
+# stock stays limited by inventory_branch_error.
 
 def inventory_read_branches(user, requested=None, include_warehouse=False):
     """Branch ids a list may show: None = every branch. Returns (ids, error)."""
@@ -2506,7 +2504,7 @@ def inventory_read_branches(user, requested=None, include_warehouse=False):
     except (TypeError, ValueError):
         return None, (jsonify({'status': 'error', 'message': 'Invalid branch'}), 400)
     warehouse = get_warehouse_branch()
-    if sees_all_inventory(user):
+    if all_branches(user):
         if requested is None:
             return None, None
         ids = {requested}
@@ -2595,11 +2593,15 @@ def premade_transfer_to_dict(transfer):
     }
 
 def can_resolve_premade_transfer(user, transfer):
-    """Anyone who sees every branch or distributes premade stock may act on any
-    delivery; others only on deliveries addressed to their own branch."""
-    if has_perm(user, 'branches.all', 'premade.distribute'):
+    """Anyone who sees every branch may act on any delivery. Others only on one
+    their branch sent (with premade.distribute) or is receiving (premade.receive)."""
+    if all_branches(user):
         return True
-    return has_perm(user, 'premade.receive') and user.get('branchId') == transfer.destination_branch_id
+    own = user_branch_id(user)
+    if own is None:
+        return False
+    return ((has_perm(user, 'premade.distribute') and own == transfer.source_branch_id)
+            or (has_perm(user, 'premade.receive') and own == transfer.destination_branch_id))
 
 def material_usage_to_dict(log):
     return {
@@ -3017,8 +3019,8 @@ def create_finished_good():
         return jsonify({'status': 'error',
                         'message': 'No warehouse branch is configured. Add one in Settings first.'}), 400
 
-    # Production uses warehouse materials, so only warehouse accounts and
-    # administrators add premade stock
+    # Production uses warehouse materials, so only all-branch accounts
+    # (administrators) add premade stock
     error = inventory_branch_error(request.current_user, warehouse.id)
     if error:
         return error
@@ -3345,17 +3347,17 @@ def distribute_finished_good(item_id):
 @require_auth
 @require_permission('premade.view', 'premade.receive')
 def get_premade_transfers():
-    """Premade deliveries. Sales managers only see their own branch."""
+    """Premade deliveries. Without branches.all, only those to or from your branch."""
     status = request.args.get('status')
     user = request.current_user
 
     query = PremadeStockTransfer.query
     if status:
         query = query.filter(PremadeStockTransfer.status == status)
-    if not has_perm(user, 'branches.all', 'premade.distribute'):
-        if not user.get('branchId'):
-            return jsonify({'status': 'success', 'data': []})
-        query = query.filter(PremadeStockTransfer.destination_branch_id == user['branchId'])
+    if not all_branches(user):
+        own = user_branch_id(user) or -1
+        query = query.filter(db.or_(PremadeStockTransfer.destination_branch_id == own,
+                                    PremadeStockTransfer.source_branch_id == own))
 
     transfers = query.order_by(PremadeStockTransfer.created_at.desc()).limit(200).all()
     return jsonify({'status': 'success', 'data': [premade_transfer_to_dict(t) for t in transfers]})
@@ -3810,6 +3812,10 @@ def get_worker_extra_materials():
     """Extra material issued under a worker's name, newest first. Filter by
     workerId and/or jobOrderId; with neither, every entry that names a worker."""
     query = MaterialWasteLog.query.filter(MaterialWasteLog.managed_worker_id.isnot(None))
+    if not all_branches(request.current_user):
+        own_orders = db.session.query(JobOrder.id).filter(
+            JobOrder.branch_id == (user_branch_id(request.current_user) or -1))
+        query = query.filter(MaterialWasteLog.job_order_id.in_(own_orders))
     if request.args.get('workerId'):
         query = query.filter(MaterialWasteLog.managed_worker_id == request.args.get('workerId', type=int))
     if request.args.get('jobOrderId'):
@@ -3857,13 +3863,15 @@ def get_payments():
     job_order_id = request.args.get('jobOrderId')
     query = PaymentRecord.query
     if job_order_id:
-        query = query.filter_by(job_order_id=int(job_order_id))
-    elif not all_job_order_branches(user):
-        # Non-admins: only show payments for their branch's job orders
-        branch_id = user.get('branchId')
-        if branch_id:
-            branch_order_ids = [jo.id for jo in JobOrder.query.filter_by(branch_id=branch_id).all()]
-            query = query.filter(PaymentRecord.job_order_id.in_(branch_order_ids))
+        try:
+            query = query.filter_by(job_order_id=int(job_order_id))
+        except ValueError:
+            return jsonify({'status': 'error', 'message': 'Invalid job order'}), 400
+    if not all_branches(user):
+        # Only payments on their branch's job orders, also when one order is asked
+        # for (no branch on the account = nothing)
+        own_orders = db.session.query(JobOrder.id).filter(JobOrder.branch_id == (user_branch_id(user) or -1))
+        query = query.filter(PaymentRecord.job_order_id.in_(own_orders))
     payments = query.order_by(PaymentRecord.created_at.desc()).all()
     return jsonify({'status': 'success', 'data': [payment_record_to_dict(p) for p in payments]})
 
@@ -3962,12 +3970,14 @@ def excess_payment_to_dict(e):
         'appliedJobOrderRef': e.applied_job_order.job_order_id if e.applied_job_order else None,
     }
 
-def open_excess_by_customer(customer_ids):
-    """{customer id: total excess still to be returned}"""
+def open_excess_by_customer(customer_ids, branch_id=None):
+    """{customer id: total excess still to be returned} (by that branch, with branch_id)"""
     if not customer_ids:
         return {}
     rows = (db.session.query(ExcessPayment.customer_id, db.func.sum(ExcessPayment.amount))
-            .filter(ExcessPayment.customer_id.in_(customer_ids), ExcessPayment.status == 'open')
+            .join(JobOrder, JobOrder.id == ExcessPayment.job_order_id)
+            .filter(ExcessPayment.customer_id.in_(customer_ids), ExcessPayment.status == 'open',
+                    branch_filter(JobOrder.branch_id, branch_id))
             .group_by(ExcessPayment.customer_id))
     return {cid: money(total or 0) for cid, total in rows}
 
@@ -3985,8 +3995,9 @@ def get_excess_payments():
     if request.args.get('status'):
         query = query.filter_by(status=request.args['status'])
     rows = query.order_by(ExcessPayment.created_at.desc()).all()
-    if not all_job_order_branches(user):
-        rows = [e for e in rows if e.job_order and e.job_order.branch_id == user.get('branchId')]
+    if not all_branches(user):
+        own = user_branch_id(user)
+        rows = [e for e in rows if own is not None and e.job_order and e.job_order.branch_id == own]
     return jsonify({'status': 'success', 'data': [excess_payment_to_dict(e) for e in rows]})
 
 def open_excess_or_error(excess_id):
@@ -4092,7 +4103,7 @@ def get_payment_summary():
     user = request.current_user
     jo_query = JobOrder.query
     # Non-admins only ever see their own branch (no branch on the account = nothing)
-    if not all_job_order_branches(user):
+    if not all_branches(user):
         jo_query = jo_query.filter_by(branch_id=user_branch_id(user) or -1)
     orders = jo_query.all()
     total_revenue = sum(float(o.total_price or 0) for o in orders if o.status not in ('voided', 'cancelled', 'draft'))
@@ -4186,10 +4197,16 @@ def list_payment_overrides():
     query = PaymentOverrideRequest.query
     if not has_perm(user, 'payments.approve_override'):
         query = query.filter_by(requested_by=user['id'])
+    if not all_branches(user):
+        own_orders = db.session.query(JobOrder.id).filter(JobOrder.branch_id == (user_branch_id(user) or -1))
+        query = query.filter(PaymentOverrideRequest.job_order_id.in_(own_orders))
     if status:
         query = query.filter_by(status=status)
     if job_order_id:
-        query = query.filter_by(job_order_id=int(job_order_id))
+        try:
+            query = query.filter_by(job_order_id=int(job_order_id))
+        except ValueError:
+            return jsonify({'status': 'error', 'message': 'Invalid job order'}), 400
     reqs = query.order_by(PaymentOverrideRequest.created_at.desc()).all()
     return jsonify({'status': 'success', 'data': [payment_override_to_dict(r) for r in reqs]})
 
@@ -4557,7 +4574,7 @@ def get_job_orders():
     # Branch-level access control with database
     query = JobOrder.query
     
-    if all_job_order_branches(user):
+    if all_branches(user):
         # Admins see all job orders
         pass
     else:
@@ -4629,7 +4646,7 @@ def get_job_order(order_id):
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
     
     # Branch-level access control
-    if not all_job_order_branches(user):
+    if not all_branches(user):
         # Use branch_id directly from user if available, otherwise look up by name
         user_branch_id = None
         if user.get('branchId'):
@@ -5239,7 +5256,7 @@ def void_job_order(order_id):
     order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    if not all_job_order_branches(user) and order.branch_id != user_branch_id(user):
+    if not all_branches(user) and order.branch_id != user_branch_id(user):
         return jsonify({'status': 'error', 'message': 'Access denied'}), 403
     if order.status in ('voided', 'cancelled', 'draft'):
         return jsonify({'status': 'error', 'message': f'A {order.status} order cannot be voided'}), 400
@@ -5267,7 +5284,7 @@ def get_draft_job_orders():
     order lists and sales/pending counts until confirmed."""
     user = request.current_user
     query = JobOrder.query.filter(JobOrder.status == 'draft')
-    if not all_job_order_branches(user):
+    if not all_branches(user):
         if user.get('branchId'):
             query = query.filter(JobOrder.branch_id == user['branchId'])
         elif user.get('branch'):
@@ -5327,7 +5344,7 @@ def get_all_orders():
     co_base = CustomerOrder.query.options(joinedload(CustomerOrder.branch))
 
     # Get job orders from database
-    if all_job_order_branches(user):
+    if all_branches(user):
         # Administrators can see all orders (drafts are excluded — they live in /api/sales/drafts)
         job_orders_db = jo_base.filter(JobOrder.status != 'draft').order_by(JobOrder.created_at.desc()).all()
         customer_orders_db = co_base.order_by(CustomerOrder.created_at.desc()).all()
@@ -5418,7 +5435,7 @@ def lineup_slip_to_dict(slip):
 
 
 def can_use_lineup_slip(user, branch_id):
-    return all_job_order_branches(user) or (branch_id is not None and branch_id == user_branch_id(user))
+    return all_branches(user) or (branch_id is not None and branch_id == user_branch_id(user))
 
 
 @app.route('/api/sales/lineup-slips', methods=['GET'])
@@ -5427,7 +5444,7 @@ def can_use_lineup_slip(user, branch_id):
 def get_lineup_slips():
     user = request.current_user
     query = LineupSlip.query
-    if not all_job_order_branches(user):
+    if not all_branches(user):
         query = query.filter(LineupSlip.branch_id == (user_branch_id(user) or -1))
     slips = query.order_by(LineupSlip.created_at.desc()).all()
     return jsonify({'status': 'success', 'data': [lineup_slip_to_dict(s) for s in slips]})
@@ -5507,7 +5524,7 @@ def branch_access_error(user, branch_id, what='job order'):
     """403 response if the user is limited to their own branch and branch_id is
     another one, else None. Always pass the branch stored on the record, never
     one taken from the request."""
-    if all_job_order_branches(user) or (branch_id is not None and branch_id == user_branch_id(user)):
+    if all_branches(user) or (branch_id is not None and branch_id == user_branch_id(user)):
         return None
     return jsonify({'status': 'error', 'message': f'This {what} belongs to another branch'}), 403
 
@@ -5690,7 +5707,7 @@ def generate_receipt(order_id):
     order = JobOrder.query.get(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
-    if not all_job_order_branches(user) and order.branch_id != user_branch_id(user):
+    if not all_branches(user) and order.branch_id != user_branch_id(user):
         return jsonify({'status': 'error', 'message': 'Access denied'}), 403
 
     receipt = {
@@ -5738,7 +5755,35 @@ def get_purchase_orders():
     if status:
         query = query.filter_by(status=status)
     pos = query.order_by(PurchaseOrder.created_at.desc()).all()
+    user = request.current_user
+    if not all_branches(user):
+        pos = [po for po in pos if can_see_purchase_order(user, po)]
     return jsonify({'status': 'success', 'data': [purchase_order_to_dict(po) for po in pos]})
+
+# A purchase order has no branch of its own: it belongs to the branches whose
+# stock it restocks, and to the branch of whoever raised it.
+def purchase_order_branch_ids(po):
+    material_ids = [it.get('materialId') for it in (po.items or []) if it.get('materialId')]
+    ids = {bid for (bid,) in db.session.query(InventoryMaterial.branch_id)
+           .filter(InventoryMaterial.id.in_(material_ids or [-1]))}
+    creator = User.query.get(po.created_by) if po.created_by else None
+    if creator and creator.branch_id:
+        ids.add(creator.branch_id)
+    return ids
+
+def can_see_purchase_order(user, po):
+    own = user_branch_id(user)
+    return all_branches(user) or (own is not None and own in purchase_order_branch_ids(po))
+
+def purchase_order_materials_error(user, items):
+    """403 response unless the user may change the stock of every material these
+    lines restock, else None."""
+    for it in items or []:
+        material = InventoryMaterial.query.get(it['materialId']) if it.get('materialId') else None
+        if material and inventory_branch_error(user, material.branch_id):
+            return jsonify({'status': 'error',
+                            'message': f"{material.material_type} is another branch's stock"}), 403
+    return None
 
 
 def purchase_order_to_dict(po):
@@ -5767,6 +5812,8 @@ def get_purchase_order(po_id):
     po = PurchaseOrder.query.get(po_id)
     if not po:
         return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    if not can_see_purchase_order(request.current_user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
     return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
 
 @app.route('/api/purchase-orders', methods=['POST'])
@@ -5794,6 +5841,9 @@ def create_purchase_order():
         return jsonify({'status': 'error', 'message': 'Every item needs a quantity above zero'}), 400
     if any(it['unitPrice'] < 0 for it in items):
         return jsonify({'status': 'error', 'message': 'Unit prices cannot be negative'}), 400
+    error = purchase_order_materials_error(request.current_user, items)
+    if error:
+        return error
 
     supplier_id = data.get('supplierId')
     if supplier_id and not Supplier.query.get(supplier_id):
@@ -5823,6 +5873,8 @@ def approve_purchase_order(po_id):
     po = PurchaseOrder.query.get(po_id)
     if not po:
         return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    if not can_see_purchase_order(request.current_user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
     if po.status != 'pending':
         return jsonify({'status': 'error', 'message': f'This PO is already {po.status}'}), 400
 
@@ -5846,6 +5898,10 @@ def receive_purchase_order(po_id):
 
     if po.status != 'approved':
         return jsonify({'status': 'error', 'message': 'PO must be approved first'}), 400
+    # Receiving adds to each material's stock, so it must all be the user's own
+    error = purchase_order_materials_error(request.current_user, po.items)
+    if error:
+        return error
 
     # Update inventory
     for item in po.items or []:
@@ -6738,7 +6794,7 @@ def premade_draft_to_dict(draft):
 
 def premade_draft_access_error(user, draft):
     """Staff see their own branch's drafts; cross-branch staff see every branch's."""
-    if all_job_order_branches(user) or draft.branch_id == user_branch_id(user):
+    if all_branches(user) or draft.branch_id == user_branch_id(user):
         return None
     return jsonify({'status': 'error', 'message': 'This draft belongs to another branch'}), 403
 
@@ -6792,7 +6848,7 @@ def apply_premade_draft_fields(draft, data, staff):
 
 def drafts_for(user):
     query = PremadeDraft.query.filter(PremadeDraft.status == 'draft')
-    if not all_job_order_branches(user):
+    if not all_branches(user):
         query = query.filter(PremadeDraft.branch_id == (user_branch_id(user) or -1))
     return query
 
@@ -7521,16 +7577,14 @@ def get_inventory_forecast():
     # Monthly usage trend from MaterialUsageLog — last 6 months
     six_months_ago = datetime.now() - timedelta(days=180)
     is_sqlite = 'sqlite' in str(db.engine.url)
-    if is_sqlite:
-        rows = db.session.query(
-            func.strftime('%Y-%m', MaterialUsageLog.created_at).label('month'),
-            func.sum(MaterialUsageLog.quantity_used).label('total')
-        ).filter(MaterialUsageLog.created_at >= six_months_ago).group_by('month').order_by('month').all()
-    else:
-        rows = db.session.query(
-            func.to_char(MaterialUsageLog.created_at, 'YYYY-MM').label('month'),
-            func.sum(MaterialUsageLog.quantity_used).label('total')
-        ).filter(MaterialUsageLog.created_at >= six_months_ago).group_by('month').order_by('month').all()
+    month_col = (func.strftime('%Y-%m', MaterialUsageLog.created_at) if is_sqlite
+                 else func.to_char(MaterialUsageLog.created_at, 'YYYY-MM')).label('month')
+    usage_q = db.session.query(month_col, func.sum(MaterialUsageLog.quantity_used).label('total')) \
+        .filter(MaterialUsageLog.created_at >= six_months_ago)
+    bid = forecast_branch_id()
+    if bid is not None:
+        usage_q = usage_q.filter(MaterialUsageLog.branch_id == bid)
+    rows = usage_q.group_by('month').order_by('month').all()
 
     monthly_usage = [{'month': r.month, 'total': float(r.total or 0), 'projected': False} for r in rows]
 
@@ -7942,7 +7996,8 @@ def get_branch_settlement():
               .filter(ProductOrder.shipment_status != 'not_needed')
               .all())
 
-    user_branch_id = user.get('branchId') if not all_branches(user) else None
+    # None = every branch; a branch-limited account with no branch sees nothing
+    own_branch = None if all_branches(user) else (user_branch_id(user) or -1)
 
     entries = []
     # branch_pair_totals: (source_branch_id, pickup_branch_id) -> {owed, settled}
@@ -7959,7 +8014,7 @@ def get_branch_settlement():
                 continue
 
             # Supervisor filter: only show entries involving their branch
-            if user_branch_id and user_branch_id not in (src_id, pickup_id):
+            if own_branch is not None and own_branch not in (src_id, pickup_id):
                 continue
 
             items_value = sum(
@@ -8057,7 +8112,7 @@ def expense_to_dict(e):
 
 def scoped_expenses(user):
     q = Expense.query
-    if not all_inventory_branches(user):
+    if not all_branches(user):
         q = q.filter(Expense.branch_id == (user_branch_id(user) or -1))
     return q
 
@@ -8262,6 +8317,7 @@ def money_by_method(start, end):
 @app.route('/api/owner/summary', methods=['GET'])
 @require_auth
 @require_permission('owner.view')
+@require_permission('branches.all')
 def owner_summary():
     """Executive dashboard: this year so far."""
     today = manila_today()
@@ -8286,6 +8342,7 @@ def owner_summary():
 @app.route('/api/owner/pnl', methods=['GET'])
 @require_auth
 @require_permission('owner.view')
+@require_permission('branches.all')
 def owner_pnl():
     start, end, error = parse_period()
     if error:
@@ -8298,6 +8355,7 @@ def owner_pnl():
 @app.route('/api/owner/job-costing', methods=['GET'])
 @require_auth
 @require_permission('owner.view')
+@require_permission('branches.all')
 def owner_job_costing():
     """Every finished job order in the period with its margin, least profitable first."""
     start, end, error = parse_period()
@@ -8351,6 +8409,7 @@ def owner_job_costing():
 @app.route('/api/owner/receivables', methods=['GET'])
 @require_auth
 @require_permission('owner.view')
+@require_permission('branches.all')
 def owner_receivables():
     """Every customer invoice (job orders and premade orders) with what is still owed."""
     invoices = []
@@ -8396,6 +8455,7 @@ def owner_receivables():
 @app.route('/api/owner/inventory', methods=['GET'])
 @require_auth
 @require_permission('owner.view')
+@require_permission('branches.all')
 def owner_inventory():
     """Where capital sits in stock, what was used up, and what needs restocking."""
     today = manila_today()
@@ -8445,6 +8505,7 @@ def owner_inventory():
 @app.route('/api/reports/audit-trail', methods=['GET'])
 @require_auth
 @require_permission('reports.audit_trail')
+@require_permission('branches.all')
 def get_audit_trail():
     start_date = request.args.get('startDate')
     end_date = request.args.get('endDate')
@@ -8528,7 +8589,10 @@ def create_user():
         branch_id = branch.id
     else:
         return jsonify({'status': 'error', 'message': 'Branch is required'}), 400
-    
+    error = warehouse_role_error(role.key, branch)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 400
+
     new_user = User(
         username=data['username'],
         password=hash_password(data['password']),
@@ -8600,14 +8664,14 @@ def update_user(user_id):
         user.email = data['email']
     if 'fullName' in data:
         user.full_name = data['fullName']
-        if 'branchId' in data:
-            if data['branchId']:
-                branch = Branch.query.get(data['branchId'])
-                if not branch:
-                    return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
-                user.branch_id = data['branchId']
-            else:
-                user.branch_id = None
+    if 'branchId' in data:
+        if data['branchId']:
+            branch = Branch.query.get(data['branchId'])
+            if not branch:
+                return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
+            user.branch_id = data['branchId']
+        else:
+            user.branch_id = None
     if 'branch' in data:
         user.branch = data['branch']
     if 'role' in data:
@@ -8628,6 +8692,13 @@ def update_user(user_id):
         if role.id != user.role_id:
             user.role_id = role.id
             prune_redundant_overrides(user.id, role.key)
+    if 'branchId' in data or 'role' in data:
+        role_after = Role.query.get(user.role_id) if user.role_id else None
+        error = warehouse_role_error(role_after.key if role_after else None,
+                                     Branch.query.get(user.branch_id) if user.branch_id else None)
+        if error:
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': error}), 400
     if resetting_password:
         user.password = hash_password(data['password'])
         user.failed_login_attempts = 0
@@ -9134,6 +9205,11 @@ def update_branch(branch_id):
     if 'address' in data:
         branch.address = data['address']
     if 'isWarehouse' in data:
+        if data['isWarehouse'] and not branch.is_warehouse and User.query.join(Role).filter(
+                User.branch_id == branch.id, Role.key.in_(BRANCH_LIMITED_ROLES)).first():
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': 'Move this branch\'s supervisors and sales managers '
+                                                          'to a shop branch before making it the warehouse.'}), 400
         branch.is_warehouse = data['isWarehouse']
     if 'isActive' in data and bool(data['isActive']) != bool(branch.is_active):
         branch.is_active = bool(data['isActive'])
@@ -9462,6 +9538,19 @@ def deactivate_managed_worker(worker_id):
     db.session.commit()
     return jsonify({'status': 'success', 'message': 'Worker deactivated'})
 
+def assignment_in_branch(user):
+    """Predicate: is this assignment the user's to see in full? Workers are shared
+    by every branch, but work on a job order belongs to the order's branch.
+    Special tasks have no branch. None = everything (branches.all)."""
+    if all_branches(user):
+        return None
+    rows = JobOrder.query.with_entities(JobOrder.id, JobOrder.job_order_id) \
+        .filter(JobOrder.branch_id == (user_branch_id(user) or -1)).all()
+    own_ids = {r[0] for r in rows}
+    own_refs = {r[1] for r in rows}
+    return lambda a: (a.assignment_type == 'special_task'
+                      or (a.job_order_db_id in own_ids if a.job_order_db_id else a.job_order_ref in own_refs))
+
 @app.route('/api/worker-assignments', methods=['GET'])
 @require_auth
 @require_permission('workers.view')
@@ -9471,6 +9560,9 @@ def list_worker_assignments():
     if worker_id:
         query = query.filter_by(worker_id=worker_id)
     assignments = query.order_by(WorkerAssignment.created_at.desc()).all()
+    in_branch = assignment_in_branch(request.current_user)
+    if in_branch:
+        assignments = [a for a in assignments if in_branch(a)]
     order_ids = {a.job_order_db_id for a in assignments if a.job_order_db_id}
     priorities = dict(db.session.query(JobOrder.id, JobOrder.priority).filter(JobOrder.id.in_(order_ids))) \
         if order_ids else {}
@@ -9781,9 +9873,22 @@ def get_assignments_calendar():
     order_ids = {a.job_order_db_id for a in items if a.job_order_db_id}
     priorities = dict(db.session.query(JobOrder.id, JobOrder.priority).filter(JobOrder.id.in_(order_ids)))         if order_ids else {}
     rank = {'urgent': 0, 'high': 1, 'normal': 2, 'low': 3}
+    in_branch = assignment_in_branch(request.current_user)
     result = {}
+    hidden = 0
     for a in items:
         d = a.scheduled_date.isoformat()
+        if in_branch and not in_branch(a):
+            # Another branch's work: show the worker is booked that day, nothing more
+            # A negative id keeps list keys unique and opens nothing
+            hidden += 1
+            result.setdefault(d, []).append({
+                'id': -hidden, 'workerId': a.worker_id, 'jobOrderRef': 'Another branch', 'jobOrderDbId': None,
+                'jobOrderPriority': 'normal', 'assignmentType': 'other_branch', 'specialTaskTitle': None,
+                'workerName': a.worker.name if a.worker else '', 'status': a.status,
+                'description': 'Booked at another branch', 'scheduledDate': d,
+            })
+            continue
         result.setdefault(d, []).append({
             'id': a.id,
             'workerId': a.worker_id,
@@ -10500,44 +10605,77 @@ def customer_to_dict(c):
         'hasAccount': c.user_id is not None,
     }
 
-def customer_order_counts(customers):
+def branch_filter(column, branch_id):
+    """column == branch_id, or no filter when branch_id is None (every branch)."""
+    return db.true() if branch_id is None else column == branch_id
+
+def customer_branch_condition(branch_id):
+    """Customers a branch-limited user sees: those who ordered at their branch, and
+    new ones with no orders anywhere yet. The directory itself is shared (search
+    finds anyone, so a returning customer is not entered twice)."""
+    def ordered(model, link, at_branch):
+        q = db.session.query(model.id).filter(link)
+        return (q.filter(model.branch_id == branch_id) if at_branch else q).exists()
+    by_account = lambda model: db.and_(Customer.user_id.isnot(None), model.user_id == Customer.user_id)
+    links = [(JobOrder, JobOrder.customer_id == Customer.id),
+             (ProductOrder, by_account(ProductOrder)),
+             (CustomerOrder, by_account(CustomerOrder))]
+    return db.or_(*[ordered(m, link, True) for m, link in links],
+                  ~db.or_(*[ordered(m, link, False) for m, link in links]))
+
+def customer_branch_error(user, customer):
+    """403 response if this customer has only dealt with other branches, else None."""
+    if all_branches(user):
+        return None
+    own = user_branch_id(user) or -1
+    if Customer.query.filter(Customer.id == customer.id, customer_branch_condition(own)).first():
+        return None
+    return jsonify({'status': 'error', 'message': 'This customer belongs to another branch'}), 403
+
+def customer_order_counts(customers, branch_id=None):
     """{customer id: number of orders}: job orders (not drafts) plus, for customers
-    with an online account, their premade product orders and custom requests."""
+    with an online account, their premade product orders and custom requests.
+    With branch_id, only orders of that branch."""
     ids = [c.id for c in customers]
     user_to_customer = {c.user_id: c.id for c in customers if c.user_id}
     counts = dict.fromkeys(ids, 0)
     if ids:
         for cid, n in (db.session.query(JobOrder.customer_id, db.func.count(JobOrder.id))
-                       .filter(JobOrder.customer_id.in_(ids), JobOrder.status != 'draft')
+                       .filter(JobOrder.customer_id.in_(ids), JobOrder.status != 'draft',
+                               branch_filter(JobOrder.branch_id, branch_id))
                        .group_by(JobOrder.customer_id)):
             counts[cid] += n
     if user_to_customer:
         for model in (ProductOrder, CustomerOrder):
             for uid, n in (db.session.query(model.user_id, db.func.count(model.id))
-                           .filter(model.user_id.in_(list(user_to_customer)))
+                           .filter(model.user_id.in_(list(user_to_customer)),
+                                   branch_filter(model.branch_id, branch_id))
                            .group_by(model.user_id)):
                 counts[user_to_customer[uid]] += n
     return counts
 
 UNBILLED_JOB_STATUSES = ('draft', 'cancelled', 'voided')
 
-def customer_unpaid_totals(customers):
+def customer_unpaid_totals(customers, branch_id=None):
     """{customer id: what they still owe}: balances on their job orders plus, for
-    customers with an online account, unpaid product orders."""
+    customers with an online account, unpaid product orders. With branch_id, only
+    what they owe that branch."""
     ids = [c.id for c in customers]
     user_to_customer = {c.user_id: c.id for c in customers if c.user_id}
     owed = dict.fromkeys(ids, 0.0)
     if ids:
         for cid, total in (db.session.query(JobOrder.customer_id, db.func.sum(JobOrder.balance))
                            .filter(JobOrder.customer_id.in_(ids), JobOrder.balance > 0,
-                                   JobOrder.status.notin_(UNBILLED_JOB_STATUSES))
+                                   JobOrder.status.notin_(UNBILLED_JOB_STATUSES),
+                                   branch_filter(JobOrder.branch_id, branch_id))
                            .group_by(JobOrder.customer_id)):
             owed[cid] += float(total or 0)
     if user_to_customer:
         for uid, total, paid in (db.session.query(ProductOrder.user_id, db.func.sum(ProductOrder.total_amount),
                                                   db.func.sum(db.func.coalesce(ProductOrder.amount_paid, 0)))
                                  .filter(ProductOrder.user_id.in_(list(user_to_customer)),
-                                         ProductOrder.status != 'cancelled')
+                                         ProductOrder.status != 'cancelled',
+                                         branch_filter(ProductOrder.branch_id, branch_id))
                                  .group_by(ProductOrder.user_id)):
             owed[user_to_customer[uid]] += max(float(total or 0) - float(paid or 0), 0)
     return {cid: money(v) for cid, v in owed.items()}
@@ -10565,6 +10703,9 @@ def search_customers():
 def get_customers():
     q = request.args.get('q', '').strip()
     query = Customer.query
+    scope = None if all_branches(request.current_user) else (user_branch_id(request.current_user) or -1)
+    if scope is not None:
+        query = query.filter(customer_branch_condition(scope))
     if q:
         like = f'%{q}%'
         query = query.filter(
@@ -10575,9 +10716,9 @@ def get_customers():
             )
         )
     customers = query.order_by(Customer.name.asc()).all()
-    counts = customer_order_counts(customers)
-    unpaid = customer_unpaid_totals(customers)
-    excess = open_excess_by_customer([c.id for c in customers])
+    counts = customer_order_counts(customers, scope)
+    unpaid = customer_unpaid_totals(customers, scope)
+    excess = open_excess_by_customer([c.id for c in customers], scope)
     usernames = dict(db.session.query(User.id, User.username)
                      .filter(User.id.in_([c.user_id for c in customers if c.user_id])))
     data = []
@@ -10616,7 +10757,13 @@ def create_customer():
 @require_permission('customers.view')
 def get_customer(customer_id):
     customer = Customer.query.get_or_404(customer_id)
-    orders = JobOrder.query.filter_by(customer_id=customer_id).order_by(JobOrder.created_at.desc()).all()
+    error = customer_branch_error(request.current_user, customer)
+    if error:
+        return error
+    # Only what they did at the user's branch, unless the user sees every branch
+    scope = None if all_branches(request.current_user) else user_branch_id(request.current_user)
+    orders = JobOrder.query.filter(JobOrder.customer_id == customer_id, branch_filter(JobOrder.branch_id, scope)) \
+        .order_by(JobOrder.created_at.desc()).all()
     order_history = [{
         'id': o.id,
         'jobOrderId': o.job_order_id,
@@ -10637,11 +10784,13 @@ def get_customer(customer_id):
     if account:
         result['username'] = account.username
         result['accountActive'] = account.is_active
-        for o in ProductOrder.query.filter_by(user_id=account.id).all():
+        for o in ProductOrder.query.filter(ProductOrder.user_id == account.id,
+                                           branch_filter(ProductOrder.branch_id, scope)).all():
             online.append({'id': o.id, 'type': 'product', 'orderNumber': o.order_number,
                            'status': o.status, 'totalPrice': o.total_amount or 0,
                            'createdAt': o.created_at.strftime('%Y-%m-%d') if o.created_at else None})
-        for o in CustomerOrder.query.filter_by(user_id=account.id).all():
+        for o in CustomerOrder.query.filter(CustomerOrder.user_id == account.id,
+                                            branch_filter(CustomerOrder.branch_id, scope)).all():
             online.append({'id': o.id, 'type': 'custom', 'orderNumber': o.order_number,
                            'status': o.status, 'totalPrice': o.quotation_total or 0,
                            'createdAt': o.created_at.strftime('%Y-%m-%d') if o.created_at else None})
@@ -10649,10 +10798,11 @@ def get_customer(customer_id):
     result['onlineOrders'] = online
 
     # What they owe, and what the shop holds of theirs
-    result['unpaidTotal'] = customer_unpaid_totals([customer]).get(customer.id, 0)
+    result['unpaidTotal'] = customer_unpaid_totals([customer], scope).get(customer.id, 0)
     result['unpaidOrders'] = [o for o in order_history
                               if (o['balance'] or 0) > 0 and o['status'] not in UNBILLED_JOB_STATUSES]
-    excess_rows = ExcessPayment.query.filter_by(customer_id=customer.id) \
+    excess_rows = ExcessPayment.query.join(JobOrder, JobOrder.id == ExcessPayment.job_order_id) \
+        .filter(ExcessPayment.customer_id == customer.id, branch_filter(JobOrder.branch_id, scope)) \
         .order_by(ExcessPayment.created_at.desc()).all()
     result['excessPayments'] = [excess_payment_to_dict(e) for e in excess_rows]
     result['excessTotal'] = money(sum(e.amount for e in excess_rows if e.status == 'open'))
@@ -10663,6 +10813,9 @@ def get_customer(customer_id):
 @require_permission('customers.edit')
 def update_customer(customer_id):
     customer = Customer.query.get_or_404(customer_id)
+    error = customer_branch_error(request.current_user, customer)
+    if error:
+        return error
     data = request.get_json()
     if 'name' in data: customer.name = data['name']
     if 'phone' in data: customer.phone = data['phone']

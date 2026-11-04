@@ -159,16 +159,15 @@ function InventoryContent() {
   // Which location's finished goods to show: 'all', or a branch/warehouse id.
   const [premadeBranchFilter, setPremadeBranchFilter] = useState<string>('all');
 
-  // Administrators and warehouse accounts manage every branch's stock; others only
+  // Accounts with all-branch access manage every branch's stock; others only
   // their own. Premade stock is produced and sent out from the warehouse.
-  const managesAllInventory = can('branches.all') || !!user?.atWarehouse;
+  const managesAllInventory = can('branches.all');
   const canDistribute = can('premade.distribute') && managesAllInventory;
   /** Admin/supervisor approve on someone's behalf, so they get a confirm step first. */
   const confirmsViaDialog = can('branches.all', 'premade.distribute');
-  // Administrators, owners, supervisors and warehouse accounts see every branch's
-  // inventory (the server enforces the same rule); others see their own branch.
-  // Changing stock is still limited to the branches each account manages.
-  const seesAllInventory = managesAllInventory || user?.role === 'supervisor';
+  // Only all-branch access sees every branch's inventory (the server enforces the
+  // same rule); everyone else sees their own branch.
+  const seesAllInventory = managesAllInventory;
   const [inventoryBranch, setInventoryBranch] = useState<string>('all');
   const listBranchId = seesAllInventory
     ? (inventoryBranch === 'all' ? undefined : Number(inventoryBranch))

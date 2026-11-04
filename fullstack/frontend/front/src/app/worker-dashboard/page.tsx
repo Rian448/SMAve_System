@@ -1159,7 +1159,7 @@ export default function WorkerDashboard() {
                         {isSaving && <div className="absolute inset-0 flex items-center justify-center bg-white/60 rounded-lg"><div className="w-3 h-3 border-2 border-[#011c72] border-t-transparent rounded-full animate-spin" /></div>}
                         {dayAsgns.slice(0, 3).map(a => (
                           <div key={a.id}
-                            draggable={a.status !== 'completed'}
+                            draggable={a.status !== 'completed' && a.assignmentType !== 'other_branch'}
                             onDragStart={e => { e.stopPropagation(); dragTask.current = a.id; }}
                             onClick={e => { e.stopPropagation(); setTaskPanel(a.id); }}
                             title={`${a.jobOrderRef}${a.description ? ' – ' + a.description : ''}${teamView ? ' · ' + a.workerName : ''}`}

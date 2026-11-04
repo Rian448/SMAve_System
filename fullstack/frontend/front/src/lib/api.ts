@@ -22,7 +22,7 @@ export interface User {
   branch: string;
   branchId?: number;
   branchName?: string;
-  /** Based at the warehouse: picks the branch each job order is for */
+  /** Based at the warehouse (administrators only); grants no extra access */
   atWarehouse?: boolean;
   isActive?: boolean;
   phone?: string;
