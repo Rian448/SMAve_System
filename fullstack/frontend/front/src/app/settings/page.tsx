@@ -163,7 +163,9 @@ export default function SettingsPage() {
     const changingPassword = !!editingUser && !!userFormData.password;
     const password = userFormData.password;
     if (fe.show({
-      'user-username': !userFormData.username.trim() && 'Enter a username.',
+      'user-username': !userFormData.username.trim() ? 'Enter a username.'
+        : !editingUser && !/^[A-Za-z0-9_.-]{3,50}$/.test(userFormData.username.trim())
+          && 'Use 3 to 50 letters, numbers, dots, dashes or underscores (no spaces).',
       'user-fullName': !userFormData.fullName.trim() && 'Enter the full name.',
       'user-email': !userFormData.email.trim() ? 'Enter an email address.' : emailProblem(userFormData.email),
       'user-password': !editingUser && !password ? 'Enter a password for the new user.'
@@ -476,7 +478,6 @@ export default function SettingsPage() {
   const [companyName, setCompanyName] = useState('Seatmakers Automotive Upholstery');
   const [companyEmail, setCompanyEmail] = useState('info@seatmakers.com');
   const [companyPhone, setCompanyPhone] = useState('(02) 8123-4567');
-  const [taxRate, setTaxRate] = useState(12);
   const [currency, setCurrency] = useState('PHP');
 
   const handleSave = async () => {
@@ -566,23 +567,6 @@ export default function SettingsPage() {
                     <option value="PHP">Philippine Peso (₱)</option>
                     <option value="USD">US Dollar ($)</option>
                   </select>
-                </div>
-              </div>
-            </div>
-
-            <div className="border-t border-gray-200 pt-6">
-              <h3 className="text-lg font-semibold text-gray-900 mb-4">Tax & Pricing</h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Tax Rate (%)
-                  </label>
-                  <input
-                    type="number"
-                    value={taxRate}
-                    onChange={(e) => setTaxRate(Number(e.target.value))}
-                    className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                  />
                 </div>
               </div>
             </div>
@@ -1084,7 +1068,9 @@ export default function SettingsPage() {
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="Full address"
                   rows={3}
+                  maxLength={255}
                 />
+                <p className="text-xs text-gray-400 mt-1 text-right">{branchFormData.address.length}/255</p>
                 <FieldError message={fe.errors['branch-address']} />
               </div>
 
@@ -1094,6 +1080,7 @@ export default function SettingsPage() {
                 </label>
                 <input
                   type="tel"
+                  maxLength={50}
                   value={branchFormData.phone}
                   onChange={(e) => setBranchFormData({ ...branchFormData, phone: e.target.value })}
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"

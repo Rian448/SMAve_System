@@ -22,6 +22,13 @@ const TAB_PERMISSIONS: Record<TabType, string[]> = {
   'ai-predictions': ['forecasting.view'],
 };
 
+/** Same rules as the server: a number from 0 up to 1,000,000 (the most of one item it takes) */
+function stockQuantityProblem(qty: number): string | false {
+  if (Number.isNaN(qty)) return 'Stock quantity must be a number.';
+  if (qty < 0) return 'Stock quantity cannot be negative.';
+  return qty > 1_000_000 && 'Stock quantity cannot be more than 1,000,000.';
+}
+
 export default function InventoryPage() {
   // useSearchParams needs a Suspense boundary for this route to prerender.
   return (
@@ -285,8 +292,10 @@ function InventoryContent() {
       } else if (activeTab === 'waste-log') {
         const [wasteRes, matRes] = await Promise.all([
           api.inventory.getWasteLogs({ branchId: listBranchId }),
-          // The picker only offers materials this account may log waste for
-          api.inventory.getRawMaterials({ branchId: managesAllInventory ? listBranchId : user?.branchId }),
+          // The picker only offers materials this account may log waste for: a
+          // shop's own and the warehouse's, which supplies every shop
+          api.inventory.getRawMaterials(managesAllInventory ? { branchId: listBranchId }
+            : { branchId: user?.branchId, includeWarehouse: true }),
         ]);
         setWasteLogs(wasteRes.data || []);
         setRawMaterials(matRes.data || []);
@@ -308,7 +317,7 @@ function InventoryContent() {
     const byMarkup = newMaterial.priceMode === 'markup';
     if (fe.show({
       'new-materialType': !newMaterial.materialType.trim() && 'Enter the material name.',
-      'new-stockQuantity': Number.isNaN(stockQuantity) && 'Stock quantity must be a number.',
+      'new-stockQuantity': stockQuantityProblem(stockQuantity),
       'new-costPerUnit': byMarkup && (Number.isNaN(costPerUnit) || costPerUnit <= 0) && 'Enter the cost per unit (more than ₱0).',
       'new-markupPercent': byMarkup && Number.isNaN(markupPercent) && 'Markup must be a number.',
       'new-unitPrice': !byMarkup && Number.isNaN(Number(newMaterial.unitPrice)) && 'Selling price must be a number.',
@@ -366,7 +375,7 @@ function InventoryContent() {
     const stockQuantity = Number(editMaterial.stockQuantity);
     if (fe.show({
       'edit-materialType': !editMaterial.materialType.trim() && 'Enter the material name.',
-      'edit-stockQuantity': Number.isNaN(stockQuantity) && 'Stock quantity must be a number.',
+      'edit-stockQuantity': stockQuantityProblem(stockQuantity),
       'edit-unitPrice': editMaterial.priceMode === 'manual' && Number.isNaN(Number(editMaterial.unitPrice))
         && 'Selling price must be a number.',
     })) return;

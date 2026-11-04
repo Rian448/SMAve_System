@@ -55,6 +55,16 @@ const PRIORITY_BADGE: Record<JobOrderPriority, string> = {
   low: 'bg-gray-50 text-gray-400 border-gray-200',
 };
 const rankOf = (p?: JobOrderPriority) => PRIORITY_RANK[p || 'normal'];
+/** Most urgent first; within the same priority, the oldest job order first (FIFO). Ids grow
+ *  with creation, so they order same-day orders too. Work with no job order goes last. */
+const LAST = Number.MAX_SAFE_INTEGER;
+const byPriority = (a: { priority?: JobOrderPriority; id: number }, b: { priority?: JobOrderPriority; id: number }) =>
+  rankOf(a.priority) - rankOf(b.priority) || a.id - b.id;
+const tasksByPriority = (
+  a: { jobOrderPriority?: JobOrderPriority; jobOrderDbId?: number | null; id: number },
+  b: { jobOrderPriority?: JobOrderPriority; jobOrderDbId?: number | null; id: number },
+) => rankOf(a.jobOrderPriority) - rankOf(b.jobOrderPriority)
+  || (a.jobOrderDbId ?? LAST) - (b.jobOrderDbId ?? LAST) || a.id - b.id;
 /** Calendar "worker" value for the team view (everyone's schedule) */
 const TEAM_VIEW = 0;
 
@@ -560,6 +570,8 @@ export default function WorkerDashboard() {
       showError(null, 'Only a task that has not started can move to another worker.');
       return;
     }
+    // A dated task keeps its date, so the new worker may be off that day
+    if (a.scheduledDate && !(await okToSchedule(worker.id, worker.name, a.scheduledDate, a.jobOrderRef))) return;
     try {
       await api.workerAssignments.update(a.id, { workerId: worker.id });
       refreshAssignments();
@@ -594,7 +606,7 @@ export default function WorkerDashboard() {
     const q = joSearch.toLowerCase();
     const matchQ = !q || jo.jobOrderId.toLowerCase().includes(q) || jo.customerName.toLowerCase().includes(q) || jo.description.toLowerCase().includes(q);
     return matchStatus && matchQ;
-  }).sort((a, b) => rankOf(a.priority) - rankOf(b.priority));
+  }).sort(byPriority);
 
   const workerAssignmentsMap = assignments.reduce((acc, a) => {
     acc[a.workerId] = [...(acc[a.workerId] || []), a];
@@ -609,7 +621,7 @@ export default function WorkerDashboard() {
   const unscheduled = assignments
     .filter(a => !a.scheduledDate && a.status !== 'completed' && a.assignmentType !== 'special_task'
       && (teamView || a.workerId === calWorker))
-    .sort((a, b) => rankOf(a.jobOrderPriority) - rankOf(b.jobOrderPriority));
+    .sort(tasksByPriority);
 
   if (authLoading || loading) {
     return (
@@ -715,7 +727,7 @@ export default function WorkerDashboard() {
                 </div>
               ) : activeWorkers.map(w => {
                 const workerAsgns = (workerAssignmentsMap[w.id]?.filter(a => a.status !== 'completed') || [])
-                  .sort((a, b) => rankOf(a.jobOrderPriority) - rankOf(b.jobOrderPriority));
+                  .sort(tasksByPriority);
                 const isDrop = dropTarget === w.id;
                 return (
                   <div
@@ -1019,7 +1031,7 @@ export default function WorkerDashboard() {
                       const q = joSearch.toLowerCase();
                       return !q || jo.jobOrderId.toLowerCase().includes(q) || jo.customerName.toLowerCase().includes(q);
                     }).filter(jo => jo.status === 'pending' || jo.status === 'in_progress')
-                      .sort((a, b) => rankOf(a.priority) - rankOf(b.priority)).map(jo => (
+                      .sort(byPriority).map(jo => (
                       <div key={jo.id} draggable onDragStart={() => onDragStart(jo)}
                         className="p-2.5 rounded-xl border border-gray-200 bg-gray-50 hover:bg-[#eef1fb] hover:border-[#c7d2f5] cursor-grab active:cursor-grabbing text-xs select-none">
                         <div className="flex items-center gap-1.5">

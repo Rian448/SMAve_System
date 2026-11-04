@@ -127,11 +127,12 @@ export default function AuditTrailPanel() {
             </button>
           ))}
           <div className="flex items-center gap-1.5">
-            <input type="date" value={customStart} max={customEnd || undefined}
+            {/* A log only covers the past: no dates after today (Manila) */}
+            <input type="date" value={customStart} max={customEnd || manilaDateString()}
               onChange={e => setCustomStart(e.target.value)} aria-label="From date"
               className="px-2 py-1.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 text-sm" />
             <span className="text-gray-400 text-sm">to</span>
-            <input type="date" value={customEnd} min={customStart || undefined}
+            <input type="date" value={customEnd} min={customStart || undefined} max={manilaDateString()}
               onChange={e => setCustomEnd(e.target.value)} aria-label="To date"
               className="px-2 py-1.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 text-sm" />
           </div>

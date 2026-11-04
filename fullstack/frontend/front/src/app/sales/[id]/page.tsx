@@ -323,11 +323,12 @@ export default function JobOrderDetailPage() {
   const updateStatus = async (newStatus: string) => {
     if (!jobOrder) return;
     setUpdating(true);
+    setError('');
     try {
       await api.sales.updateJobOrder(jobOrder.id, { status: newStatus as any });
       setJobOrder({ ...jobOrder, status: newStatus as any });
     } catch (err) {
-      console.error(err);
+      setError(err instanceof Error && err.message ? err.message : 'Could not change the status.');
     }
     setUpdating(false);
   };

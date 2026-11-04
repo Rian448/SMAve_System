@@ -73,7 +73,8 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
       'expense-date': !form.date && 'Choose the date.',
       'expense-category': !form.category && 'Choose a category.',
       'expense-particulars': !form.particulars.trim() && 'Say what it was for.',
-      'expense-amount': !(amount > 0) && 'Enter an amount above zero.',
+      'expense-amount': !(amount > 0) ? 'Enter an amount above zero.'
+        : amount > 99_999_999.99 && 'The amount must be less than ₱100,000,000 (up to 8 digits).',
     })) return;
     setSaving(true);
     try {
@@ -130,7 +131,7 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
               <FieldError message={fe.errors['expense-particulars']} />
             </label>
             <label className="text-sm text-gray-700" {...fe.field('expense-amount')}>Amount (₱)
-              <input type="number" min="0" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className={`${input} mt-1`} />
+              <input type="number" min="0" max="99999999.99" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className={`${input} mt-1`} />
               <FieldError message={fe.errors['expense-amount']} />
             </label>
             <label className="text-sm text-gray-700">Paid by

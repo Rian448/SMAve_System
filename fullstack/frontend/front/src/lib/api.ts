@@ -926,8 +926,13 @@ export interface PurchaseOrder {
   expectedDelivery: string;
   createdAt: string;
   createdBy: number;
+  createdByName?: string | null;
   approvedAt?: string;
   approvedBy?: number;
+  approvedByName?: string | null;
+  receivedAt?: string;
+  receivedBy?: number;
+  receivedByName?: string | null;
 }
 
 export interface DeliveryItem {
@@ -1288,7 +1293,13 @@ async function fetchApi<T>(
       ...options,
     });
 
-    const data = await response.json();
+    // A crashed request comes back as an HTML error page, not JSON: say so plainly
+    // instead of surfacing the browser's "SyntaxError: Unexpected token '<'"
+    const data = await response.json().catch(() => null);
+    if (data === null) {
+      throw new ApiError(`The server could not complete this request (error ${response.status}). Please try again.`,
+        response.status, null);
+    }
 
     // Handle 401 Unauthorized - clear token and redirect to login
     if (response.status === 401) {

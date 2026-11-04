@@ -828,6 +828,7 @@ class PurchaseOrder(db.Model):
     approved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     approved_at = db.Column(db.DateTime, nullable=True)
     received_at = db.Column(db.DateTime, nullable=True)
+    received_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
 
 class LineupSlip(db.Model):
     """Production line-up slip for a job order: its tasks and who is on them."""
@@ -1060,6 +1061,15 @@ def inventory_branch_error(user, branch_id):
         return None
     return jsonify({'status': 'error', 'message': 'You can only change inventory for your own branch'}), 403
 
+def raw_material_branch_error(user, branch_id):
+    """Like inventory_branch_error, for logging waste on and ordering raw
+    materials: the warehouse's stock supplies every shop, so a shop may also
+    log waste on it and order it. Other shops' stock stays off limits."""
+    warehouse = get_warehouse_branch()
+    if branch_id is not None and warehouse and branch_id == warehouse.id and user_branch_id(user):
+        return None
+    return inventory_branch_error(user, branch_id)
+
 # Delegation policy. Administrators may change anyone's access. Anyone else who
 # manages users can't change their own account, can't touch administrator
 # accounts or hand out the administrator role, and can only grant or remove
@@ -1132,6 +1142,31 @@ def customer_order_to_dict(order):
         'createdAt': fmt_dt(order.created_at),
         'userId': order.user_id,
     }
+
+# A phone or landline number, optionally with a local/extension: digits, spaces,
+# + - ( ) . only (e.g. 0917-123-4567, +63 917 123 4567, (02) 8123-4567 loc. 12)
+BRANCH_PHONE_RE = re.compile(r'([\d\s\-().+]+?)(?:\s*(?:loc\.?|local|ext\.?|#)\s*\d{1,5})?', re.IGNORECASE)
+
+def branch_fields_error(data, creating):
+    """Why the branch fields in data can't be saved, or None. Checked before
+    saving, so a value the database can't hold gets a message instead of a crash.
+    On create the required fields must be present; on edit only those sent."""
+    limits = (('name', 'Branch name', 255), ('code', 'Branch code', 50), ('address', 'Address', 255))
+    for key, label, size in limits:
+        if creating or key in data:
+            value = str(data.get(key) or '').strip()
+            if not value:
+                return f'{label} is required'
+            if len(value) > size:
+                return f'{label} must be {size} characters or fewer (it has {len(value)})'
+    phone = str(data.get('phone') or '').strip()
+    if phone:
+        match = BRANCH_PHONE_RE.fullmatch(phone)
+        digits = sum(ch.isdigit() for ch in match.group(1)) if match else 0
+        if len(phone) > 50 or not match or match.group(1).count('+') > 1 or not 7 <= digits <= 13:
+            return ('Enter a valid contact number using digits, spaces, + - ( ), '
+                    'e.g. 0917-123-4567 or (02) 8123-4567 loc. 12')
+    return None
 
 def branch_to_dict(branch):
     return {
@@ -1295,6 +1330,8 @@ def run_migrations():
         "ALTER TABLE branches ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP",
         # Branches deactivated before the column existed start their 30-day clock now
         "UPDATE branches SET deactivated_at = CURRENT_TIMESTAMP WHERE is_active = FALSE AND deactivated_at IS NULL",
+        # Who confirmed a purchase order's delivery
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS received_by INTEGER REFERENCES users(id)",
     ]
     is_sqlite = db.engine.dialect.name == 'sqlite'
     for sql in migrations:
@@ -2761,6 +2798,26 @@ def get_raw_material(material_id):
         return jsonify({'status': 'error', 'message': "You can only view your own branch's inventory"}), 403
     return jsonify({'status': 'success', 'data': material_to_dict(material)})
 
+# The largest quantity of one item the system takes, as for premade order lines
+MAX_STOCK_QUANTITY = 1_000_000
+
+def raw_material_numbers_error(data):
+    """A message if a quantity or amount in data is not a finite number of zero
+    or more within the system's limits, else None. Only the keys sent are checked."""
+    for key, label, limit, limit_text in (
+            ('stockQuantity', 'Stock quantity', MAX_STOCK_QUANTITY, '1,000,000'),
+            ('lowStockThreshold', 'Reorder level', MAX_STOCK_QUANTITY, '1,000,000'),
+            ('costPerUnit', 'Cost', MAX_JOB_ORDER_PRICE, '₱99,999,999.99'),
+            ('unitPrice', 'Selling price', MAX_JOB_ORDER_PRICE, '₱99,999,999.99')):
+        if data.get(key) in (None, ''):
+            continue
+        value = finite_number(data[key])
+        if value is None or value < 0:
+            return f'{label} must be a number of zero or more'
+        if value > limit:
+            return f'{label} cannot be more than {limit_text}'
+    return None
+
 @app.route('/api/inventory/raw-materials', methods=['POST'])
 @require_auth
 @require_permission('inventory.add')
@@ -2773,6 +2830,9 @@ def create_raw_material():
     # Selling price may be given directly (unitPrice) or derived from cost + markup
     if 'unitPrice' not in data and 'costPerUnit' not in data:
         return jsonify({'status': 'error', 'message': 'Either unitPrice or costPerUnit is required'}), 400
+    error = raw_material_numbers_error(data)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 400
 
     branch = Branch.query.get(data['branchId'])
     if not branch or not branch.is_active:
@@ -2862,6 +2922,9 @@ def update_raw_material(material_id):
             value = finite_number(data[key])
             if value is None or value < 0:
                 return jsonify({'status': 'error', 'message': f'{label} must be a number of zero or more'}), 400
+    error = raw_material_numbers_error(data)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 400
 
     if 'materialType' in data:
         material.material_type = data['materialType'].strip()
@@ -2881,9 +2944,8 @@ def update_raw_material(material_id):
     elif 'costPerUnit' in data or 'markupPercent' in data:
         material.unit_price = round((material.cost_per_unit or 0) * (1 + (material.markup_percent if material.markup_percent is not None else 25) / 100), 2)
     if 'stockQuantity' in data:
-        try:
-            new_stock = float(data['stockQuantity'])
-        except (TypeError, ValueError):
+        new_stock = finite_number(data['stockQuantity'])  # None for text, NaN and Infinity
+        if new_stock is None:
             return jsonify({'status': 'error', 'message': 'Stock quantity must be a number'}), 400
         if not new_stock >= 0:
             return jsonify({'status': 'error', 'message': 'Stock quantity cannot be negative'}), 400
@@ -3619,7 +3681,7 @@ def record_waste(material_id, quantity, reason, notes=None, job_order=None, work
     material = InventoryMaterial.query.filter_by(id=material_id).with_for_update().first()
     if not material:
         return None, (jsonify({'status': 'error', 'message': 'Material not found'}), 404)
-    error = inventory_branch_error(request.current_user, material.branch_id)
+    error = raw_material_branch_error(request.current_user, material.branch_id)
     if error:
         return None, error
     worker = None
@@ -3650,17 +3712,37 @@ def record_waste(material_id, quantity, reason, notes=None, job_order=None, work
     db.session.add(log)
     return log, None
 
+def waste_in_branch(user):
+    """Waste entries a branch-limited user sees and may undo: their branch's own,
+    plus waste on warehouse stock that their branch's staff logged or that went
+    on their branch's job orders. None = every entry (branches.all)."""
+    if all_branches(user):
+        return None
+    own = user_branch_id(user) or -1
+    warehouse = get_warehouse_branch()
+    staff = db.session.query(User.id).filter(User.branch_id == own)
+    orders = db.session.query(JobOrder.id).filter(JobOrder.branch_id == own)
+    return db.or_(MaterialWasteLog.branch_id == own,
+                  db.and_(MaterialWasteLog.branch_id == (warehouse.id if warehouse else -1),
+                          db.or_(MaterialWasteLog.logged_by.in_(staff), MaterialWasteLog.job_order_id.in_(orders))))
+
 @app.route('/api/inventory/waste-logs', methods=['GET'])
 @require_auth
 @require_permission('inventory.view')
 def get_waste_logs():
     branch_id = request.args.get('branchId')
     query = MaterialWasteLog.query
-    branch_ids, error = inventory_read_branches(request.current_user, branch_id)
-    if error:
-        return error
-    if branch_ids is not None:
-        query = query.filter(MaterialWasteLog.branch_id.in_(branch_ids or [-1]))
+    user = request.current_user
+    if all_branches(user):
+        branch_ids, error = inventory_read_branches(user, branch_id)
+        if error:
+            return error
+        if branch_ids is not None:
+            query = query.filter(MaterialWasteLog.branch_id.in_(branch_ids or [-1]))
+    else:
+        if branch_id not in (None, '') and str(branch_id) != str(user_branch_id(user)):
+            return jsonify({'status': 'error', 'message': "You can only view your own branch's inventory"}), 403
+        query = query.filter(waste_in_branch(user))
     if request.args.get('jobOrderId'):
         try:
             query = query.filter(MaterialWasteLog.job_order_id == int(request.args['jobOrderId']))
@@ -3697,13 +3779,21 @@ def undo_waste_log(log_id):
     log = MaterialWasteLog.query.get(log_id)
     if not log:
         return jsonify({'status': 'error', 'message': 'That waste entry was not found'}), 404
+    in_branch = waste_in_branch(request.current_user)
+    if in_branch is not None and not MaterialWasteLog.query.filter(MaterialWasteLog.id == log.id, in_branch).first():
+        return jsonify({'status': 'error', 'message': 'This waste entry belongs to another branch'}), 403
     order = JobOrder.query.filter_by(id=log.job_order_id).with_for_update().first() if log.job_order_id else None
     if order:
         error = branch_access_error(request.current_user, order.branch_id)
         if error:
             return error
+    # Row lock (after the job order's, as the job order page takes them): a second
+    # undo of the same entry waits, then finds it gone instead of restoring it twice
+    log = MaterialWasteLog.query.filter_by(id=log_id).with_for_update().populate_existing().first()
+    if not log:
+        return jsonify({'status': 'error', 'message': 'That waste entry was already undone'}), 404
     material = InventoryMaterial.query.filter_by(id=log.material_id).with_for_update().first()
-    error = inventory_branch_error(request.current_user, material.branch_id if material else log.branch_id)
+    error = raw_material_branch_error(request.current_user, material.branch_id if material else log.branch_id)
     if error:
         return error
     if material:
@@ -3782,12 +3872,12 @@ def undo_job_order_extra_material(order_id, log_id):
     error = branch_access_error(request.current_user, order.branch_id)
     if error:
         return error
-    log = MaterialWasteLog.query.filter_by(id=log_id, job_order_id=order.id).first()
+    log = MaterialWasteLog.query.filter_by(id=log_id, job_order_id=order.id).with_for_update().first()
     if not log:
         return jsonify({'status': 'error', 'message': 'That extra material entry was not found'}), 404
     material = InventoryMaterial.query.filter_by(id=log.material_id).with_for_update().first()
     if material:
-        error = inventory_branch_error(request.current_user, material.branch_id)
+        error = raw_material_branch_error(request.current_user, material.branch_id)
         if error:
             return error
         material.stock_quantity = round(float(material.stock_quantity or 0) + float(log.quantity or 0), 4)
@@ -5017,6 +5107,12 @@ def update_job_order(order_id):
             return jsonify({'status': 'error',
                             'message': f"A {prev_status.replace('_', ' ')} job order can't be changed to "
                                        f"{str(data['status']).replace('_', ' ')}"}), 400
+        # The page only offers Mark Complete once the order is paid in full; hold
+        # the server to the same rule so a direct request can't skip it
+        if data['status'] == 'completed' and \
+                money(float(order.total_price or 0) - float(order.down_payment or 0)) > 0:
+            return jsonify({'status': 'error',
+                            'message': 'Payment must be fully settled before marking as complete'}), 400
         if data['status'] == 'cancelled' and job_order_materials_taken(order):
             return jsonify({'status': 'error', 'message': "This job order was completed before and its materials "
                                                           "were used, so it can't be cancelled."}), 400
@@ -5222,7 +5318,11 @@ def update_job_order(order_id):
 
     db.session.commit()
 
-    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Sales', f"Updated job order: {order.job_order_id}", request.remote_addr or '0.0.0.0')
+    # The audit trail entry is the order's status history: who, when, from what to what
+    status_note = (f" (status: {prev_status.replace('_', ' ')} -> {order.status.replace('_', ' ')})"
+                   if order.status != prev_status else '')
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Sales',
+               f"Updated job order: {order.job_order_id}{status_note}", request.remote_addr or '0.0.0.0')
     
     return jsonify({
         'status': 'success', 
@@ -5780,7 +5880,7 @@ def purchase_order_materials_error(user, items):
     lines restock, else None."""
     for it in items or []:
         material = InventoryMaterial.query.get(it['materialId']) if it.get('materialId') else None
-        if material and inventory_branch_error(user, material.branch_id):
+        if material and raw_material_branch_error(user, material.branch_id):
             return jsonify({'status': 'error',
                             'message': f"{material.material_type} is another branch's stock"}), 403
     return None
@@ -5788,6 +5888,8 @@ def purchase_order_materials_error(user, items):
 
 def purchase_order_to_dict(po):
     day = lambda dt: dt.strftime('%Y-%m-%d') if dt else None
+    people = {u.id: u.full_name or u.username for u in User.query.filter(
+        User.id.in_([i for i in (po.created_by, po.approved_by, po.received_by) if i]))}
     return {
         'id': po.id,
         'poNumber': po.po_number,
@@ -5800,9 +5902,13 @@ def purchase_order_to_dict(po):
         'expectedDelivery': po.expected_delivery,
         'createdAt': day(po.created_at),
         'createdBy': po.created_by,
+        'createdByName': people.get(po.created_by),
         'approvedAt': day(po.approved_at),
         'approvedBy': po.approved_by,
+        'approvedByName': people.get(po.approved_by),
         'receivedAt': day(po.received_at),
+        'receivedBy': po.received_by,
+        'receivedByName': people.get(po.received_by),
     }
 
 @app.route('/api/purchase-orders/<int:po_id>', methods=['GET'])
@@ -5896,6 +6002,8 @@ def receive_purchase_order(po_id):
     if not po:
         return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
 
+    if not can_see_purchase_order(request.current_user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
     if po.status != 'approved':
         return jsonify({'status': 'error', 'message': 'PO must be approved first'}), 400
     # Receiving adds to each material's stock, so it must all be the user's own
@@ -5913,6 +6021,7 @@ def receive_purchase_order(po_id):
 
     po.status = 'received'
     po.received_at = datetime.utcnow()
+    po.received_by = request.current_user['id']
     db.session.commit()
 
     log_action(request.current_user['id'], request.current_user['fullName'], 'RECEIVE', 'Purchase Orders', f"Received PO: {po.po_number}", request.remote_addr or '0.0.0.0')
@@ -8140,14 +8249,20 @@ def list_expenses():
 def create_expense():
     user = request.current_user
     data = request.get_json(silent=True) or {}
+    raw_amount = finite_number(data.get('amount'))  # None for text, NaN and Infinity
     try:
-        amount = money(float(data.get('amount')))
+        if raw_amount is None:
+            raise ValueError
+        amount = money(raw_amount)
         expense_date = datetime.strptime(str(data.get('date') or manila_today()), '%Y-%m-%d').date()
     except (TypeError, ValueError):
         return jsonify({'status': 'error', 'message': 'Enter a valid amount and date'}), 400
     particulars = (data.get('particulars') or '').strip()
     if not amount > 0:
         return jsonify({'status': 'error', 'message': 'Amount must be above zero'}), 400
+    # The same ceiling as a job order's price, so one typo can't swamp every total
+    if amount > MAX_JOB_ORDER_PRICE:
+        return jsonify({'status': 'error', 'message': 'Amount must be less than ₱100,000,000 (up to 8 digits)'}), 400
     if not particulars:
         return jsonify({'status': 'error', 'message': 'Say what the money was spent on'}), 400
     if expense_date > manila_today():
@@ -8561,7 +8676,12 @@ def create_user():
         return jsonify({'status': 'error',
                         'message': f'Password must be at least {MIN_PASSWORD_LENGTH} characters'}), 400
     
-    if User.query.filter_by(username=data['username']).first():
+    # The same rule My Profile applies: no spaces or other characters
+    data['username'] = str(data['username'] or '').strip()
+    if not USERNAME_PATTERN.match(data['username']):
+        return jsonify({'status': 'error',
+                        'message': 'Username must be 3 to 50 characters: letters, numbers, dots, dashes or underscores.'}), 400
+    if User.query.filter(db.func.lower(User.username) == data['username'].lower()).first():
         return jsonify({'status': 'error', 'message': 'Username already exists'}), 400
     
     if User.query.filter_by(email=data['email']).first():
@@ -8657,7 +8777,9 @@ def update_user(user_id):
             if status == 400:
                 return jsonify({'status': 'error', 'message': 'Your password is incorrect.'}), 400
             return error
-    
+
+    if 'role' in data:
+        lock_active_accounts()  # a role change may take away an administrator
     old_role_key = user.role.key if user.role else None
     
     if 'email' in data:
@@ -8680,6 +8802,10 @@ def update_user(user_id):
         if not role or (role.key == 'customer' and old_role_key != 'customer'):
             return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
         perms_after = effective_permissions(user.id, role.key)
+        if old_role_key == 'administrator' and role.key != 'administrator' and user.is_active \
+                and last_active_administrator(user):
+            return jsonify({'status': 'error',
+                            'message': 'Cannot change the role of the last active administrator'}), 400
         if role.id != user.role_id:
             error = delegation_error(request.current_user, effective_permissions(user.id, old_role_key),
                                      perms_after, role.key)
@@ -8757,6 +8883,7 @@ def update_user(user_id):
 @require_auth
 @require_permission('users.manage')
 def archive_user(user_id):
+    lock_active_accounts()
     user = User.query.get(user_id)
     if not user:
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
@@ -8951,6 +9078,7 @@ def set_user_permissions(user_id):
     """Replace a user's overrides. Body: {grants: [...], revokes: [...], version};
     empty lists reset them to their role's defaults. `version` is the one the
     caller loaded; if the permissions changed since, the save is refused (409)."""
+    lock_active_accounts()  # revoking users.manage may leave nobody to manage users
     # Row lock: two saves for the same user run one after the other, so the
     # second one sees the first one's version and is refused
     user = User.query.filter_by(id=user_id).with_for_update().first()
@@ -9022,6 +9150,16 @@ def last_active_administrator(user):
         User.id != user.id,
     ).count() == 0
 
+def lock_active_accounts():
+    """Row-lock every active account (always in id order, so it can't deadlock)
+    before checking who would be left to run the system. Two admins deactivating
+    each other at the same moment then go one after the other: the second waits,
+    sees the first one's change and is refused. Call it before reading the target
+    account or changing anything. (PostgreSQL; SQLite ignores row locks.)"""
+    db.session.query(User.id).filter(User.is_active.is_(True)) \
+        .order_by(User.id).with_for_update().all()
+    db.session.expire_all()  # read everything again as it is now
+
 @app.route('/api/settings/users/<int:user_id>', methods=['DELETE'])
 @require_auth
 @require_permission('users.manage')
@@ -9031,6 +9169,7 @@ def delete_user(user_id):
     Only allowed for accounts with no business history (e.g. one created by
     mistake). Anything else must be archived so its records keep an author.
     """
+    lock_active_accounts()
     user = User.query.get(user_id)
     if not user:
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
@@ -9152,6 +9291,9 @@ def create_branch():
     required = ['name', 'code', 'address']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    error = branch_fields_error(data, creating=True)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 400
     
     # Check if code already exists
     existing = Branch.query.filter_by(code=data['code']).first()
@@ -9186,7 +9328,10 @@ def update_branch(branch_id):
         return jsonify({'status': 'error', 'message': 'Branch not found'}), 404
     
     data = request.get_json()
-    
+    error = branch_fields_error(data, creating=False)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 400
+
     if 'name' in data:
         branch.name = data['name']
     if 'code' in data:
@@ -9363,7 +9508,8 @@ def delete_branch(branch_id):
 @require_auth
 @require_staff
 def get_system_settings():
-    settings = SystemSetting.query.filter(~SystemSetting.key.startswith('_')).all()
+    # autoescape: in SQL LIKE a bare '_' matches any character, which hid every setting
+    settings = SystemSetting.query.filter(~SystemSetting.key.startswith('_', autoescape=True)).all()
     return jsonify({'status': 'success', 'data': {s.key: s.value for s in settings}})
 
 @app.route('/api/settings/system/<key>', methods=['PUT'])
@@ -9378,7 +9524,8 @@ def update_system_setting(key):
         error = vat_percent_error(value)
         if error:
             return jsonify({'status': 'error', 'message': error}), 400
-        value = str(Decimal(value).normalize() if Decimal(value) != 0 else 0)  # '12.00' -> '12'
+        # '12.00' -> '12'; plain digits, since normalize() alone turns 10 into '1E+1'
+        value = format(Decimal(value).normalize(), 'f') if Decimal(value) != 0 else '0'
     setting = SystemSetting.query.filter_by(key=key).first()
     if not setting:
         setting = SystemSetting(key=key, value=value)
@@ -9902,9 +10049,9 @@ def get_assignments_calendar():
             'description': a.description,
             'scheduledDate': d,
         })
-    # Most urgent first within each day
+    # Most urgent first within each day; the same priority oldest job order first (FIFO)
     for day in result.values():
-        day.sort(key=lambda x: rank.get(x['jobOrderPriority'], 2))
+        day.sort(key=lambda x: (rank.get(x['jobOrderPriority'], 2), x['jobOrderDbId'] or float('inf'), x['id']))
     return jsonify({'status': 'success', 'data': result})
 
 @app.route('/api/worker-assignments/<int:assignment_id>', methods=['DELETE'])
