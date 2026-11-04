@@ -3,6 +3,7 @@ import { useEffect, useState, Fragment } from 'react';
 import { api, type Announcement } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useConfirm } from '@/components/ConfirmDialog';
+import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import { formatDateTime, isMeaningfullyLater } from '@/lib/dateUtils';
 
 const PRIORITY_STYLES: Record<string, { bar: string; badge: string; label: string }> = {
@@ -15,7 +16,15 @@ const BLANK_FORM = { title: '', body: '', priority: 'info', isPinned: false };
 
 const inputCls = 'w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm';
 
-function PostForm({ f, setF, onSubmit, onCancel, submitLabel, saving, formError }: {
+/** The checks a post must pass, keyed by the form's field names under `prefix`. */
+function postProblems(f: typeof BLANK_FORM, prefix: string) {
+  return {
+    [`${prefix}-title`]: !f.title.trim() && 'Enter a title.',
+    [`${prefix}-body`]: !f.body.trim() && 'Write the message.',
+  };
+}
+
+function PostForm({ f, setF, onSubmit, onCancel, submitLabel, saving, formError, fe, prefix }: {
   f: typeof BLANK_FORM;
   setF: (v: typeof BLANK_FORM) => void;
   onSubmit: () => void;
@@ -23,22 +32,27 @@ function PostForm({ f, setF, onSubmit, onCancel, submitLabel, saving, formError 
   submitLabel: string;
   saving: boolean;
   formError: string;
+  fe: ReturnType<typeof useFieldErrors>;
+  /** Keeps the create and edit forms' fields apart when both are open */
+  prefix: string;
 }) {
   return (
     <div className="bg-white rounded-2xl border border-gray-200 p-6 space-y-4 shadow-sm">
       {formError && (
         <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-2 text-sm">{formError}</div>
       )}
-      <div>
+      <div {...fe.field(`${prefix}-title`)}>
         <label className="block text-xs font-medium text-gray-500 mb-1.5">Title <span className="text-red-500">*</span></label>
         <input type="text" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })}
           placeholder="Announcement title…" className={inputCls} />
+        <FieldError message={fe.errors[`${prefix}-title`]} />
       </div>
-      <div>
+      <div {...fe.field(`${prefix}-body`)}>
         <label className="block text-xs font-medium text-gray-500 mb-1.5">Message <span className="text-red-500">*</span></label>
         <textarea rows={4} value={f.body} onChange={(e) => setF({ ...f, body: e.target.value })}
           placeholder="Write the announcement here…"
           className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm resize-none" />
+        <FieldError message={fe.errors[`${prefix}-body`]} />
       </div>
       <div className="flex items-center gap-4 flex-wrap">
         <div>
@@ -89,6 +103,7 @@ export default function AnnouncementsPage() {
   const [form, setForm] = useState({ ...BLANK_FORM });
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
+  const fe = useFieldErrors();
 
   // Edit
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -106,8 +121,7 @@ export default function AnnouncementsPage() {
 
   const handleCreate = async () => {
     setFormError('');
-    if (!form.title.trim()) { setFormError('Title is required.'); return; }
-    if (!form.body.trim()) { setFormError('Body is required.'); return; }
+    if (fe.show(postProblems(form, 'new'))) return;
     setSaving(true);
     try {
       await api.announcements.create({ title: form.title.trim(), body: form.body.trim(), priority: form.priority, isPinned: form.isPinned });
@@ -129,6 +143,7 @@ export default function AnnouncementsPage() {
   const handleEdit = async () => {
     if (!editingId) return;
     setFormError('');
+    if (fe.show(postProblems(editForm, 'edit'))) return;
     setSaving(true);
     try {
       await api.announcements.update(editingId, { title: editForm.title.trim(), body: editForm.body.trim(), priority: editForm.priority, isPinned: editForm.isPinned });
@@ -235,6 +250,7 @@ export default function AnnouncementsPage() {
               submitLabel="Post"
               saving={saving}
               formError={formError}
+              fe={fe} prefix="new"
             />
           </div>
         )}
@@ -290,6 +306,7 @@ export default function AnnouncementsPage() {
                         submitLabel="Save Changes"
                         saving={saving}
                         formError={formError}
+                        fe={fe} prefix="edit"
                       />
                     </div>
                   ) : (

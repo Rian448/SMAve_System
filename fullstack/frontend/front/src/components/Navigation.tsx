@@ -1,11 +1,15 @@
 ﻿'use client';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useAuth, hasAccess } from '@/context/AuthContext';
+import { useAuth } from '@/context/AuthContext';
 import { useNotifications } from '@/context/NotificationContext';
 import { formatDateTime } from '@/lib/dateUtils';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useConfirm } from './ConfirmDialog';
+
+type NavItem = { name: string; path: string; icon: () => React.JSX.Element; perms?: string[] };
+type NavGroup = { name: string; icon: () => React.JSX.Element; items: NavItem[] };
+type NavEntry = NavItem | NavGroup;
 
 interface NavigationProps {
   collapsed: boolean;
@@ -82,16 +86,6 @@ const CustomersIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
   </svg>
 );
-const AppointmentsIcon = () => (
-  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-  </svg>
-);
-const OrdersIcon = () => (
-  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-  </svg>
-);
 const ShoppingIcon = () => (
   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
@@ -130,6 +124,11 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [showArchive, setShowArchive] = useState(false);
+  // Desktop: the category whose flyout is open, and where to draw it
+  const [flyout, setFlyout] = useState<{ name: string; top: number; left: number } | null>(null);
+  const flyoutCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Phone drawer: the expanded category (undefined = the one holding the current page)
+  const [drawerExpanded, setDrawerExpanded] = useState<string | null | undefined>(undefined);
 
   // Escape closes the phone drawer
   useEffect(() => {
@@ -139,24 +138,45 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     return () => window.removeEventListener('keydown', onKey);
   }, [mobileOpen, onMobileClose]);
 
-  const publicRoutes = ['/', '/login', '/register', '/place-order'];
+  // Escape or scrolling the sidebar closes the flyout
+  useEffect(() => {
+    if (!flyout) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFlyout(null); };
+    const onScroll = () => setFlyout(null);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [flyout]);
 
-  if (pathname === '/login' || pathname === '/register') return null;
+  useEffect(() => () => { if (flyoutCloseTimer.current) clearTimeout(flyoutCloseTimer.current); }, []);
+
+  // The promotional website and the staff sign-in are the only pages open to visitors
+  const publicRoutes = ['/', '/login'];
+  const mustSignIn = !isLoading && !isAuthenticated && !publicRoutes.includes(pathname);
+
+  // Navigating is a state update on the router, so it can't happen during render
+  useEffect(() => {
+    if (mustSignIn) router.push('/login');
+  }, [mustSignIn, router]);
+
+  if (pathname === '/login') return null;
   if (isLoading) return null;
 
   // Unauthenticated: show minimal top bar
   if (!isAuthenticated) {
-    if (!publicRoutes.includes(pathname) && typeof window !== 'undefined') {
-      router.push('/login');
-      return null;
-    }
+    if (mustSignIn) return null;
     const navLinks = [
-      { label: 'Home',         href: '/#home' },
-      { label: 'Why Us',       href: '/#why-us' },
-      { label: 'How It Works', href: '/#process' },
-      { label: 'Catalog',      href: '/#catalog' },
-      { label: 'FAQ',          href: '/#faq' },
-      { label: 'Contact',      href: '/#contact' },
+      { label: 'Home',       href: '/#home' },
+      { label: 'Track Order', href: '/#track' },
+      { label: 'About Us',   href: '/#about' },
+      { label: 'Products & Services', href: '/#products' },
+      { label: 'Promotions', href: '/#promotions' },
+      { label: 'Gallery',    href: '/#gallery' },
+      { label: 'Branches',   href: '/#branches' },
+      { label: 'Contact Us', href: '/#contact' },
     ];
 
     return (
@@ -173,7 +193,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
             </Link>
 
             {/* Desktop nav links */}
-            <div className="hidden md:flex items-center gap-1 ml-6 flex-1">
+            <div className="hidden lg:flex items-center gap-1 ml-6 flex-1">
               {navLinks.map(link => (
                 <a
                   key={link.label}
@@ -185,18 +205,18 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
               ))}
             </div>
 
-            {/* Right side: Login + hamburger */}
+            {/* Right side: staff sign-in + hamburger */}
             <div className="ml-auto flex items-center gap-3">
               <Link
                 href="/login"
-                className="px-5 py-2 rounded-md bg-[#011c72] hover:bg-[#01268c] text-white text-sm font-semibold uppercase tracking-wide transition-colors shadow-sm"
+                className="px-4 py-2 rounded-md border border-gray-300 hover:border-[#011c72] text-gray-700 hover:text-[#011c72] text-xs font-semibold uppercase tracking-wide transition-colors"
               >
-                Login
+                Staff Login
               </Link>
               {/* Mobile hamburger */}
               <button
                 onClick={() => setMobileMenuOpen(o => !o)}
-                className="md:hidden p-2 rounded-md text-gray-600 hover:text-[#011c72] hover:bg-gray-50 transition-colors"
+                className="lg:hidden p-2 rounded-md text-gray-600 hover:text-[#011c72] hover:bg-gray-50 transition-colors"
                 aria-label="Toggle menu"
               >
                 {mobileMenuOpen ? (
@@ -215,7 +235,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
 
         {/* Mobile dropdown */}
         {mobileMenuOpen && (
-          <div className="md:hidden border-t border-gray-100 bg-white px-4 py-3 space-y-1">
+          <div className="lg:hidden border-t border-gray-100 bg-white px-4 py-3 space-y-1">
             {navLinks.map(link => (
               <a
                 key={link.label}
@@ -232,31 +252,102 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     );
   }
 
-  // Staff items need any one of their permissions; customer pages are by account type
-  const navItems: { name: string; path: string; icon: () => React.JSX.Element; perms?: string[]; roles?: string[] }[] = [
-    { name: 'Home', path: '/', icon: HomeIcon },
-    { name: 'My Orders', path: '/my-orders', icon: OrdersIcon, roles: ['customer'] },
-    { name: 'Shop Products', path: '/place-order', icon: ShoppingIcon, roles: ['customer'] },
-    { name: 'Owner Dashboard', path: '/owner', icon: OwnerIcon, perms: ['owner.view'] },
-    { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, perms: ['dashboard.view'] },
-    { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, perms: ['announcements.view'] },
-    { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, perms: ['workers.add', 'workers.edit', 'workers.delete'] },
-    { name: 'Sales', path: '/sales', icon: SalesIcon, perms: ['sales.view'] },
-    { name: 'Customers', path: '/customers', icon: CustomersIcon, perms: ['customers.view'] },
-    { name: 'Payments', path: '/payments', icon: PaymentsIcon, perms: ['payments.view'] },
-    { name: 'Expenses', path: '/expenses', icon: ExpensesIcon, perms: ['expenses.view', 'expenses.add'] },
-    { name: 'Appointments', path: '/appointments', icon: AppointmentsIcon, perms: ['appointments.view'] },
-    { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'premade.receive', 'suppliers.view'] },
-    { name: 'Product Orders', path: '/product-orders', icon: ShoppingIcon, perms: ['product_orders.view'] },
-    { name: 'Costing', path: '/costing', icon: CostingIcon, perms: ['costing.view'] },
-    { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, perms: ['forecasting.view'] },
-    { name: 'Item Trail', path: '/delivery', icon: DeliveryIcon, perms: ['item_trail.view'] },
-    { name: 'Reports', path: '/reports', icon: ReportsIcon, perms: ['reports.sales', 'reports.inventory', 'reports.settlement', 'reports.audit_trail'] },
+  // Pages are grouped into categories that open a flyout. Each page needs any one of its permissions.
+  const navEntries: NavEntry[] = [
+    { name: 'Website', path: '/', icon: HomeIcon },
+    { name: 'Overview', icon: DashboardIcon, items: [
+      { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, perms: ['dashboard.view'] },
+      { name: 'Owner Dashboard', path: '/owner', icon: OwnerIcon, perms: ['owner.view'] },
+      { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, perms: ['announcements.view'] },
+    ] },
+    { name: 'Sales', icon: SalesIcon, items: [
+      { name: 'Sales', path: '/sales', icon: SalesIcon, perms: ['sales.view'] },
+      { name: 'Customers', path: '/customers', icon: CustomersIcon, perms: ['customers.view'] },
+      { name: 'Payments', path: '/payments', icon: PaymentsIcon, perms: ['payments.view'] },
+    ] },
+    { name: 'Operations', icon: InventoryIcon, items: [
+      { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'premade.receive', 'suppliers.view'] },
+      { name: 'Product Orders', path: '/product-orders', icon: ShoppingIcon, perms: ['product_orders.view'] },
+      { name: 'Item Trail', path: '/delivery', icon: DeliveryIcon, perms: ['item_trail.view'] },
+      { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, perms: ['workers.add', 'workers.edit', 'workers.delete'] },
+    ] },
+    { name: 'Finance', icon: CostingIcon, items: [
+      { name: 'Expenses', path: '/expenses', icon: ExpensesIcon, perms: ['expenses.view', 'expenses.add'] },
+      { name: 'Costing', path: '/costing', icon: CostingIcon, perms: ['costing.view'] },
+    ] },
+    { name: 'Analytics', icon: ReportsIcon, items: [
+      { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, perms: ['forecasting.view'] },
+      { name: 'Reports', path: '/reports', icon: ReportsIcon, perms: ['reports.sales', 'reports.inventory', 'reports.settlement', 'reports.audit_trail'] },
+    ] },
     { name: 'Settings', path: '/settings', icon: SettingsIcon, perms: ['settings.edit', 'users.manage', 'branches.manage'] },
   ];
 
-  const filteredNavItems = navItems.filter((item) =>
-    item.roles ? hasAccess(user?.role, item.roles) : item.perms ? can(...item.perms) : true);
+  const allowed = (item: NavItem) => (item.perms ? can(...item.perms) : true);
+  // Drop pages the user can't open; a category left with a single page shows as that page
+  const visibleEntries: NavEntry[] = navEntries.flatMap((entry): NavEntry[] => {
+    if (!('items' in entry)) return allowed(entry) ? [entry] : [];
+    const items = entry.items.filter(allowed);
+    if (items.length === 0) return [];
+    if (items.length === 1) return [items[0]];
+    return [{ ...entry, items }];
+  });
+
+  const isActivePath = (path: string) => pathname === path || (path !== '/' && pathname.startsWith(path));
+  const flyoutGroup = flyout ? visibleEntries.find((e): e is NavGroup => 'items' in e && e.name === flyout.name) : undefined;
+
+  const openFlyout = (name: string, el: HTMLElement) => {
+    if (flyoutCloseTimer.current) clearTimeout(flyoutCloseTimer.current);
+    const rect = el.getBoundingClientRect();
+    setFlyout({ name, top: rect.top, left: rect.right + 8 });
+  };
+  // A short delay lets the pointer cross the gap between the sidebar and the flyout
+  const scheduleFlyoutClose = () => {
+    if (flyoutCloseTimer.current) clearTimeout(flyoutCloseTimer.current);
+    flyoutCloseTimer.current = setTimeout(() => setFlyout(null), 150);
+  };
+  const cancelFlyoutClose = () => {
+    if (flyoutCloseTimer.current) clearTimeout(flyoutCloseTimer.current);
+  };
+
+  // Item Trail carries the unread count
+  const badgeFor = (path: string) => (path === '/delivery' && unreadCount > 0 ? unreadCount : 0);
+
+  const renderLink = (item: NavItem, inFlyout = false) => {
+    const Icon = item.icon;
+    const isActive = isActivePath(item.path);
+    const badge = badgeFor(item.path);
+    const iconOnly = collapsed && !inFlyout;
+    return (
+      <Link
+        key={item.path}
+        href={item.path}
+        onClick={() => { setFlyout(null); onMobileClose(); }}
+        title={iconOnly ? item.name : undefined}
+        className={`flex items-center rounded-lg text-sm font-medium transition-colors ${
+          iconOnly ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+        } ${
+          isActive
+            ? 'bg-[#dde6ff] text-[#011c72]'
+            : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+        }`}
+      >
+        <span className="relative shrink-0">
+          <Icon />
+          {iconOnly && badge > 0 && (
+            <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-0.5 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">
+              {badge > 9 ? '9+' : badge}
+            </span>
+          )}
+        </span>
+        {!iconOnly && <span className="truncate flex-1">{item.name}</span>}
+        {!iconOnly && badge > 0 && (
+          <span className="ml-auto shrink-0 min-w-[20px] h-5 px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">
+            {badge > 9 ? '9+' : badge}
+          </span>
+        )}
+      </Link>
+    );
+  };
 
   const handleLogout = async () => {
     const ok = await confirm({
@@ -385,46 +476,86 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
 
       {/* Nav Items */}
       <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5">
-        {filteredNavItems.map((item) => {
-          const Icon = item.icon;
-          const isActive =
-            pathname === item.path ||
-            (item.path !== '/' && pathname.startsWith(item.path));
-          const isDelivery = item.path === '/delivery';
+        {visibleEntries.map((entry) => {
+          if (!('items' in entry)) return renderLink(entry);
+
+          const Icon = entry.icon;
+          const isActive = entry.items.some((i) => isActivePath(i.path));
+          const badge = entry.items.reduce((n, i) => n + badgeFor(i.path), 0);
+          const isOpen = mobileOpen
+            ? (drawerExpanded === undefined ? isActive : drawerExpanded === entry.name)
+            : flyout?.name === entry.name;
+
           return (
-            <Link
-              key={item.path}
-              href={item.path}
-              onClick={onMobileClose}
-              title={collapsed ? item.name : undefined}
-              className={`flex items-center rounded-lg text-sm font-medium transition-colors ${
-                collapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
-              } ${
-                isActive
-                  ? 'bg-[#dde6ff] text-[#011c72]'
-                  : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
-              }`}
-            >
-              <span className="relative shrink-0">
-                <Icon />
-                {isDelivery && unreadCount > 0 && (
-                  <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-0.5 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">
-                    {unreadCount > 9 ? '9+' : unreadCount}
-                  </span>
-                )}
-              </span>
-              {!collapsed && (
-                <span className="truncate flex-1">{item.name}</span>
-              )}
-              {!collapsed && isDelivery && unreadCount > 0 && (
-                <span className="ml-auto shrink-0 min-w-[20px] h-5 px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">
-                  {unreadCount > 9 ? '9+' : unreadCount}
+            <div key={entry.name}>
+              <button
+                type="button"
+                title={collapsed ? entry.name : undefined}
+                aria-expanded={isOpen}
+                // Desktop: hover or click opens the flyout. Phone drawer: click expands in place.
+                onMouseEnter={(e) => { if (!mobileOpen) openFlyout(entry.name, e.currentTarget); }}
+                onMouseLeave={() => { if (!mobileOpen) scheduleFlyoutClose(); }}
+                onClick={(e) => {
+                  if (mobileOpen) setDrawerExpanded(isOpen ? null : entry.name);
+                  else if (flyout?.name === entry.name) setFlyout(null);
+                  else openFlyout(entry.name, e.currentTarget);
+                }}
+                className={`w-full flex items-center rounded-lg text-sm font-medium transition-colors ${
+                  collapsed ? 'justify-center p-3' : 'gap-3 px-3 py-2.5'
+                } ${
+                  isActive
+                    ? 'bg-[#dde6ff] text-[#011c72]'
+                    : isOpen
+                      ? 'bg-gray-100 text-gray-900'
+                      : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                }`}
+              >
+                <span className="relative shrink-0">
+                  <Icon />
+                  {collapsed && badge > 0 && (
+                    <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-red-500" />
+                  )}
                 </span>
+                {!collapsed && <span className="truncate flex-1 text-left">{entry.name}</span>}
+                {!collapsed && badge > 0 && (
+                  <span className="shrink-0 w-2 h-2 rounded-full bg-red-500" />
+                )}
+                {!collapsed && (
+                  <svg className={`w-4 h-4 shrink-0 text-gray-400 transition-transform ${mobileOpen && isOpen ? 'rotate-90' : ''}`}
+                    fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                )}
+              </button>
+              {mobileOpen && isOpen && (
+                <div className="ml-4 pl-2 mt-0.5 border-l border-gray-200 space-y-0.5">
+                  {entry.items.map((item) => renderLink(item, true))}
+                </div>
               )}
-            </Link>
+            </div>
           );
         })}
       </nav>
+
+      {/* Category flyout (desktop): lists the category's pages beside the sidebar */}
+      {!mobileOpen && flyout && flyoutGroup && (
+        <div
+          onMouseEnter={cancelFlyoutClose}
+          onMouseLeave={scheduleFlyoutClose}
+          style={{
+            top: Math.max(8, Math.min(flyout.top, window.innerHeight - (flyoutGroup.items.length * 44 + 64))),
+            left: flyout.left,
+          }}
+          className="hidden md:block fixed z-50 w-60 bg-white rounded-xl shadow-xl border border-gray-200 overflow-hidden"
+        >
+          <p className="px-4 py-2.5 border-b border-gray-100 text-xs font-semibold uppercase tracking-wide text-gray-500">
+            {flyoutGroup.name}
+          </p>
+          <div className="p-2 space-y-0.5">
+            {flyoutGroup.items.map((item) => renderLink(item, true))}
+          </div>
+        </div>
+      )}
 
       {/* Logout */}
       <div className="border-t border-gray-200 p-3 shrink-0">
@@ -468,7 +599,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
                   {showArchive ? 'No archived notifications' : 'No notifications'}
                 </p>
               ) : (showArchive ? archived : notifications).map(n => {
-                const href = notificationHref(n.type, n.data, user?.role, can);
+                const href = notificationHref(n.type, n.data, can);
                 const unread = !showArchive && !n.isRead;
                 const body = (
                   <div className="flex items-start gap-2">
@@ -549,9 +680,9 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
  * Where a notification leads, or null when it has nowhere to go for this role
  * (the row is then shown as plain text rather than a link).
  */
-function notificationHref(type: string, data: unknown, role: string | undefined,
+function notificationHref(type: string, data: unknown,
   can: (...permissions: string[]) => boolean): string | null {
-  const d = (data || {}) as { orderId?: number; jobOrderId?: number; kind?: 'job' | 'product' | 'request' };
+  const d = (data || {}) as { orderId?: number; jobOrderId?: number };
   switch (type) {
     case 'transfer_request':
     case 'transfer_dispatched':
@@ -562,17 +693,6 @@ function notificationHref(type: string, data: unknown, role: string | undefined,
     case 'premade_delivery':
       // Incoming premade stock is confirmed on the Finished Goods tab
       return can('premade.view', 'premade.receive') ? '/inventory?tab=finished-goods' : null;
-    case 'quotation_response':
-      return d.jobOrderId && can('sales.view')
-        ? `/sales/${d.jobOrderId}` : null;
-    case 'order_status':
-    case 'quotation_ready':
-      // The customer's own order: custom requests have a page, the rest open on My Orders
-      if (role !== 'customer' || !d.orderId) return null;
-      if (d.kind === 'request') return `/my-orders/${d.orderId}`;
-      if (d.kind === 'job') return `/my-orders?tab=custom&job=${d.orderId}`;
-      if (d.kind === 'product') return `/my-orders?tab=premade&order=${d.orderId}`;
-      return null;
     default:
       return null;
   }

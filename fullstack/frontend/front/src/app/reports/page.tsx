@@ -1,7 +1,7 @@
 ﻿'use client';
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, SalesReport, InventoryReport, BranchSettlementReport } from '@/lib/api';
+import { api, SalesReport, InventoryReport, BranchSettlementReport, type ExtraMaterialsReport } from '@/lib/api';
 import { formatShortDate, formatDayLabel, manilaDateString } from '@/lib/dateUtils';
 
 function getDateRange(range: string): { startDate: string; endDate: string } {
@@ -62,6 +62,7 @@ export default function ReportsPage() {
   const [salesData, setSalesData]           = useState<SalesReport | null>(null);
   const [inventoryData, setInventoryData]   = useState<InventoryReport | null>(null);
   const [settlementData, setSettlementData] = useState<BranchSettlementReport | null>(null);
+  const [extraData, setExtraData]           = useState<ExtraMaterialsReport | null>(null);
   // '' means all branches; only administrators can pick (the server pins everyone else to their own branch)
   const [salesBranchId, setSalesBranchId]   = useState('');
   const [branches, setBranches]             = useState<{ id: number; name: string; isWarehouse: boolean }[]>([]);
@@ -99,6 +100,12 @@ export default function ReportsPage() {
       } else if (reportType === 'settlement') {
         const res = await api.reports.getSettlementReport(dates);
         setSettlementData(res.data || null);
+      } else if (reportType === 'extra' && canViewInventory) {
+        const res = await api.reports.getExtraMaterialsReport({
+          ...dates,
+          ...(isAdmin && salesBranchId ? { branchId: Number(salesBranchId) } : {}),
+        });
+        setExtraData(res.data || null);
       }
     } catch {
       setError('Failed to load report data. Please try again.');
@@ -123,6 +130,14 @@ export default function ReportsPage() {
       filename = 'inventory-report.csv';
       csv = 'Category,Items,Value\n' +
         inventoryData.categoryBreakdown.map(c => [csvCell(c.category), c.count, c.value].join(',')).join('\n');
+    } else if (reportType === 'extra' && extraData) {
+      filename = `extra-materials-${extraData.period.startDate}-to-${extraData.period.endDate}.csv`;
+      csv = 'Date,Job Order,Worker,Material,Quantity,Reason,Notes,Cost,Recorded By\n' +
+        extraData.entries.map(e => [
+          csvCell(e.createdAt?.slice(0, 10) || ''), csvCell(e.jobOrderNumber), csvCell(e.workerName || ''),
+          csvCell(`${e.materialName || ''}${e.materialColor ? ` - ${e.materialColor}` : ''}`), e.quantity,
+          csvCell(e.reason), csvCell(e.notes || ''), e.value ?? 0, csvCell(e.loggedByName || ''),
+        ].join(',')).join('\n');
     } else if (reportType === 'settlement' && settlementData) {
       filename = 'branch-settlement.csv';
       csv = 'Order,Date,Source Branch,Pickup Branch,Items Value,Transfer Status,Settled,Customer\n' +
@@ -159,6 +174,14 @@ export default function ReportsPage() {
       icon: (
         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+        </svg>
+      ),
+    }] : []),
+    ...(canViewInventory ? [{
+      id: 'extra', name: 'Extra Materials',
+      icon: (
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
         </svg>
       ),
     }] : []),
@@ -208,7 +231,7 @@ export default function ReportsPage() {
         </div>
 
         {/* Report Type Tabs */}
-        <div className={`grid gap-4 mb-6 ${reportTypes.length === 1 ? 'grid-cols-1' : reportTypes.length === 2 ? 'grid-cols-2' : 'grid-cols-3'}`}>
+        <div className={`grid gap-4 mb-6 ${reportTypes.length === 1 ? 'grid-cols-1' : reportTypes.length === 2 ? 'grid-cols-2' : reportTypes.length === 3 ? 'grid-cols-3' : 'grid-cols-2 lg:grid-cols-4'}`}>
           {reportTypes.map((type) => (
             <button
               key={type.id}
@@ -272,7 +295,7 @@ export default function ReportsPage() {
                 </div>
               </>
             )}
-            {reportType === 'sales' && (
+            {(reportType === 'sales' || reportType === 'extra') && (
               isAdmin ? (
                 <select
                   value={salesBranchId}
@@ -515,6 +538,99 @@ export default function ReportsPage() {
               <EmptyState message="No inventory data available." />
             )}
           </>
+        )}
+
+        {/* ── EXTRA MATERIALS ── */}
+        {reportType === 'extra' && (
+          loading ? (
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">{[...Array(4)].map((_, i) => <SkeletonCard key={i} />)}</div>
+          ) : extraData ? (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <SummaryCard label="Extra Material Cost" value={formatCurrency(extraData.summary.totalValue)}
+                  sub="Added to job costs, not billed" color="text-red-600" />
+                <SummaryCard label="Entries" value={extraData.summary.count.toString()}
+                  sub={`${extraData.summary.jobOrders} job order${extraData.summary.jobOrders === 1 ? '' : 's'}`} color="text-gray-500" />
+                <SummaryCard label="Workers Named" value={extraData.byWorker.filter(w => w.key).length.toString()}
+                  sub="With at least one entry" color="text-gray-500" />
+                <SummaryCard label="No Worker Named" value={extraData.summary.unassigned.toString()}
+                  sub={extraData.summary.unassigned > 0 ? 'Entries without a worker' : 'Every entry names a worker'}
+                  color={extraData.summary.unassigned > 0 ? 'text-amber-600' : 'text-green-600'} />
+              </div>
+
+              {extraData.summary.count === 0 ? (
+                <EmptyState message="No extra materials were issued in this period." />
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                    {([['By Worker', extraData.byWorker], ['By Reason', extraData.byReason]] as const).map(([title, rows]) => {
+                      const max = Math.max(...rows.map(r => r.value), 1);
+                      return (
+                        <div key={title} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                          <div className="px-6 py-4 border-b border-gray-200">
+                            <h2 className="text-base font-semibold text-gray-900">{title}</h2>
+                          </div>
+                          <div className="p-6 space-y-3">
+                            {rows.map(r => (
+                              <div key={String(r.key)}>
+                                <div className="flex items-center justify-between text-sm mb-1">
+                                  <span className={`font-medium ${r.key ? 'text-gray-900' : 'text-gray-500 italic'}`}>{r.label}</span>
+                                  <span className="text-gray-600">{r.count} · <span className="font-semibold text-gray-900">{formatCurrency(r.value)}</span></span>
+                                </div>
+                                <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
+                                  <div className="h-full rounded-full bg-red-400" style={{ width: `${(r.value / max) * 100}%` }} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-200">
+                      <h2 className="text-base font-semibold text-gray-900">Entries</h2>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[720px] text-sm">
+                        <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
+                          <tr>
+                            <th className="px-4 py-2 text-left font-medium">Date</th>
+                            <th className="px-4 py-2 text-left font-medium">Job Order</th>
+                            <th className="px-4 py-2 text-left font-medium">Worker</th>
+                            <th className="px-4 py-2 text-left font-medium">Material</th>
+                            <th className="px-4 py-2 text-right font-medium">Qty</th>
+                            <th className="px-4 py-2 text-left font-medium">Reason</th>
+                            <th className="px-4 py-2 text-right font-medium">Cost</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {extraData.entries.map(e => (
+                            <tr key={e.id} className="hover:bg-gray-50">
+                              <td className="px-4 py-2 text-gray-600 whitespace-nowrap">{formatDate(e.createdAt)}</td>
+                              <td className="px-4 py-2">
+                                {e.jobOrderId
+                                  ? <a href={`/sales/${e.jobOrderId}`} className="font-mono text-[#011c72] hover:underline">{e.jobOrderNumber}</a>
+                                  : '—'}
+                              </td>
+                              <td className="px-4 py-2 text-gray-700">{e.workerName || <span className="text-gray-400">—</span>}</td>
+                              <td className="px-4 py-2 text-gray-900">{e.materialName}{e.materialColor ? ` - ${e.materialColor}` : ''}</td>
+                              <td className="px-4 py-2 text-right text-gray-700">{e.quantity}</td>
+                              <td className="px-4 py-2 text-gray-700">{e.reason}</td>
+                              <td className="px-4 py-2 text-right font-medium text-red-600">{formatCurrency(e.value || 0)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              )}
+            </>
+          ) : (
+            <EmptyState message="No extra material data available." />
+          )
         )}
 
         {/* ── BRANCH SETTLEMENT ── */}

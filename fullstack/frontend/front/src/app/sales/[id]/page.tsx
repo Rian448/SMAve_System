@@ -4,10 +4,15 @@ import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord, ManagedWorker, PaymentOverride,
+  type ExcessPayment, type CustomerOrderSummary, type JobOrderPriority, PRIORITY_LABELS, type MaterialWasteLog,
   jobOrderItemCategory, jobOrderPriceBreakdown, jobOrderTotalFrom, MAX_JOB_ORDER_PRICE, isValidPriceInput,
 } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useVatRate } from '@/lib/useVatRate';
+import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
+import ExcessPayments from '@/components/ExcessPayments';
+import ExtraMaterialDialog from '@/components/ExtraMaterialDialog';
+import { useConfirm } from '@/components/ConfirmDialog';
 
 type EditableJobOrderItem = JobOrderItem & {
   materialSource?: 'inventory' | 'custom';
@@ -74,7 +79,16 @@ export default function JobOrderDetailPage() {
   const vatRate = useVatRate();
   const [savingParts, setSavingParts] = useState(false);
   const [partsMsg, setPartsMsg] = useState('');
+  // Why the last Save of parts/workers failed, shown by its Save button
+  const [partsError, setPartsError] = useState('');
   const [error, setError] = useState('');
+
+  // Extra materials: material issued beyond the plan (a recut after a mistake,
+  // defective material, rework). Leaves stock and adds to the job's actual cost.
+  const [showExtra, setShowExtra] = useState(false);
+  const fe = useFieldErrors();
+  const { confirm, confirmDialog } = useConfirm();
+  const [extraMsg, setExtraMsg] = useState('');
 
   // Payment states
   const [paymentRecords, setPaymentRecords] = useState<PaymentRecord[]>([]);
@@ -96,11 +110,17 @@ export default function JobOrderDetailPage() {
   const [overrideMsg, setOverrideMsg] = useState('');
 
   const [showRevertConfirm, setShowRevertConfirm] = useState(false);
+  // Money received on this order beyond its balance, and the customer's other
+  // unpaid orders it can be applied to
+  const [excessItems, setExcessItems] = useState<ExcessPayment[]>([]);
+  const [customerUnpaid, setCustomerUnpaid] = useState<CustomerOrderSummary[]>([]);
   const [managedWorkers, setManagedWorkers] = useState<ManagedWorker[]>([]);
 
   // Workers on the job are Worker Management assignments; this page shows and edits
-  // the same ones. Sales managers can see them; admins and supervisors can change them.
-  const canViewLabor = !!user && can('workers.view');
+  // the same ones. Every staff role sees who is on the job and how far along it is;
+  // only administrators, owners and supervisors see the pay and can change it.
+  const canViewLabor = !!user;
+  const seesLaborCost = !!user && ['administrator', 'owner', 'supervisor'].includes(user.role);
 
   useEffect(() => {
     api.managedWorkers.list().then(res => {
@@ -215,6 +235,9 @@ export default function JobOrderDetailPage() {
     try {
       await api.sales.updateJobOrder(jobOrder.id, {
         slipData: {
+          // Keeps what this user can't see (cutter/sewer are for those who manage labor)
+          ...jobOrder.slipData,
+          ...(seesLaborCost ? { cutterName: slipCutter, sewerName: slipSewer } : {}),
           rows: slipRows,
           materialCenter: slipCenter,
           materialSides: slipSides,
@@ -224,8 +247,6 @@ export default function JobOrderDetailPage() {
           pockets: slipPockets,
           logo: slipLogo,
           specification: slipSpec,
-          cutterName: slipCutter,
-          sewerName: slipSewer,
         }
       } as any);
     } catch (err) {
@@ -239,10 +260,47 @@ export default function JobOrderDetailPage() {
   // before a down payment (sales.edit_unpaid, by default administrators and
   // supervisors); the server refuses edits to unpaid confirmed orders without it.
   const canEditParts = can('sales.edit') && can('sales.edit_unpaid');
+  const canEditLabor = canEditParts && seesLaborCost;
   const canUpdatePaymentStatus = can('payments.add');
   // Those who can't approve overrides themselves send a request for approval instead
   const canRequestOverride = can('payments.request_override') && !can('payments.approve_override');
   const canCreateNewMaterial = can('inventory.add');
+  const canIssueExtra = can('inventory.log_waste');
+
+  const reloadJobOrder = async () => {
+    if (!jobOrder) return;
+    const res = await api.sales.getJobOrder(jobOrder.id);
+    if (res.data) setJobOrder(res.data);
+  };
+
+  const openExtra = () => {
+    setExtraMsg('');
+    setShowExtra(true);
+  };
+
+  /** Undo an entry made by mistake: the quantity goes back into stock */
+  const undoExtra = async (x: MaterialWasteLog) => {
+    if (!jobOrder) return;
+    const ok = await confirm({
+      title: 'Undo this extra material?',
+      message: <>{x.quantity} of <span className="font-medium text-gray-900">{x.materialName}</span> goes back into
+        stock and comes off this job&apos;s cost.</>,
+      confirmLabel: 'Undo',
+      variant: 'warning',
+    });
+    if (!ok) return;
+    try {
+      await api.sales.undoExtraMaterial(jobOrder.id, x.id);
+      setExtraMsg('Undone. The material was returned to stock.');
+      await reloadJobOrder();
+    } catch (err) {
+      setExtraMsg(err instanceof Error && err.message ? `Not undone: ${err.message}` : 'Not undone. Please try again.');
+    }
+  };
+  // Extra material can be issued once work has started: the order is in progress or
+  // completed, or a worker has started their task while the order still says pending
+  const workStarted = !!jobOrder && (jobOrder.status === 'in_progress' || jobOrder.status === 'completed'
+    || (jobOrder.status === 'pending' && (jobOrder.items || []).some(it => it.assignmentStatus === 'in_progress')));
 
   useEffect(() => {
     const isFinished = jobOrder?.status === 'completed' || jobOrder?.status === 'delivered';
@@ -272,6 +330,19 @@ export default function JobOrderDetailPage() {
       console.error(err);
     }
     setUpdating(false);
+  };
+
+  /** Priority sets the order Worker Management lists the job in */
+  const updatePriority = async (priority: JobOrderPriority) => {
+    if (!jobOrder) return;
+    const previous = jobOrder.priority;
+    setJobOrder({ ...jobOrder, priority });
+    try {
+      await api.sales.updateJobOrder(jobOrder.id, { priority });
+    } catch (err) {
+      setJobOrder({ ...jobOrder, priority: previous });
+      setError(err instanceof Error && err.message ? err.message : 'Could not change the priority.');
+    }
   };
 
   const addMaterialPart = () => {
@@ -357,6 +428,7 @@ export default function JobOrderDetailPage() {
     if (!jobOrder || savingParts) return;
     // Set before any awaits so a double-click can't create new materials twice
     setSavingParts(true);
+    setPartsError('');
 
     const normalizedItems: JobOrderItem[] = [];
 
@@ -376,7 +448,7 @@ export default function JobOrderDetailPage() {
       if (item.category === 'material' && item.materialSource === 'custom') {
         if (!canCreateNewMaterial) {
           setSavingParts(false);
-          setError('Only administrators and supervisors can add new materials to inventory.');
+          setPartsError('Only administrators and supervisors can add new materials to inventory.');
           return;
         }
 
@@ -402,7 +474,7 @@ export default function JobOrderDetailPage() {
             });
           } catch (err) {
             setSavingParts(false);
-            setError(err instanceof Error && err.message ? err.message : `Couldn't add "${materialName}" to inventory.`);
+            setPartsError(err instanceof Error && err.message ? err.message : `Couldn't add "${materialName}" to inventory.`);
             return;
           }
 
@@ -446,13 +518,15 @@ export default function JobOrderDetailPage() {
         (sum, item) => sum + item.quantity * ((Number(item.materialCost) || 0) + (Number(item.laborCost) || 0)), 0);
     }
     if (subtotal > MAX_JOB_ORDER_PRICE) {
-      setError('Price for the work must be less than ₱100,000,000 (up to 8 digits).');
+      setSavingParts(false);
+      setPartsError('Price for the work must be less than ₱100,000,000 (up to 8 digits).');
       return;
     }
     const totalPrice = jobOrderTotalFrom(subtotal, discountPercent);
 
     setSavingParts(true);
     setPartsMsg('');
+    setPartsError('');
     try {
       const response = await api.sales.updateJobOrder(jobOrder.id, {
         items: normalizedItems,
@@ -482,7 +556,7 @@ export default function JobOrderDetailPage() {
       }
     } catch (err) {
       console.error(err);
-      setError(err instanceof Error && err.message ? err.message : 'Failed to save parts.');
+      setPartsError(err instanceof Error && err.message ? err.message : 'Could not save. Please try again.');
     } finally {
       setSavingParts(false);
     }
@@ -498,7 +572,19 @@ export default function JobOrderDetailPage() {
     api.paymentOverrides.list({ jobOrderId: jobOrder.id, status: 'pending' })
       .then(res => setPendingOverride(res.data?.[0] || null))
       .catch(() => setPendingOverride(null));
+    loadExcess(jobOrder.id, jobOrder.customerId);
   }, [jobOrder?.id]);
+
+  const loadExcess = (orderId: number, customerId?: number) => {
+    api.excessPayments.list({ jobOrderId: orderId })
+      .then(res => setExcessItems((res.data || []).filter(e => e.jobOrderId === orderId)))
+      .catch(() => setExcessItems([]));
+    if (customerId) {
+      api.customers.get(customerId)
+        .then(res => setCustomerUnpaid(res.data?.unpaidOrders || []))
+        .catch(() => setCustomerUnpaid([]));
+    }
+  };
 
   const submitOverride = async () => {
     if (!jobOrder) return;
@@ -527,6 +613,13 @@ export default function JobOrderDetailPage() {
     if (!jobOrder) return;
     const amount = parseFloat(newPaymentAmount);
     if (!amount || amount <= 0) return;
+    const balanceLeft = Math.max(0, (jobOrder.totalPrice || 0) - paymentRecords.reduce((s, r) => s + r.amount, 0));
+    const over = amount - balanceLeft;
+    // Cash over the balance is change handed back now; online money over it is kept as excess
+    if (fe.show({
+      'payment-amount': over > 0.005 && newPaymentMethod === 'cash'
+        && `That is more than the ${formatCurrency(balanceLeft)} balance. Record ${formatCurrency(balanceLeft)} and give ${formatCurrency(over)} change.`,
+    })) return;
     setSavingPayment(true);
     try {
       await api.payments.create({
@@ -535,7 +628,9 @@ export default function JobOrderDetailPage() {
         paymentMethod: newPaymentMethod,
         referenceNumber: newPaymentRef || undefined,
         notes: newPaymentNotes || undefined,
+        recordExcess: over > 0.005,
       });
+      loadExcess(jobOrder.id, jobOrder.customerId);
       const res = await api.payments.getAll({ jobOrderId: jobOrder.id });
       const records = res.data || [];
       setPaymentRecords(records);
@@ -719,6 +814,21 @@ export default function JobOrderDetailPage() {
             <span className={`px-3 py-1.5 text-sm font-semibold rounded-full ${getStatusColor(jobOrder.status)}`}>
               {jobOrder.status.replace(/_/g, ' ').toUpperCase()}
             </span>
+            {canEditParts && !['cancelled', 'voided', 'completed', 'delivered'].includes(jobOrder.status) ? (
+              <label className="inline-flex items-center gap-1.5 text-sm text-gray-600">
+                Priority
+                <select value={jobOrder.priority || 'normal'} onChange={(e) => updatePriority(e.target.value as JobOrderPriority)}
+                  className="px-2 py-1 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72]">
+                  {(['urgent', 'high', 'normal', 'low'] as const).map((p) => (
+                    <option key={p} value={p}>{PRIORITY_LABELS[p]}</option>
+                  ))}
+                </select>
+              </label>
+            ) : jobOrder.priority && jobOrder.priority !== 'normal' && (
+              <span className={`px-3 py-1.5 text-sm font-semibold rounded-full ${jobOrder.priority === 'urgent' ? 'bg-red-100 text-red-700' : jobOrder.priority === 'high' ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-500'}`}>
+                {PRIORITY_LABELS[jobOrder.priority].toUpperCase()} PRIORITY
+              </span>
+            )}
             {canEditParts && jobOrder.status === 'in_progress' && (
               <button
                 onClick={() => updateStatus('pending')}
@@ -1016,7 +1126,7 @@ export default function JobOrderDetailPage() {
           </div>
 
           {/* Specification */}
-          <div className="mb-5">
+          <div className={seesLaborCost ? 'mb-5' : ''}>
             <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Specification</label>
             <textarea
               value={slipSpec}
@@ -1027,21 +1137,29 @@ export default function JobOrderDetailPage() {
             />
           </div>
 
-          {/* Cutter & Sewer */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">CUTTER</label>
-              <input type="text" value={slipCutter} onChange={(e) => setSlipCutter(e.target.value)}
-                placeholder="Cutter name"
-                className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+          {/* Cutter & Sewer: picked from the workers of that type */}
+          {seesLaborCost && (
+            <div className="grid grid-cols-2 gap-4">
+              {[
+                { label: 'CUTTER', type: 'cutter', value: slipCutter, set: setSlipCutter },
+                { label: 'SEWER', type: 'sewer', value: slipSewer, set: setSlipSewer },
+              ].map(({ label, type, value, set }) => {
+                const choices = managedWorkers.filter(w => w.workType.toLowerCase() === type);
+                return (
+                  <div key={label}>
+                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">{label}</label>
+                    <select value={value} onChange={(e) => set(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
+                      <option value="">{choices.length ? '— Select —' : `No active ${type}s`}</option>
+                      {choices.map(w => <option key={w.id} value={w.name}>{w.name}</option>)}
+                      {/* A name saved earlier (typed in, or a since-deactivated worker) stays selectable */}
+                      {value && !choices.some(w => w.name === value) && <option value={value}>{value}</option>}
+                    </select>
+                  </div>
+                );
+              })}
             </div>
-            <div>
-              <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">SEWER</label>
-              <input type="text" value={slipSewer} onChange={(e) => setSlipSewer(e.target.value)}
-                placeholder="Sewer name"
-                className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
-            </div>
-          </div>
+          )}
         </div>
 
         {/* ── Workers & Labor ── one list shared with Worker Management */}
@@ -1056,9 +1174,11 @@ export default function JobOrderDetailPage() {
                   Workers &amp; Labor
                 </h2>
                 <p className="text-xs text-gray-500 mt-1 max-w-2xl">
-                  Who is doing the work and what it costs. These are the same assignments as in Worker Management —
-                  a worker added in either place shows up in both. Workers start and finish their tasks there, and what they
-                  were actually paid is filled in here automatically.
+                  {seesLaborCost
+                    ? <>Who is doing the work and what it costs. These are the same assignments as in Worker Management —
+                      a worker added in either place shows up in both. Workers start and finish their tasks there, and what they
+                      were actually paid is filled in here automatically.</>
+                    : 'Who is working on this job and how far along each task is.'}
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -1068,7 +1188,7 @@ export default function JobOrderDetailPage() {
                     Open Worker Management
                   </button>
                 )}
-                {canEditParts && (
+                {canEditLabor && (
                   <>
                     <button type="button" onClick={addLaborPart}
                       className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-[#c7d2f5] text-[#011c72] hover:bg-[#eef1fb] text-xs font-medium transition-colors">
@@ -1087,16 +1207,20 @@ export default function JobOrderDetailPage() {
             </div>
 
             <div className="overflow-x-auto border border-gray-200 rounded-lg">
-              <table className="w-full min-w-[760px]">
+              <table className={`w-full ${seesLaborCost ? 'min-w-[760px]' : 'min-w-[480px]'}`}>
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[24%]">Task</th>
                     <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[22%]">Worker</th>
                     <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                    <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-20">Qty</th>
-                    <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-28">Rate (₱)</th>
-                    <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-28">Cost</th>
-                    <th className="px-3 py-3 w-12"></th>
+                    {seesLaborCost && (
+                      <>
+                        <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-20">Qty</th>
+                        <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-28">Rate (₱)</th>
+                        <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-28">Cost</th>
+                        <th className="px-3 py-3 w-12"></th>
+                      </>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 bg-white">
@@ -1107,7 +1231,7 @@ export default function JobOrderDetailPage() {
                     const unit = PAY_UNIT[lineWorker?.payMode || 'per_hour'];
                     // Once the worker has started, the line is the record of their work
                     const started = part.assignmentStatus === 'in_progress' || part.assignmentStatus === 'completed';
-                    const editable = canEditParts && !started;
+                    const editable = canEditLabor && !started;
                     const status = !part.workerId
                       ? { label: 'No worker', cls: 'bg-gray-100 text-gray-500' }
                       : !part.assignmentId
@@ -1116,7 +1240,7 @@ export default function JobOrderDetailPage() {
                       ? { label: 'Done', cls: 'bg-green-100 text-green-700' }
                       : part.assignmentStatus === 'in_progress'
                       ? { label: 'In progress', cls: 'bg-blue-100 text-blue-700' }
-                      : { label: 'Assigned', cls: 'bg-[#eef1fb] text-[#011c72]' };
+                      : { label: 'Pending', cls: 'bg-[#eef1fb] text-[#011c72]' };
                     return (
                       <tr key={`labor-${globalIndex}`}>
                         <td className="px-3 py-3">
@@ -1165,68 +1289,72 @@ export default function JobOrderDetailPage() {
                             <p className="text-[10px] text-gray-400 mt-0.5">for {formatDate(part.scheduledDate)}</p>
                           )}
                         </td>
-                        <td className="px-3 py-3 text-right">
-                          {editable ? (
-                            <input type="number" min="0" step="0.5" value={part.quantity}
-                              onChange={(e) => updateOrderPart(globalIndex, 'quantity', e.target.value)}
-                              className="w-16 px-2 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 text-right"
-                              aria-label={unit.qty} />
-                          ) : (
-                            <p className="text-sm text-gray-900">{part.quantity}</p>
-                          )}
-                          <p className="text-[10px] text-gray-400 mt-0.5">{unit.qty.toLowerCase()}</p>
-                        </td>
-                        <td className="px-3 py-3 text-right">
-                          {editable ? (
-                            <input type="number" min="0" step="0.01" value={part.laborCost || 0}
-                              onChange={(e) => updateOrderPart(globalIndex, 'laborCost', e.target.value)}
-                              className="w-24 px-2 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 text-right"
-                              aria-label={unit.rate} />
-                          ) : (
-                            <p className="text-sm text-gray-900">{formatCurrency(Number(part.laborCost) || 0)}</p>
-                          )}
-                          <p className="text-[10px] text-gray-400 mt-0.5">{unit.rate.toLowerCase()}</p>
-                        </td>
-                        <td className="px-3 py-3 text-right text-sm">
-                          {part.actualLaborCost != null ? (
-                            <>
-                              <p className="font-semibold text-green-700" title="What the worker was paid when they finished">
-                                {formatCurrency(part.actualLaborCost)}
-                              </p>
-                              <p className="text-[10px] text-gray-400">paid · est. {formatCurrency(lineTotal)}</p>
-                            </>
-                          ) : (
-                            <>
-                              <p className="font-semibold text-gray-900">{formatCurrency(lineTotal)}</p>
-                              <p className="text-[10px] text-gray-400">estimate</p>
-                            </>
-                          )}
-                        </td>
-                        <td className="px-3 py-3 text-center">
-                          {editable && (
-                            <button type="button" onClick={() => removeOrderPart(globalIndex)}
-                              className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                              title={part.assignmentId ? 'Remove (also unassigns the worker)' : 'Remove'}
-                              aria-label="Remove labor line">
-                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                              </svg>
-                            </button>
-                          )}
-                        </td>
+                        {seesLaborCost && (
+                          <>
+                            <td className="px-3 py-3 text-right">
+                              {editable ? (
+                                <input type="number" min="0" step="0.5" value={part.quantity}
+                                  onChange={(e) => updateOrderPart(globalIndex, 'quantity', e.target.value)}
+                                  className="w-16 px-2 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 text-right"
+                                  aria-label={unit.qty} />
+                              ) : (
+                                <p className="text-sm text-gray-900">{part.quantity}</p>
+                              )}
+                              <p className="text-[10px] text-gray-400 mt-0.5">{unit.qty.toLowerCase()}</p>
+                            </td>
+                            <td className="px-3 py-3 text-right">
+                              {editable ? (
+                                <input type="number" min="0" step="0.01" value={part.laborCost || 0}
+                                  onChange={(e) => updateOrderPart(globalIndex, 'laborCost', e.target.value)}
+                                  className="w-24 px-2 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 text-right"
+                                  aria-label={unit.rate} />
+                              ) : (
+                                <p className="text-sm text-gray-900">{formatCurrency(Number(part.laborCost) || 0)}</p>
+                              )}
+                              <p className="text-[10px] text-gray-400 mt-0.5">{unit.rate.toLowerCase()}</p>
+                            </td>
+                            <td className="px-3 py-3 text-right text-sm">
+                              {part.actualLaborCost != null ? (
+                                <>
+                                  <p className="font-semibold text-green-700" title="What the worker was paid when they finished">
+                                    {formatCurrency(part.actualLaborCost)}
+                                  </p>
+                                  <p className="text-[10px] text-gray-400">paid · est. {formatCurrency(lineTotal)}</p>
+                                </>
+                              ) : (
+                                <>
+                                  <p className="font-semibold text-gray-900">{formatCurrency(lineTotal)}</p>
+                                  <p className="text-[10px] text-gray-400">estimate</p>
+                                </>
+                              )}
+                            </td>
+                            <td className="px-3 py-3 text-center">
+                              {editable && (
+                                <button type="button" onClick={() => removeOrderPart(globalIndex)}
+                                  className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                  title={part.assignmentId ? 'Remove (also unassigns the worker)' : 'Remove'}
+                                  aria-label="Remove labor line">
+                                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  </svg>
+                                </button>
+                              )}
+                            </td>
+                          </>
+                        )}
                       </tr>
                     );
                   })}
                   {!editingParts.some(p => p.category === 'labor') && (
                     <tr>
-                      <td colSpan={7} className="px-4 py-6 text-center text-sm text-gray-400">
+                      <td colSpan={seesLaborCost ? 7 : 3} className="px-4 py-6 text-center text-sm text-gray-400">
                         No workers on this job yet.
-                        {canEditParts && ' Click "Assign Worker", or drag the job onto a worker in Worker Management.'}
+                        {canEditLabor && ' Click "Assign Worker", or drag the job onto a worker in Worker Management.'}
                       </td>
                     </tr>
                   )}
                 </tbody>
-                {editingParts.some(p => p.category === 'labor') && (
+                {seesLaborCost && editingParts.some(p => p.category === 'labor') && (
                   <tfoot className="bg-[#eef1fb]">
                     <tr>
                       <td colSpan={5} className="px-3 py-2.5 text-right text-xs font-semibold text-[#011c72] uppercase tracking-wide">
@@ -1242,10 +1370,11 @@ export default function JobOrderDetailPage() {
                 )}
               </table>
             </div>
-            {editingParts.some(p => p.category === 'labor' && p.workerId && !p.assignmentId) && (
+            {canEditLabor && editingParts.some(p => p.category === 'labor' && p.workerId && !p.assignmentId) && (
               <p className="mt-3 text-xs text-amber-700">Click Save to assign the new worker(s).</p>
             )}
             {partsMsg && <p className="mt-3 text-sm text-green-700">{partsMsg}</p>}
+            {partsError && <p role="alert" className="mt-3 text-sm text-red-600">Not saved: {partsError}</p>}
           </div>
         )}
 
@@ -1546,6 +1675,7 @@ export default function JobOrderDetailPage() {
               </div>
             </div>
             {partsMsg && <p className="mt-3 text-sm text-green-700">{partsMsg}</p>}
+            {partsError && <p role="alert" className="mt-3 text-sm text-red-600">Not saved: {partsError}</p>}
           </div>
         )}
 
@@ -1619,6 +1749,89 @@ export default function JobOrderDetailPage() {
               <div className="mt-5 pt-5 border-t border-gray-100">
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Where the cost goes</p>
                 <CostDonut parts={costParts} formatCurrency={formatCurrency} />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Extra Materials (internal cost, not billed to the customer) ── */}
+        {jobOrder.extraMaterials !== undefined && (
+          <div className="no-print mb-5 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+            <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+              <div>
+                <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                  <svg className="w-5 h-5 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  Extra Materials
+                </h2>
+                <p className="text-xs text-gray-500 mt-1">
+                  Material used beyond the plan, such as a recut after a mistake. It is taken from stock and added to
+                  this job&apos;s actual cost. The customer&apos;s price does not change.
+                </p>
+              </div>
+              {canIssueExtra && workStarted && (
+                <button
+                  type="button"
+                  onClick={openExtra}
+                  className="inline-flex items-center px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors"
+                >
+                  + Issue Extra Materials
+                </button>
+              )}
+            </div>
+            {extraMsg && <p className="mb-3 text-sm text-green-700">{extraMsg}</p>}
+            {jobOrder.extraMaterials.length === 0 ? (
+              <p className="text-sm text-gray-500">
+                No extra materials issued.
+                {canIssueExtra && !workStarted && ' Extra materials can be issued once work on this order has started.'}
+              </p>
+            ) : (
+              <div className="overflow-x-auto border border-gray-200 rounded-lg">
+                <table className="w-full min-w-[640px]">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Material</th>
+                      <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Reason</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Worker</th>
+                      <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Cost</th>
+                      {canIssueExtra && <th className="px-2 py-2 w-16"></th>}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {jobOrder.extraMaterials.map(x => (
+                      <tr key={x.id}>
+                        <td className="px-4 py-2 text-sm text-gray-600 whitespace-nowrap">{formatDate(x.createdAt)}</td>
+                        <td className="px-4 py-2 text-sm text-gray-900">
+                          {x.materialName || '—'}{x.materialColor ? ` - ${x.materialColor}` : ''}
+                        </td>
+                        <td className="px-4 py-2 text-sm text-right text-gray-700">{x.quantity}</td>
+                        <td className="px-4 py-2 text-sm text-gray-700">
+                          {x.reason}
+                          {x.notes && <span className="block text-xs text-gray-400">{x.notes}</span>}
+                          <span className="block text-[11px] text-gray-400">by {x.loggedByName || 'staff'}</span>
+                        </td>
+                        <td className="px-4 py-2 text-sm text-gray-700">{x.workerName || '—'}</td>
+                        <td className="px-4 py-2 text-sm text-right font-medium text-red-600">{formatCurrency(x.value || 0)}</td>
+                        {canIssueExtra && (
+                          <td className="px-2 py-2 text-right">
+                            <button type="button" onClick={() => undoExtra(x)} title="Undo: return it to stock"
+                              className="text-xs text-gray-500 hover:text-red-600 hover:underline">Undo</button>
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-gray-50">
+                      <td colSpan={5} className="px-4 py-2 text-sm font-semibold text-gray-700 text-right">Total extra material cost</td>
+                      <td className="px-4 py-2 text-sm text-right font-bold text-red-600">{formatCurrency(jobOrder.extraMaterialsCost || 0)}</td>
+                      {canIssueExtra && <td></td>}
+                    </tr>
+                  </tfoot>
+                </table>
               </div>
             )}
           </div>
@@ -1739,6 +1952,24 @@ export default function JobOrderDetailPage() {
             )}
           </div>
 
+          {/* Excess payments received on this order */}
+          {excessItems.length > 0 && (
+            <div className="mb-5">
+              <h3 className="text-sm font-semibold text-gray-700 mb-1">Excess Payments</h3>
+              <p className="text-xs text-gray-500 mb-3">
+                Received beyond this order&apos;s balance. Not counted as payment until it is applied to an order.
+                {!jobOrder.customerId && ' This order is not linked to a customer record, so it can only be refunded.'}
+              </p>
+              <ExcessPayments
+                items={excessItems}
+                unpaidOrders={customerUnpaid}
+                canManage={canUpdatePaymentStatus}
+                showSource={false}
+                onChanged={() => loadExcess(jobOrder.id, jobOrder.customerId)}
+              />
+            </div>
+          )}
+
           {/* Record Payment Button + Form */}
           {canUpdatePaymentStatus && !isFullySettled && (
             <div>
@@ -1762,7 +1993,7 @@ export default function JobOrderDetailPage() {
                     New Payment Entry
                   </h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-                    <div>
+                    <div {...fe.field('payment-amount')}>
                       <label className="block text-xs font-medium text-gray-600 mb-1.5">Amount (₱) *</label>
                       <div className="relative">
                         <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm font-medium">₱</span>
@@ -1770,13 +2001,20 @@ export default function JobOrderDetailPage() {
                           type="number"
                           min="0.01"
                           step="0.01"
-                          max={remainingBalance}
                           value={newPaymentAmount}
                           onChange={(e) => setNewPaymentAmount(e.target.value)}
                           className="w-full pl-8 pr-3 py-2.5 rounded-lg border border-gray-300 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm"
-                          placeholder={`Max: ${formatCurrency(remainingBalance)}`}
+                          placeholder={`Balance: ${formatCurrency(remainingBalance)}`}
                         />
                       </div>
+                      <FieldError message={fe.errors['payment-amount']} />
+                      {newPaymentMethod !== 'cash' && parseFloat(newPaymentAmount) - remainingBalance > 0.005 && (
+                        <p className="mt-1.5 text-xs text-amber-700">
+                          {formatCurrency(parseFloat(newPaymentAmount) - remainingBalance)} over the balance.{' '}
+                          {formatCurrency(remainingBalance)} is recorded as payment; the rest is kept as an excess
+                          payment to refund or apply to another of the customer&apos;s orders.
+                        </p>
+                      )}
                     </div>
                     <div>
                       <label className="block text-xs font-medium text-gray-600 mb-1.5">Payment Method *</label>
@@ -1895,7 +2133,7 @@ export default function JobOrderDetailPage() {
               ) : (
                 <div className="border border-amber-200 rounded-lg p-4 bg-amber-50/40 space-y-3">
                   <p className="text-sm font-semibold text-amber-800">Request Payment Override</p>
-                  <p className="text-xs text-amber-700">This will be sent to an administrator for approval and won't take effect until approved.</p>
+                  <p className="text-xs text-amber-700">This will be sent to an administrator for approval and won&apos;t take effect until approved.</p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs font-medium text-gray-600 mb-1">New Payment Status</label>
@@ -1938,7 +2176,8 @@ export default function JobOrderDetailPage() {
         </div>
 
         {/* ── Job Financial Summary (completed / delivered only) ── */}
-        {(jobOrder.status === 'completed' || jobOrder.status === 'delivered') && (
+        {/* Includes what each worker was paid, so only for those who see labor costs */}
+        {seesLaborCost && (jobOrder.status === 'completed' || jobOrder.status === 'delivered') && (
           <div className="mb-5 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
@@ -2144,7 +2383,8 @@ export default function JobOrderDetailPage() {
             </svg>
             Print Receipt
           </button>
-          {canEditParts && jobOrder.status !== 'cancelled' && jobOrder.status !== 'delivered' && (
+          {/* A completed order's materials have been used, so it can't be cancelled */}
+          {canEditParts && !['cancelled', 'delivered', 'completed'].includes(jobOrder.status) && (
             <button
               onClick={() => updateStatus('cancelled')}
               disabled={updating}
@@ -2284,6 +2524,20 @@ export default function JobOrderDetailPage() {
           </div>
 
         </div>
+
+        {/* Issue extra materials */}
+        {showExtra && (
+          <ExtraMaterialDialog
+            jobOrderId={jobOrder.id} jobOrderRef={jobOrder.jobOrderId} workers={managedWorkers}
+            onClose={() => setShowExtra(false)}
+            onSaved={async () => {
+              setShowExtra(false);
+              setExtraMsg('Extra material recorded. It was taken from stock and added to this job\'s actual cost.');
+              await reloadJobOrder();
+            }}
+          />
+        )}
+        {confirmDialog}
 
       </main>
     </div>

@@ -4,6 +4,7 @@ import { api, Expense, PAYMENT_METHOD_LABELS } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { formatDate, manilaDateString } from '@/lib/dateUtils';
 import { useConfirm } from './ConfirmDialog';
+import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 
 const peso = (n: number) => `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -34,6 +35,7 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
   const blankForm = { date: today, category: '', particulars: '', amount: '', paymentMethod: 'cash', notes: '', branchId: '' };
   const [form, setForm] = useState(blankForm);
   const [formError, setFormError] = useState('');
+  const fe = useFieldErrors();
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
@@ -66,11 +68,14 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const amount = Number(form.amount);
-    if (!form.category || !form.particulars.trim() || !(amount > 0)) {
-      setFormError('Enter the date, category, what it was for and an amount above zero.');
-      return;
-    }
-    setSaving(true); setFormError('');
+    setFormError('');
+    if (fe.show({
+      'expense-date': !form.date && 'Choose the date.',
+      'expense-category': !form.category && 'Choose a category.',
+      'expense-particulars': !form.particulars.trim() && 'Say what it was for.',
+      'expense-amount': !(amount > 0) && 'Enter an amount above zero.',
+    })) return;
+    setSaving(true);
     try {
       await api.expenses.create({
         date: form.date, category: form.category, particulars: form.particulars.trim(), amount,
@@ -102,27 +107,31 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
   return (
     <div className="space-y-5">
       {canAdd && (
-        <form onSubmit={submit} className="bg-white rounded-xl border border-gray-200 p-5">
+        <form onSubmit={submit} noValidate className="bg-white rounded-xl border border-gray-200 p-5">
           <h3 className="text-base font-semibold text-gray-900 mb-1">Log an expense</h3>
           <p className="text-xs text-gray-500 mb-4">
             Money spent on running the business. Materials bought through purchase orders don&apos;t go here.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            <label className="text-sm text-gray-700">Date
+            <label className="text-sm text-gray-700" {...fe.field('expense-date')}>Date
               <input type="date" max={today} value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} className={`${input} mt-1`} />
+              <FieldError message={fe.errors['expense-date']} />
             </label>
-            <label className="text-sm text-gray-700">Category
+            <label className="text-sm text-gray-700" {...fe.field('expense-category')}>Category
               <select value={form.category} onChange={e => setForm({ ...form, category: e.target.value })} className={`${input} mt-1`}>
                 <option value="">Choose…</option>
                 {categories.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
+              <FieldError message={fe.errors['expense-category']} />
             </label>
-            <label className="text-sm text-gray-700 lg:col-span-2">Particulars
+            <label className="text-sm text-gray-700 lg:col-span-2" {...fe.field('expense-particulars')}>Particulars
               <input value={form.particulars} maxLength={255} placeholder="e.g. October electricity bill"
                 onChange={e => setForm({ ...form, particulars: e.target.value })} className={`${input} mt-1`} />
+              <FieldError message={fe.errors['expense-particulars']} />
             </label>
-            <label className="text-sm text-gray-700">Amount (₱)
+            <label className="text-sm text-gray-700" {...fe.field('expense-amount')}>Amount (₱)
               <input type="number" min="0" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className={`${input} mt-1`} />
+              <FieldError message={fe.errors['expense-amount']} />
             </label>
             <label className="text-sm text-gray-700">Paid by
               <select value={form.paymentMethod} onChange={e => setForm({ ...form, paymentMethod: e.target.value })} className={`${input} mt-1`}>

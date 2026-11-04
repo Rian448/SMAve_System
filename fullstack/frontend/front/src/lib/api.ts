@@ -17,7 +17,7 @@ export interface User {
   username: string;
   email: string;
   fullName: string;
-  role: 'administrator' | 'supervisor' | 'sales_manager' | 'seat_maker' | 'sewer' | 'customer' | 'owner';
+  role: 'administrator' | 'supervisor' | 'sales_manager' | 'seat_maker' | 'sewer' | 'owner';
   roleName?: string;
   branch: string;
   branchId?: number;
@@ -57,14 +57,6 @@ export interface UserPermissions {
   locked: string[];
 }
 
-export interface SignupDetails {
-  username: string;
-  password: string;
-  email: string;
-  fullName: string;
-  phone: string;
-}
-
 export interface AuthResponse {
   token: string;
   user: User;
@@ -74,8 +66,14 @@ export interface DashboardStats {
   totalJobOrders: number;
   pendingOrders: number;
   inProgressOrders: number;
+  /** Job orders finished in the chosen period */
   completedOrders: number;
+  /** Sales in the chosen period: job orders + premade, VAT excluded (same as the Owner P&L) */
   totalRevenue: number;
+  jobOrderRevenue?: number;
+  premadeRevenue?: number;
+  completedPremadeOrders?: number;
+  /** Cost of goods sold in the chosen period */
   totalCost: number;
   profit: number;
   profitMargin: number;
@@ -88,7 +86,10 @@ export interface DashboardStats {
   /** Branch these figures cover; null means the whole company (admins only) */
   scopeBranchId?: number | null;
   scopeBranchName?: string | null;
+  period?: { key: DashboardPeriod; startDate: string; endDate: string };
 }
+
+export type DashboardPeriod = 'today' | 'week' | 'month' | 'year' | 'all';
 
 export interface Activity {
   /** 'job_order' | 'delivery' — decides which record page this row opens. */
@@ -148,6 +149,37 @@ export interface Customer {
   orderCount?: number;
   /** Detail only: orders placed through the online account */
   onlineOrders?: CustomerOnlineOrder[];
+  /** What they still owe across their orders */
+  unpaidTotal?: number;
+  /** Excess payments the shop still has to return (refund or apply) */
+  excessTotal?: number;
+  /** Detail only: job orders with a balance left */
+  unpaidOrders?: CustomerOrderSummary[];
+  /** Detail only: every excess payment, open and settled */
+  excessPayments?: ExcessPayment[];
+}
+
+/** Money received on a job order beyond its balance, held until returned */
+export interface ExcessPayment {
+  id: number;
+  jobOrderId: number;
+  jobOrderRef?: string | null;
+  customerId?: number | null;
+  customerName?: string | null;
+  amount: number;
+  paymentMethod: string;
+  referenceNumber?: string | null;
+  notes?: string | null;
+  status: 'open' | 'refunded' | 'applied';
+  receivedByName?: string | null;
+  createdAt: string;
+  resolvedByName?: string | null;
+  resolvedAt?: string | null;
+  refundMethod?: string | null;
+  refundReference?: string | null;
+  resolutionNotes?: string | null;
+  appliedJobOrderId?: number | null;
+  appliedJobOrderRef?: string | null;
 }
 
 export interface CustomerOnlineOrder {
@@ -181,77 +213,61 @@ export interface PhoneBlacklistRecord {
   createdAt: string;
 }
 
-export interface Appointment {
+/** One line of a premade draft, re-checked against stock every time it is loaded */
+export interface PremadeDraftLine {
+  productId: number;
+  name: string;
+  sku?: string;
+  quantity: number;
+  /** Stock on hand now (0 when the product is no longer sold at the branch) */
+  available: number;
+  /** Current price, used when the draft is confirmed */
+  unitPrice: number;
+  /** Price when the line was saved */
+  savedUnitPrice: number;
+  total: number;
+  /** null when the line can be sold as it stands */
+  issue: 'unavailable' | 'out_of_stock' | 'insufficient' | null;
+  message: string;
+}
+
+/** A premade job order being prepared by staff: no stock is taken until it is confirmed */
+export interface PremadeDraft {
   id: number;
-  appointmentNumber: string;
+  draftNumber: string;
+  status: 'draft' | 'confirmed';
+  branchId: number;
+  branchName?: string | null;
+  customerId?: number | null;
   customerName: string;
   customerPhone: string;
-  customerEmail?: string;
-  contactMethod: 'branch_visit' | 'phone_call';
-  branchId?: number;
-  branchName?: string;
-  preferredDate: string;
-  preferredTime?: string;
-  description?: string;
-  vehicleInfo?: VehicleInfo;
-  status: 'pending' | 'confirmed' | 'completed' | 'cancelled';
-  confirmedTime?: string;
-  confirmedBy?: number;
-  confirmedByName?: string;
-  confirmedByRole?: string;
-  adminNotes?: string;
+  customerEmail: string;
+  customerAddress: string;
+  notes: string;
+  paymentMethod: string;
+  items: PremadeDraftLine[];
+  itemCount: number;
+  totalAmount: number;
+  /** False when any line is out of stock, short or no longer sold: it can't be confirmed yet */
+  isAvailable: boolean;
+  productOrderId?: number | null;
+  productOrderNumber?: string | null;
+  createdByName?: string | null;
+  updatedByName?: string | null;
   createdAt: string;
-  updatedAt?: string;
-  /** Booked from a signed-in customer account (a quotation can be sent to it) */
-  hasAccount?: boolean;
-  /** The latest quotation made from this appointment */
-  quotation?: AppointmentQuotation | null;
+  updatedAt: string;
 }
 
-export interface AppointmentQuotation {
-  id: number;
-  jobOrderId: string;
-  status: string;
-  quoteStatus: QuoteStatus | null;
-  quoteRejectReason?: string | null;
-}
-
-/** A job order sent to the customer as a quotation: sent → accepted | rejected */
-export type QuoteStatus = 'sent' | 'accepted' | 'rejected';
-
-export interface QuoteFields {
-  quoteStatus?: QuoteStatus | null;
-  quoteRejectReason?: string | null;
-  quoteSentAt?: string | null;
-  quoteRespondedAt?: string | null;
-  appointmentId?: number | null;
-}
-
-/** A customer's own job order or quotation, as shown in My Orders (no costs) */
-export interface CustomerJobOrder extends QuoteFields {
-  id: number;
-  jobOrderId: string;
-  description: string;
-  vehicleInfo?: VehicleInfo | null;
-  branchName: string;
-  status: string;
-  paymentStatus: string;
-  totalPrice: number;
-  discountPercent?: number | null;
-  vatPercent?: number | null;
-  /** True if the price was entered with VAT included (VAT not added on top) */
-  vatInclusive?: boolean;
-  /** VAT inside totalPrice, as worked out by the server */
-  vatAmount?: number;
-  downPayment: number;
-  balance: number;
-  estimatedCompletion: string | null;
-  completedAt?: string | null;
-  createdAt: string | null;
-  /** Specification from the order slip, e.g. center/side/back material, stitching */
-  specs: { label: string; value: string }[];
-  /** Work steps written on the order slip */
-  workSteps: string[];
+export interface PremadeDraftInput {
+  branchId?: number;
+  customerId?: number | null;
+  customerName?: string;
+  customerPhone?: string;
+  customerEmail?: string;
+  customerAddress?: string;
+  notes?: string;
+  paymentMethod?: string;
+  items?: Array<{ productId: number; quantity: number }>;
 }
 
 export interface ProductOrderItem {
@@ -263,43 +279,6 @@ export interface ProductOrderItem {
   total: number;
   sourceBranchId?: number;
   sourceBranchName?: string;
-}
-
-/** One line of a saved cart re-checked against current stock. */
-export interface AvailabilityRow {
-  productId: number;
-  name: string;
-  sku?: string;
-  requested: number;
-  available: number;
-  currentPrice: number | null;
-  savedPrice?: number;
-  /** null when the line is fine; otherwise why it blocks confirmation. */
-  issue: 'unavailable' | 'out_of_stock' | 'insufficient' | 'invalid' | null;
-  message: string;
-}
-
-/** A customer's saved premade cart, not yet a real order. */
-export interface CartDraft {
-  id: number;
-  kind: 'premade';
-  userId: number;
-  customerName: string;
-  customerPhone: string;
-  customerEmail: string;
-  customerAddress: string;
-  pickupBranchId?: number | null;
-  pickupBranchName?: string | null;
-  notes: string;
-  items: ProductOrderItem[];
-  itemCount: number;
-  /** Total at *current* prices, counting only lines with no issue. */
-  totalAmount: number;
-  availability: AvailabilityRow[];
-  /** False when any line is out of stock or short — confirmation is blocked. */
-  isAvailable: boolean;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface AppNotification {
@@ -381,20 +360,6 @@ export interface ProductOrderTimelineEvent {
   by?: string;
 }
 
-export interface PublicProduct {
-  id: number;
-  name: string;
-  sku: string;
-  quantity: number;
-  unit: string;
-  category: string;
-  price: number;
-  branchId: number;
-  branchName?: string;
-  /** False when out of stock (only sent with includeUnavailable) */
-  isAvailable?: boolean;
-}
-
 export interface RawMaterial {
   id: number;
   itemId: string;
@@ -410,6 +375,7 @@ export interface RawMaterial {
   sku?: string;
   stockQuantity: number;
   lowStockThreshold: number;
+  branchName?: string | null;
   supplierId?: number;
   supplierName?: string;
   branchId: number;
@@ -448,6 +414,14 @@ export interface MaterialWasteLog {
   loggedBy: number;
   loggedByName?: string;
   createdAt: string;
+  /** Set when this was extra material issued for a job order */
+  jobOrderId?: number | null;
+  jobOrderNumber?: string | null;
+  workerId?: number | null;
+  workerName?: string | null;
+  /** Cost per unit when it was logged */
+  unitCost?: number;
+  value?: number;
 }
 
 export interface AIPrediction {
@@ -607,7 +581,8 @@ export interface PremadeProductInput {
   unit?: string;
   category: string;
   price: number;
-  cost: number;
+  /** Leave out to have the server work it out from the materials used */
+  cost?: number;
   branchId: number;
   sku?: string;
   materialsUsed?: PremadeMaterialUsageInput[];
@@ -622,6 +597,7 @@ export interface ChatMessage {
   id: number;
   senderId: number;
   senderName: string;
+  senderUsername?: string;
   senderRole: string;
   content: string;
   createdAt: string;
@@ -747,11 +723,43 @@ export interface ManagedWorker {
   id: number;
   name: string;
   workType: string;
+  /** Hidden (0) for roles that may not see labor cost */
   ratePerHour: number;
   /** per_hour | per_day | per_piece */
   payMode: 'per_hour' | 'per_day' | 'per_piece';
   isActive: boolean;
   createdAt?: string;
+  /** The worker's own login (a seat maker or sewer account), if linked */
+  userId?: number | null;
+  userName?: string | null;
+}
+
+/** A seat maker or sewer login that a worker can be linked to */
+export interface LinkableWorkerAccount {
+  id: number;
+  fullName: string;
+  username: string;
+  linkedWorkerId?: number | null;
+}
+
+/** What a seat maker or sewer sees of their own work */
+export interface MyWork {
+  linked: boolean;
+  worker?: { name: string; workType: string; payMode: string };
+  assignments?: {
+    id: number;
+    jobOrderRef: string;
+    title: string;
+    description?: string | null;
+    customerName?: string | null;
+    vehicle?: { make?: string; model?: string; year?: number; plateNumber?: string } | null;
+    priority: JobOrderPriority;
+    scheduledDate?: string | null;
+    status: 'pending' | 'in_progress' | 'completed';
+    hoursWorked?: number | null;
+    pay?: number | null;
+    endTime?: string | null;
+  }[];
 }
 
 export interface WorkerAssignment {
@@ -763,6 +771,8 @@ export interface WorkerAssignment {
   payMode: 'per_hour' | 'per_day' | 'per_piece';
   jobOrderRef: string;
   jobOrderDbId?: number;
+  /** The job order's priority (normal for special tasks) */
+  jobOrderPriority?: JobOrderPriority;
   description?: string;
   expectedHours?: number;
   startTime?: string;
@@ -798,10 +808,35 @@ export interface VehicleInfo {
   color?: string;
 }
 
+export type JobOrderPriority = 'low' | 'normal' | 'high' | 'urgent';
+
+/** An assignment as the Worker Management calendar shows it on its day */
+export interface CalendarAssignment {
+  id: number;
+  workerId: number;
+  workerName: string;
+  jobOrderRef: string;
+  jobOrderDbId?: number | null;
+  jobOrderPriority?: JobOrderPriority;
+  assignmentType: string;
+  specialTaskTitle?: string;
+  status: string;
+  description?: string;
+  scheduledDate: string;
+}
+
+/** Order to work through job orders in: most urgent first */
+export const PRIORITY_RANK: Record<JobOrderPriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+
+export const PRIORITY_LABELS: Record<JobOrderPriority, string> = {
+  urgent: 'Urgent', high: 'High', normal: 'Normal', low: 'Low',
+};
+
 export interface JobOrder {
   id: number;
   jobOrderId: string;
   customerId?: number;
+  priority?: JobOrderPriority;
   customerName: string;
   customerPhone: string;
   customerEmail: string;
@@ -824,7 +859,11 @@ export interface JobOrder {
     sewerName?: string;
   } | null;
   estimatedCost: number;
+  /** Planned lines plus any extra material issued for the order */
   actualCost: number;
+  /** Extra material issued beyond the plan (only for users who see costs) */
+  extraMaterials?: MaterialWasteLog[];
+  extraMaterialsCost?: number;
   totalPrice: number;
   discountPercent?: number | null;
   vatPercent?: number | null;
@@ -841,19 +880,6 @@ export interface JobOrder {
   createdAt: string;
   createdBy: number;
   updatedAt: string;
-  quoteStatus?: QuoteStatus | null;
-  quoteRejectReason?: string | null;
-  quoteSentAt?: string | null;
-  quoteRespondedAt?: string | null;
-  appointmentId?: number | null;
-}
-
-export interface QuotationItem {
-  name: string;
-  description?: string;
-  quantity: number;
-  unitPrice: number;
-  total: number;
 }
 
 export interface CustomerOrder {
@@ -877,15 +903,7 @@ export interface CustomerOrder {
   branchId?: number;
   branchName?: string;
   createdAt: string;
-  // Quotation fields
   userId?: number;
-  quotationItems?: QuotationItem[];
-  quotationTotal?: number;
-  quotationStatus?: 'pending_quotation' | 'quoted' | 'accepted' | 'rejected';
-  quotationNotes?: string;
-  customerResponseNotes?: string;
-  quotedAt?: string;
-  respondedAt?: string;
 }
 
 export interface PurchaseOrderItem {
@@ -954,7 +972,13 @@ export interface JobOrderCost {
   overheadCost: number;
   totalAmount: number;
   status: string;
+  extraMaterialsCost?: number;
+  estimatedCost?: number;
+  actualCost?: number;
+  variance?: number;
 }
+
+export interface CostComparison { estimated: number; actual: number; variance: number }
 
 export interface CostingData {
   /** Job order database id (for links); jobOrderId is its display number */
@@ -971,6 +995,15 @@ export interface CostingData {
   grossProfit: number;
   profitMargin: number;
   variance: number;
+  customerName?: string;
+  status?: string;
+  /** Estimated vs actual per component */
+  components?: { materials: CostComparison; labor: CostComparison; overhead: CostComparison; total: CostComparison };
+  /** Each line with what it costs (not its selling price) */
+  lines?: { name: string; category: 'material' | 'labor' | 'expense'; quantity: number; unitCost: number;
+            estimatedCost: number; actualCost: number; workerName?: string | null }[];
+  extraMaterials?: MaterialWasteLog[];
+  extraMaterialsCost?: number;
 }
 
 export interface Receipt {
@@ -1061,6 +1094,15 @@ export interface BranchSettlementSummary {
   completedOrders: number;
 }
 
+/** Extra material issued for job orders in a period, by worker and by reason */
+export interface ExtraMaterialsReport {
+  period: { startDate: string; endDate: string };
+  summary: { count: number; totalValue: number; jobOrders: number; unassigned: number };
+  byWorker: { key: number; label: string; count: number; value: number }[];
+  byReason: { key: string; label: string; count: number; value: number }[];
+  entries: MaterialWasteLog[];
+}
+
 export interface BranchSettlementReport {
   period: { startDate: string; endDate: string };
   summary: BranchSettlementSummary[];
@@ -1086,6 +1128,9 @@ export interface Branch {
   phone?: string;
   isWarehouse: boolean;
   isActive: boolean;
+  isArchived?: boolean;
+  deactivatedAt?: string | null;
+  archivedAt?: string | null;
   createdAt?: string;
 }
 
@@ -1099,20 +1144,24 @@ export interface Role {
 // AUTH TOKEN MANAGEMENT
 // ============================================
 
+// Kept in sessionStorage, so closing the browser signs the user out — shop
+// computers are shared, and the next person shouldn't find someone else signed in.
 let authToken: string | null = null;
 
 export const setAuthToken = (token: string | null) => {
   authToken = token;
   if (token) {
-    localStorage.setItem('authToken', token);
+    sessionStorage.setItem('authToken', token);
   } else {
-    localStorage.removeItem('authToken');
+    sessionStorage.removeItem('authToken');
   }
 };
 
 export const getAuthToken = (): string | null => {
   if (!authToken && typeof window !== 'undefined') {
-    authToken = localStorage.getItem('authToken');
+    // A token left over from when it was kept for good is dropped, not reused
+    localStorage.removeItem('authToken');
+    authToken = sessionStorage.getItem('authToken');
   }
   return authToken;
 };
@@ -1165,7 +1214,8 @@ export interface JobCostingRow {
   finishedOn: string; status: string;
   customerPrice: number; vat: number; sellingPrice: number;
   materials: number; labor: number; otherCosts: number; grossMargin: number; marginPercent: number;
-  lines: { name: string; category: 'material' | 'labor' | 'expense'; quantity: number; unitCost: number; cost: number }[];
+  estimatedCost?: number; actualCost?: number; extraMaterials?: number;
+  lines: { name: string; category: 'material' | 'labor' | 'expense'; quantity: number; unitCost: number; cost: number; extra?: boolean }[];
 }
 
 export interface OwnerJobCosting {
@@ -1206,6 +1256,7 @@ export interface ExpenseList { expenses: Expense[]; total: number; categories: s
 export const PAYMENT_METHOD_LABELS: Record<string, string> = {
   cash: 'Cash', gcash: 'GCash', maya: 'Maya', bank_transfer: 'Bank Transfer', credit_card: 'Credit Card',
   debit_card: 'Debit Card', check: 'Cheque', other: 'Other', not_recorded: 'Premade sales (method not recorded)',
+  adjustment: 'Approved payment override',
 };
 
 const periodQuery = (p?: { startDate?: string; endDate?: string; branchId?: number | '' }) => {
@@ -1301,19 +1352,6 @@ export const api = {
     
     me: () => fetchApi<User>('/api/auth/me'),
 
-    /** Sign-up step 1: checks the details and emails a 6-digit code */
-    sendSignupCode: (data: SignupDetails) =>
-      fetchApi<null>('/api/auth/register/send-code', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-
-    /** Sign-up step 2: creates the account once the emailed code checks out */
-    register: (data: SignupDetails & { code: string }) =>
-      fetchApi<AuthResponse>('/api/auth/register', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
   },
 
   // ==================
@@ -1345,26 +1383,15 @@ export const api = {
   },
 
   // ==================
-  // MY JOB ORDERS (customer side: staff-made job orders and quotations)
-  // ==================
-  myJobOrders: {
-    list: () => fetchApi<CustomerJobOrder[]>('/api/job-orders/mine'),
-
-    /** Accept turns the quotation into a job order; reject needs a reason */
-    respondToQuotation: (id: number, response: 'accept' | 'reject', reason?: string) =>
-      fetchApi<CustomerJobOrder>(`/api/job-orders/${id}/quotation/respond`, {
-        method: 'POST',
-        body: JSON.stringify({ response, reason }),
-      }),
-  },
-
-  // ==================
   // DASHBOARD
   // ==================
   dashboard: {
     // branchId is honoured for administrators only; everyone else always gets their own branch
-    getStats: (branchId?: number) =>
-      fetchApi<DashboardStats>(`/api/dashboard/stats${branchId ? `?branchId=${branchId}` : ''}`),
+    getStats: (branchId?: number, period: DashboardPeriod = 'month') => {
+      const q = new URLSearchParams({ period });
+      if (branchId) q.set('branchId', String(branchId));
+      return fetchApi<DashboardStats>(`/api/dashboard/stats?${q}`);
+    },
     
     getRecentActivity: (branchId?: number) =>
       fetchApi<Activity[]>(`/api/dashboard/recent-activity${branchId ? `?branchId=${branchId}` : ''}`),
@@ -1455,15 +1482,6 @@ export const api = {
       return fetchApi<MaterialUsageLog[]>(`/api/inventory/material-usage?${query}`);
     },
     
-    // Public Products (for customer ordering)
-    getPublicProducts: (params?: { branchId?: number; category?: string; includeUnavailable?: boolean }) => {
-      const query = new URLSearchParams();
-      if (params?.branchId) query.append('branchId', params.branchId.toString());
-      if (params?.category) query.append('category', params.category);
-      if (params?.includeUnavailable) query.append('includeUnavailable', 'true');
-      return fetchApi<PublicProduct[]>(`/api/inventory/finished-goods/public?${query}`);
-    },
-
     // Suppliers
     getSuppliers: (includeInactive?: boolean) => {
       const q = includeInactive ? '?includeInactive=true' : '';
@@ -1481,6 +1499,9 @@ export const api = {
     },
     createWasteLog: (data: { materialId: number; quantity: number; reason: string; notes?: string; branchId?: number }) =>
       fetchApi<MaterialWasteLog>('/api/inventory/waste-logs', { method: 'POST', body: JSON.stringify(data) }),
+    /** Undo a waste entry made by mistake: the quantity goes back into stock */
+    undoWasteLog: (id: number) =>
+      fetchApi<void>(`/api/inventory/waste-logs/${id}`, { method: 'DELETE' }),
 
     // AI Predictions
     ai: {
@@ -1510,9 +1531,25 @@ export const api = {
       const q = params?.jobOrderId ? `?jobOrderId=${params.jobOrderId}` : '';
       return fetchApi<PaymentRecord[]>(`/api/payments${q}`);
     },
-    create: (data: { jobOrderId: number; amount: number; paymentMethod: string; referenceNumber?: string; notes?: string }) =>
-      fetchApi<PaymentRecord>('/api/payments', { method: 'POST', body: JSON.stringify(data) }),
+    /** recordExcess: for non-cash payments over the balance, keep the extra as an excess payment */
+    create: (data: { jobOrderId: number; amount: number; paymentMethod: string; referenceNumber?: string; notes?: string; recordExcess?: boolean }) =>
+      fetchApi<PaymentRecord & { excess?: ExcessPayment | null }>('/api/payments', { method: 'POST', body: JSON.stringify(data) }),
     getSummary: () => fetchApi<PaymentSummary>('/api/payments/summary'),
+  },
+
+  excessPayments: {
+    list: (params: { jobOrderId?: number; customerId?: number; status?: string }) => {
+      const q = new URLSearchParams();
+      if (params.jobOrderId) q.set('jobOrderId', String(params.jobOrderId));
+      if (params.customerId) q.set('customerId', String(params.customerId));
+      if (params.status) q.set('status', params.status);
+      return fetchApi<ExcessPayment[]>(`/api/excess-payments?${q}`);
+    },
+    refund: (id: number, data: { refundMethod: string; referenceNumber?: string; notes?: string }) =>
+      fetchApi<ExcessPayment>(`/api/excess-payments/${id}/refund`, { method: 'POST', body: JSON.stringify(data) }),
+    /** Pays another of the same customer's orders with it; any rest stays open */
+    apply: (id: number, jobOrderId: number) =>
+      fetchApi<ExcessPayment>(`/api/excess-payments/${id}/apply`, { method: 'POST', body: JSON.stringify({ jobOrderId }) }),
   },
 
   // ==================
@@ -1578,6 +1615,15 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(updates),
       }),
+
+    /** Extra material issued for a job order beyond its plan (a recut after a mistake, defects, rework) */
+    getExtraMaterials: (jobOrderId: number) =>
+      fetchApi<MaterialWasteLog[]>(`/api/sales/job-orders/${jobOrderId}/extra-materials`),
+    issueExtraMaterials: (jobOrderId: number, data: { materialId: number; quantity: number; reason: string; workerId?: number; notes?: string }) =>
+      fetchApi<MaterialWasteLog>(`/api/sales/job-orders/${jobOrderId}/extra-materials`, { method: 'POST', body: JSON.stringify(data) }),
+    /** Undo an extra material entry made by mistake: it goes back into stock */
+    undoExtraMaterial: (jobOrderId: number, logId: number) =>
+      fetchApi<void>(`/api/sales/job-orders/${jobOrderId}/extra-materials/${logId}`, { method: 'DELETE' }),
 
     // Draft job orders — saved but not confirmed; excluded from normal lists/counts
     getDrafts: () => fetchApi<JobOrder[]>('/api/sales/drafts'),
@@ -1688,63 +1734,6 @@ export const api = {
         body: JSON.stringify({ status }),
       }),
 
-    // Customer's own orders
-    getMyOrders: () => fetchApi<CustomerOrder[]>('/api/customer-orders/my-orders'),
-
-    getMyOrder: (id: number) => fetchApi<CustomerOrder>(`/api/customer-orders/my-orders/${id}`),
-
-    // Quotation management
-    setQuotation: (id: number, data: {
-      items: Array<{ name: string; description?: string; quantity: number; unitPrice: number }>;
-      notes?: string;
-    }) =>
-      fetchApi<CustomerOrder>(`/api/customer-orders/${id}/quotation`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-
-    respondToQuotation: (id: number, response: 'accept' | 'reject', notes?: string) =>
-      fetchApi<CustomerOrder>(`/api/customer-orders/${id}/respond`, {
-        method: 'PUT',
-        body: JSON.stringify({ response, notes }),
-      }),
-  },
-
-  // ==================
-  // APPOINTMENTS
-  // ==================
-  appointments: {
-    create: (data: {
-      customerName: string;
-      customerPhone: string;
-      customerEmail?: string;
-      contactMethod: 'branch_visit' | 'phone_call';
-      branchId: number;
-      preferredDate: string;
-      preferredTime?: string;
-      description?: string;
-      vehicleInfo?: VehicleInfo;
-    }) =>
-      fetchApi<Appointment>('/api/appointments', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-
-    getAll: (status?: string) => {
-      const query = status ? `?status=${status}` : '';
-      return fetchApi<Appointment[]>(`/api/appointments${query}`);
-    },
-
-    update: (id: number, data: { status?: string; adminNotes?: string; confirmedTime?: string }) =>
-      fetchApi<Appointment>(`/api/appointments/${id}`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-
-    getMyAppointments: () => fetchApi<Appointment[]>('/api/appointments/my-appointments'),
-    get: (id: number) => fetchApi<Appointment>(`/api/appointments/${id}`),
-    markNoShow: (id: number) =>
-      fetchApi<{ strikeCount: number; isBlocked: boolean }>(`/api/admin/appointments/${id}/no-show`, { method: 'POST' }),
   },
 
   spamControl: {
@@ -1758,46 +1747,7 @@ export const api = {
   // PRODUCT ORDERS (Premade Products)
   // ==================
   productOrders: {
-    /** The logged-in customer's saved cart, or null if they have none. */
-    getCartDraft: () => fetchApi<CartDraft | null>('/api/product-orders/draft'),
-
-    saveCartDraft: (data: {
-      items: Array<{ productId: number; quantity: number }>;
-      pickupBranchId?: number | null;
-      customerName?: string;
-      customerPhone?: string;
-      customerEmail?: string;
-      customerAddress?: string;
-      notes?: string;
-    }) =>
-      fetchApi<CartDraft>('/api/product-orders/draft', {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-
-    deleteCartDraft: () =>
-      fetchApi<{ message: string }>('/api/product-orders/draft', { method: 'DELETE' }),
-
-    /**
-     * Confirms the saved cart into a real order. Rejects with status 409 and an
-     * `availability` report when stock has moved since the cart was saved.
-     */
-    confirmCartDraft: (data?: {
-      customerName?: string;
-      customerPhone?: string;
-      customerEmail?: string;
-      customerAddress?: string;
-      pickupBranchId?: number;
-      notes?: string;
-    }) =>
-      fetchApi<ProductOrder>('/api/product-orders/draft/confirm', {
-        method: 'POST',
-        body: JSON.stringify(data || {}),
-      }),
-
-    /** Staff view of all customers' unconfirmed saved carts. */
-    getPremadeDrafts: () => fetchApi<CartDraft[]>('/api/product-orders/drafts'),
-
+    /** Staff record a premade product sale at a branch */
     create: (data: {
       customerName: string;
       customerPhone: string;
@@ -1828,28 +1778,25 @@ export const api = {
         body: JSON.stringify(data),
       }),
 
-    multiCreate: (data: {
-      customerName: string;
-      customerPhone: string;
-      customerEmail?: string;
-      customerAddress?: string;
-      items: Array<{ productId: number; quantity: number }>;
-      pickupBranchId: number;
-      notes?: string;
-    }) =>
-      fetchApi<ProductOrder>('/api/product-orders/multi-branch', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-
-    getMyOrders: () => fetchApi<ProductOrder[]>('/api/product-orders/my-orders'),
-    /** Customer cancels their own order; only allowed while it is pending */
-    cancelMyOrder: (id: number) =>
-      fetchApi<ProductOrder>(`/api/product-orders/my-orders/${id}/cancel`, { method: 'POST' }),
-
     getPickupQueue: () => fetchApi<ProductOrder[]>('/api/product-orders/pickup-queue'),
 
     getDirectSales: () => fetchApi<ProductOrder[]>('/api/product-orders/direct-sales'),
+  },
+
+  // ==================
+  // PREMADE JOB ORDER DRAFTS (saved, not yet recorded; no stock taken)
+  // ==================
+  premadeDrafts: {
+    list: () => fetchApi<PremadeDraft[]>('/api/premade-drafts'),
+    get: (id: number) => fetchApi<PremadeDraft>(`/api/premade-drafts/${id}`),
+    create: (data: PremadeDraftInput & { branchId: number; customerName: string }) =>
+      fetchApi<PremadeDraft>('/api/premade-drafts', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: number, data: PremadeDraftInput) =>
+      fetchApi<PremadeDraft>(`/api/premade-drafts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    remove: (id: number) => fetchApi<null>(`/api/premade-drafts/${id}`, { method: 'DELETE' }),
+    /** Records the draft as a premade order. Stock is re-checked on the server; a 409 carries the flagged draft */
+    confirm: (id: number, data: { paymentAmount?: number; paymentMethod?: string }) =>
+      fetchApi<ProductOrder>(`/api/premade-drafts/${id}/confirm`, { method: 'POST', body: JSON.stringify(data) }),
   },
 
   // ==================
@@ -1927,6 +1874,13 @@ export const api = {
       return fetchApi<AuditLog[]>(`/api/reports/audit-trail?${query}`);
     },
 
+    getExtraMaterialsReport: (params: { startDate?: string; endDate?: string; branchId?: number }) => {
+      const q = new URLSearchParams();
+      if (params.startDate) q.set('startDate', params.startDate);
+      if (params.endDate) q.set('endDate', params.endDate);
+      if (params.branchId) q.set('branchId', String(params.branchId));
+      return fetchApi<ExtraMaterialsReport>(`/api/reports/extra-materials?${q}`);
+    },
     getSettlementReport: (params?: { startDate?: string; endDate?: string }) => {
       const query = new URLSearchParams();
       if (params?.startDate) query.append('startDate', params.startDate);
@@ -2016,10 +1970,26 @@ export const api = {
     getRoles: () => fetchApi<Role[]>('/api/settings/roles'),
     
     // Branches
-    getBranches: (includeInactive?: boolean) => {
-      const query = includeInactive ? '?includeInactive=true' : '';
+    getBranches: (includeInactive?: boolean, includeArchived?: boolean) => {
+      const query = includeInactive
+        ? `?includeInactive=true${includeArchived ? '&includeArchived=true' : ''}`
+        : '';
       return fetchApi<Branch[]>(`/api/settings/branches${query}`);
     },
+
+    archiveBranch: (id: number) =>
+      fetchApi<Branch>(`/api/settings/branches/${id}/archive`, { method: 'POST' }),
+
+    unarchiveBranch: (id: number) =>
+      fetchApi<Branch>(`/api/settings/branches/${id}/unarchive`, { method: 'POST' }),
+
+    checkBranchDeletable: (id: number) =>
+      fetchApi<{ canDelete: boolean; reason: string; blockers: string[] }>(
+        `/api/settings/branches/${id}/delete-check`,
+      ),
+
+    deleteBranch: (id: number) =>
+      fetchApi<null>(`/api/settings/branches/${id}`, { method: 'DELETE' }),
     
     getBranchesPublic: () => fetchApi<Branch[]>('/api/settings/branches/public'),
     
@@ -2048,12 +2018,23 @@ export const api = {
   managedWorkers: {
     list: () =>
       fetchApi<{ workers: ManagedWorker[] }>('/api/managed-workers'),
-    create: (data: { name: string; workType: string; ratePerHour: number; payMode?: string }) =>
+    /** Seat maker and sewer logins a worker can be linked to */
+    linkableAccounts: () => fetchApi<LinkableWorkerAccount[]>('/api/managed-workers/linkable-accounts'),
+    /** The signed-in worker's own assignments */
+    myWork: () => fetchApi<MyWork>('/api/my-work'),
+    /** Extra material issued under workers' names (filter by worker and/or job order) */
+    extraMaterials: (params: { workerId?: number; jobOrderId?: number } = {}) => {
+      const q = new URLSearchParams();
+      if (params.workerId) q.set('workerId', String(params.workerId));
+      if (params.jobOrderId) q.set('jobOrderId', String(params.jobOrderId));
+      return fetchApi<MaterialWasteLog[]>(`/api/worker-extra-materials?${q}`);
+    },
+    create: (data: { name: string; workType: string; ratePerHour: number; payMode?: string; userId?: number | null }) =>
       fetchApi<{ worker: ManagedWorker }>('/api/managed-workers', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: number, data: Partial<{ name: string; workType: string; ratePerHour: number; payMode: string; isActive: boolean }>) =>
+    update: (id: number, data: Partial<{ name: string; workType: string; ratePerHour: number; payMode: string; isActive: boolean; userId: number | null }>) =>
       fetchApi<{ worker: ManagedWorker }>(`/api/managed-workers/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -2065,16 +2046,18 @@ export const api = {
       const query = workerId ? `?workerId=${workerId}` : '';
       return fetchApi<{ assignments: WorkerAssignment[] }>(`/api/worker-assignments${query}`);
     },
-    getCalendar: (params: { workerId: number; month: string }) =>
-      fetchApi<Record<string, Array<{ id: number; jobOrderRef: string; assignmentType: string; specialTaskTitle?: string; workerName: string; status: string; description?: string }>>>(
-        `/api/worker-assignments/calendar?workerId=${params.workerId}&month=${params.month}`
+    /** Scheduled work by date: one worker's, or everyone's when workerId is left out */
+    getCalendar: (params: { workerId?: number; month: string }) =>
+      fetchApi<Record<string, CalendarAssignment[]>>(
+        `/api/worker-assignments/calendar?month=${params.month}${params.workerId ? `&workerId=${params.workerId}` : ''}`
       ),
     create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string; scheduledDate?: string; assignmentType?: string; specialTaskTitle?: string }) =>
       fetchApi<{ assignment: WorkerAssignment }>('/api/worker-assignments', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: number, data: Partial<{ status: string; hoursWorked: number; unitsWorked: number; payOverride: number; materialsUsed: object[]; expectedHours: number; notes: string; description: string; scheduledDate: string }>) =>
+    /** workerId moves a task that hasn't started to another worker */
+    update: (id: number, data: Partial<{ status: string; hoursWorked: number; unitsWorked: number; payOverride: number; materialsUsed: object[]; expectedHours: number; notes: string; description: string; scheduledDate: string; workerId: number }>) =>
       fetchApi<{ assignment: WorkerAssignment }>(`/api/worker-assignments/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),

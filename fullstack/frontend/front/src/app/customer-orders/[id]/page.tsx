@@ -15,17 +15,6 @@ export default function CustomerOrderDetailPage() {
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
 
-  // Quotation form state
-  const [showQuotationForm, setShowQuotationForm] = useState(false);
-  const [quotationItems, setQuotationItems] = useState<Array<{
-    name: string;
-    description: string;
-    quantity: number;
-    unitPrice: number;
-  }>>([{ name: '', description: '', quantity: 1, unitPrice: 0 }]);
-  const [quotationNotes, setQuotationNotes] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-
   // Status update state
   const [updatingStatus, setUpdatingStatus] = useState(false);
 
@@ -51,54 +40,6 @@ export default function CustomerOrderDetailPage() {
       setError('Failed to load customer order details');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const addQuotationItem = () => {
-    setQuotationItems([...quotationItems, { name: '', description: '', quantity: 1, unitPrice: 0 }]);
-  };
-
-  const removeQuotationItem = (index: number) => {
-    if (quotationItems.length > 1) {
-      setQuotationItems(quotationItems.filter((_, i) => i !== index));
-    }
-  };
-
-  const updateQuotationItem = (index: number, field: string, value: string | number) => {
-    const updated = [...quotationItems];
-    updated[index] = { ...updated[index], [field]: value };
-    setQuotationItems(updated);
-  };
-
-  const calculateTotal = () => {
-    return quotationItems.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
-  };
-
-  const handleSubmitQuotation = async () => {
-    if (!order) return;
-
-    // Validate items
-    const validItems = quotationItems.filter(item => item.name.trim() && item.quantity > 0 && item.unitPrice > 0);
-    if (validItems.length === 0) {
-      setError('Please add at least one valid quotation item');
-      return;
-    }
-
-    setSubmitting(true);
-    setError('');
-
-    try {
-      await api.customerOrders.setQuotation(order.id, {
-        items: validItems,
-        notes: quotationNotes
-      });
-      setSuccessMessage('Quotation sent successfully!');
-      setShowQuotationForm(false);
-      await loadOrder();
-    } catch (err: any) {
-      setError(err.message || 'Failed to send quotation');
-    } finally {
-      setSubmitting(false);
     }
   };
 
@@ -134,36 +75,6 @@ export default function CustomerOrderDetailPage() {
         return 'bg-red-100 text-red-700';
       default:
         return 'bg-gray-100 text-gray-700';
-    }
-  };
-
-  const getQuotationStatusColor = (status?: string) => {
-    switch (status) {
-      case 'pending_quotation':
-        return 'bg-gray-100 text-gray-700';
-      case 'quoted':
-        return 'bg-[#dde6ff] text-[#011c72]';
-      case 'accepted':
-        return 'bg-green-100 text-green-700';
-      case 'rejected':
-        return 'bg-red-100 text-red-700';
-      default:
-        return 'bg-gray-100 text-gray-700';
-    }
-  };
-
-  const getQuotationStatusLabel = (status?: string) => {
-    switch (status) {
-      case 'pending_quotation':
-        return 'Pending Quotation';
-      case 'quoted':
-        return 'Quotation Sent';
-      case 'accepted':
-        return 'Customer Accepted';
-      case 'rejected':
-        return 'Customer Rejected';
-      default:
-        return status || 'Unknown';
     }
   };
 
@@ -244,36 +155,17 @@ export default function CustomerOrderDetailPage() {
                 <span className={`px-3 py-1 text-sm font-medium rounded-full ${getStatusColor(order.status)}`}>
                   {order.status.replace(/_/g, ' ').toUpperCase()}
                 </span>
-                <span className={`px-3 py-1 text-sm font-medium rounded-full ${getQuotationStatusColor(order.quotationStatus)}`}>
-                  {getQuotationStatusLabel(order.quotationStatus)}
-                </span>
               </div>
               <p className="text-gray-500 mt-1">
                 {order.createdAt ? formatDateTime(order.createdAt) : 'N/A'}
               </p>
             </div>
-
-            {/* Action Buttons */}
-            <div className="flex gap-2 flex-wrap">
-              {order.quotationStatus === 'pending_quotation' && (
-                <button
-                  onClick={() => setShowQuotationForm(true)}
-                  className="px-4 py-2 bg-[#011c72] text-white rounded-lg hover:bg-[#01268c] transition-colors font-medium"
-                >
-                  Create Quotation
-                </button>
-              )}
-              {order.quotationStatus === 'accepted' && order.status === 'pending' && (
-                <button
-                  onClick={() => handleStatusUpdate('processing')}
-                  disabled={updatingStatus}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors font-medium"
-                >
-                  Start Processing
-                </button>
-              )}
-            </div>
           </div>
+
+          <p className="mb-6 rounded-lg bg-gray-50 border border-gray-200 px-4 py-3 text-sm text-gray-600">
+            This request was sent through the website before online ordering was retired, and is kept as a record.
+            To take on the work, record it as a job order under Sales &rsaquo; New Job Order.
+          </p>
 
           {/* Customer & Vehicle Info */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
@@ -325,89 +217,12 @@ export default function CustomerOrderDetailPage() {
           </div>
         </div>
 
-        {/* Quotation Section */}
-        {order.quotationItems && order.quotationItems.length > 0 && (
-          <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Quotation</h2>
-            
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Item</th>
-                    <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase">Qty</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase">Unit Price</th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase">Total</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200">
-                  {order.quotationItems.map((item, index) => (
-                    <tr key={index}>
-                      <td className="px-4 py-3">
-                        <p className="text-sm font-medium text-gray-900">{item.name}</p>
-                        {item.description && (
-                          <p className="text-xs text-gray-500">{item.description}</p>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-center text-sm text-gray-700">{item.quantity}</td>
-                      <td className="px-4 py-3 text-right text-sm text-gray-700">₱{item.unitPrice.toLocaleString()}</td>
-                      <td className="px-4 py-3 text-right text-sm font-medium text-gray-900">₱{item.total.toLocaleString()}</td>
-                    </tr>
-                  ))}
-                </tbody>
-                <tfoot className="bg-gray-50">
-                  <tr>
-                    <td colSpan={3} className="px-4 py-3 text-right text-sm font-bold text-gray-900">Total</td>
-                    <td className="px-4 py-3 text-right text-lg font-bold text-[#011c72]">₱{order.quotationTotal?.toLocaleString()}</td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-
-            {order.quotationNotes && (
-              <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-                <p className="text-xs text-gray-500 uppercase font-semibold mb-1">Notes</p>
-                <p className="text-sm text-gray-700">{order.quotationNotes}</p>
-              </div>
-            )}
-
-            {order.quotedAt && (
-              <p className="text-xs text-gray-500 mt-4">
-                Sent on {formatDateTime(order.quotedAt)}
-              </p>
-            )}
-
-            {/* Customer Response */}
-            {order.quotationStatus === 'accepted' && order.respondedAt && (
-              <div className="mt-4 p-4 bg-green-50 rounded-lg">
-                <p className="text-sm font-medium text-green-800">
-                  Customer accepted on {formatDateTime(order.respondedAt)}
-                </p>
-                {order.customerResponseNotes && (
-                  <p className="text-sm text-green-700 mt-1">{order.customerResponseNotes}</p>
-                )}
-              </div>
-            )}
-
-            {order.quotationStatus === 'rejected' && order.respondedAt && (
-              <div className="mt-4 p-4 bg-red-50 rounded-lg">
-                <p className="text-sm font-medium text-red-800">
-                  Customer rejected on {formatDateTime(order.respondedAt)}
-                </p>
-                {order.customerResponseNotes && (
-                  <p className="text-sm text-red-700 mt-1">Reason: {order.customerResponseNotes}</p>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Status Update Section */}
-        {order.quotationStatus === 'accepted' && (
+        {/* Status Update Section: close out or follow up older requests */}
+        {can('custom_requests.edit') && (
           <div className="bg-white rounded-xl border border-gray-200 p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Update Status</h2>
             <div className="flex flex-wrap gap-2">
-              {['pending', 'processing', 'in_progress', 'ready_for_installation', 'completed', 'delivered'].map((status) => (
+              {['pending', 'processing', 'in_progress', 'ready_for_installation', 'completed', 'delivered', 'cancelled'].map((status) => (
                 <button
                   key={status}
                   onClick={() => handleStatusUpdate(status)}
@@ -425,121 +240,6 @@ export default function CustomerOrderDetailPage() {
           </div>
         )}
       </main>
-
-      {/* Quotation Form Modal */}
-      {showQuotationForm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 overflow-y-auto">
-          <div className="bg-white rounded-xl max-w-3xl w-full p-6 my-8">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-xl font-bold text-gray-900">Create Quotation</h2>
-              <button
-                onClick={() => setShowQuotationForm(false)}
-                className="text-gray-500 hover:text-gray-700"
-              >
-                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-
-            <div className="space-y-4 max-h-96 overflow-y-auto mb-4">
-              {quotationItems.map((item, index) => (
-                <div key={index} className="p-4 bg-gray-50 rounded-lg">
-                  <div className="flex justify-between items-start mb-3">
-                    <span className="text-sm font-medium text-gray-600">Item {index + 1}</span>
-                    {quotationItems.length > 1 && (
-                      <button
-                        onClick={() => removeQuotationItem(index)}
-                        className="text-red-500 hover:text-red-700 text-sm"
-                      >
-                        Remove
-                      </button>
-                    )}
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <input
-                      type="text"
-                      value={item.name}
-                      onChange={(e) => updateQuotationItem(index, 'name', e.target.value)}
-                      placeholder="Item name *"
-                      className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
-                    />
-                    <input
-                      type="text"
-                      value={item.description}
-                      onChange={(e) => updateQuotationItem(index, 'description', e.target.value)}
-                      placeholder="Description (optional)"
-                      className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
-                    />
-                    <input
-                      type="number"
-                      value={item.quantity}
-                      onChange={(e) => updateQuotationItem(index, 'quantity', parseInt(e.target.value) || 1)}
-                      placeholder="Quantity"
-                      min="1"
-                      className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
-                    />
-                    <input
-                      type="number"
-                      value={item.unitPrice}
-                      onChange={(e) => updateQuotationItem(index, 'unitPrice', parseFloat(e.target.value) || 0)}
-                      placeholder="Unit price"
-                      min="0"
-                      step="0.01"
-                      className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
-                    />
-                  </div>
-                  <div className="mt-2 text-right text-sm text-gray-600">
-                    Subtotal: ₱{(item.quantity * item.unitPrice).toLocaleString()}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <button
-              onClick={addQuotationItem}
-              className="mb-4 text-[#011c72] hover:text-[#011c72] text-sm font-medium"
-            >
-              + Add Another Item
-            </button>
-
-            <div className="p-4 bg-[#eef1fb] rounded-lg mb-4">
-              <p className="text-lg font-bold text-gray-900">
-                Total: <span className="text-[#011c72]">₱{calculateTotal().toLocaleString()}</span>
-              </p>
-            </div>
-
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Notes for Customer (Optional)
-              </label>
-              <textarea
-                value={quotationNotes}
-                onChange={(e) => setQuotationNotes(e.target.value)}
-                placeholder="Add any notes or terms for the customer..."
-                rows={3}
-                className="w-full px-4 py-3 rounded-lg border border-gray-200 bg-white text-gray-900"
-              />
-            </div>
-
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowQuotationForm(false)}
-                className="flex-1 px-4 py-3 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-100 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSubmitQuotation}
-                disabled={submitting}
-                className="flex-1 px-4 py-3 bg-[#011c72] text-white rounded-lg hover:bg-[#01268c] disabled:opacity-50 transition-colors font-medium"
-              >
-                {submitting ? 'Sending...' : 'Send Quotation'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -199,6 +199,9 @@ export default function CostingPage() {
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                           {formatCurrency(costing.materialsCost)}
+                          {(costing.extraMaterialsCost || 0) > 0 && (
+                            <span className="block text-xs text-red-600">incl. {formatCurrency(costing.extraMaterialsCost || 0)} extra</span>
+                          )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                           {formatCurrency(costing.laborCost)}
@@ -208,6 +211,11 @@ export default function CostingPage() {
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-red-600">
                           {formatCurrency(totalCost)}
+                          {typeof costing.variance === 'number' && Math.abs(costing.variance) >= 0.005 && (
+                            <span className={`block text-xs font-normal ${costing.variance > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                              {costing.variance > 0 ? '+' : '−'}{formatCurrency(Math.abs(costing.variance))} vs estimate
+                            </span>
+                          )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                           {formatCurrency(costing.totalAmount)}

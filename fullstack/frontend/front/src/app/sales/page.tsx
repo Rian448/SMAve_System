@@ -1,7 +1,7 @@
 ﻿'use client';
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, JobOrder, CustomerOrder, ProductOrder, ProductOrderTransfer, CartDraft } from '@/lib/api';
+import { api, JobOrder, CustomerOrder, ProductOrder, ProductOrderTransfer, PremadeDraft } from '@/lib/api';
 import { formatDate as _fmtDate } from '@/lib/dateUtils';
 import Link from 'next/link';
 import { useConfirm } from '@/components/ConfirmDialog';
@@ -36,15 +36,13 @@ export default function SalesPage() {
   const [drafts, setDrafts] = useState<JobOrder[]>([]);
   const [showDrafts, setShowDrafts] = useState(false);
   const [draftBusyId, setDraftBusyId] = useState<number | null>(null);
-  // Customers' saved premade carts — read-only here; only the customer confirms them.
-  const [premadeDrafts, setPremadeDrafts] = useState<CartDraft[]>([]);
+  // Premade job orders being prepared: no stock is taken until they are confirmed
+  const [premadeDrafts, setPremadeDrafts] = useState<PremadeDraft[]>([]);
   const [draftKind, setDraftKind] = useState<'custom' | 'premade'>('custom');
 
   const [transferDateFilter, setTransferDateFilter] = useState<'all' | 'day' | 'week' | 'month' | 'year'>('all');
 
   const canSeePremadeFeatures = !!user && can('product_orders.view');
-  // Customers' saved carts are read-only here, so sales staff see them too
-  const canSeeCartDrafts = !!user && can('sales.view');
 
   const fetchOrders = useCallback(async () => {
     try {
@@ -102,18 +100,18 @@ export default function SalesPage() {
     }
   }, []);
 
+  useEffect(() => { fetchOrders(); }, [fetchOrders]);
+  useEffect(() => { fetchTabData(); }, [fetchTabData]);
+  // Stock is re-checked by the server on every load, so the flags are current
   const fetchPremadeDrafts = useCallback(async () => {
-    if (!canSeeCartDrafts) { setPremadeDrafts([]); return; }
     try {
-      const res = await api.productOrders.getPremadeDrafts();
+      const res = await api.premadeDrafts.list();
       setPremadeDrafts(res.data || []);
     } catch {
       setPremadeDrafts([]);
     }
-  }, [canSeeCartDrafts]);
+  }, []);
 
-  useEffect(() => { fetchOrders(); }, [fetchOrders]);
-  useEffect(() => { fetchTabData(); }, [fetchTabData]);
   useEffect(() => { fetchDrafts(); }, [fetchDrafts]);
   useEffect(() => { fetchPremadeDrafts(); }, [fetchPremadeDrafts]);
 
@@ -124,6 +122,24 @@ export default function SalesPage() {
       await Promise.all([fetchDrafts(), fetchOrders()]);
     } catch (err: any) {
       setActionError(err?.message || 'Failed to confirm draft');
+    } finally { setDraftBusyId(null); }
+  };
+
+  const deletePremadeDraft = async (d: PremadeDraft) => {
+    const ok = await confirm({
+      title: `Delete draft ${d.draftNumber}?`,
+      message: 'The saved premade draft will be removed. No stock was taken, so none is returned.',
+      warning: 'This cannot be undone.',
+      confirmLabel: 'Delete draft',
+      variant: 'danger',
+    });
+    if (!ok) return;
+    setDraftBusyId(-d.id); setActionError('');
+    try {
+      await api.premadeDrafts.remove(d.id);
+      await fetchPremadeDrafts();
+    } catch (err: any) {
+      setActionError(err?.message || 'Failed to delete draft');
     } finally { setDraftBusyId(null); }
   };
 
@@ -281,8 +297,9 @@ export default function SalesPage() {
             {(drafts.length > 0 || premadeDrafts.length > 0) && (
               <button
                 onClick={() => {
-                  // Open on whichever kind actually has drafts.
+                  // Open on whichever kind actually has drafts
                   setDraftKind(drafts.length > 0 ? 'custom' : 'premade');
+                  fetchPremadeDrafts();
                   setShowDrafts(true);
                 }}
                 className="inline-flex items-center gap-2.5 px-5 py-3 rounded-xl border-2 border-[#011c72] bg-white text-[#011c72] font-semibold hover:bg-[#eef1fb] transition-colors shadow-sm">
@@ -297,7 +314,7 @@ export default function SalesPage() {
                   {drafts.length + premadeDrafts.length}
                 </span>
                 {premadeDrafts.some(d => !d.isAvailable) && (
-                  <span title="A saved cart has items that are no longer available"
+                  <span title="A premade draft has items that are out of stock or short"
                     className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-yellow-100 text-yellow-700 text-xs font-bold">
                     !
                   </span>
@@ -1143,8 +1160,6 @@ export default function SalesPage() {
                   className="text-gray-400 hover:text-gray-700 text-xl leading-none">✕</button>
               </div>
 
-              {/* Custom job orders and customers' saved carts behave differently,
-                  so they get their own tab rather than one mixed list. */}
               <div className="px-6 pt-4">
                 <div className="flex gap-1 p-1 bg-gray-100 rounded-xl">
                   <button onClick={() => setDraftKind('custom')}
@@ -1153,98 +1168,101 @@ export default function SalesPage() {
                   </button>
                   <button onClick={() => setDraftKind('premade')}
                     className={`flex-1 py-2 px-3 text-sm font-semibold rounded-lg transition-colors ${draftKind === 'premade' ? 'bg-white text-[#011c72] shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>
-                    Premade Carts ({premadeDrafts.length})
+                    Premade ({premadeDrafts.length})
                   </button>
                 </div>
                 <p className="text-xs text-gray-500 mt-2">
                   {draftKind === 'custom'
                     ? 'Job orders your team saved to finish later. Edit or confirm them here.'
-                    : 'Carts customers saved but have not placed yet. Only the customer can confirm their own cart.'}
+                    : 'Premade job orders saved to finish later. No stock is taken until one is confirmed; stock shown is as of now.'}
                 </p>
               </div>
 
-              {draftKind === 'custom' ? (
-                <div className="overflow-y-auto divide-y divide-gray-100 mt-3">
-                  {drafts.length === 0 ? (
-                    <p className="p-8 text-center text-gray-400 text-sm">No custom drafts saved.</p>
-                  ) : drafts.map(d => (
-                    <div key={d.id} className="px-6 py-4 flex items-center justify-between gap-3">
+              {draftKind === 'premade' ? (
+              <div className="overflow-y-auto divide-y divide-gray-100 mt-3">
+                {premadeDrafts.length === 0 ? (
+                  <p className="p-8 text-center text-gray-400 text-sm">No premade drafts saved.</p>
+                ) : premadeDrafts.map(d => (
+                  <div key={d.id} className="px-6 py-4">
+                    <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <p className="text-sm font-medium text-gray-900 truncate">
-                          {d.customerName || 'Unnamed customer'}
-                          {d.quoteStatus && (
-                            <span className={`ml-2 align-middle text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${
-                              d.quoteStatus === 'rejected' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-800'}`}>
-                              {d.quoteStatus === 'rejected' ? 'Quotation rejected' : 'Quotation sent'}
+                          {d.draftNumber}
+                          <span className="ml-2 align-middle text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-yellow-100 text-yellow-800">Draft</span>
+                        </p>
+                        <p className="text-xs text-gray-500 truncate">
+                          {d.customerName}{d.customerPhone ? ` · ${d.customerPhone}` : ''}{d.branchName ? ` · ${d.branchName}` : ''}
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          {d.itemCount} item{d.itemCount !== 1 ? 's' : ''} · ₱{d.totalAmount.toLocaleString()} · saved {formatDate(d.updatedAt)}
+                        </p>
+                      </div>
+                      <span className={`shrink-0 px-2 py-0.5 rounded-full text-xs font-semibold ${d.isAvailable ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                        {d.items.length === 0 ? 'No items' : d.isAvailable ? 'In stock' : 'Needs attention'}
+                      </span>
+                    </div>
+                    <ul className="mt-2 space-y-1">
+                      {d.items.map(it => (
+                        <li key={it.productId} className="text-xs flex flex-wrap gap-x-2">
+                          <span className="text-gray-700">{it.quantity}× {it.name}</span>
+                          {it.issue && (
+                            <span className="font-semibold text-red-700">
+                              {it.issue === 'out_of_stock' ? 'Out of stock'
+                                : it.issue === 'insufficient' ? `Insufficient stock (${it.available} available)`
+                                : 'No longer sold here'}
                             </span>
                           )}
-                        </p>
-                        <p className="text-xs text-gray-500 truncate">{d.description || '—'} · {formatDate(d.createdAt)}</p>
-                        {d.quoteStatus === 'rejected' && d.quoteRejectReason && (
-                          <p className="text-xs text-red-700 truncate" title={d.quoteRejectReason}>Reason: {d.quoteRejectReason}</p>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <Link href={`/sales/new?draftId=${d.id}`}
-                          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#eef1fb] text-[#011c72] hover:bg-[#dde3f7]">
-                          {d.quoteStatus === 'rejected' ? 'Revise' : 'Edit'}
-                        </Link>
-                        <Link href={`/sales/${d.id}`}
-                          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200">
-                          Open
-                        </Link>
-                        <button onClick={() => confirmDraft(d.id)} disabled={draftBusyId === d.id}
-                          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#011c72] text-white hover:bg-[#01268c] disabled:opacity-50">
-                          {draftBusyId === d.id ? '…' : 'Confirm'}
-                        </button>
-                        <button onClick={() => deleteDraft(d.id)} disabled={draftBusyId === d.id}
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="mt-3 flex items-center gap-2">
+                      <Link href={`/sales/new?premadeDraftId=${d.id}`}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#011c72] text-white hover:bg-[#01268c]">
+                        Open &amp; Confirm
+                      </Link>
+                      {can('sales.delete') && (
+                        <button onClick={() => deletePremadeDraft(d)} disabled={draftBusyId === -d.id}
                           className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-50 text-red-600 hover:bg-red-100 disabled:opacity-50">
                           Delete
                         </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="overflow-y-auto divide-y divide-gray-100 mt-3">
-                  {premadeDrafts.length === 0 ? (
-                    <p className="p-8 text-center text-gray-400 text-sm">No customer carts saved.</p>
-                  ) : premadeDrafts.map(d => (
-                    <div key={d.id} className="px-6 py-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="text-sm font-medium text-gray-900 truncate">
-                            {d.customerName || 'Unnamed customer'}
-                            {d.customerPhone && <span className="text-gray-400 font-normal"> · {d.customerPhone}</span>}
-                          </p>
-                          <p className="text-xs text-gray-500 truncate">
-                            {d.itemCount} item{d.itemCount !== 1 ? 's' : ''} · ₱{d.totalAmount.toLocaleString()}
-                            {d.pickupBranchName ? ` · pickup at ${d.pickupBranchName}` : ' · no pickup branch yet'}
-                          </p>
-                        </div>
-                        <span className={`shrink-0 px-2 py-0.5 rounded-full text-xs font-semibold ${d.isAvailable ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
-                          {d.isAvailable ? 'All available' : 'Needs attention'}
-                        </span>
-                      </div>
-                      <ul className="mt-2 space-y-0.5">
-                        {d.items.map(it => (
-                          <li key={it.productId} className="text-xs text-gray-600">
-                            {it.quantity}× {it.name}
-                          </li>
-                        ))}
-                      </ul>
-                      {!d.isAvailable && (
-                        <ul className="mt-2 space-y-1">
-                          {d.availability.filter(r => r.issue).map(r => (
-                            <li key={r.productId} className="text-xs text-yellow-800 bg-yellow-50 rounded-md px-2 py-1">
-                              {r.message}
-                            </li>
-                          ))}
-                        </ul>
                       )}
                     </div>
-                  ))}
-                </div>
+                  </div>
+                ))}
+              </div>
+              ) : (
+              <div className="overflow-y-auto divide-y divide-gray-100 mt-3">
+                {drafts.length === 0 ? (
+                  <p className="p-8 text-center text-gray-400 text-sm">No drafts saved.</p>
+                ) : drafts.map(d => (
+                  <div key={d.id} className="px-6 py-4 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-900 truncate">
+                        {d.customerName || 'Unnamed customer'}
+                      </p>
+                      <p className="text-xs text-gray-500 truncate">{d.description || '—'} · {formatDate(d.createdAt)}</p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Link href={`/sales/new?draftId=${d.id}`}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#eef1fb] text-[#011c72] hover:bg-[#dde3f7]">
+                        Edit
+                      </Link>
+                      <Link href={`/sales/${d.id}`}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200">
+                        Open
+                      </Link>
+                      <button onClick={() => confirmDraft(d.id)} disabled={draftBusyId === d.id}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#011c72] text-white hover:bg-[#01268c] disabled:opacity-50">
+                        {draftBusyId === d.id ? '…' : 'Confirm'}
+                      </button>
+                      <button onClick={() => deleteDraft(d.id)} disabled={draftBusyId === d.id}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-50 text-red-600 hover:bg-red-100 disabled:opacity-50">
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
               )}
             </div>
           </div>

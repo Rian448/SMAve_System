@@ -4,6 +4,7 @@ import { useAuth } from '@/context/AuthContext';
 import { setAuthToken } from '@/lib/api';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
@@ -16,6 +17,7 @@ export default function LoginPage() {
   const [recoveryEmail, setRecoveryEmail] = useState('');
   const [recoveryMessage, setRecoveryMessage] = useState('');
   const [recoveryError, setRecoveryError] = useState('');
+  const fe = useFieldErrors();
   const [recoveryStep, setRecoveryStep] = useState<'email' | 'code'>('email');
   const [recoveryCode, setRecoveryCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -134,14 +136,11 @@ export default function LoginPage() {
   const handleResetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setRecoveryError('');
-    if (newPassword.length < 8) {
-      setRecoveryError('Password must be at least 8 characters.');
-      return;
-    }
-    if (newPassword !== confirmPassword) {
-      setRecoveryError('Passwords do not match.');
-      return;
-    }
+    if (fe.show({
+      'reset-code': recoveryCode.length !== 6 && 'Enter the 6-digit code from the email.',
+      'reset-password': newPassword.length < 8 && 'Password must be at least 8 characters.',
+      'reset-confirm': newPassword.length >= 8 && newPassword !== confirmPassword && 'Passwords do not match.',
+    })) return;
     setRecoveryLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/auth/reset-password`, {
@@ -303,19 +302,14 @@ export default function LoginPage() {
                 </button>
                 <div className="border-t border-gray-200 pt-4">
                   <p className="text-sm text-gray-600">
-                    Don&apos;t have an account yet?{' '}
-                    <Link href="/register" className="text-[#011c72] font-medium hover:underline">
-                      Register here
+                    For Seatmakers Avenue staff only.{' '}
+                    <Link href="/" className="text-[#011c72] font-medium hover:underline">
+                      Back to the website
                     </Link>
                   </p>
                 </div>
               </div>
 
-              <div className="mt-4 p-4 bg-gray-50 rounded-xl">
-                <div className="text-xs text-gray-600 space-y-1">
-                  <p><span className="font-medium">Admin:</span> admin / admin123</p>
-                </div>
-              </div>
 
             </>
           ) : (
@@ -363,8 +357,8 @@ export default function LoginPage() {
                   </button>
                 </form>
               ) : (
-                <form onSubmit={handleResetPassword} className="space-y-5">
-                  <div>
+                <form onSubmit={handleResetPassword} noValidate className="space-y-5">
+                  <div {...fe.field('reset-code')}>
                     <label htmlFor="code" className="block text-sm font-medium text-gray-700 mb-1">
                       6-digit code
                     </label>
@@ -380,12 +374,13 @@ export default function LoginPage() {
                       placeholder="••••••"
                       required
                     />
+                    <FieldError message={fe.errors['reset-code']} />
                     <p className="mt-1 text-xs text-gray-500">
                       Sent to {recoveryEmail}. It expires in 10 minutes, so check your spam folder if you don&apos;t see it.
                     </p>
                   </div>
 
-                  <div>
+                  <div {...fe.field('reset-password')}>
                     <label htmlFor="newPassword" className="block text-sm font-medium text-gray-700 mb-1">
                       New Password
                     </label>
@@ -399,9 +394,10 @@ export default function LoginPage() {
                       placeholder="At least 8 characters"
                       required
                     />
+                    <FieldError message={fe.errors['reset-password']} />
                   </div>
 
-                  <div>
+                  <div {...fe.field('reset-confirm')}>
                     <label htmlFor="confirmPassword" className="block text-sm font-medium text-gray-700 mb-1">
                       Confirm New Password
                     </label>
@@ -415,6 +411,7 @@ export default function LoginPage() {
                       placeholder="Type it again"
                       required
                     />
+                    <FieldError message={fe.errors['reset-confirm']} />
                     <label className="mt-2 inline-flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
                       <input type="checkbox" checked={showPassword} onChange={() => setShowPassword(v => !v)} />
                       Show passwords

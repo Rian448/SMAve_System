@@ -5,6 +5,8 @@ import { api, Branch, User as UserType, Role } from '@/lib/api';
 import { useConfirm } from '@/components/ConfirmDialog';
 import PermissionsDialog from '@/components/PermissionsDialog';
 import VatRateSetting from '@/components/VatRateSetting';
+import { formatDate } from '@/lib/dateUtils';
+import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
 
 type TabType = 'general' | 'users' | 'branches' | 'notifications';
 
@@ -33,15 +35,16 @@ export default function SettingsPage() {
       branchId: 0
     });
     const [userError, setUserError] = useState('');
+    // Problems with a specific field are shown next to it (user and branch dialogs)
+    const fe = useFieldErrors();
     // Setting someone else's password must be confirmed with the admin's own password
     const [adminPassword, setAdminPassword] = useState('');
+    // Eye toggle on the user form's password fields
+    const [showUserPassword, setShowUserPassword] = useState(false);
     const [roles, setRoles] = useState<Role[]>([]);
     const [roleFilter, setRoleFilter] = useState('all');
     const filteredUsers = users.filter((u) => {
       if (roleFilter === 'all') return true;
-      if (roleFilter === 'group:staff') return u.role !== 'customer';       // all employees
-      if (roleFilter === 'group:customers') return u.role === 'customer';
-      if (roleFilter === 'group:workers') return u.role === 'seat_maker' || u.role === 'sewer';
       return u.role === roleFilter;                                          // a specific role
     });
   
@@ -58,6 +61,8 @@ export default function SettingsPage() {
     isWarehouse: false
   });
   const [branchError, setBranchError] = useState('');
+  // Archived branches are hidden from the Branches tab unless asked for
+  const [showArchivedBranches, setShowArchivedBranches] = useState(false);
 
   // Load branches when branches tab is active
   useEffect(() => {
@@ -67,9 +72,9 @@ export default function SettingsPage() {
       loadBranches(false);
     }
     if (activeTab === 'branches') {
-      loadBranches(true);
+      loadBranches(true, showArchivedBranches);
     }
-  }, [activeTab]);
+  }, [activeTab, showArchivedBranches]);
 
   const loadUsers = async () => {
     setLoadingUsers(true);
@@ -104,12 +109,13 @@ export default function SettingsPage() {
    * reappears on refresh. Everywhere else the list feeds branch pickers, which
    * should only offer active branches.
    */
-  const reloadBranches = () => loadBranches(activeTab === 'branches');
+  const reloadBranches = () =>
+    activeTab === 'branches' ? loadBranches(true, showArchivedBranches) : loadBranches(false);
 
-  const loadBranches = async (includeInactive = false) => {
+  const loadBranches = async (includeInactive = false, includeArchived = false) => {
     setLoadingBranches(true);
     try {
-      const response = await api.settings.getBranches(includeInactive);
+      const response = await api.settings.getBranches(includeInactive, includeArchived);
       if (response.status === 'success' && response.data) {
         setBranches(response.data);
       }
@@ -131,6 +137,7 @@ export default function SettingsPage() {
     });
     setEditingUser(null);
     setUserError('');
+    fe.clear();
     setShowUserModal(true);
   };
 
@@ -145,36 +152,28 @@ export default function SettingsPage() {
     });
     setEditingUser(user);
     setUserError('');
+    fe.clear();
     setAdminPassword('');
+    setShowUserPassword(false);
     setShowUserModal(true);
   };
 
   const handleSaveUser = async () => {
-    if (!userFormData.username || !userFormData.email || !userFormData.fullName || !userFormData.role) {
-      setUserError('Please fill in all required fields');
-      return;
-    }
-
-    if (!userFormData.branchId) {
-      setUserError('Please select a branch');
-      return;
-    }
-
-    if (!editingUser && !userFormData.password) {
-      setUserError('Password is required for new users');
-      return;
-    }
-
+    setUserError('');
     const changingPassword = !!editingUser && !!userFormData.password;
+    const password = userFormData.password;
+    if (fe.show({
+      'user-username': !userFormData.username.trim() && 'Enter a username.',
+      'user-fullName': !userFormData.fullName.trim() && 'Enter the full name.',
+      'user-email': !userFormData.email.trim() ? 'Enter an email address.' : emailProblem(userFormData.email),
+      'user-password': !editingUser && !password ? 'Enter a password for the new user.'
+        : password && password.length < 8 && 'The password must be at least 8 characters.',
+      'user-adminPassword': changingPassword && !adminPassword && 'Enter your own password to confirm the password change.',
+      'user-role': !userFormData.role && 'Choose a role.',
+      'user-branch': !userFormData.branchId && 'Choose a branch.',
+    })) return;
+
     if (changingPassword) {
-      if (userFormData.password.length < 8) {
-        setUserError('The new password must be at least 8 characters.');
-        return;
-      }
-      if (!adminPassword) {
-        setUserError('Enter your own password to confirm the password change.');
-        return;
-      }
       const ok = await confirm({
         title: `Change ${editingUser.fullName}'s password?`,
         message: (
@@ -333,6 +332,7 @@ export default function SettingsPage() {
     setBranchFormData({ name: '', code: '', address: '', phone: '', isWarehouse: false });
     setEditingBranch(null);
     setBranchError('');
+    fe.clear();
     setShowBranchModal(true);
   };
 
@@ -346,14 +346,17 @@ export default function SettingsPage() {
     });
     setEditingBranch(branch);
     setBranchError('');
+    fe.clear();
     setShowBranchModal(true);
   };
 
   const handleSaveBranch = async () => {
-    if (!branchFormData.name || !branchFormData.code || !branchFormData.address) {
-      setBranchError('Please fill in all required fields');
-      return;
-    }
+    setBranchError('');
+    if (fe.show({
+      'branch-name': !branchFormData.name.trim() && 'Enter the branch name.',
+      'branch-code': !branchFormData.code.trim() && 'Enter a short branch code, e.g. BD.',
+      'branch-address': !branchFormData.address.trim() && 'Enter the address.',
+    })) return;
 
     setSaving(true);
     setBranchError('');
@@ -378,6 +381,19 @@ export default function SettingsPage() {
 
   const handleToggleBranchStatus = async (branch: Branch) => {
     setBranchError('');
+    const deactivating = branch.isActive;
+    const ok = await confirm({
+      title: deactivating ? `Deactivate ${branch.name}?` : `Activate ${branch.name}?`,
+      message: deactivating
+        ? 'The branch will no longer be offered when choosing a branch, and it moves to the deactivated list.'
+        : 'The branch will be available again everywhere a branch can be chosen.',
+      warning: deactivating
+        ? 'A branch with existing records can only be deleted after it has been deactivated for 30 days.'
+        : 'Activating restarts the 30-day waiting period if you deactivate it again later.',
+      confirmLabel: deactivating ? 'Deactivate' : 'Activate',
+      variant: deactivating ? 'warning' : 'info',
+    });
+    if (!ok) return;
     try {
       await api.settings.updateBranch(branch.id, {
         isActive: !branch.isActive
@@ -385,6 +401,74 @@ export default function SettingsPage() {
       reloadBranches();
     } catch (err: any) {
       setBranchError(err?.message || 'Failed to update branch status');
+    }
+  };
+
+  const handleToggleBranchArchive = async (branch: Branch) => {
+    setBranchError('');
+    const archiving = !branch.isArchived;
+    const ok = await confirm({
+      title: archiving ? `Archive ${branch.name}?` : `Restore ${branch.name}?`,
+      message: archiving
+        ? <>The branch is deactivated{branch.isActive ? '' : ' (it already is)'} and hidden from the branch list. Its records are kept.</>
+        : 'The branch returns to the deactivated list. Activate it there to use it again.',
+      warning: archiving ? 'You can bring it back any time with "Show archived".' : undefined,
+      confirmLabel: archiving ? 'Archive' : 'Restore',
+      variant: archiving ? 'warning' : 'info',
+    });
+    if (!ok) return;
+    try {
+      if (archiving) await api.settings.archiveBranch(branch.id);
+      else await api.settings.unarchiveBranch(branch.id);
+      reloadBranches();
+    } catch (err: any) {
+      setBranchError(err?.message || (archiving ? 'Failed to archive branch' : 'Failed to restore branch'));
+    }
+  };
+
+  const handleDeleteBranch = async (branch: Branch) => {
+    setBranchError('');
+
+    let check: { canDelete: boolean; reason: string; blockers: string[] };
+    try {
+      const response = await api.settings.checkBranchDeletable(branch.id);
+      check = response.data!;
+    } catch (err: any) {
+      setBranchError(err?.message || 'Could not check whether this branch can be deleted');
+      return;
+    }
+
+    if (!check.canDelete) {
+      await confirm({
+        title: `Cannot delete ${branch.name}`,
+        message: check.reason,
+        warning: check.blockers.length > 0
+          ? <>Existing records: {check.blockers.join(', ')}.</>
+          : undefined,
+        confirmLabel: 'Got it',
+        cancelLabel: 'Close',
+        variant: 'warning',
+      });
+      return;
+    }
+
+    const ok = await confirm({
+      title: `Permanently delete ${branch.name}?`,
+      message: <>The branch <span className="font-medium text-gray-900">{branch.name} ({branch.code})</span> will be removed from the system and can no longer be chosen or restored.</>,
+      warning: check.blockers.length > 0
+        ? <>This cannot be undone. Its existing records ({check.blockers.join(', ')}) are kept for history.</>
+        : 'This cannot be undone. If you only want to stop using it, deactivate or archive it instead.',
+      confirmLabel: 'Delete permanently',
+      variant: 'danger',
+      requireText: 'DELETE',
+    });
+    if (!ok) return;
+
+    try {
+      await api.settings.deleteBranch(branch.id);
+      reloadBranches();
+    } catch (err: any) {
+      setBranchError(err?.message || 'Failed to delete branch');
     }
   };
 
@@ -525,18 +609,9 @@ export default function SettingsPage() {
                     className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   >
                     <option value="all">All Users</option>
-                    <optgroup label="Specific Role">
-                      <option value="administrator">Administrator</option>
-                      <option value="supervisor">Supervisor</option>
-                      <option value="sales_manager">Sales Manager</option>
-                      <option value="seat_maker">Seat Maker</option>
-                      <option value="sewer">Sewer</option>
-                    </optgroup>
-                    <optgroup label="General">
-                      <option value="group:staff">All Staff</option>
-                      <option value="group:workers">Workers (Seat Makers &amp; Sewers)</option>
-                      <option value="group:customers">Customers</option>
-                    </optgroup>
+                    <option value="administrator">Administrator</option>
+                    <option value="supervisor">Supervisor</option>
+                    <option value="sales_manager">Sales Manager</option>
                   </select>
                 </div>
                 {can('users.manage') && (
@@ -630,16 +705,14 @@ export default function SettingsPage() {
                               >
                           Edit
                         </button>
-                              {u.role !== 'customer' && (
-                                <button
-                                  onClick={() => setPermTarget(u)}
-                                  disabled={!!offLimitsReason(u)}
-                                  title={offLimitsReason(u) || undefined}
-                                  className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300"
-                                >
-                                  Permissions
-                                </button>
-                              )}
+                              <button
+                                onClick={() => setPermTarget(u)}
+                                disabled={!!offLimitsReason(u)}
+                                title={offLimitsReason(u) || undefined}
+                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300"
+                              >
+                                Permissions
+                              </button>
                               <button
                                 onClick={() => handleToggleUserStatus(u)}
                                 disabled={!!protectedReason(u)}
@@ -687,8 +760,17 @@ export default function SettingsPage() {
             )}
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-gray-900">Branch Management</h3>
+              <div className="flex items-center gap-3">
               {can('branches.manage') && (
-                <button 
+                <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-600 select-none">
+                  <input type="checkbox" checked={showArchivedBranches}
+                    onChange={(e) => setShowArchivedBranches(e.target.checked)}
+                    className="w-4 h-4 rounded border-gray-300 text-[#011c72] focus:ring-[#011c72]" />
+                  Show archived
+                </label>
+              )}
+              {can('branches.manage') && (
+                <button
                   onClick={handleAddBranch}
                   className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors"
                 >
@@ -698,6 +780,7 @@ export default function SettingsPage() {
                   Add Branch
                 </button>
               )}
+              </div>
             </div>
 
             {loadingBranches ? (
@@ -711,10 +794,14 @@ export default function SettingsPage() {
                 </svg>
                 <p className="text-gray-500">No branches found</p>
               </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {branches.map((branch) => (
-                  <div key={branch.id} className="bg-gray-50 rounded-xl p-6">
+            ) : (() => {
+              // Active branches on top, then the deactivated (and archived) ones below a divider
+              const byName = (a: Branch, b: Branch) => a.name.localeCompare(b.name);
+              const activeBranches = branches.filter((b) => b.isActive).sort(byName);
+              const inactiveBranches = branches.filter((b) => !b.isActive)
+                .sort((a, b) => Number(!!a.isArchived) - Number(!!b.isArchived) || byName(a, b));
+              const renderBranch = (branch: Branch) => (
+                  <div key={branch.id} className={`bg-gray-50 rounded-xl p-6 ${!branch.isActive ? 'opacity-75' : ''}`}>
                     <div className="flex items-start justify-between mb-4">
                       <div className="flex items-center">
                         <div className="w-12 h-12 rounded-xl bg-[#dde6ff] flex items-center justify-center mr-4">
@@ -734,10 +821,15 @@ export default function SettingsPage() {
                           <span className={`inline-block mt-1 px-2 py-0.5 text-xs font-medium rounded-full ${
                             branch.isActive
                               ? 'bg-green-100 text-green-700'
-                              : 'bg-gray-100 text-gray-700'
+                              : branch.isArchived
+                                ? 'bg-amber-100 text-amber-700'
+                                : 'bg-gray-200 text-gray-700'
                           }`}>
-                            {branch.isActive ? 'ACTIVE' : 'INACTIVE'}
+                            {branch.isActive ? 'ACTIVE' : branch.isArchived ? 'ARCHIVED' : 'DEACTIVATED'}
                           </span>
+                          {!branch.isActive && branch.deactivatedAt && (
+                            <p className="mt-1 text-xs text-gray-500">Deactivated {formatDate(branch.deactivatedAt)}</p>
+                          )}
                         </div>
                       </div>
                       {can('branches.manage') && (
@@ -765,23 +857,61 @@ export default function SettingsPage() {
                       </div>
                     </div>
                     {can('branches.manage') && (
-                      <div className="mt-4 pt-4 border-t border-gray-200">
+                      <div className="mt-4 pt-4 border-t border-gray-200 flex flex-wrap items-center gap-x-4 gap-y-2">
+                        {!branch.isArchived && (
+                          <button
+                            onClick={() => handleToggleBranchStatus(branch)}
+                            className={`text-sm font-medium ${
+                              branch.isActive
+                                ? 'text-amber-600 hover:text-amber-700'
+                                : 'text-green-600 hover:text-green-700'
+                            }`}
+                          >
+                            {branch.isActive ? 'Deactivate' : 'Activate'}
+                          </button>
+                        )}
                         <button
-                          onClick={() => handleToggleBranchStatus(branch)}
-                          className={`text-sm font-medium ${
-                            branch.isActive
-                              ? 'text-red-600 hover:text-red-700'
-                              : 'text-green-600 hover:text-green-700'
-                          }`}
+                          onClick={() => handleToggleBranchArchive(branch)}
+                          className="text-sm font-medium text-gray-600 hover:text-gray-800"
                         >
-                          {branch.isActive ? 'Deactivate' : 'Activate'}
+                          {branch.isArchived ? 'Restore' : 'Archive'}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteBranch(branch)}
+                          className="text-sm font-medium text-red-600 hover:text-red-700 ml-auto"
+                        >
+                          Delete
                         </button>
                       </div>
                     )}
                   </div>
-                ))}
-              </div>
-            )}
+              );
+              return (
+                <div className="space-y-6">
+                  {activeBranches.length > 0 ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      {activeBranches.map(renderBranch)}
+                    </div>
+                  ) : (
+                    <p className="text-center text-sm text-gray-500 py-6">No active branches</p>
+                  )}
+                  {inactiveBranches.length > 0 && (
+                    <>
+                      <div className="flex items-center gap-3 pt-3">
+                        <div className="flex-1 border-t-2 border-gray-200" />
+                        <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">
+                          {showArchivedBranches ? 'Deactivated & Archived Branches' : 'Deactivated Branches'}
+                        </span>
+                        <div className="flex-1 border-t-2 border-gray-200" />
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {inactiveBranches.map(renderBranch)}
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         );
 
@@ -910,7 +1040,7 @@ export default function SettingsPage() {
             )}
 
             <div className="space-y-4">
-              <div>
+              <div {...fe.field('branch-name')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Branch Name *
                 </label>
@@ -921,9 +1051,10 @@ export default function SettingsPage() {
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="e.g., Branch D"
                 />
+                <FieldError message={fe.errors['branch-name']} />
               </div>
 
-              <div>
+              <div {...fe.field('branch-code')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Branch Code *
                 </label>
@@ -934,16 +1065,16 @@ export default function SettingsPage() {
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="e.g., BD"
                   maxLength={10}
-                  disabled={!!editingBranch}
                 />
-                {editingBranch && (
-                  <p className="text-xs text-gray-500 mt-1">
-                    Branch code cannot be changed after creation
+                <FieldError message={fe.errors['branch-code']} />
+                {editingBranch && branchFormData.code !== editingBranch.code && (
+                  <p className="text-xs text-amber-700 mt-1">
+                    New job order and draft numbers will use the new code. Existing numbers keep {editingBranch.code}.
                   </p>
                 )}
               </div>
 
-              <div>
+              <div {...fe.field('branch-address')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Address *
                 </label>
@@ -954,6 +1085,7 @@ export default function SettingsPage() {
                   placeholder="Full address"
                   rows={3}
                 />
+                <FieldError message={fe.errors['branch-address']} />
               </div>
 
               <div>
@@ -967,7 +1099,7 @@ export default function SettingsPage() {
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="e.g., 0917-123-4567"
                 />
-                <p className="text-xs text-gray-500 mt-1">Displayed to customers when booking appointments</p>
+                <p className="text-xs text-gray-500 mt-1">Shown to visitors on the website&apos;s Branches section</p>
               </div>
 
               <div className="flex items-center">
@@ -1040,7 +1172,7 @@ export default function SettingsPage() {
               )}
 
               <div className="space-y-4">
-                <div>
+                <div {...fe.field('user-username')}>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Username *
                   </label>
@@ -1052,6 +1184,7 @@ export default function SettingsPage() {
                     placeholder="e.g., jsmith"
                     disabled={!!editingUser}
                   />
+                  <FieldError message={fe.errors['user-username']} />
                   {editingUser && (
                     <p className="text-xs text-gray-500 mt-1">
                       Username cannot be changed after creation
@@ -1059,7 +1192,7 @@ export default function SettingsPage() {
                   )}
                 </div>
 
-                <div>
+                <div {...fe.field('user-fullName')}>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Full Name *
                   </label>
@@ -1070,9 +1203,10 @@ export default function SettingsPage() {
                     className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                     placeholder="e.g., John Smith"
                   />
+                  <FieldError message={fe.errors['user-fullName']} />
                 </div>
 
-                <div>
+                <div {...fe.field('user-email')}>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Email *
                   </label>
@@ -1083,41 +1217,84 @@ export default function SettingsPage() {
                     className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                     placeholder="e.g., jsmith@seatmakers.com"
                   />
+                  <FieldError message={fe.errors['user-email']} />
                 </div>
 
-                <div>
+                <div {...fe.field('user-password')}>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Password {editingUser ? '(leave blank to keep current)' : '*'}
                   </label>
-                  <input
-                    type="password"
-                    value={userFormData.password}
-                    onChange={(e) => setUserFormData({ ...userFormData, password: e.target.value })}
-                    className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                    placeholder={editingUser ? 'Leave blank to keep current password' : 'Enter password'}
-                  />
+                  <div className="relative">
+                    <input
+                      type={showUserPassword ? 'text' : 'password'}
+                      value={userFormData.password}
+                      onChange={(e) => setUserFormData({ ...userFormData, password: e.target.value })}
+                      className="w-full px-4 py-2 pr-11 [&::-ms-reveal]:hidden rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                      placeholder={editingUser ? 'Leave blank to keep current password' : 'Enter password'}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowUserPassword(v => !v)}
+                      className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 hover:text-gray-600"
+                      aria-label={showUserPassword ? 'Hide password' : 'Show password'}
+                      title={showUserPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showUserPassword ? (
+                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                        </svg>
+                      ) : (
+                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                        </svg>
+                      )}
+                    </button>
+                  </div>
+                  <FieldError message={fe.errors['user-password']} />
                 </div>
 
                 {editingUser && userFormData.password && (
-                  <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-3">
+                  <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-3" {...fe.field('user-adminPassword')}>
                     <label className="block text-sm font-medium text-yellow-900 mb-2">
                       Your password (to confirm) *
                     </label>
-                    <input
-                      type="password"
-                      autoComplete="current-password"
-                      value={adminPassword}
-                      onChange={(e) => setAdminPassword(e.target.value)}
-                      className="w-full px-4 py-2 rounded-lg border border-yellow-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                      placeholder="Enter your own password"
-                    />
+                    <div className="relative">
+                      <input
+                        type={showUserPassword ? 'text' : 'password'}
+                        autoComplete="current-password"
+                        value={adminPassword}
+                        onChange={(e) => setAdminPassword(e.target.value)}
+                        className="w-full px-4 py-2 pr-11 [&::-ms-reveal]:hidden rounded-lg border border-yellow-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                        placeholder="Enter your own password"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowUserPassword(v => !v)}
+                        className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-400 hover:text-gray-600"
+                        aria-label={showUserPassword ? 'Hide password' : 'Show password'}
+                        title={showUserPassword ? 'Hide password' : 'Show password'}
+                      >
+                        {showUserPassword ? (
+                          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                          </svg>
+                        ) : (
+                          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                          </svg>
+                        )}
+                      </button>
+                    </div>
+                    <FieldError message={fe.errors['user-adminPassword']} />
                     <p className="text-xs text-yellow-800 mt-1">
                       Changing another user&apos;s password signs them out everywhere.
                     </p>
                   </div>
                 )}
 
-                <div>
+                <div {...fe.field('user-role')}>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Role *
                   </label>
@@ -1137,9 +1314,10 @@ export default function SettingsPage() {
                         </option>
                       ))}
                   </select>
+                  <FieldError message={fe.errors['user-role']} />
                 </div>
 
-                <div>
+                <div {...fe.field('user-branch')}>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Branch *
                   </label>
@@ -1155,6 +1333,7 @@ export default function SettingsPage() {
                       </option>
                     ))}
                   </select>
+                  <FieldError message={fe.errors['user-branch']} />
                 </div>
               </div>
 

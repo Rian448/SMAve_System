@@ -65,6 +65,7 @@ export default function PaymentsPage() {
 
   const METHOD_LABELS: Record<string, string> = {
     cash: 'Cash',
+    adjustment: 'Approved override',
     gcash: 'GCash',
     maya: 'Maya',
     bank_transfer: 'Bank Transfer',
