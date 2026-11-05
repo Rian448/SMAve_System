@@ -41,9 +41,6 @@ function ItemTrailContent() {
   const [actionError, setActionError] = useState('');
   const [actionSuccess, setActionSuccess] = useState('');
   const [savingId, setSavingId] = useState<number | null>(null);
-  const [qrTransferId, setQrTransferId] = useState<number | null>(null);
-  const [scanning, setScanning] = useState(false);
-  const [scanInput, setScanInput] = useState('');
   // Admin override confirmation
   const [overrideConfirm, setOverrideConfirm] = useState<{ id: number; action: 'mark-sent' | 'confirm-receipt'; transfer: TransferDashboardItem } | null>(null);
 
@@ -160,13 +157,6 @@ function ItemTrailContent() {
     } finally { setBulkLoading(false); }
   };
 
-  const handleScanSubmit = async () => {
-    const match = scanInput.trim().match(/^(?:TRANSFER:)?(\d+)$/i);
-    if (!match) { flash('Invalid QR — expected TRANSFER:{id}', true); return; }
-    const id = parseInt(match[1]);
-    setScanning(false); setScanInput('');
-    await singleAction(id, 'confirm-receipt');
-  };
 
   const toggleSelect = (id: number) =>
     setSelected(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
@@ -249,7 +239,7 @@ function ItemTrailContent() {
           <StatCard label="Overdue (>24h)" value={summary.overdue} color="red" onClick={() => setStatusFilter('overdue')} active={statusFilter === 'overdue'} />
         </div>
 
-        {/* Filter bar + QR scan button */}
+        {/* Filter bar */}
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-3 mb-4 flex flex-wrap items-center gap-2">
           <span className="text-xs font-medium text-gray-500">Status:</span>
           {(['all', 'pending', 'transferred', 'received', 'overdue'] as const).map(f => (
@@ -264,13 +254,6 @@ function ItemTrailContent() {
                 className="w-4 h-4 rounded border-gray-300 text-[#011c72] cursor-pointer" />
               Needs action first
             </label>
-            <button onClick={() => setScanning(true)}
-              className="px-3 py-1.5 rounded-lg text-sm font-medium bg-purple-100 text-purple-700 hover:bg-purple-200 flex items-center gap-1.5">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
-              </svg>
-              Scan QR
-            </button>
             <button onClick={() => load()} className="px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 flex items-center gap-1.5">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -338,43 +321,6 @@ function ItemTrailContent() {
           </div>
         )}
 
-        {/* QR Scan Modal */}
-        {scanning && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
-            <div className="bg-white rounded-xl shadow-xl w-full max-w-sm p-6 space-y-4">
-              <h3 className="font-bold text-gray-900">Scan Transfer QR</h3>
-              <p className="text-sm text-gray-500">Enter the Transfer ID from the QR code label, or type it manually:</p>
-              <input autoFocus value={scanInput} onChange={e => setScanInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleScanSubmit()}
-                placeholder="e.g. TRANSFER:42 or just 42"
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#011c72]" />
-              <div className="flex gap-2 justify-end">
-                <button onClick={() => { setScanning(false); setScanInput(''); }}
-                  className="px-4 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100">Cancel</button>
-                <button onClick={handleScanSubmit}
-                  className="px-4 py-2 rounded-lg text-sm bg-green-600 text-white font-semibold hover:bg-green-700">
-                  Confirm Receipt
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* QR Preview Modal */}
-        {qrTransferId !== null && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={() => setQrTransferId(null)}>
-            <div className="bg-white rounded-xl shadow-xl p-6 space-y-3 text-center" onClick={e => e.stopPropagation()}>
-              <p className="font-bold text-gray-900 text-sm">Transfer #{qrTransferId}</p>
-              <p className="text-xs text-gray-500">Scan this at the pickup branch to confirm receipt</p>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=TRANSFER:${qrTransferId}`}
-                alt={`QR for transfer ${qrTransferId}`} className="mx-auto rounded-lg border" />
-              <p className="text-xs font-mono text-gray-400">TRANSFER:{qrTransferId}</p>
-              <button onClick={() => setQrTransferId(null)}
-                className="mt-2 px-4 py-2 rounded-lg text-sm bg-gray-100 text-gray-700 hover:bg-gray-200">Close</button>
-            </div>
-          </div>
-        )}
 
         {/* Transfer list */}
         {!canSee ? (
@@ -416,7 +362,6 @@ function ItemTrailContent() {
                 onToggle={toggleSelect}
                 onMarkSent={transfer => triggerAction(transfer, 'mark-sent')}
                 onConfirm={transfer => triggerAction(transfer, 'confirm-receipt')}
-                onShowQr={setQrTransferId}
                 savingId={savingId}
                 isAdmin={isAdmin}
                 fmt={fmt}
@@ -461,13 +406,12 @@ interface TransferRowProps {
   onToggle: (id: number) => void;
   onMarkSent: (transfer: TransferDashboardItem) => void;
   onConfirm: (transfer: TransferDashboardItem) => void;
-  onShowQr: (id: number) => void;
   savingId: number | null;
   isAdmin: boolean;
   fmt: (iso?: string) => string;
 }
 
-function TransferRow({ transfer: t, selected, pinned, onTogglePin, onToggle, onMarkSent, onConfirm, onShowQr, savingId, isAdmin, fmt }: TransferRowProps) {
+function TransferRow({ transfer: t, selected, pinned, onTogglePin, onToggle, onMarkSent, onConfirm, savingId, isAdmin, fmt }: TransferRowProps) {
   const isSaving = savingId === t.id;
   const isActionable = t.status === 'pending' || t.status === 'transferred';
   const total = t.items.reduce((s, i) => s + (i.total ?? i.unitPrice * i.quantity), 0);
@@ -610,10 +554,6 @@ function TransferRow({ transfer: t, selected, pinned, onTogglePin, onToggle, onM
 
               {t.status === 'pending' && (
                 <>
-                  <button onClick={() => onShowQr(t.id)}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 flex items-center gap-1">
-                    <QrIcon /> Show QR
-                  </button>
                   <button onClick={() => onMarkSent(t)} disabled={isSaving}
                     className={`px-4 py-1.5 rounded-lg text-sm font-semibold disabled:opacity-50 flex items-center gap-1.5 ${isAdmin ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
                     {isSaving ? <Spinner /> : <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4" /></svg>}
@@ -623,10 +563,6 @@ function TransferRow({ transfer: t, selected, pinned, onTogglePin, onToggle, onM
               )}
               {t.status === 'transferred' && (
                 <>
-                  <button onClick={() => onShowQr(t.id)}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 flex items-center gap-1">
-                    <QrIcon /> Show QR
-                  </button>
                   <button onClick={() => onConfirm(t)} disabled={isSaving}
                     className={`px-4 py-1.5 rounded-lg text-sm font-semibold disabled:opacity-50 flex items-center gap-1.5 ${isAdmin ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-green-600 text-white hover:bg-green-700'}`}>
                     {isSaving ? <Spinner /> : <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
@@ -654,10 +590,3 @@ function Spinner() {
   return <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />;
 }
 
-function QrIcon() {
-  return (
-    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
-    </svg>
-  );
-}

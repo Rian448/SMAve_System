@@ -3,7 +3,7 @@ import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect, useMemo, useRef, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus, PremadeTransfer } from '@/lib/api';
+import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus, PremadeTransfer, FORECAST_METHOD_LABELS } from '@/lib/api';
 import { useConfirm } from '@/components/ConfirmDialog';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import Link from 'next/link';
@@ -21,6 +21,13 @@ const TAB_PERMISSIONS: Record<TabType, string[]> = {
   'waste-log': ['inventory.view'],
   'ai-predictions': ['forecasting.view'],
 };
+
+/** Same rules as the server: a number from 0 up to 1,000,000 (the most of one item it takes) */
+function stockQuantityProblem(qty: number): string | false {
+  if (Number.isNaN(qty)) return 'Stock quantity must be a number.';
+  if (qty < 0) return 'Stock quantity cannot be negative.';
+  return qty > 1_000_000 && 'Stock quantity cannot be more than 1,000,000.';
+}
 
 export default function InventoryPage() {
   // useSearchParams needs a Suspense boundary for this route to prerender.
@@ -104,7 +111,17 @@ function InventoryContent() {
   const [editingThreshold, setEditingThreshold] = useState(false);
   const [thresholdSaving, setThresholdSaving] = useState(false);
   const [notificationDismissed, setNotificationDismissed] = useState(false);
-  const [alertsCollapsed, setAlertsCollapsed] = useState(false);
+  // Stock alerts start as a one-line summary (counts only) so they don't push the
+  // inventory down on every visit; opening them is remembered in this browser
+  const [alertsCollapsed, setAlertsCollapsedState] = useState(true);
+  useEffect(() => {
+    try { if (localStorage.getItem('inventory.stockAlertsOpen') === '1') setAlertsCollapsedState(false); } catch { /* storage unavailable */ }
+  }, []);
+  const setAlertsCollapsed = (update: (prev: boolean) => boolean) => setAlertsCollapsedState(prev => {
+    const next = update(prev);
+    try { localStorage.setItem('inventory.stockAlertsOpen', next ? '0' : '1'); } catch { /* storage unavailable */ }
+    return next;
+  });
 
   // Suppliers
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -159,16 +176,15 @@ function InventoryContent() {
   // Which location's finished goods to show: 'all', or a branch/warehouse id.
   const [premadeBranchFilter, setPremadeBranchFilter] = useState<string>('all');
 
-  // Administrators and warehouse accounts manage every branch's stock; others only
+  // Accounts with all-branch access manage every branch's stock; others only
   // their own. Premade stock is produced and sent out from the warehouse.
-  const managesAllInventory = can('branches.all') || !!user?.atWarehouse;
+  const managesAllInventory = can('branches.all');
   const canDistribute = can('premade.distribute') && managesAllInventory;
   /** Admin/supervisor approve on someone's behalf, so they get a confirm step first. */
   const confirmsViaDialog = can('branches.all', 'premade.distribute');
-  // Administrators, owners, supervisors and warehouse accounts see every branch's
-  // inventory (the server enforces the same rule); others see their own branch.
-  // Changing stock is still limited to the branches each account manages.
-  const seesAllInventory = managesAllInventory || user?.role === 'supervisor';
+  // Only all-branch access sees every branch's inventory (the server enforces the
+  // same rule); everyone else sees their own branch.
+  const seesAllInventory = managesAllInventory;
   const [inventoryBranch, setInventoryBranch] = useState<string>('all');
   const listBranchId = seesAllInventory
     ? (inventoryBranch === 'all' ? undefined : Number(inventoryBranch))
@@ -286,8 +302,10 @@ function InventoryContent() {
       } else if (activeTab === 'waste-log') {
         const [wasteRes, matRes] = await Promise.all([
           api.inventory.getWasteLogs({ branchId: listBranchId }),
-          // The picker only offers materials this account may log waste for
-          api.inventory.getRawMaterials({ branchId: managesAllInventory ? listBranchId : user?.branchId }),
+          // The picker only offers materials this account may log waste for: a
+          // shop's own and the warehouse's, which supplies every shop
+          api.inventory.getRawMaterials(managesAllInventory ? { branchId: listBranchId }
+            : { branchId: user?.branchId, includeWarehouse: true }),
         ]);
         setWasteLogs(wasteRes.data || []);
         setRawMaterials(matRes.data || []);
@@ -309,7 +327,7 @@ function InventoryContent() {
     const byMarkup = newMaterial.priceMode === 'markup';
     if (fe.show({
       'new-materialType': !newMaterial.materialType.trim() && 'Enter the material name.',
-      'new-stockQuantity': Number.isNaN(stockQuantity) && 'Stock quantity must be a number.',
+      'new-stockQuantity': stockQuantityProblem(stockQuantity),
       'new-costPerUnit': byMarkup && (Number.isNaN(costPerUnit) || costPerUnit <= 0) && 'Enter the cost per unit (more than ₱0).',
       'new-markupPercent': byMarkup && Number.isNaN(markupPercent) && 'Markup must be a number.',
       'new-unitPrice': !byMarkup && Number.isNaN(Number(newMaterial.unitPrice)) && 'Selling price must be a number.',
@@ -367,7 +385,7 @@ function InventoryContent() {
     const stockQuantity = Number(editMaterial.stockQuantity);
     if (fe.show({
       'edit-materialType': !editMaterial.materialType.trim() && 'Enter the material name.',
-      'edit-stockQuantity': Number.isNaN(stockQuantity) && 'Stock quantity must be a number.',
+      'edit-stockQuantity': stockQuantityProblem(stockQuantity),
       'edit-unitPrice': editMaterial.priceMode === 'manual' && Number.isNaN(Number(editMaterial.unitPrice))
         && 'Selling price must be a number.',
     })) return;
@@ -2393,6 +2411,13 @@ function InventoryContent() {
                                     <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${confColors[p.confidence]}`}>
                                       {p.confidence.charAt(0).toUpperCase() + p.confidence.slice(1)} conf.
                                     </span>
+                                    {p.method && (
+                                      <span className="text-[11px] text-gray-500"
+                                        title="Error = how far off the method was when forecasting the most recent weeks it was not shown (lower is better)">
+                                        {FORECAST_METHOD_LABELS[p.method]}
+                                        {p.errorPercent != null && <> · {p.errorPercent}% error</>}
+                                      </span>
+                                    )}
                                   </div>
                                 </td>
                               </tr>

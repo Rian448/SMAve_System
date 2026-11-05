@@ -68,6 +68,8 @@ export default function JobOrderDetailPage() {
   const { user, can } = useAuth();
   const [jobOrder, setJobOrder] = useState<JobOrder | null>(null);
   const [loading, setLoading] = useState(true);
+  // Why the order couldn't be opened (another branch's order, connection lost...)
+  const [loadError, setLoadError] = useState('');
   const [updating, setUpdating] = useState(false);
   const [inventoryMaterials, setInventoryMaterials] = useState<RawMaterial[]>([]);
   const [editingParts, setEditingParts] = useState<EditableJobOrderItem[]>([]);
@@ -137,7 +139,7 @@ export default function JobOrderDetailPage() {
           setLoading(false);
         })
         .catch(err => {
-          console.error(err);
+          setLoadError(err instanceof Error && err.message ? err.message : '');
           setLoading(false);
         });
     }
@@ -205,6 +207,7 @@ export default function JobOrderDetailPage() {
   const [slipCutter, setSlipCutter] = useState('');
   const [slipSewer, setSlipSewer] = useState('');
   const [savingSlip, setSavingSlip] = useState(false);
+  const [slipMessage, setSlipMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     const sd = jobOrder?.slipData;
@@ -232,6 +235,7 @@ export default function JobOrderDetailPage() {
   const saveSlip = async () => {
     if (!jobOrder) return;
     setSavingSlip(true);
+    setSlipMessage(null);
     try {
       await api.sales.updateJobOrder(jobOrder.id, {
         slipData: {
@@ -249,8 +253,9 @@ export default function JobOrderDetailPage() {
           specification: slipSpec,
         }
       } as any);
+      setSlipMessage({ ok: true, text: 'Slip saved.' });
     } catch (err) {
-      console.error(err);
+      setSlipMessage({ ok: false, text: err instanceof Error && err.message ? err.message : 'Could not save the slip.' });
     } finally {
       setSavingSlip(false);
     }
@@ -323,11 +328,12 @@ export default function JobOrderDetailPage() {
   const updateStatus = async (newStatus: string) => {
     if (!jobOrder) return;
     setUpdating(true);
+    setError('');
     try {
       await api.sales.updateJobOrder(jobOrder.id, { status: newStatus as any });
       setJobOrder({ ...jobOrder, status: newStatus as any });
     } catch (err) {
-      console.error(err);
+      setError(err instanceof Error && err.message ? err.message : 'Could not change the status.');
     }
     setUpdating(false);
   };
@@ -691,7 +697,7 @@ export default function JobOrderDetailPage() {
       <div className="min-h-screen bg-gray-50">
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-center">
-            <p className="text-red-600">Job order not found</p>
+            <p className="text-red-600">{loadError || 'Job order not found'}</p>
             <button onClick={() => router.push('/sales')} className="mt-4 text-[#011c72] hover:text-[#011c72] font-medium">
               Back to Sales
             </button>
@@ -1029,6 +1035,12 @@ export default function JobOrderDetailPage() {
               {savingSlip ? 'Saving...' : 'Save Slip'}
             </button>
           </div>
+          {slipMessage && (
+            <p role={slipMessage.ok ? 'status' : 'alert'}
+              className={`-mt-2 mb-3 text-sm text-right ${slipMessage.ok ? 'text-green-700' : 'text-red-600'}`}>
+              {slipMessage.text}
+            </p>
+          )}
 
           {/* Auto-filled header info (read-only) */}
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-5 p-4 bg-gray-50 rounded-xl border border-gray-200 text-sm">

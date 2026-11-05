@@ -22,7 +22,7 @@ export interface User {
   branch: string;
   branchId?: number;
   branchName?: string;
-  /** Based at the warehouse: picks the branch each job order is for */
+  /** Based at the warehouse (administrators only); grants no extra access */
   atWarehouse?: boolean;
   isActive?: boolean;
   phone?: string;
@@ -440,7 +440,17 @@ export interface AIPrediction {
   dataSource: 'xlsx' | 'hybrid' | 'live';
   dataPoints: number;
   hasCurrentInventory: boolean;
+  /** Forecasting method that tested best for this material (missing on predictions made before it existed) */
+  method?: 'moving_average' | 'croston_sba' | 'exp_smoothing' | 'prophet';
+  /** Its error on held-back weeks (WAPE %), and the plain moving average's; null with too little history */
+  errorPercent?: number | null;
+  baselineErrorPercent?: number | null;
 }
+
+export const FORECAST_METHOD_LABELS: Record<NonNullable<AIPrediction['method']>, string> = {
+  moving_average: 'Moving average', croston_sba: 'Croston (bursty use)',
+  exp_smoothing: 'Exponential smoothing', prophet: 'Prophet',
+};
 
 export interface AIStatus {
   status: 'idle' | 'computing' | 'done' | 'error';
@@ -466,6 +476,8 @@ export interface InventoryForecastData {
   hasPredictions: boolean;
   predictionStatus: string;
   period: string;
+  /** Overall tested error of the forecasts (WAPE %) and of a plain moving average */
+  forecastAccuracy?: { testedItems: number; errorPercent: number | null; baselineErrorPercent: number | null };
 }
 
 export interface PaymentRecord {
@@ -926,8 +938,13 @@ export interface PurchaseOrder {
   expectedDelivery: string;
   createdAt: string;
   createdBy: number;
+  createdByName?: string | null;
   approvedAt?: string;
   approvedBy?: number;
+  approvedByName?: string | null;
+  receivedAt?: string;
+  receivedBy?: number;
+  receivedByName?: string | null;
 }
 
 export interface DeliveryItem {
@@ -1288,7 +1305,13 @@ async function fetchApi<T>(
       ...options,
     });
 
-    const data = await response.json();
+    // A crashed request comes back as an HTML error page, not JSON: say so plainly
+    // instead of surfacing the browser's "SyntaxError: Unexpected token '<'"
+    const data = await response.json().catch(() => null);
+    if (data === null) {
+      throw new ApiError(`The server could not complete this request (error ${response.status}). Please try again.`,
+        response.status, null);
+    }
 
     // Handle 401 Unauthorized - clear token and redirect to login
     if (response.status === 401) {

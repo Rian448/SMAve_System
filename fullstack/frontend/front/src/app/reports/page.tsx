@@ -128,8 +128,14 @@ export default function ReportsPage() {
       csv = 'Type,Date,Orders,Revenue\n' + [...jobRows, ...premadeRows].join('\n');
     } else if (reportType === 'inventory' && inventoryData) {
       filename = 'inventory-report.csv';
-      csv = 'Category,Items,Value\n' +
-        inventoryData.categoryBreakdown.map(c => [csvCell(c.category), c.count, c.value].join(',')).join('\n');
+      // The totals the summary cards show, so a shop with no raw materials of its
+      // own still exports its finished goods instead of an empty file
+      const s = inventoryData.summary;
+      csv = 'Category,Items,Value\n' + [
+        ...inventoryData.categoryBreakdown.map(c => [csvCell(c.category), c.count, c.value].join(',')),
+        [csvCell('Total raw materials'), s.totalRawMaterials, s.rawMaterialsValue].join(','),
+        [csvCell('Finished goods (premade)'), s.totalFinishedGoods, s.finishedGoodsValue].join(','),
+      ].join('\n');
     } else if (reportType === 'extra' && extraData) {
       filename = `extra-materials-${extraData.period.startDate}-to-${extraData.period.endDate}.csv`;
       csv = 'Date,Job Order,Worker,Material,Quantity,Reason,Notes,Cost,Recorded By\n' +

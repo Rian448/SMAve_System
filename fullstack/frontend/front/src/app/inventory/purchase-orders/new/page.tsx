@@ -32,7 +32,8 @@ export default function NewPurchaseOrderPage() {
   ]);
 
   useEffect(() => {
-    api.inventory.getRawMaterials()
+    // Shops order their own stock and the warehouse's (which supplies them)
+    api.inventory.getRawMaterials({ includeWarehouse: true })
       .then(response => {
         setMaterials(response.data || []);
         setLoadingMaterials(false);
@@ -59,7 +60,8 @@ export default function NewPurchaseOrderPage() {
   const updateItem = (index: number, field: keyof POItem, value: string | number) => {
     const newItems = [...items];
     if (field === 'material_id') {
-      const material = materials.find(m => m.id === value);
+      // The dropdown gives the id as text
+      const material = materials.find(m => String(m.id) === String(value));
       if (material) {
         const label = [material.materialType, material.color, material.pattern].filter(Boolean).join(' - ');
         newItems[index] = {
@@ -98,8 +100,11 @@ export default function NewPurchaseOrderPage() {
     setLoading(true);
 
     try {
+      // A name that matches a saved supplier links the order to that supplier
+      const saved = savedSuppliers.find((s: Supplier) => s.name.trim().toLowerCase() === supplier.trim().toLowerCase());
       const purchaseOrder = {
         supplierName: supplier,
+        supplierId: saved?.id,
         items: items.filter(item => item.material_id).map(item => ({
           materialId: Number(item.material_id),
           name: item.material_name,
