@@ -427,8 +427,8 @@ export default function SalesPage() {
                   <p className="text-gray-500">Create a new job order to get started.</p>
                 </div>
               ) : (
-                <div>
-                  <table className="w-full">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[760px]">
                     <thead className="bg-gray-50">
                       <tr>
                         {['Order #', 'Type', 'Customer', 'Vehicle', 'Branch', 'Amount', 'Date', 'Status', ''].map(h => (
@@ -521,8 +521,8 @@ export default function SalesPage() {
                   <p className="text-gray-500">Create a new job order to get started.</p>
                 </div>
               ) : (
-                <div>
-                  <table className="w-full">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[760px]">
                     <thead className="bg-gray-50">
                       <tr>
                         {['Order #', 'Type', 'Customer', 'Vehicle', 'Branch', 'Amount', 'Date', 'Status', ''].map(h => (
@@ -615,8 +615,8 @@ export default function SalesPage() {
                   <p className="text-gray-500">No customers have purchased premade products yet.</p>
                 </div>
               ) : (
-                <div>
-                  <table className="w-full">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[600px]">
                     <thead className="bg-gray-50">
                       <tr>
                         {['Order #', 'Customer', 'Branch', 'Amount', 'Date', 'Status', ''].map(h => (

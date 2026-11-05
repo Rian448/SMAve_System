@@ -3,7 +3,7 @@ import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect, useMemo, useRef, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus, PremadeTransfer } from '@/lib/api';
+import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus, PremadeTransfer, FORECAST_METHOD_LABELS } from '@/lib/api';
 import { useConfirm } from '@/components/ConfirmDialog';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import Link from 'next/link';
@@ -111,7 +111,17 @@ function InventoryContent() {
   const [editingThreshold, setEditingThreshold] = useState(false);
   const [thresholdSaving, setThresholdSaving] = useState(false);
   const [notificationDismissed, setNotificationDismissed] = useState(false);
-  const [alertsCollapsed, setAlertsCollapsed] = useState(false);
+  // Stock alerts start as a one-line summary (counts only) so they don't push the
+  // inventory down on every visit; opening them is remembered in this browser
+  const [alertsCollapsed, setAlertsCollapsedState] = useState(true);
+  useEffect(() => {
+    try { if (localStorage.getItem('inventory.stockAlertsOpen') === '1') setAlertsCollapsedState(false); } catch { /* storage unavailable */ }
+  }, []);
+  const setAlertsCollapsed = (update: (prev: boolean) => boolean) => setAlertsCollapsedState(prev => {
+    const next = update(prev);
+    try { localStorage.setItem('inventory.stockAlertsOpen', next ? '0' : '1'); } catch { /* storage unavailable */ }
+    return next;
+  });
 
   // Suppliers
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -2401,6 +2411,13 @@ function InventoryContent() {
                                     <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${confColors[p.confidence]}`}>
                                       {p.confidence.charAt(0).toUpperCase() + p.confidence.slice(1)} conf.
                                     </span>
+                                    {p.method && (
+                                      <span className="text-[11px] text-gray-500"
+                                        title="Error = how far off the method was when forecasting the most recent weeks it was not shown (lower is better)">
+                                        {FORECAST_METHOD_LABELS[p.method]}
+                                        {p.errorPercent != null && <> · {p.errorPercent}% error</>}
+                                      </span>
+                                    )}
                                   </div>
                                 </td>
                               </tr>

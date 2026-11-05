@@ -7186,6 +7186,16 @@ def update_product_order(order_id):
                     'message': f"Cannot mark as '{incoming_status}'. {len(pending_transfers)} transfer(s) are still in transit. All items must be received at the pickup branch first."
                 }), 400
 
+        # The order page only offers Complete once the sale is paid in full; the
+        # server holds to it too (a payment sent with this request counts)
+        if incoming_status == 'completed' and order.status != 'completed':
+            paid_after = float(order.amount_paid or 0) + (finite_number(data.get('addPayment'), 0.0) or 0.0)
+            if data.get('paymentStatus') == 'paid':
+                paid_after = float(order.total_amount or 0)
+            if money(float(order.total_amount or 0) - paid_after) > 0:
+                return jsonify({'status': 'error',
+                                'message': 'Payment must be fully settled before completing this sale'}), 400
+
         previous_status = order.status
         placed_stock = any(stock_taken_at_placement(it) for it in (order.items or []))
         if previous_status == 'completed' and incoming_status != 'completed':
@@ -7711,7 +7721,23 @@ def get_inventory_forecast():
     soon = [p for p in predictions if 7 < p.get('daysUntilStockout', 9999) <= 30]
     top_consuming = max(predictions, key=lambda p: p.get('avgDailyUsage', 0)) if predictions else None
 
+    # How accurate the forecasts tested, over all materials with enough history:
+    # overall WAPE = total miss / total actual usage in the held-back weeks, so a
+    # much-used material counts for more than one used once. Next to it, the same
+    # for a plain moving average.
+    tested = [p for p in predictions if p.get('errorPercent') is not None and p.get('testedUsage')]
+    def overall(key):
+        rows = [p for p in tested if p.get(key) is not None]
+        used = sum(p['testedUsage'] for p in rows)
+        return round(sum(p[key] * p['testedUsage'] for p in rows) / used, 1) if used else None
+    accuracy = {
+        'testedItems': len(tested),
+        'errorPercent': overall('errorPercent'),
+        'baselineErrorPercent': overall('baselineErrorPercent'),
+    }
+
     return jsonify({'status': 'success', 'data': {
+        'forecastAccuracy': accuracy,
         'restockItems': restock_items,
         'monthlyUsageTrend': monthly_usage,
         'totalPredictedItems': len(predictions),
@@ -10415,10 +10441,108 @@ def _parse_date(val):
     except Exception:
         return None
 
+# ── Forecasting: weekly usage, several methods, the one that tested best wins ──
+# Upholstery material is used in bursts (a big job, then nothing for days), so
+# usage is forecast per week from a gap-free series (a week with no usage counts
+# as 0). Each method is tried on the history minus its last weeks and scored on
+# how well it predicted them; the best one forecasts the coming weeks.
+FORECAST_HORIZON_WEEKS = 8
+FORECAST_METHODS = ('moving_average', 'croston_sba', 'exp_smoothing', 'prophet')
+
+def _forecast_weekly(method, history, horizon):
+    """Next `horizon` weekly totals from a list of past weekly totals."""
+    if not history:
+        return [0.0] * horizon
+    if method == 'moving_average':
+        recent = history[-8:]
+        return [sum(recent) / len(recent)] * horizon
+    if method == 'exp_smoothing':
+        alpha, level = 0.3, history[0]
+        for y in history[1:]:
+            level = alpha * y + (1 - alpha) * level
+        return [level] * horizon
+    if method == 'croston_sba':
+        # Croston with the Syntetos-Boylan correction: smooths the size of the
+        # weeks with usage and the gap between them separately
+        alpha = 0.1
+        size = interval = None
+        gap = 1
+        for y in history:
+            if y > 0:
+                if size is None:
+                    size, interval = y, gap
+                else:
+                    size = alpha * y + (1 - alpha) * size
+                    interval = alpha * gap + (1 - alpha) * interval
+                gap = 1
+            else:
+                gap += 1
+        rate = 0.0 if size is None else (1 - alpha / 2) * size / interval
+        return [rate] * horizon
+    if method == 'prophet':
+        import logging
+        import pandas as pd
+        from prophet import Prophet
+        for name in ('prophet', 'cmdstanpy'):
+            logging.getLogger(name).setLevel(logging.WARNING)
+        end = pd.Timestamp.now().normalize()
+        weeks = pd.date_range(end=end, periods=len(history), freq='W')
+        model = Prophet(yearly_seasonality=len(history) >= 78, weekly_seasonality=False,
+                        daily_seasonality=False, changepoint_prior_scale=0.05)
+        model.fit(pd.DataFrame({'ds': weeks, 'y': history}))
+        future = model.make_future_dataframe(periods=horizon, freq='W')
+        return [max(0.0, float(v)) for v in model.predict(future)['yhat'].tail(horizon)]
+    raise ValueError(method)
+
+def _miss(method, history, actual_weeks):
+    """Total absolute miss of `method` forecasting actual_weeks from history, or None if it fails."""
+    try:
+        predicted = _forecast_weekly(method, history, len(actual_weeks))
+    except Exception:
+        return None
+    return sum(abs(p - a) for p, a in zip(predicted, actual_weeks))
+
+def _choose_forecast(weekly):
+    """(method, error %, baseline error %, forecast weekly totals, usage in the
+    test weeks).
+
+    The last `hold` weeks are the test: never used to pick the method, only to
+    measure it, so the error shown is a fair one. The method is picked on the
+    `hold` weeks before them (validation), then refit on everything before the
+    test and scored on it; the plain moving average is scored the same way as a
+    baseline. Error = WAPE: total miss / total actual usage in the test weeks."""
+    n = len(weekly)
+    hold = min(8, max(2, n // 6))
+    baseline = 'moving_average'
+    final = lambda m: _forecast_weekly(m, weekly, FORECAST_HORIZON_WEEKS)
+    if n < hold + 6:  # too little history to test anything
+        return baseline, None, None, final(baseline), 0.0
+    trainval, test = weekly[:-hold], weekly[-hold:]
+    actual = sum(test)
+    wape = lambda miss: round(miss / actual * 100, 1) if actual > 0 and miss is not None else None
+
+    best = baseline
+    if len(trainval) >= hold + 6:  # enough history to also hold out validation weeks
+        try:
+            import prophet  # noqa: F401  optional: the other methods work without it
+            methods = FORECAST_METHODS if len(trainval) >= 26 else FORECAST_METHODS[:-1]
+        except ImportError:
+            methods = FORECAST_METHODS[:-1]
+        train, valid = trainval[:-hold], trainval[-hold:]
+        misses = {m: _miss(m, train, valid) for m in methods}
+        misses = {m: v for m, v in misses.items() if v is not None}
+        best = min(misses, key=misses.get)  # ties go to the simpler, earlier method
+
+    error = wape(_miss(best, trainval, test))
+    try:
+        forecast = final(best)
+    except Exception:
+        best, error, forecast = baseline, wape(_miss(baseline, trainval, test)), final(baseline)
+    return best, error, wape(_miss(baseline, trainval, test)), forecast, actual
+
 def _compute_prediction_for_item(item_id):
     try:
         import pandas as pd
-        from prophet import Prophet
     except ImportError:
         return None
 
@@ -10438,12 +10562,14 @@ def _compute_prediction_for_item(item_id):
 
     material = InventoryMaterial.query.filter_by(item_id=item_id, is_archived=False).first()
     live_day_span = 0
+    has_live_usage = False
     if material:
         logs = MaterialUsageLog.query.filter_by(material_id=material.id).all()
         day_totals = defaultdict(float)
         for log in logs:
             day_totals[log.created_at.date()] += log.quantity_used
         if day_totals:
+            has_live_usage = True
             sorted_days = sorted(day_totals.keys())
             live_day_span = (sorted_days[-1] - sorted_days[0]).days
             for d, qty in day_totals.items():
@@ -10465,39 +10591,28 @@ def _compute_prediction_for_item(item_id):
     restock_qtys = [float(row.restock_quantity) for row in xlsx_rows if row.restock_quantity and float(row.restock_quantity) > 0]
     suggested_qty = round(sum(restock_qtys) / len(restock_qtys)) if restock_qtys else None
 
-    df = None
-    try:
-        import pandas as pd
-        df = pd.DataFrame(daily_records).groupby('ds', as_index=False)['y'].sum()
-        df = df.sort_values('ds').reset_index(drop=True)
-        df['y'] = df['y'].clip(lower=0)
-    except Exception:
-        pass
+    # One row per day with usage (the spreadsheet and live logs can share a day)
+    daily = pd.DataFrame(daily_records).groupby('ds')['y'].sum().clip(lower=0).sort_index()
+    n_unique = int((daily > 0).sum())
+    # Gap-free: days with no usage count as 0. Live usage runs to today (no log
+    # since then means none was used); spreadsheet-only history ends where it does.
+    end = pd.Timestamp(datetime.now().date()) if has_live_usage else daily.index.max()
+    daily = daily.reindex(pd.date_range(daily.index.min(), max(end, daily.index.max()), freq='D'), fill_value=0.0)
+    weekly = [float(v) for v in daily.resample('W').sum()]
 
-    n_unique = len(df) if df is not None else 0
-    confidence = 'low' if n_unique < 5 else ('medium' if n_unique < 20 else 'high')
-
-    avg_daily_usage = 0.001
+    method, wape, baseline_wape, tested_usage = 'moving_average', None, None, 0.0
     try:
-        if df is not None and n_unique >= 2:
-            import pandas as pd
-            model = Prophet(
-                yearly_seasonality=n_unique > 365,
-                weekly_seasonality=n_unique > 14,
-                daily_seasonality=False,
-                changepoint_prior_scale=0.05,
-                seasonality_mode='additive'
-            )
-            model.fit(df)
-            future = model.make_future_dataframe(periods=60)
-            forecast = model.predict(future)
-            future_only = forecast[forecast['ds'] > pd.Timestamp.now()]
-            avg_daily_usage = max(0.001, float(future_only['yhat'].head(60).mean()))
-        elif daily_records:
-            avg_daily_usage = max(0.001, sum(r['y'] for r in daily_records) / len(daily_records))
+        method, wape, baseline_wape, weekly_forecast, tested_usage = _choose_forecast(weekly)
+        avg_daily_usage = max(0.001, sum(weekly_forecast) / len(weekly_forecast) / 7)
     except Exception:
-        if daily_records:
-            avg_daily_usage = max(0.001, sum(r['y'] for r in daily_records) / len(daily_records))
+        avg_daily_usage = max(0.001, float(daily.mean()))
+
+    # Confidence from how well the method predicted the held-back weeks; with
+    # nothing to test against, from how much history there is
+    if wape is not None:
+        confidence = 'high' if wape <= 35 else ('medium' if wape <= 70 else 'low')
+    else:
+        confidence = 'low' if n_unique < 5 else ('medium' if n_unique < 20 else 'high')
 
     current_stock = float(material.stock_quantity) if material else 0
     days_until_stockout = min(9999, int(current_stock / avg_daily_usage))
@@ -10523,6 +10638,12 @@ def _compute_prediction_for_item(item_id):
         'dataSource': data_source,
         'dataPoints': n_unique,
         'hasCurrentInventory': material is not None,
+        # Which method forecast this item, and its tested error (WAPE %) next to
+        # the plain moving average's; None when there was too little history
+        'method': method,
+        'errorPercent': wape,
+        'baselineErrorPercent': baseline_wape,
+        'testedUsage': round(tested_usage, 4),  # weighs this item in the overall error
     }
 
 def _run_predictions_background(app_obj):

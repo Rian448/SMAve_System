@@ -440,7 +440,17 @@ export interface AIPrediction {
   dataSource: 'xlsx' | 'hybrid' | 'live';
   dataPoints: number;
   hasCurrentInventory: boolean;
+  /** Forecasting method that tested best for this material (missing on predictions made before it existed) */
+  method?: 'moving_average' | 'croston_sba' | 'exp_smoothing' | 'prophet';
+  /** Its error on held-back weeks (WAPE %), and the plain moving average's; null with too little history */
+  errorPercent?: number | null;
+  baselineErrorPercent?: number | null;
 }
+
+export const FORECAST_METHOD_LABELS: Record<NonNullable<AIPrediction['method']>, string> = {
+  moving_average: 'Moving average', croston_sba: 'Croston (bursty use)',
+  exp_smoothing: 'Exponential smoothing', prophet: 'Prophet',
+};
 
 export interface AIStatus {
   status: 'idle' | 'computing' | 'done' | 'error';
@@ -466,6 +476,8 @@ export interface InventoryForecastData {
   hasPredictions: boolean;
   predictionStatus: string;
   period: string;
+  /** Overall tested error of the forecasts (WAPE %) and of a plain moving average */
+  forecastAccuracy?: { testedItems: number; errorPercent: number | null; baselineErrorPercent: number | null };
 }
 
 export interface PaymentRecord {

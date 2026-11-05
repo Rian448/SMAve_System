@@ -25,6 +25,9 @@ export default function PermissionsDialog({ target, onClose, onSaved }: {
   // Someone else saved this user's permissions after we loaded them
   const [stale, setStale] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Finding one permission among many: text search and "only what differs from the role"
+  const [query, setQuery] = useState('');
+  const [changedOnly, setChangedOnly] = useState(false);
 
   const load = () => {
     setLoadError(''); setSaveError(''); setStale(false);
@@ -61,6 +64,15 @@ export default function PermissionsDialog({ target, onClose, onSaved }: {
   const sameAs = (a: Set<string>, b: string[]) => a.size === b.length && b.every(x => a.has(x));
   const dirty = !!current && (!sameAs(grants, current.grants) || !sameAs(revokes, current.revokes));
   const overrideCount = grants.size + revokes.size;
+  const changesIn = (m: PermissionCatalogue['modules'][number]) =>
+    m.permissions.filter(p => grants.has(p.key) || revokes.has(p.key)).length;
+  const q = query.trim().toLowerCase();
+  // A module shows if its name or any of its actions matches; all its cells stay
+  // visible so the row still reads as one feature
+  const shownModules = (catalogue?.modules ?? []).filter(m =>
+    (!changedOnly || changesIn(m) > 0)
+    && (!q || m.label.toLowerCase().includes(q)
+      || m.permissions.some(p => p.label.toLowerCase().includes(q) || p.key.toLowerCase().includes(q))));
 
   const resetToRole = async () => {
     const ok = await confirm({
@@ -131,6 +143,19 @@ export default function PermissionsDialog({ target, onClose, onSaved }: {
           </button>
         </div>
 
+        {current?.editable && (
+          <div className="px-6 pt-4 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+            <input type="search" value={query} onChange={e => setQuery(e.target.value)}
+              placeholder="Search a module or action, e.g. payments, void, export" aria-label="Search permissions"
+              className="flex-1 px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+            <label className="inline-flex items-center gap-2 text-sm text-gray-700 whitespace-nowrap">
+              <input type="checkbox" checked={changedOnly} onChange={e => setChangedOnly(e.target.checked)}
+                className="rounded border-gray-300 text-[#011c72] focus:ring-[#011c72]" />
+              Changed from role only
+            </label>
+          </div>
+        )}
+
         <div className="px-6 pt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-gray-600">
           <span className="inline-flex items-center gap-1.5"><span className="w-4 h-4 rounded border-2 bg-[#011c72] border-[#011c72]" /> From role</span>
           <span className="inline-flex items-center gap-1.5"><span className="w-4 h-4 rounded border-2 bg-green-600 border-green-600" /> Granted</span>
@@ -147,8 +172,14 @@ export default function PermissionsDialog({ target, onClose, onSaved }: {
             <p className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 text-sm text-gray-600">
               {current.readOnlyReason}
             </p>
+          ) : shownModules.length === 0 ? (
+            <p className="text-center text-gray-400 text-sm py-10">
+              {changedOnly && !q ? "No changes from the role — this user has exactly the role's permissions."
+                : 'No permissions match your search.'}
+            </p>
           ) : (
-            <table className="w-full text-sm">
+            <div className="overflow-x-auto">
+            <table className="w-full min-w-[560px] text-sm">
               <thead>
                 <tr className="text-xs font-semibold uppercase tracking-wide text-gray-500 border-b border-gray-200">
                   <th className="text-left py-2 pr-3">Module</th>
@@ -157,12 +188,19 @@ export default function PermissionsDialog({ target, onClose, onSaved }: {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {catalogue.modules.map(m => {
+                {shownModules.map(m => {
                   const byAction = new Map(m.permissions.map(p => [p.action, p]));
                   const extras = m.permissions.filter(p => !(STANDARD_ACTIONS as readonly string[]).includes(p.action));
                   return (
                     <tr key={m.key}>
-                      <td className="py-2.5 pr-3 font-medium text-gray-900 whitespace-nowrap">{m.label}</td>
+                      <td className="py-2.5 pr-3 font-medium text-gray-900 whitespace-nowrap">
+                        {m.label}
+                        {changesIn(m) > 0 && (
+                          <span className="ml-2 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-semibold align-middle">
+                            {changesIn(m)} changed
+                          </span>
+                        )}
+                      </td>
                       {STANDARD_ACTIONS.map(a => {
                         const p = byAction.get(a);
                         return (
@@ -185,6 +223,7 @@ export default function PermissionsDialog({ target, onClose, onSaved }: {
                 })}
               </tbody>
             </table>
+            </div>
           )}
         </div>
 

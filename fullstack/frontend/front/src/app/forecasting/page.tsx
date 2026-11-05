@@ -55,6 +55,16 @@ export default function ForecastingPage() {
             <p className="text-gray-500 mt-1">
               AI-powered material usage trends and restock predictions
             </p>
+            {data?.forecastAccuracy?.errorPercent != null && (
+              <p className="text-xs text-gray-500 mt-1"
+                title="Each material's forecast was tested on its most recent weeks of real usage, which the model was not shown. Error = total miss ÷ total actual usage (WAPE). Lower is better.">
+                Forecast error: <span className="font-semibold text-gray-700">{data.forecastAccuracy.errorPercent}%</span>
+                {' '}across {data.forecastAccuracy.testedItems} tested material{data.forecastAccuracy.testedItems !== 1 ? 's' : ''}
+                {data.forecastAccuracy.baselineErrorPercent != null && (
+                  <> (simple moving average: {data.forecastAccuracy.baselineErrorPercent}%)</>
+                )}
+              </p>
+            )}
           </div>
           <div className="mt-4 sm:mt-0 flex items-center gap-3">
             <div className="flex gap-2">
