@@ -5,6 +5,7 @@ import { useAuth } from '@/context/AuthContext';
 import { api, ProductOrder, ProductOrderTransfer } from '@/lib/api';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import Paginated from '@/components/Paginated';
 
 type StatusFilter = 'all' | 'pending' | 'processing' | 'ready' | 'completed' | 'cancelled';
 
@@ -212,7 +213,8 @@ export default function ProductOrdersPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            {orders.map((order) => (
+            <Paginated items={orders} resetKey={statusFilter} label="orders" boxed>{rows => (<>
+            {rows.map((order) => (
               <div key={order.id} className="bg-white rounded-xl border border-gray-200 p-6">
                 <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-4">
                   <div>
@@ -326,6 +328,7 @@ export default function ProductOrdersPage() {
                 </div>
               </div>
             ))}
+            </>)}</Paginated>
           </div>
         )}
 
@@ -414,7 +417,8 @@ export default function ProductOrdersPage() {
             </div>
 
             <div className="space-y-4">
-              {incomingTransfers.map((transfer) => (
+              <Paginated items={incomingTransfers} label="transfers" boxed>{rows => (<>
+              {rows.map((transfer) => (
                 <div key={transfer.id} className="bg-white rounded-xl border-2 border-green-200 p-5">
                   <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-3">
                     <div>
@@ -454,6 +458,7 @@ export default function ProductOrdersPage() {
                   </button>
                 </div>
               ))}
+              </>)}</Paginated>
             </div>
           </div>
         )}

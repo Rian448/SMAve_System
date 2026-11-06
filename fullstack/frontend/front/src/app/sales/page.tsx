@@ -5,6 +5,7 @@ import { api, JobOrder, CustomerOrder, ProductOrder, ProductOrderTransfer, Prema
 import { formatDate as _fmtDate } from '@/lib/dateUtils';
 import Link from 'next/link';
 import { useConfirm } from '@/components/ConfirmDialog';
+import Paginated from '@/components/Paginated';
 
 type SalesTab = 'all' | 'custom-jobs' | 'premade-purchase' | 'premade-sales' | 'pickup-queue';
 
@@ -427,6 +428,7 @@ export default function SalesPage() {
                   <p className="text-gray-500">Create a new job order to get started.</p>
                 </div>
               ) : (
+                <Paginated items={filteredOrders} resetKey={[searchTerm, filter]} label="orders">{rows => (
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[760px]">
                     <thead className="bg-gray-50">
@@ -437,7 +439,7 @@ export default function SalesPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200">
-                      {filteredOrders.map(order => (
+                      {rows.map(order => (
                         <tr key={`${order.orderType}-${order.id}`} className="hover:bg-gray-50 transition-colors">
                           <td className="px-4 py-3">
                             <span className="text-sm font-medium text-[#011c72]">{order.displayId}</span>
@@ -478,6 +480,7 @@ export default function SalesPage() {
                     </tbody>
                   </table>
                 </div>
+                )}</Paginated>
               )}
             </div>
           </>
@@ -521,6 +524,7 @@ export default function SalesPage() {
                   <p className="text-gray-500">Create a new job order to get started.</p>
                 </div>
               ) : (
+                <Paginated items={filteredCustomJobOrders} resetKey={[searchTerm, filter]} label="orders">{rows => (
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[760px]">
                     <thead className="bg-gray-50">
@@ -531,7 +535,7 @@ export default function SalesPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200">
-                      {filteredCustomJobOrders.map(order => (
+                      {rows.map(order => (
                         <tr key={`${order.orderType}-${order.id}`} className="hover:bg-gray-50 transition-colors">
                           <td className="px-4 py-3">
                             <span className="text-sm font-medium text-[#011c72]">{order.displayId}</span>
@@ -572,6 +576,7 @@ export default function SalesPage() {
                     </tbody>
                   </table>
                 </div>
+                )}</Paginated>
               )}
             </div>
           </>
@@ -615,6 +620,7 @@ export default function SalesPage() {
                   <p className="text-gray-500">No customers have purchased premade products yet.</p>
                 </div>
               ) : (
+                <Paginated items={filteredPremadePurchaseOrders} resetKey={[searchTerm, filter]} label="orders">{rows => (
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[600px]">
                     <thead className="bg-gray-50">
@@ -625,7 +631,7 @@ export default function SalesPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200">
-                      {filteredPremadePurchaseOrders.map(order => (
+                      {rows.map(order => (
                         <tr key={`product-${order.id}`} className="hover:bg-gray-50 transition-colors">
                           <td className="px-4 py-3">
                             <span className="text-sm font-medium text-[#011c72]">{order.displayId}</span>
@@ -657,6 +663,7 @@ export default function SalesPage() {
                     </tbody>
                   </table>
                 </div>
+                )}</Paginated>
               )}
             </div>
           </>
@@ -732,7 +739,8 @@ export default function SalesPage() {
             ) : (
               <div className="space-y-4">
                 {/* Cross-branch transfer records */}
-                {filteredTransferRequests.map(transfer => {
+                <Paginated items={filteredTransferRequests} resetKey={transferDateFilter} label="cross-branch sales" boxed>{rows => (<>
+                {rows.map(transfer => {
                   const itemsTotal = transfer.items.reduce((s, i) => s + (i.total || i.unitPrice * i.quantity), 0);
                   return (
                     <div key={`tr-${transfer.id}`} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
@@ -826,9 +834,11 @@ export default function SalesPage() {
                     </div>
                   );
                 })}
+                </>)}</Paginated>
 
                 {/* Direct sales (single-branch orders where this branch is both supplier and pickup) */}
-                {filteredDirectSales.map(order => (
+                <Paginated items={filteredDirectSales} resetKey={transferDateFilter} label="direct sales" boxed>{rows => (<>
+                {rows.map(order => (
                   <div key={`ds-${order.id}`} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-5 py-4 border-b border-gray-100 bg-gray-50">
                       <div className="flex items-center gap-3 flex-wrap">
@@ -889,6 +899,7 @@ export default function SalesPage() {
                     </div>
                   </div>
                 ))}
+                </>)}</Paginated>
               </div>
             )}
           </div>

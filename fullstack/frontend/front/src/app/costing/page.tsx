@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react';
 import { api, JobOrderCost } from '@/lib/api';
 import Link from 'next/link';
+import Paginated from '@/components/Paginated';
 
 export default function CostingPage() {
   const [costings, setCostings] = useState<JobOrderCost[]>([]);
@@ -172,6 +173,7 @@ export default function CostingPage() {
               <p className="text-gray-500">Cost data will appear here as job orders are processed.</p>
             </div>
           ) : (
+            <Paginated items={filteredCostings} resetKey={searchTerm} label="costings">{rows => (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead className="bg-gray-50">
@@ -188,7 +190,7 @@ export default function CostingPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
-                  {filteredCostings.map((costing) => {
+                  {rows.map((costing) => {
                     const totalCost = costing.materialsCost + costing.laborCost + costing.overheadCost;
                     const profit = costing.totalAmount - totalCost;
                     const margin = calculateProfitMargin(costing.totalAmount, totalCost);
@@ -250,6 +252,7 @@ export default function CostingPage() {
                 </tbody>
               </table>
             </div>
+            )}</Paginated>
           )}
         </div>
 

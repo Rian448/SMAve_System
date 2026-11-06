@@ -11,6 +11,7 @@ import { useConfirm } from '@/components/ConfirmDialog';
 import { formatDate } from '@/lib/dateUtils';
 import ExtraMaterialDialog from '@/components/ExtraMaterialDialog';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
+import Paginated from '@/components/Paginated';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const WORK_TYPES = ['Seat Maker', 'Sewer', 'Upholstery', 'Installer', 'Cutter', 'Finisher', 'Other'];
@@ -942,6 +943,7 @@ export default function WorkerDashboard() {
               {assignments.length === 0 ? (
                 <p className="p-10 text-center text-gray-400 text-sm">No assignments yet.</p>
               ) : (
+                <Paginated items={assignments} label="assignments">{rows => (
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-200 text-sm">
                     <thead className="bg-gray-50">
@@ -952,7 +954,7 @@ export default function WorkerDashboard() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {assignments.map(a => (
+                      {rows.map(a => (
                         <tr key={a.id} className="hover:bg-gray-50">
                           <td className="px-5 py-4 font-medium text-gray-900">{a.workerName}</td>
                           <td className="px-5 py-4">
@@ -998,6 +1000,7 @@ export default function WorkerDashboard() {
                     </tbody>
                   </table>
                 </div>
+                )}</Paginated>
               )}
             </div>
           </>

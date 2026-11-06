@@ -7,6 +7,7 @@ import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWas
 import { useConfirm } from '@/components/ConfirmDialog';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import Link from 'next/link';
+import Paginated from '@/components/Paginated';
 
 type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'purchase-orders' | 'suppliers' | 'waste-log' | 'ai-predictions';
 
@@ -840,6 +841,28 @@ function InventoryContent() {
     });
   }, [finishedGoods, searchTerm, premadeBranchFilter]);
 
+  const filteredUsageLogs = materialUsageLogs.filter((log) => {
+    if (!searchTerm) return true;
+    const q = searchTerm.toLowerCase();
+    return (
+      (log.materialName || '').toLowerCase().includes(q) ||
+      (log.usedInReference || '').toLowerCase().includes(q) ||
+      (log.usedByName || '').toLowerCase().includes(q) ||
+      (log.workerName || '').toLowerCase().includes(q)
+    );
+  });
+
+  const filteredSuppliers = suppliers.filter(s => !supplierSearch
+    || s.name.toLowerCase().includes(supplierSearch.toLowerCase())
+    || (s.contactPerson || '').toLowerCase().includes(supplierSearch.toLowerCase()));
+
+  const filteredWasteLogs = wasteLogs.filter(l => {
+    if (!wasteSearch) return true;
+    const q = wasteSearch.toLowerCase();
+    return (l.materialName || '').toLowerCase().includes(q) || l.reason.toLowerCase().includes(q) || (l.loggedByName || '').toLowerCase().includes(q)
+      || (l.jobOrderNumber || '').toLowerCase().includes(q) || (l.workerName || '').toLowerCase().includes(q);
+  });
+
   /** How many premade products sit at a given location, for the dropdown labels. */
   const countAtLocation = (branchId: number) =>
     finishedGoods.filter((item) => item.branchId === branchId).length;
@@ -1654,7 +1677,8 @@ function InventoryContent() {
                   </p>
                 </div>
               ) : (
-                filteredRawMaterials.map((material) => {
+                <Paginated items={filteredRawMaterials} resetKey={[searchTerm, statusFilter, materialTypeFilter]} label="materials">{rows => (
+                rows.map((material) => {
                   const status = getStockStatus(material.stockQuantity, material.lowStockThreshold);
                   const isEditing = editingMaterialId === material.id;
                   return (
@@ -1839,6 +1863,7 @@ function InventoryContent() {
                     </div>
                   );
                 })
+                )}</Paginated>
               )}
             </div>
           ) : activeTab === 'finished-goods' ? (
@@ -1863,8 +1888,9 @@ function InventoryContent() {
                     </p>
                   )}
 
+                  <Paginated items={transfers} label="transfers">{rows => (
                   <ul className="space-y-2">
-                    {transfers.map((t) => {
+                    {rows.map((t) => {
                       const mine = user?.branchId === t.destinationBranchId;
                       const canAct = canDistribute || can('branches.all') || (can('premade.receive') && mine);
                       return (
@@ -1908,6 +1934,7 @@ function InventoryContent() {
                       );
                     })}
                   </ul>
+                  )}</Paginated>
                 </div>
               )}
 
@@ -1930,6 +1957,7 @@ function InventoryContent() {
                   </p>
                 </div>
               ) : (
+                <Paginated items={filteredFinishedGoods} resetKey={[searchTerm, premadeBranchFilter]} label="products">{rows => (
                 <table className="w-full">
                   <thead className="bg-gray-50">
                     <tr>
@@ -1943,7 +1971,7 @@ function InventoryContent() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
-                    {filteredFinishedGoods.map((item) => {
+                    {rows.map((item) => {
                       const status = getStockStatus(item.quantity);
                       return (
                         <tr key={item.id} className="hover:bg-gray-50 transition-colors">
@@ -2059,6 +2087,7 @@ function InventoryContent() {
                     })}
                   </tbody>
                 </table>
+                )}</Paginated>
               )}
             </div>
           ) : activeTab === 'material-usage' ? (
@@ -2072,6 +2101,7 @@ function InventoryContent() {
                   <p className="text-gray-500">Material usage entries appear here when premade products are added or job orders are completed.</p>
                 </div>
               ) : (
+                <Paginated items={filteredUsageLogs} resetKey={searchTerm} label="entries">{rows => (
                 <table className="w-full">
                   <thead className="bg-gray-50">
                     <tr>
@@ -2086,18 +2116,7 @@ function InventoryContent() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
-                    {materialUsageLogs
-                      .filter((log) => {
-                        if (!searchTerm) return true;
-                        const q = searchTerm.toLowerCase();
-                        return (
-                          (log.materialName || '').toLowerCase().includes(q) ||
-                          (log.usedInReference || '').toLowerCase().includes(q) ||
-                          (log.usedByName || '').toLowerCase().includes(q) ||
-                          (log.workerName || '').toLowerCase().includes(q)
-                        );
-                      })
-                      .map((log) => (
+                    {rows.map((log) => (
                         <tr key={log.id} className="hover:bg-gray-50 transition-colors">
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                             {formatDateTime(log.usedAt)}
@@ -2128,6 +2147,7 @@ function InventoryContent() {
                       ))}
                   </tbody>
                 </table>
+                )}</Paginated>
               )}
             </div>
           ) : activeTab === 'purchase-orders' ? (
@@ -2152,6 +2172,7 @@ function InventoryContent() {
                   <p className="text-gray-500">No suppliers found. Add your first supplier above.</p>
                 </div>
               ) : (
+                <Paginated items={filteredSuppliers} resetKey={supplierSearch} label="suppliers">{rows => (
                 <table className="w-full">
                   <thead className="bg-gray-50">
                     <tr>
@@ -2164,7 +2185,7 @@ function InventoryContent() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
-                    {suppliers.filter(s => !supplierSearch || s.name.toLowerCase().includes(supplierSearch.toLowerCase()) || (s.contactPerson || '').toLowerCase().includes(supplierSearch.toLowerCase())).map(s => (
+                    {rows.map(s => (
                       <tr key={s.id} className="hover:bg-gray-50 transition-colors">
                         <td className="px-6 py-4 whitespace-nowrap">
                           {editingSupplierId === s.id ? (
@@ -2227,6 +2248,7 @@ function InventoryContent() {
                     ))}
                   </tbody>
                 </table>
+                )}</Paginated>
               )}
             </div>
           ) : activeTab === 'ai-predictions' ? (
@@ -2345,6 +2367,7 @@ function InventoryContent() {
                     </div>
 
                     {/* Predictions table */}
+                    <Paginated items={filtered} resetKey={[predSearch, predUrgencyFilter]} label="items">{rows => (
                     <div className="overflow-x-auto">
                       <table className="w-full">
                         <thead className="bg-gray-50">
@@ -2359,7 +2382,7 @@ function InventoryContent() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
-                          {filtered.map(p => {
+                          {rows.map(p => {
                             const isUrgent = p.daysUntilStockout <= 7;
                             const isSoon = p.daysUntilStockout > 7 && p.daysUntilStockout <= 30;
                             const daysClass = isUrgent
@@ -2431,6 +2454,7 @@ function InventoryContent() {
                         </tbody>
                       </table>
                     </div>
+                    )}</Paginated>
                   </div>
                 );
               })()}
@@ -2445,6 +2469,7 @@ function InventoryContent() {
                   <p className="text-gray-500">No waste logs yet. Use the form above to log wasted or scrapped materials.</p>
                 </div>
               ) : (
+                <Paginated items={filteredWasteLogs} resetKey={wasteSearch} label="waste logs">{rows => (
                 <table className="w-full">
                   <thead className="bg-gray-50">
                     <tr>
@@ -2460,12 +2485,7 @@ function InventoryContent() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
-                    {wasteLogs.filter(l => {
-                      if (!wasteSearch) return true;
-                      const q = wasteSearch.toLowerCase();
-                      return (l.materialName || '').toLowerCase().includes(q) || l.reason.toLowerCase().includes(q) || (l.loggedByName || '').toLowerCase().includes(q)
-                        || (l.jobOrderNumber || '').toLowerCase().includes(q) || (l.workerName || '').toLowerCase().includes(q);
-                    }).map(l => (
+                    {rows.map(l => (
                       <tr key={l.id} className="hover:bg-gray-50 transition-colors">
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                           {formatDate(l.createdAt)}
@@ -2502,6 +2522,7 @@ function InventoryContent() {
                     ))}
                   </tbody>
                 </table>
+                )}</Paginated>
               )}
             </div>
           ) : null}

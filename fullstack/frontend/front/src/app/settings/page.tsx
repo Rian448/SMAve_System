@@ -7,6 +7,7 @@ import PermissionsDialog from '@/components/PermissionsDialog';
 import VatRateSetting from '@/components/VatRateSetting';
 import { formatDate } from '@/lib/dateUtils';
 import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
+import Paginated from '@/components/Paginated';
 
 type TabType = 'general' | 'users' | 'branches' | 'notifications';
 
@@ -625,6 +626,7 @@ export default function SettingsPage() {
                 </div>
               ) : (
                 <div className="overflow-x-auto">
+              <Paginated items={filteredUsers} resetKey={roleFilter} label="users">{rows => (
               <table className="w-full">
                 <thead className="bg-gray-50">
                   <tr>
@@ -636,7 +638,7 @@ export default function SettingsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
-                    {filteredUsers.map((u) => (
+                    {rows.map((u) => (
                       <tr key={u.id} className="hover:bg-gray-50">
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div className="flex items-center">
@@ -728,6 +730,7 @@ export default function SettingsPage() {
                   ))}
                 </tbody>
               </table>
+              )}</Paginated>
             </div>
               )}
           </div>
