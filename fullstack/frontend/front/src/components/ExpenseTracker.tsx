@@ -5,6 +5,7 @@ import { useAuth } from '@/context/AuthContext';
 import { formatDate, manilaDateString } from '@/lib/dateUtils';
 import { useConfirm } from './ConfirmDialog';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
+import Paginated from '@/components/Paginated';
 
 const peso = (n: number) => `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -197,6 +198,7 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
         ) : expenses.length === 0 ? (
           <p className="p-8 text-center text-sm text-gray-400">No expenses in this period.</p>
         ) : (
+          <Paginated items={expenses} resetKey={[startDate, endDate, category]} label="expenses">{rows => (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -212,7 +214,7 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {expenses.map(e => (
+                {rows.map(e => (
                   <tr key={e.id} className="align-top">
                     <td className="px-4 py-2.5 whitespace-nowrap text-gray-700">{formatDate(e.date)}</td>
                     <td className="px-4 py-2.5 whitespace-nowrap text-gray-700">{e.category}</td>
@@ -234,6 +236,7 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
               </tbody>
             </table>
           </div>
+          )}</Paginated>
         )}
       </div>
       {confirmDialog}

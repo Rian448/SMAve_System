@@ -4,6 +4,7 @@ import { useEffect, useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, PaymentRecord, PaymentSummary, PaymentOverride } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
+import Paginated from '@/components/Paginated';
 
 export default function PaymentsPage() {
   const router = useRouter();
@@ -239,6 +240,7 @@ export default function PaymentsPage() {
               <p className="text-sm">No payment records found</p>
             </div>
           ) : (
+            <Paginated items={filteredPayments} resetKey={[search, methodFilter]} label="payments">{rows => (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[700px]">
                 <thead className="bg-gray-50">
@@ -253,7 +255,7 @@ export default function PaymentsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {filteredPayments.map(record => (
+                  {rows.map(record => (
                     <tr
                       key={record.id}
                       className="hover:bg-gray-50 transition-colors cursor-pointer"
@@ -300,6 +302,7 @@ export default function PaymentsPage() {
                 </tfoot>
               </table>
             </div>
+            )}</Paginated>
           )}
         </div>
       </main>

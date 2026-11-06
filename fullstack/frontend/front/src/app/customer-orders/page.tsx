@@ -5,6 +5,7 @@ import { useAuth } from '@/context/AuthContext';
 import { api, CustomerOrder } from '@/lib/api';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import Paginated from '@/components/Paginated';
 
 
 export default function CustomerOrdersPage() {
@@ -134,7 +135,8 @@ export default function CustomerOrdersPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            {filteredOrders.map((order) => (
+            <Paginated items={filteredOrders} resetKey={filter} label="orders" boxed>{rows => (<>
+            {rows.map((order) => (
               <div
                 key={order.id}
                 className="bg-white rounded-xl border border-gray-200 p-6 hover:shadow-md transition-shadow"
@@ -197,6 +199,7 @@ export default function CustomerOrdersPage() {
                 </div>
               </div>
             ))}
+            </>)}</Paginated>
           </div>
         )}
       </main>

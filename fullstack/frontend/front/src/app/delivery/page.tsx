@@ -7,6 +7,7 @@ import { api, TransferDashboardItem, TransferSummary } from '@/lib/api';
 import { formatDateTime } from '@/lib/dateUtils';
 import AuditTrailPanel from '@/components/AuditTrailPanel';
 import Link from 'next/link';
+import Paginated from '@/components/Paginated';
 
 // 'overdue' is applied client-side: the server has no overdue filter, only a flag per row.
 type StatusFilter = 'all' | 'pending' | 'transferred' | 'received' | 'overdue';
@@ -352,7 +353,8 @@ function ItemTrailContent() {
               <span className="text-xs text-gray-400">Select actionable</span>
             </div>
 
-            {sortedTransfers.map(t => (
+            <Paginated items={sortedTransfers} resetKey={statusFilter} label="transfers" boxed>{rows => (<>
+            {rows.map(t => (
               <TransferRow
                 key={t.id}
                 transfer={t}
@@ -367,6 +369,7 @@ function ItemTrailContent() {
                 fmt={fmt}
               />
             ))}
+            </>)}</Paginated>
           </div>
         )}
         </>)}

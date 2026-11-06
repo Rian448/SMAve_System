@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { api, PurchaseOrder } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
+import Paginated from '@/components/Paginated';
 
 export default function PurchaseOrdersPage() {
   const { can } = useAuth();
@@ -149,6 +150,7 @@ export default function PurchaseOrdersPage() {
               </Link>}
             </div>
           ) : (
+            <Paginated items={purchaseOrders} label="purchase orders">{rows => (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead className="bg-gray-50">
@@ -163,7 +165,7 @@ export default function PurchaseOrdersPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
-                  {purchaseOrders.map((po) => (
+                  {rows.map((po) => (
                     <tr key={po.id} className="hover:bg-gray-50 transition-colors">
                       <td className="px-6 py-4 whitespace-nowrap">
                         <Link
@@ -221,6 +223,7 @@ export default function PurchaseOrdersPage() {
                 </tbody>
               </table>
             </div>
+            )}</Paginated>
           )}
         </div>
       </main>

@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { api, type Customer } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
+import Paginated from '@/components/Paginated';
 
 const peso = (n: number) =>
   new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(n || 0);
@@ -166,6 +167,7 @@ export default function CustomersPage() {
           </div>
         ) : (
           <div className="bg-white rounded-2xl border border-gray-200 overflow-x-auto">
+            <Paginated items={filtered} resetKey={[query, accountFilter, orderFilter, balanceFilter]} label="customers">{rows => (
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
@@ -181,7 +183,7 @@ export default function CustomersPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {filtered.map((c) => (
+                {rows.map((c) => (
                   <tr
                     key={c.id}
                     onClick={() => router.push(`/customers/${c.id}`)}
@@ -239,6 +241,7 @@ export default function CustomersPage() {
                 ))}
               </tbody>
             </table>
+            )}</Paginated>
           </div>
         )}
 
