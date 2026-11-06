@@ -7,8 +7,8 @@ import { useAuth } from '@/context/AuthContext';
 
 export default function PaymentsPage() {
   const router = useRouter();
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'administrator';
+  const { can } = useAuth();
+  const isAdmin = can('payments.approve_override');
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [summary, setSummary] = useState<PaymentSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -65,6 +65,7 @@ export default function PaymentsPage() {
 
   const METHOD_LABELS: Record<string, string> = {
     cash: 'Cash',
+    adjustment: 'Approved override',
     gcash: 'GCash',
     maya: 'Maya',
     bank_transfer: 'Bank Transfer',

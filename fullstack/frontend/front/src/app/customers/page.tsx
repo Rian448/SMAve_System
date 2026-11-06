@@ -3,20 +3,28 @@ import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, type Customer } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
+import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
+
+const peso = (n: number) =>
+  new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(n || 0);
 
 export default function CustomersPage() {
   const router = useRouter();
-  const { user } = useAuth();
-  const canCreate = ['administrator', 'supervisor'].includes(user?.role || '');
+  const { can } = useAuth();
+  const canCreate = can('customers.add');
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
+  const [accountFilter, setAccountFilter] = useState<'all' | 'online' | 'walkin'>('all');
+  const [orderFilter, setOrderFilter] = useState<'all' | 'with' | 'without'>('all');
+  const [balanceFilter, setBalanceFilter] = useState<'all' | 'unpaid' | 'excess'>('all');
 
   // Manual customer creation
   const [showCreate, setShowCreate] = useState(false);
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState('');
+  const fe = useFieldErrors();
   const [form, setForm] = useState({ name: '', phone: '', email: '', address: '', discountPercent: '', notes: '' });
 
   useEffect(() => {
@@ -34,9 +42,25 @@ export default function CustomersPage() {
 
   useEffect(() => { loadCustomers(); }, [loadCustomers]);
 
+  const filtered = customers.filter((c) => {
+    if (accountFilter === 'online' && !c.hasAccount) return false;
+    if (accountFilter === 'walkin' && c.hasAccount) return false;
+    if (orderFilter === 'with' && !(c.orderCount && c.orderCount > 0)) return false;
+    if (orderFilter === 'without' && (c.orderCount || 0) > 0) return false;
+    if (balanceFilter === 'unpaid' && !((c.unpaidTotal || 0) > 0)) return false;
+    if (balanceFilter === 'excess' && !((c.excessTotal || 0) > 0)) return false;
+    return true;
+  });
+  const filtersOn = accountFilter !== 'all' || orderFilter !== 'all' || balanceFilter !== 'all';
+  const withExcess = customers.filter((c) => (c.excessTotal || 0) > 0).length;
+
   const handleCreate = async () => {
-    if (!form.name.trim()) { setCreateError('Customer name is required.'); return; }
-    setSaving(true); setCreateError('');
+    setCreateError('');
+    if (fe.show({
+      'customer-name': !form.name.trim() && 'Enter the customer name.',
+      'customer-email': emailProblem(form.email),
+    })) return;
+    setSaving(true);
     try {
       await api.customers.create({
         name: form.name.trim(),
@@ -63,7 +87,7 @@ export default function CustomersPage() {
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Customers</h1>
-            <p className="text-sm text-gray-500 mt-1">All customer accounts</p>
+            <p className="text-sm text-gray-500 mt-1">Customers recorded on job orders and sales, including former online accounts</p>
           </div>
           {canCreate && (
             <button onClick={() => { setShowCreate(true); setCreateError(''); }}
@@ -76,8 +100,9 @@ export default function CustomersPage() {
           )}
         </div>
 
-        {/* Search */}
-        <div className="relative mb-6">
+        {/* Search + filters */}
+        <div className="flex flex-col sm:flex-row gap-3 mb-6">
+        <div className="relative flex-1">
           <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
@@ -89,29 +114,74 @@ export default function CustomersPage() {
             className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm"
           />
         </div>
+          <select value={accountFilter} onChange={(e) => setAccountFilter(e.target.value as typeof accountFilter)}
+            aria-label="Filter by account"
+            className="px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
+            <option value="all">All customers</option>
+            <option value="online">Former online account</option>
+            <option value="walkin">Walk-in only</option>
+          </select>
+          <select value={orderFilter} onChange={(e) => setOrderFilter(e.target.value as typeof orderFilter)}
+            aria-label="Filter by orders"
+            className="px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
+            <option value="all">Any orders</option>
+            <option value="with">Has orders</option>
+            <option value="without">No orders yet</option>
+          </select>
+          <select value={balanceFilter} onChange={(e) => setBalanceFilter(e.target.value as typeof balanceFilter)}
+            aria-label="Filter by balance"
+            className="px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
+            <option value="all">Any balance</option>
+            <option value="unpaid">Has unpaid balance</option>
+            <option value="excess">Has excess to return</option>
+          </select>
+        </div>
+
+        {/* Money the shop still has to give back */}
+        {withExcess > 0 && balanceFilter !== 'excess' && (
+          <button type="button" onClick={() => setBalanceFilter('excess')}
+            className="w-full mb-4 flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left text-sm text-amber-800 hover:bg-amber-100 transition-colors">
+            <span>
+              <span className="font-semibold">{withExcess} customer{withExcess === 1 ? ' has' : 's have'} excess payments</span>{' '}
+              to refund or apply to another order.
+            </span>
+            <span className="font-medium underline shrink-0">Show</span>
+          </button>
+        )}
+
+        {!loading && customers.length > 0 && (
+          <p className="text-xs text-gray-500 mb-3">
+            Showing {filtered.length} of {customers.length} customer{customers.length === 1 ? '' : 's'}
+          </p>
+        )}
 
         {/* List */}
         {loading ? (
           <div className="text-center py-16 text-gray-400 text-sm">Loading…</div>
-        ) : customers.length === 0 ? (
+        ) : filtered.length === 0 ? (
           <div className="text-center py-16 text-gray-400 text-sm">
-            {query ? 'No customers match your search.' : 'No customers yet. They are created automatically when job orders are made.'}
+            {query || filtersOn
+              ? 'No customers match your search or filters.'
+              : 'No customers yet. They appear when a job order or sale is recorded for them.'}
           </div>
         ) : (
-          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="text-left px-5 py-3 font-semibold text-gray-600">Name</th>
                   <th className="text-left px-5 py-3 font-semibold text-gray-600">Phone</th>
                   <th className="text-left px-5 py-3 font-semibold text-gray-600">Email</th>
+                  <th className="text-left px-5 py-3 font-semibold text-gray-600">Account</th>
+                  <th className="text-left px-5 py-3 font-semibold text-gray-600">Orders</th>
+                  <th className="text-left px-5 py-3 font-semibold text-gray-600">Balance</th>
                   <th className="text-left px-5 py-3 font-semibold text-gray-600">Discount</th>
                   <th className="text-left px-5 py-3 font-semibold text-gray-600">Promo</th>
                   <th className="text-left px-5 py-3 font-semibold text-gray-600">Since</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {customers.map((c) => (
+                {filtered.map((c) => (
                   <tr
                     key={c.id}
                     onClick={() => router.push(`/customers/${c.id}`)}
@@ -120,6 +190,36 @@ export default function CustomersPage() {
                     <td className="px-5 py-3 font-medium text-gray-900">{c.name}</td>
                     <td className="px-5 py-3 text-gray-600">{c.phone || '—'}</td>
                     <td className="px-5 py-3 text-gray-600">{c.email || '—'}</td>
+                    <td className="px-5 py-3">
+                      {c.hasAccount ? (
+                        <span title={c.username ? `@${c.username}` : undefined}
+                          className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                          Online
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
+                          Walk-in
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-5 py-3 text-gray-600">{c.orderCount || 0}</td>
+                    <td className="px-5 py-3">
+                      <div className="flex flex-col items-start gap-1">
+                        {(c.unpaidTotal || 0) > 0 && (
+                          <span title="Still owed on their orders"
+                            className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 whitespace-nowrap">
+                            Unpaid {peso(c.unpaidTotal || 0)}
+                          </span>
+                        )}
+                        {(c.excessTotal || 0) > 0 && (
+                          <span title="Paid beyond their balance; to refund or apply to another order"
+                            className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 whitespace-nowrap">
+                            Excess {peso(c.excessTotal || 0)}
+                          </span>
+                        )}
+                        {!(c.unpaidTotal || 0) && !(c.excessTotal || 0) && <span className="text-gray-400">—</span>}
+                      </div>
+                    </td>
                     <td className="px-5 py-3">
                       {c.discountPercent != null ? (
                         <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
@@ -157,10 +257,11 @@ export default function CustomersPage() {
                 {createError && (
                   <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-2.5 text-sm">{createError}</div>
                 )}
-                <div>
+                <div {...fe.field('customer-name')}>
                   <label className="block text-xs font-medium text-gray-500 mb-1.5">Full Name <span className="text-red-500">*</span></label>
                   <input type="text" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
                     className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm" />
+                  <FieldError message={fe.errors['customer-name']} />
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
@@ -168,10 +269,11 @@ export default function CustomersPage() {
                     <input type="tel" value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
                       className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm" />
                   </div>
-                  <div>
+                  <div {...fe.field('customer-email')}>
                     <label className="block text-xs font-medium text-gray-500 mb-1.5">Email</label>
                     <input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
                       className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm" />
+                    <FieldError message={fe.errors['customer-email']} />
                   </div>
                 </div>
                 <div>

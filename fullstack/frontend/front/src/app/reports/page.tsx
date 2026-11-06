@@ -1,12 +1,13 @@
 ﻿'use client';
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, SalesReport, InventoryReport, AuditLog, BranchSettlementReport } from '@/lib/api';
-import { formatShortDate, formatDayLabel, formatDateTime } from '@/lib/dateUtils';
+import { api, SalesReport, InventoryReport, BranchSettlementReport, type ExtraMaterialsReport } from '@/lib/api';
+import { formatShortDate, formatDayLabel, manilaDateString } from '@/lib/dateUtils';
 
 function getDateRange(range: string): { startDate: string; endDate: string } {
+  // Manila calendar days, not UTC: the server reads these dates as Philippine time,
+  // and between midnight and 8 AM the UTC date is still yesterday.
   const now = new Date();
-  const end = now.toISOString().split('T')[0];
   const start = new Date(now);
   switch (range) {
     case 'week':    start.setDate(start.getDate() - 7); break;
@@ -14,7 +15,12 @@ function getDateRange(range: string): { startDate: string; endDate: string } {
     case 'year':    start.setFullYear(start.getFullYear() - 1); break;
     default:        start.setDate(start.getDate() - 30);
   }
-  return { startDate: start.toISOString().split('T')[0], endDate: end };
+  return { startDate: manilaDateString(start), endDate: manilaDateString(now) };
+}
+
+/** Quote a CSV cell, doubling embedded quotes so a comma or quote in a value can't break the row. */
+function csvCell(value: unknown): string {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
 }
 
 const formatCurrency = (amount: number) =>
@@ -29,15 +35,6 @@ const STATUS_COLORS: Record<string, string> = {
   cancelled:   'bg-red-500',
   for_pickup:  'bg-purple-500',
   delivered:   'bg-teal-500',
-};
-
-const STATUS_LABEL_COLORS: Record<string, string> = {
-  completed:   'bg-green-100 text-green-700',
-  in_progress: 'bg-blue-100 text-blue-700',
-  pending:     'bg-yellow-100 text-yellow-700',
-  cancelled:   'bg-red-100 text-red-700',
-  for_pickup:  'bg-purple-100 text-purple-700',
-  delivered:   'bg-teal-100 text-teal-700',
 };
 
 function SkeletonCard() {
@@ -55,7 +52,7 @@ function SummaryCard({ label, value, sub, color }: { label: string; value: strin
 }
 
 export default function ReportsPage() {
-  const { user } = useAuth();
+  const { user, can } = useAuth();
   const [loading, setLoading]           = useState(true);
   const [error, setError]               = useState<string | null>(null);
   const [reportType, setReportType]     = useState('sales');
@@ -64,12 +61,24 @@ export default function ReportsPage() {
   const [customEnd, setCustomEnd]       = useState('');
   const [salesData, setSalesData]           = useState<SalesReport | null>(null);
   const [inventoryData, setInventoryData]   = useState<InventoryReport | null>(null);
-  const [auditData, setAuditData]           = useState<AuditLog[] | null>(null);
   const [settlementData, setSettlementData] = useState<BranchSettlementReport | null>(null);
-  const [auditModule, setAuditModule]       = useState('');
+  const [extraData, setExtraData]           = useState<ExtraMaterialsReport | null>(null);
+  // '' means all branches; only administrators can pick (the server pins everyone else to their own branch)
+  const [salesBranchId, setSalesBranchId]   = useState('');
+  const [branches, setBranches]             = useState<{ id: number; name: string; isWarehouse: boolean }[]>([]);
 
-  const isAdmin        = user?.role === 'administrator';
-  const canViewInventory = isAdmin || user?.role === 'supervisor';
+  // Cross-branch staff pick a branch; everyone else sees their own
+  const isAdmin        = can('branches.all');
+  const canViewInventory = can('reports.inventory');
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    api.settings.getBranches().then(r => {
+      if (r.data) setBranches(r.data.filter((b: any) => b.isActive));
+    }).catch(() => {});
+  }, [isAdmin]);
+
+  const selectedBranchName = branches.find(b => b.id.toString() === salesBranchId)?.name;
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -80,24 +89,30 @@ export default function ReportsPage() {
         : getDateRange(dateRange);
 
       if (reportType === 'sales') {
-        const res = await api.reports.getSalesReport(dates);
+        const res = await api.reports.getSalesReport({
+          ...dates,
+          ...(isAdmin && salesBranchId ? { branchId: Number(salesBranchId) } : {}),
+        });
         setSalesData(res.data || null);
       } else if (reportType === 'inventory' && canViewInventory) {
         const res = await api.reports.getInventoryReport();
         setInventoryData(res.data || null);
-      } else if (reportType === 'audit' && isAdmin) {
-        const res = await api.reports.getAuditTrail({ ...dates, ...(auditModule ? { module: auditModule } : {}) });
-        setAuditData(res.data || null);
       } else if (reportType === 'settlement') {
         const res = await api.reports.getSettlementReport(dates);
         setSettlementData(res.data || null);
+      } else if (reportType === 'extra' && canViewInventory) {
+        const res = await api.reports.getExtraMaterialsReport({
+          ...dates,
+          ...(isAdmin && salesBranchId ? { branchId: Number(salesBranchId) } : {}),
+        });
+        setExtraData(res.data || null);
       }
     } catch {
       setError('Failed to load report data. Please try again.');
     } finally {
       setLoading(false);
     }
-  }, [reportType, dateRange, customStart, customEnd, auditModule, canViewInventory, isAdmin]);
+  }, [reportType, dateRange, customStart, customEnd, salesBranchId, canViewInventory, isAdmin]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -106,43 +121,60 @@ export default function ReportsPage() {
     let filename = 'report.csv';
 
     if (reportType === 'sales' && salesData) {
-      filename = 'sales-report.csv';
-      const jobRows = salesData.dailySales.map(d => `"Job Order","${d.date}",${d.orders},${d.revenue}`);
-      const premadeRows = (salesData.premadeDailySales || []).map(d => `"Premade Sale","${d.date}",${d.orders},${d.revenue}`);
+      const branchSlug = selectedBranchName ? selectedBranchName.toLowerCase().replace(/[^a-z0-9]+/g, '-') : 'all-branches';
+      filename = `sales-report-${isAdmin ? branchSlug : 'my-branch'}.csv`;
+      const jobRows = salesData.dailySales.map(d => [csvCell('Job Order'), csvCell(d.date), d.orders, d.revenue].join(','));
+      const premadeRows = (salesData.premadeDailySales || []).map(d => [csvCell('Premade Sale'), csvCell(d.date), d.orders, d.revenue].join(','));
       csv = 'Type,Date,Orders,Revenue\n' + [...jobRows, ...premadeRows].join('\n');
     } else if (reportType === 'inventory' && inventoryData) {
       filename = 'inventory-report.csv';
-      csv = 'Category,Items,Value\n' +
-        inventoryData.categoryBreakdown.map(c => `${c.category},${c.count},${c.value}`).join('\n');
-    } else if (reportType === 'audit' && auditData) {
-      filename = 'audit-trail.csv';
-      csv = 'Timestamp,User,Module,Action,Details\n' +
-        auditData.map(l => `"${l.timestamp}","${l.userName}","${l.module}","${l.action}","${l.details}"`).join('\n');
+      // The totals the summary cards show, so a shop with no raw materials of its
+      // own still exports its finished goods instead of an empty file
+      const s = inventoryData.summary;
+      csv = 'Category,Items,Value\n' + [
+        ...inventoryData.categoryBreakdown.map(c => [csvCell(c.category), c.count, c.value].join(',')),
+        [csvCell('Total raw materials'), s.totalRawMaterials, s.rawMaterialsValue].join(','),
+        [csvCell('Finished goods (premade)'), s.totalFinishedGoods, s.finishedGoodsValue].join(','),
+      ].join('\n');
+    } else if (reportType === 'extra' && extraData) {
+      filename = `extra-materials-${extraData.period.startDate}-to-${extraData.period.endDate}.csv`;
+      csv = 'Date,Job Order,Worker,Material,Quantity,Reason,Notes,Cost,Recorded By\n' +
+        extraData.entries.map(e => [
+          csvCell(e.createdAt?.slice(0, 10) || ''), csvCell(e.jobOrderNumber), csvCell(e.workerName || ''),
+          csvCell(`${e.materialName || ''}${e.materialColor ? ` - ${e.materialColor}` : ''}`), e.quantity,
+          csvCell(e.reason), csvCell(e.notes || ''), e.value ?? 0, csvCell(e.loggedByName || ''),
+        ].join(',')).join('\n');
     } else if (reportType === 'settlement' && settlementData) {
       filename = 'branch-settlement.csv';
       csv = 'Order,Date,Source Branch,Pickup Branch,Items Value,Transfer Status,Settled,Customer\n' +
-        settlementData.entries.map(e =>
-          `"${e.orderNumber}","${e.orderDate?.slice(0,10) || ''}","${e.sourceBranchName}","${e.pickupBranchName}",${e.itemsValue},"${e.transferStatus}",${e.isSettled},"${e.customerName}"`
-        ).join('\n');
+        settlementData.entries.map(e => [
+          csvCell(e.orderNumber), csvCell(e.orderDate?.slice(0, 10) || ''), csvCell(e.sourceBranchName),
+          csvCell(e.pickupBranchName), e.itemsValue, csvCell(e.transferStatus), e.isSettled, csvCell(e.customerName),
+        ].join(',')).join('\n');
     }
 
     if (!csv) return;
-    const blob = new Blob([csv], { type: 'text/csv' });
+    // BOM so Excel opens peso signs and accented names correctly.
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
-    URL.revokeObjectURL(url);
+    a.href = url; a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoking straight after click() can cancel the download in some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const reportTypes = [
-    {
+    ...(can('reports.sales') ? [{
       id: 'sales', name: 'Sales Report',
       icon: (
         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
       ),
-    },
+    }] : []),
     ...(canViewInventory ? [{
       id: 'inventory', name: 'Inventory Report',
       icon: (
@@ -151,22 +183,22 @@ export default function ReportsPage() {
         </svg>
       ),
     }] : []),
-    ...(isAdmin ? [{
-      id: 'audit', name: 'Audit Trail',
+    ...(canViewInventory ? [{
+      id: 'extra', name: 'Extra Materials',
       icon: (
         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
         </svg>
       ),
     }] : []),
-    {
+    ...(can('reports.settlement') ? [{
       id: 'settlement', name: 'Branch Settlement',
       icon: (
         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
         </svg>
       ),
-    },
+    }] : []),
   ];
 
   const showDateFilter = reportType !== 'inventory';
@@ -205,7 +237,7 @@ export default function ReportsPage() {
         </div>
 
         {/* Report Type Tabs */}
-        <div className={`grid gap-4 mb-6 ${reportTypes.length === 1 ? 'grid-cols-1' : reportTypes.length === 2 ? 'grid-cols-2' : 'grid-cols-3'}`}>
+        <div className={`grid gap-4 mb-6 ${reportTypes.length === 1 ? 'grid-cols-1' : reportTypes.length === 2 ? 'grid-cols-2' : reportTypes.length === 3 ? 'grid-cols-3' : 'grid-cols-2 lg:grid-cols-4'}`}>
           {reportTypes.map((type) => (
             <button
               key={type.id}
@@ -269,19 +301,26 @@ export default function ReportsPage() {
                 </div>
               </>
             )}
-            {reportType === 'audit' && (
-              <select
-                value={auditModule}
-                onChange={(e) => setAuditModule(e.target.value)}
-                className="px-3 py-1.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 text-sm"
-              >
-                <option value="">All Modules</option>
-                <option value="auth">Auth</option>
-                <option value="sales">Sales</option>
-                <option value="inventory">Inventory</option>
-                <option value="delivery">Delivery</option>
-                <option value="settings">Settings</option>
-              </select>
+            {(reportType === 'sales' || reportType === 'extra') && (
+              isAdmin ? (
+                <select
+                  value={salesBranchId}
+                  onChange={(e) => setSalesBranchId(e.target.value)}
+                  className="px-3 py-1.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 text-sm"
+                  aria-label="Branch"
+                >
+                  <option value="">All Branches</option>
+                  {branches.map(b => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}{b.isWarehouse ? ' (Warehouse)' : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : user?.branch ? (
+                <span className="px-3 py-1.5 rounded-lg bg-gray-100 text-gray-600 text-sm">
+                  Branch: <span className="font-medium text-gray-900">{user.branch}</span>
+                </span>
+              ) : null
             )}
             <button
               onClick={fetchData}
@@ -392,7 +431,7 @@ export default function ReportsPage() {
                   <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
                     <div className="px-6 py-4 border-b border-gray-200">
                       <h2 className="text-base font-semibold text-gray-900">Premade Sales Trend</h2>
-                      <p className="text-xs text-gray-500 mt-0.5">Premade product revenue per day (your branch's items)</p>
+                      <p className="text-xs text-gray-500 mt-0.5">Premade product revenue per day ({isAdmin ? (selectedBranchName ? `${selectedBranchName}'s items` : 'all branches') : "your branch's items"})</p>
                     </div>
                     <div className="p-6">
                       {!salesData.premadeDailySales || salesData.premadeDailySales.length === 0 ? (
@@ -507,62 +546,97 @@ export default function ReportsPage() {
           </>
         )}
 
-        {/* ── AUDIT TRAIL ── */}
-        {reportType === 'audit' && isAdmin && (
-          <>
-            {loading ? (
-              <div className="space-y-3">
-                {[...Array(5)].map((_, i) => (
-                  <div key={i} className="h-16 bg-gray-200 rounded-xl animate-pulse" />
-                ))}
+        {/* ── EXTRA MATERIALS ── */}
+        {reportType === 'extra' && (
+          loading ? (
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">{[...Array(4)].map((_, i) => <SkeletonCard key={i} />)}</div>
+          ) : extraData ? (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <SummaryCard label="Extra Material Cost" value={formatCurrency(extraData.summary.totalValue)}
+                  sub="Added to job costs, not billed" color="text-red-600" />
+                <SummaryCard label="Entries" value={extraData.summary.count.toString()}
+                  sub={`${extraData.summary.jobOrders} job order${extraData.summary.jobOrders === 1 ? '' : 's'}`} color="text-gray-500" />
+                <SummaryCard label="Workers Named" value={extraData.byWorker.filter(w => w.key).length.toString()}
+                  sub="With at least one entry" color="text-gray-500" />
+                <SummaryCard label="No Worker Named" value={extraData.summary.unassigned.toString()}
+                  sub={extraData.summary.unassigned > 0 ? 'Entries without a worker' : 'Every entry names a worker'}
+                  color={extraData.summary.unassigned > 0 ? 'text-amber-600' : 'text-green-600'} />
               </div>
-            ) : auditData ? (
-              <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-                  <h2 className="text-base font-semibold text-gray-900">Audit Log</h2>
-                  <span className="text-sm text-gray-500">{auditData.length} entries</span>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
-                      <tr>
-                        <th className="px-5 py-3 text-left">Timestamp</th>
-                        <th className="px-5 py-3 text-left">User</th>
-                        <th className="px-5 py-3 text-left">Module</th>
-                        <th className="px-5 py-3 text-left">Action</th>
-                        <th className="px-5 py-3 text-left">Details</th>
-                        <th className="px-5 py-3 text-left">IP</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {auditData.length === 0 ? (
-                        <tr>
-                          <td colSpan={6} className="px-5 py-12 text-center text-gray-400">No audit entries for this period</td>
-                        </tr>
-                      ) : auditData.map((log) => (
-                        <tr key={log.id} className="hover:bg-gray-50 transition-colors">
-                          <td className="px-5 py-3 whitespace-nowrap text-gray-500">
-                            {formatDateTime(log.timestamp)}
-                          </td>
-                          <td className="px-5 py-3 whitespace-nowrap font-medium text-gray-900">{log.userName}</td>
-                          <td className="px-5 py-3 whitespace-nowrap">
-                            <span className="px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-600 capitalize">
-                              {log.module}
-                            </span>
-                          </td>
-                          <td className="px-5 py-3 whitespace-nowrap text-gray-700">{log.action}</td>
-                          <td className="px-5 py-3 text-gray-500 max-w-xs truncate">{log.details}</td>
-                          <td className="px-5 py-3 whitespace-nowrap text-gray-400 font-mono text-xs">{log.ipAddress}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            ) : (
-              <EmptyState message="No audit data available." />
-            )}
-          </>
+
+              {extraData.summary.count === 0 ? (
+                <EmptyState message="No extra materials were issued in this period." />
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                    {([['By Worker', extraData.byWorker], ['By Reason', extraData.byReason]] as const).map(([title, rows]) => {
+                      const max = Math.max(...rows.map(r => r.value), 1);
+                      return (
+                        <div key={title} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                          <div className="px-6 py-4 border-b border-gray-200">
+                            <h2 className="text-base font-semibold text-gray-900">{title}</h2>
+                          </div>
+                          <div className="p-6 space-y-3">
+                            {rows.map(r => (
+                              <div key={String(r.key)}>
+                                <div className="flex items-center justify-between text-sm mb-1">
+                                  <span className={`font-medium ${r.key ? 'text-gray-900' : 'text-gray-500 italic'}`}>{r.label}</span>
+                                  <span className="text-gray-600">{r.count} · <span className="font-semibold text-gray-900">{formatCurrency(r.value)}</span></span>
+                                </div>
+                                <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
+                                  <div className="h-full rounded-full bg-red-400" style={{ width: `${(r.value / max) * 100}%` }} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-200">
+                      <h2 className="text-base font-semibold text-gray-900">Entries</h2>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[720px] text-sm">
+                        <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
+                          <tr>
+                            <th className="px-4 py-2 text-left font-medium">Date</th>
+                            <th className="px-4 py-2 text-left font-medium">Job Order</th>
+                            <th className="px-4 py-2 text-left font-medium">Worker</th>
+                            <th className="px-4 py-2 text-left font-medium">Material</th>
+                            <th className="px-4 py-2 text-right font-medium">Qty</th>
+                            <th className="px-4 py-2 text-left font-medium">Reason</th>
+                            <th className="px-4 py-2 text-right font-medium">Cost</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {extraData.entries.map(e => (
+                            <tr key={e.id} className="hover:bg-gray-50">
+                              <td className="px-4 py-2 text-gray-600 whitespace-nowrap">{formatDate(e.createdAt)}</td>
+                              <td className="px-4 py-2">
+                                {e.jobOrderId
+                                  ? <a href={`/sales/${e.jobOrderId}`} className="font-mono text-[#011c72] hover:underline">{e.jobOrderNumber}</a>
+                                  : '—'}
+                              </td>
+                              <td className="px-4 py-2 text-gray-700">{e.workerName || <span className="text-gray-400">—</span>}</td>
+                              <td className="px-4 py-2 text-gray-900">{e.materialName}{e.materialColor ? ` - ${e.materialColor}` : ''}</td>
+                              <td className="px-4 py-2 text-right text-gray-700">{e.quantity}</td>
+                              <td className="px-4 py-2 text-gray-700">{e.reason}</td>
+                              <td className="px-4 py-2 text-right font-medium text-red-600">{formatCurrency(e.value || 0)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              )}
+            </>
+          ) : (
+            <EmptyState message="No extra material data available." />
+          )
         )}
 
         {/* ── BRANCH SETTLEMENT ── */}

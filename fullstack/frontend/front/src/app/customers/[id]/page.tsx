@@ -1,7 +1,10 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import { api, type Customer, type CustomerOrderSummary } from '@/lib/api';
+import { api, type Customer, type CustomerOrderSummary, type CustomerOnlineOrder, type ExcessPayment } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
+import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
+import ExcessPayments from '@/components/ExcessPayments';
 
 const STATUS_COLORS: Record<string, string> = {
   pending: 'bg-yellow-100 text-yellow-800',
@@ -11,16 +14,25 @@ const STATUS_COLORS: Record<string, string> = {
   cancelled: 'bg-red-100 text-red-800',
 };
 
+const peso = (n: number) =>
+  new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(n || 0);
+
 export default function CustomerProfilePage() {
   const router = useRouter();
   const params = useParams();
   const id = Number(params.id);
+  const { can } = useAuth();
+  // Premade product orders are only viewable by administrators and supervisors
+  const canOpenProductOrders = can('product_orders.view');
+  const canManagePayments = can('payments.add');
 
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [orders, setOrders] = useState<CustomerOrderSummary[]>([]);
+  const [onlineOrders, setOnlineOrders] = useState<CustomerOnlineOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const fe = useFieldErrors();
   const [saved, setSaved] = useState(false);
 
   // Editable profile fields
@@ -35,11 +47,31 @@ export default function CustomerProfilePage() {
   const [promoCode, setPromoCode] = useState('');
   const [promoDiscount, setPromoDiscount] = useState<string>('');
 
+  // What they owe and what the shop holds of theirs
+  const [balances, setBalances] = useState<{
+    unpaidTotal: number; excessTotal: number; unpaidOrders: CustomerOrderSummary[]; excessPayments: ExcessPayment[];
+  }>({ unpaidTotal: 0, excessTotal: 0, unpaidOrders: [], excessPayments: [] });
+  const applyBalances = (c: Customer) => setBalances({
+    unpaidTotal: c.unpaidTotal || 0,
+    excessTotal: c.excessTotal || 0,
+    unpaidOrders: c.unpaidOrders || [],
+    excessPayments: c.excessPayments || [],
+  });
+  /** After a refund or an apply: the balances and the order list's balances change */
+  const reloadBalances = () => {
+    api.customers.get(id).then((res) => {
+      if (!res.data) return;
+      applyBalances(res.data);
+      setOrders(res.data.orderHistory || []);
+    }).catch(() => {});
+  };
+
   useEffect(() => {
     api.customers.get(id)
       .then((res) => {
         const c = res.data!;
         setCustomer(c);
+        applyBalances(c);
         setName(c.name);
         setPhone(c.phone);
         setEmail(c.email);
@@ -49,15 +81,19 @@ export default function CustomerProfilePage() {
         setPromoCode(c.promoCode || '');
         setPromoDiscount(c.promoDiscount != null ? String(c.promoDiscount) : '');
         setOrders(c.orderHistory || []);
+        setOnlineOrders(c.onlineOrders || []);
       })
       .catch(() => setError('Customer not found.'))
       .finally(() => setLoading(false));
   }, [id]);
 
   const handleSave = async () => {
-    if (!name.trim()) { setError('Name is required.'); return; }
-    setSaving(true);
     setError('');
+    if (fe.show({
+      'customer-name': !name.trim() && 'Enter the customer name.',
+      'customer-email': emailProblem(email),
+    })) return;
+    setSaving(true);
     try {
       const res = await api.customers.update(id, {
         name: name.trim(),
@@ -102,7 +138,16 @@ export default function CustomerProfilePage() {
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-2xl font-bold text-gray-900">{customer?.name}</h1>
-              <p className="text-sm text-gray-500 mt-0.5">Customer since {customer?.createdAt || '—'}</p>
+              <p className="text-sm text-gray-500 mt-0.5 flex items-center gap-2 flex-wrap">
+                <span>Customer since {customer?.createdAt || '—'}</span>
+                {customer?.hasAccount ? (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                    Online account{customer.username ? ` · @${customer.username}` : ''}{customer.accountActive === false ? ' (archived)' : ''}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">Walk-in</span>
+                )}
+              </p>
             </div>
             <div className="flex items-center gap-3">
               {saved && <span className="text-sm text-green-600 font-medium">Saved!</span>}
@@ -121,7 +166,7 @@ export default function CustomerProfilePage() {
         {/* Stats row */}
         <div className="grid grid-cols-3 gap-4">
           {[
-            { label: 'Total Orders', value: orders.length },
+            { label: 'Total Orders', value: orders.length + onlineOrders.length },
             { label: 'Total Spend', value: `₱${totalSpend.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` },
             { label: 'Loyalty Discount', value: discountPercent ? `${discountPercent}%` : 'None' },
           ].map((s) => (
@@ -136,17 +181,19 @@ export default function CustomerProfilePage() {
           {/* Profile */}
           <div className="bg-white rounded-2xl border border-gray-200 p-6 space-y-4">
             <h2 className="font-semibold text-gray-900">Profile</h2>
-            <div>
+            <div {...fe.field('customer-name')}>
               <label className="block text-xs font-medium text-gray-500 mb-1.5">Full Name <span className="text-red-500">*</span></label>
               <input type="text" value={name} onChange={(e) => setName(e.target.value)} className={inputCls} />
+              <FieldError message={fe.errors['customer-name']} />
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1.5">Phone</label>
               <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} className={inputCls} />
             </div>
-            <div>
+            <div {...fe.field('customer-email')}>
               <label className="block text-xs font-medium text-gray-500 mb-1.5">Email</label>
               <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className={inputCls} />
+              <FieldError message={fe.errors['customer-email']} />
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1.5">Address</label>
@@ -213,10 +260,61 @@ export default function CustomerProfilePage() {
           </div>
         </div>
 
+        {/* Balance: unpaid orders and excess payments to return */}
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="font-semibold text-gray-900">Balance</h2>
+            <div className="flex flex-wrap gap-2">
+              <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold ${balances.unpaidTotal > 0 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+                {balances.unpaidTotal > 0 ? `Unpaid ${peso(balances.unpaidTotal)}` : 'Nothing unpaid'}
+              </span>
+              {balances.excessTotal > 0 && (
+                <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold bg-amber-100 text-amber-800">
+                  Excess to return {peso(balances.excessTotal)}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {balances.unpaidOrders.length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-gray-700 mb-2">Orders with a balance</h3>
+              <div className="divide-y divide-gray-100 border border-gray-200 rounded-xl">
+                {balances.unpaidOrders.map((o) => (
+                  <button key={o.id} type="button" onClick={() => router.push(`/sales/${o.id}`)}
+                    className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-left text-sm hover:bg-gray-50">
+                    <span className="font-medium text-[#011c72]">{o.jobOrderId}</span>
+                    <span className="text-gray-500">paid {peso(o.downPayment || 0)} of {peso(o.totalPrice || 0)}</span>
+                    <span className="font-semibold text-red-600">{peso(o.balance)}</span>
+                  </button>
+                ))}
+              </div>
+              {balances.unpaidTotal > balances.unpaidOrders.reduce((s, o) => s + (o.balance || 0), 0) + 0.005 && (
+                <p className="text-xs text-gray-500 mt-2">The total also includes unpaid orders from their online account.</p>
+              )}
+            </div>
+          )}
+
+          {balances.excessPayments.length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-gray-700 mb-1">Excess payments</h3>
+              <p className="text-xs text-gray-500 mb-2">
+                Paid beyond an order&apos;s balance (e.g. a GCash transfer for more than was owed). Refund it, or apply it to one of the orders above.
+              </p>
+              <ExcessPayments
+                items={balances.excessPayments}
+                unpaidOrders={balances.unpaidOrders}
+                canManage={canManagePayments}
+                onChanged={reloadBalances}
+              />
+            </div>
+          )}
+        </div>
+
         {/* Order History */}
         <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-100">
-            <h2 className="font-semibold text-gray-900">Order History</h2>
+            <h2 className="font-semibold text-gray-900">Job Orders</h2>
           </div>
           {orders.length === 0 ? (
             <p className="text-center text-gray-400 text-sm py-10">No orders yet.</p>
@@ -255,6 +353,56 @@ export default function CustomerProfilePage() {
             </table>
           )}
         </div>
+
+        {/* Orders placed through the online account, before online ordering was retired */}
+        {customer?.hasAccount && (
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-x-auto">
+            <div className="px-6 py-4 border-b border-gray-100">
+              <h2 className="font-semibold text-gray-900">Online Orders</h2>
+              <p className="text-xs text-gray-500 mt-0.5">Premade products and custom requests the customer placed online before online ordering was retired</p>
+            </div>
+            {onlineOrders.length === 0 ? (
+              <p className="text-center text-gray-400 text-sm py-10">No online orders yet.</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th className="text-left px-5 py-3 font-semibold text-gray-600">Order #</th>
+                    <th className="text-left px-5 py-3 font-semibold text-gray-600">Type</th>
+                    <th className="text-left px-5 py-3 font-semibold text-gray-600">Date</th>
+                    <th className="text-left px-5 py-3 font-semibold text-gray-600">Status</th>
+                    <th className="text-left px-5 py-3 font-semibold text-gray-600">Total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {onlineOrders.map((o) => {
+                    const href = o.type === 'custom' ? `/customer-orders/${o.id}`
+                      : canOpenProductOrders ? `/product-orders/${o.id}` : null;
+                    return (
+                    <tr key={`${o.type}-${o.id}`}
+                      onClick={href ? () => router.push(href) : undefined}
+                      className={href ? 'hover:bg-gray-50 cursor-pointer transition-colors' : ''}>
+                      <td className="px-5 py-3 font-medium text-[#011c72]">{o.orderNumber}</td>
+                      <td className="px-5 py-3 text-gray-600">{o.type === 'product' ? 'Premade product' : 'Custom request'}</td>
+                      <td className="px-5 py-3 text-gray-600">{o.createdAt || '—'}</td>
+                      <td className="px-5 py-3">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[o.status] || 'bg-gray-100 text-gray-600'}`}>
+                          {o.status.replace('_', ' ')}
+                        </span>
+                      </td>
+                      <td className="px-5 py-3 font-medium text-gray-900">
+                        {o.totalPrice > 0
+                          ? `₱${o.totalPrice.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                          : '—'}
+                      </td>
+                    </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
 
       </main>
     </div>

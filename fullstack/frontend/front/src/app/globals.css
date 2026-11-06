@@ -18,6 +18,12 @@ body {
   font-family: var(--font-geist-sans), 'Inter', Arial, Helvetica, sans-serif;
 }
 
+/* ── A field with a validation message next to it (see lib/useFieldErrors) ── */
+[data-invalid="field"] :is(input, select, textarea):not([type="checkbox"]):not([type="radio"]) {
+  border-color: #f87171 !important;
+  background-color: #fef2f2;
+}
+
 /* ── Receipt: hidden on screen, shown only when printing ── */
 #print-receipt {
   display: none !important;

@@ -20,6 +20,7 @@ function NewDeliveryForm() {
   const [driverName, setDriverName] = useState('');
   const [vehicleAssigned, setVehicleAssigned] = useState('');
   const [notes, setNotes] = useState('');
+  const [error, setError] = useState('');
 
   useEffect(() => {
     api.sales.getJobOrders()
@@ -35,7 +36,6 @@ function NewDeliveryForm() {
           const selectedOrder = completedOrders.find((jo: JobOrder) => String(jo.id) === preselectedId);
           if (selectedOrder) {
             setRecipientName(selectedOrder.customerName);
-            setDeliveryAddress(selectedOrder.customerEmail || '');
             setContactNumber(selectedOrder.customerPhone || '');
           }
         }
@@ -51,7 +51,6 @@ function NewDeliveryForm() {
     const selectedOrder = jobOrders.find(jo => String(jo.id) === id);
     if (selectedOrder) {
       setRecipientName(selectedOrder.customerName);
-      setDeliveryAddress(selectedOrder.customerEmail || '');
       setContactNumber(selectedOrder.customerPhone || '');
     }
   };
@@ -59,35 +58,33 @@ function NewDeliveryForm() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setError('');
 
     try {
+      // Sent from the branch that did the job (the server works it out from the job order)
       const delivery = {
         type: 'customer_delivery' as const,
-        fromBranchId: 1,
         customerName: recipientName,
         customerPhone: contactNumber,
         customerAddress: deliveryAddress,
         jobOrderId: parseInt(jobOrderId) || undefined,
         items: [],
         scheduledDate,
+        timeSlot,
         driverName,
         vehiclePlate: vehicleAssigned,
         notes,
       };
 
-      await api.deliveries.create(delivery);
-      router.push('/delivery');
+      const res = await api.deliveries.create(delivery);
+      // Open the new delivery; the Item Trail page only lists branch transfers
+      router.push(res.data ? `/delivery/${res.data.id}` : '/dashboard');
     } catch (err) {
       console.error(err);
+      setError(err instanceof Error && err.message ? err.message : 'Failed to schedule the delivery.');
+      setLoading(false);
     }
-    setLoading(false);
   };
-
-  const drivers = [
-    { name: 'Juan Cruz', vehicle: 'Delivery Van 01' },
-    { name: 'Pedro Santos', vehicle: 'Delivery Van 02' },
-    { name: 'Miguel Garcia', vehicle: 'Pickup Truck 01' },
-  ];
 
   const timeSlots = [
     { value: 'morning', label: '9:00 AM - 12:00 PM', icon: '🌅' },
@@ -114,6 +111,10 @@ function NewDeliveryForm() {
             Schedule delivery for a completed job order
           </p>
         </div>
+
+        {error && (
+          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>
+        )}
 
         <form onSubmit={handleSubmit}>
           {/* Job Order Selection */}
@@ -309,37 +310,25 @@ function NewDeliveryForm() {
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Assign Driver
                 </label>
-                <select
+                <input
+                  type="text"
                   value={driverName}
-                  onChange={(e) => {
-                    const driver = drivers.find(d => d.name === e.target.value);
-                    setDriverName(e.target.value);
-                    if (driver) {
-                      setVehicleAssigned(driver.vehicle);
-                    }
-                  }}
+                  onChange={(e) => setDriverName(e.target.value)}
+                  placeholder="Driver name (optional)"
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                >
-                  <option value="">Select driver (optional)</option>
-                  {drivers.map(d => (
-                    <option key={d.name} value={d.name}>{d.name}</option>
-                  ))}
-                </select>
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Vehicle
                 </label>
-                <select
+                <input
+                  type="text"
                   value={vehicleAssigned}
                   onChange={(e) => setVehicleAssigned(e.target.value)}
+                  placeholder="Plate number or vehicle (optional)"
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                >
-                  <option value="">Select vehicle (optional)</option>
-                  <option value="Delivery Van 01">Delivery Van 01</option>
-                  <option value="Delivery Van 02">Delivery Van 02</option>
-                  <option value="Pickup Truck 01">Pickup Truck 01</option>
-                </select>
+                />
               </div>
             </div>
           </div>

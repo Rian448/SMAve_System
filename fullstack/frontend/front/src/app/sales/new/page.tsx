@@ -1,9 +1,16 @@
 'use client';
-import { formatDate } from '@/lib/dateUtils';
-import { useEffect, useRef, useState, type ReactElement } from 'react';
-import { useRouter } from 'next/navigation';
+import { formatDate, manilaDateString, nextSaturdayManila } from '@/lib/dateUtils';
+import { useEffect, useRef, useState, Suspense, type ReactElement } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { api, type Customer, type FinishedGood, type RawMaterial } from '@/lib/api';
+import {
+  api, ApiError, type Customer, type FinishedGood, type RawMaterial, type Branch,
+  type PremadeDraft, type ManagedWorker,
+  vatBreakdown, jobOrderTotalFrom, jobOrderPriceBreakdown, MAX_JOB_ORDER_PRICE, isValidPriceInput,
+} from '@/lib/api';
+import Combobox from '@/components/Combobox';
+import { useVatRate } from '@/lib/useVatRate';
+import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
 
 interface MaterialItem {
   id: string;
@@ -65,11 +72,47 @@ const SERVICE_ICONS: Record<string, ReactElement> = {
 };
 
 export default function NewJobOrderPage() {
+  // useSearchParams needs a Suspense boundary for this route to prerender.
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="animate-spin w-8 h-8 border-2 border-[#011c72] border-t-transparent rounded-full" />
+      </div>
+    }>
+      <NewJobOrderForm />
+    </Suspense>
+  );
+}
+
+function NewJobOrderForm() {
   const router = useRouter();
-  const { user } = useAuth();
+  const searchParams = useSearchParams();
+  // When present we are editing an existing draft rather than creating a new order.
+  const draftId = searchParams.get('draftId');
+  const editingDraftId = draftId ? Number(draftId) : null;
+  const [loadingDraft, setLoadingDraft] = useState(!!editingDraftId);
+  const [retailBranches, setRetailBranches] = useState<Branch[]>([]);
+  const { user, can } = useAuth();
+  // Accounts with all-branch access choose which branch a job order is for;
+  // everyone else's orders go to their own branch.
+  const choosesBranch = can('branches.all');
+  const [orderBranchId, setOrderBranchId] = useState<number | ''>('');
+  // Must be one of the retail branches listed (a draft saved before may point at the warehouse)
+  const orderBranchValid = orderBranchId !== '' && retailBranches.some((b) => b.id === orderBranchId);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [orderType, setOrderType] = useState<'normal' | 'premade'>('normal');
+  // Problems with a specific field are shown next to it; `error` is for the rest
+  const fe = useFieldErrors();
+  // ?premadeDraftId=… : editing a saved premade draft (no stock is taken until it is confirmed)
+  const premadeDraftParam = searchParams.get('premadeDraftId');
+  const editingPremadeDraftId = premadeDraftParam ? Number(premadeDraftParam) : null;
+  const [premadeDraft, setPremadeDraft] = useState<PremadeDraft | null>(null);
+  const [loadingPremadeDraft, setLoadingPremadeDraft] = useState(!!editingPremadeDraftId);
+  const [savingPremadeDraft, setSavingPremadeDraft] = useState(false);
+  const [notice, setNotice] = useState('');
+  // The branch whose finished goods a premade order sells (a draft keeps its own)
+  const [premadeBranchId, setPremadeBranchId] = useState<number | ''>('');
+  const [orderType, setOrderType] = useState<'normal' | 'premade'>(editingPremadeDraftId ? 'premade' : 'normal');
   const [step, setStep] = useState(1);
   const [premadeStep, setPremadeStep] = useState(1);
   const [paymentAmount, setPaymentAmount] = useState<number | ''>('');
@@ -80,6 +123,8 @@ export default function NewJobOrderPage() {
   ]);
   const [premadeItems, setPremadeItems] = useState<FinishedGood[]>([]);
   const [premadeLoading, setPremadeLoading] = useState(false);
+  // True once the finished goods list has loaded, so stock flags never show against an empty list
+  const [premadeItemsReady, setPremadeItemsReady] = useState(false);
   const [inventoryMaterials, setInventoryMaterials] = useState<RawMaterial[]>([]);
 
   // Customer Information
@@ -90,6 +135,9 @@ export default function NewJobOrderPage() {
   const [linkedCustomerId, setLinkedCustomerId] = useState<number | null>(null);
   const [linkedCustomerDiscount, setLinkedCustomerDiscount] = useState<number | null>(null);
   const [orderDiscount, setOrderDiscount] = useState<string>('');  // editable per-order discount %
+  // Prices include VAT by default; untick for a sale without VAT
+  const [vatOn, setVatOn] = useState(true);
+  const vatRate = useVatRate();
   const [customerSuggestions, setCustomerSuggestions] = useState<Customer[]>([]);
   const [searchingCustomer, setSearchingCustomer] = useState(false);
   const customerSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -100,9 +148,20 @@ export default function NewJobOrderPage() {
   const [vehicleYear, setVehicleYear] = useState('');
   const [vehiclePlate, setVehiclePlate] = useState('');
   const [reupholsteryItemType, setReupholsteryItemType] = useState('');
+  // Make/model reference data for the searchable dropdowns
+  const [vehicleMakes, setVehicleMakes] = useState<string[]>([]);
+  const [vehicleModels, setVehicleModels] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const modelFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Year options: current year (allow next model year) down to 1970, newest first
+  const yearOptions = Array.from(
+    { length: new Date().getFullYear() + 1 - 1970 + 1 },
+    (_, i) => String(new Date().getFullYear() + 1 - i)
+  );
 
   // Service Information
-  const [estimatedCompletionDate, setEstimatedCompletionDate] = useState('');
+  // Defaults to the next Saturday; staff can pick another date
+  const [estimatedCompletionDate, setEstimatedCompletionDate] = useState(() => nextSaturdayManila());
   const [priority, setPriority] = useState('normal');
 
   // Services Selection
@@ -134,25 +193,37 @@ export default function NewJobOrderPage() {
   const [pockets, setPockets] = useState('');
   const [logo, setLogo] = useState('');
   const [specification, setSpecification] = useState('');
+  // Cutter and sewer are picked from the workers of that type, by those who manage labor
+  const seesLaborCost = !!user && ['administrator', 'owner', 'supervisor'].includes(user.role);
   const [cutterName, setCutterName] = useState('');
   const [sewerName, setSewerName] = useState('');
+  const [slipWorkers, setSlipWorkers] = useState<ManagedWorker[]>([]);
+
+  useEffect(() => {
+    if (!seesLaborCost) return;
+    api.managedWorkers.list().then(res => {
+      setSlipWorkers((res.data?.workers || []).filter(w => w.isActive));
+    }).catch(() => {});
+  }, [seesLaborCost]);
 
   // Payment
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [profitMargin, setProfitMargin] = useState(250);
   const [estimatedTotal, setEstimatedTotal] = useState(0);
-  const [downPayment, setDownPayment] = useState(0);
   const [notes, setNotes] = useState('');
 
   useEffect(() => {
     const loadPremadeItems = async () => {
       if (orderType !== 'premade') return;
+      // A draft being edited sells from its own branch; wait until it has loaded
+      if (editingPremadeDraftId && !premadeBranchId) return;
+      const branchId = premadeBranchId || user?.branchId;
       setPremadeLoading(true);
+      setPremadeItemsReady(false);
       try {
-        const response = await api.inventory.getFinishedGoods(
-          user?.branchId ? { branchId: user.branchId } : undefined
-        );
+        const response = await api.inventory.getFinishedGoods(branchId ? { branchId } : undefined);
         setPremadeItems(response.data || []);
+        setPremadeItemsReady(true);
       } catch (err) {
         console.error(err);
         setError('Failed to load premade inventory items.');
@@ -161,7 +232,42 @@ export default function NewJobOrderPage() {
       }
     };
     loadPremadeItems();
-  }, [orderType, user?.branchId]);
+  }, [orderType, user?.branchId, premadeBranchId, editingPremadeDraftId]);
+
+  // ── Load a saved premade draft (?premadeDraftId=…) ─────────────────────────
+  const applyPremadeDraft = (d: PremadeDraft) => {
+    setPremadeDraft(d);
+    setPremadeBranchId(d.branchId);
+    setCustomerName(d.customerName || '');
+    setCustomerPhone(d.customerPhone || '');
+    setCustomerEmail(d.customerEmail || '');
+    setCustomerAddress(d.customerAddress || '');
+    setLinkedCustomerId(d.customerId ?? null);
+    setNotes(d.notes || '');
+    setPaymentMethod(d.paymentMethod || 'cash');
+    const lines: { productId: number | ''; quantity: number }[] =
+      d.items.length > 0 ? d.items : [{ productId: '', quantity: 1 }];
+    setPremadeSelections(lines.map((it, i) => ({ id: `premade-${i + 1}`, productId: it.productId, quantity: it.quantity })));
+    premadeSelectionIdRef.current = lines.length;
+  };
+
+  useEffect(() => {
+    if (!editingPremadeDraftId) return;
+    let cancelled = false;
+    setLoadingPremadeDraft(true);
+    api.premadeDrafts.get(editingPremadeDraftId)
+      .then((res) => {
+        if (cancelled || !res.data) return;
+        if (res.data.status !== 'draft') {
+          setError(`This draft was already recorded as ${res.data.productOrderNumber || 'an order'}.`);
+          return;
+        }
+        applyPremadeDraft(res.data);
+      })
+      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load the draft.'); })
+      .finally(() => { if (!cancelled) setLoadingPremadeDraft(false); });
+    return () => { cancelled = true; };
+  }, [editingPremadeDraftId]);
 
   useEffect(() => {
     const loadInventoryMaterials = async () => {
@@ -193,6 +299,31 @@ export default function NewJobOrderPage() {
     }, 500);
     return () => { if (customerSearchTimerRef.current) clearTimeout(customerSearchTimerRef.current); };
   }, [customerName, customerPhone, customerEmail, linkedCustomerId]);
+
+  // Load the list of vehicle makes once.
+  useEffect(() => {
+    api.vehicles.getMakes()
+      .then((res) => setVehicleMakes(res.data || []))
+      .catch((err) => console.error('Failed to load vehicle makes:', err));
+  }, []);
+
+  // Load models for the selected make (debounced so free-typing doesn't spam
+  // the API). Falls back to an empty list for makes not in our reference data,
+  // in which case the user can still free-type a model.
+  useEffect(() => {
+    const make = vehicleMake.trim();
+    if (modelFetchTimerRef.current) clearTimeout(modelFetchTimerRef.current);
+    if (!make) { setVehicleModels([]); return; }
+    modelFetchTimerRef.current = setTimeout(async () => {
+      setLoadingModels(true);
+      try {
+        const res = await api.vehicles.getModels(make);
+        setVehicleModels(res.data || []);
+      } catch { setVehicleModels([]); }
+      finally { setLoadingModels(false); }
+    }, 350);
+    return () => { if (modelFetchTimerRef.current) clearTimeout(modelFetchTimerRef.current); };
+  }, [vehicleMake]);
 
   const linkCustomer = (c: Customer) => {
     setLinkedCustomerId(c.id);
@@ -265,6 +396,21 @@ export default function NewJobOrderPage() {
     );
   };
 
+  // A draft keeps every line, even one that sold out since it was saved: it is
+  // flagged here with the stock on hand now, and can't be confirmed until it fits.
+  const premadeStockIssue = (s: PremadeSelection): string | null => {
+    if (!s.productId || !premadeItemsReady) return null;
+    const item = premadeItems.find((i) => i.id === s.productId);
+    if (!item) return 'No longer sold at this branch';
+    const wanted = premadeSelections.filter((x) => x.productId === s.productId)
+      .reduce((n, x) => n + x.quantity, 0);
+    const stock = Number(item.quantity) || 0;
+    if (stock <= 0) return 'Out of stock';
+    if (stock < wanted) return `Insufficient stock: only ${stock} available`;
+    return null;
+  };
+  const premadeHasStockIssue = !premadeLoading && premadeSelections.some((s) => premadeStockIssue(s) !== null);
+
   const premadeTotal = premadeSelections.reduce((sum, s) => {
     if (!s.productId) return sum;
     const item = premadeItems.find((i) => i.id === s.productId);
@@ -280,20 +426,116 @@ export default function NewJobOrderPage() {
   // Per-order discount: clamp 0–100, derive the discounted total and savings.
   const orderDiscountPct = Math.min(Math.max(Number(orderDiscount) || 0, 0), 100);
   const discountAmount = estimatedTotal > 0 ? Math.round(estimatedTotal * (orderDiscountPct / 100) * 100) / 100 : 0;
-  const discountedTotal = estimatedTotal > 0 ? Math.round((estimatedTotal - discountAmount) * 100) / 100 : 0;
+  // The price already includes VAT: the customer pays the discounted price, and
+  // VAT is the share of it shown below (never added on top). The server works
+  // the total out again with the rate saved in Settings.
+  const vatPct = vatOn ? vatRate : 0;
+  const finalTotal = estimatedTotal > 0 ? jobOrderTotalFrom(estimatedTotal, orderDiscountPct) : 0;
+  const vatAmount = vatBreakdown(finalTotal, vatPct).vat;
 
   const goNext = () => {
-    setError('');
+    setError(''); fe.clear();
     setStep((s) => s + 1);
   };
+
+  // ── Load an existing draft for editing (?draftId=…) ───────────────────────
+  // saveDraft stores the chosen services as a joined description string, so the
+  // services are parsed back out of it here.
+  useEffect(() => {
+    if (!editingDraftId) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await api.sales.getJobOrder(editingDraftId);
+        const d: any = res.data;
+        if (cancelled || !d) return;
+        if (d.status !== 'draft') {
+          setError('That order is no longer a draft and cannot be edited here.');
+          return;
+        }
+
+        setCustomerName(d.customerName || '');
+        setCustomerPhone(d.customerPhone || '');
+        setCustomerEmail(d.customerEmail || '');
+        if (d.customerId) setLinkedCustomerId(d.customerId);
+        if (d.branchId) setOrderBranchId(d.branchId);
+        if (d.discountPercent != null) setOrderDiscount(String(d.discountPercent));
+        setVatOn(Number(d.vatPercent) > 0);
+        // Restore the price (it used to be lost when reopening a draft)
+        // As a VAT-inclusive price, so saving keeps the draft's total (older drafts too)
+        if (Number(d.totalPrice) > 0) {
+          setEstimatedTotal(jobOrderPriceBreakdown(Number(d.totalPrice), d.discountPercent, d.vatPercent, true).subtotal);
+        }
+        if (d.notes) setNotes(d.notes);
+        if (d.priority) setPriority(d.priority);
+        if (d.estimatedCompletion) setEstimatedCompletionDate(String(d.estimatedCompletion).slice(0, 10));
+
+        const v = d.vehicleInfo || {};
+        if (v.make === 'Reupholstery') {
+          setReupholsteryItemType(v.model || '');
+        } else {
+          setVehicleMake(v.make && v.make !== 'N/A' ? v.make : '');
+          setVehicleModel(v.model && v.model !== 'N/A' ? v.model : '');
+          setVehicleYear(v.year ? String(v.year) : '');
+          setVehiclePlate(v.plateNumber || '');
+        }
+
+        const services = String(d.description || '').toLowerCase();
+        if (services.includes('flooring')) setFlooring(s => ({ ...s, selected: true }));
+        if (services.includes('reupholstery')) {
+          setReupholstery(s => ({ ...s, selected: true }));
+          const match = services.match(/reupholstery \(([^)]*)\)/);
+          if (match) setReupholsteryItemType(match[1]);
+        }
+        if (services.includes('ceiling')) setCeiling(s => ({ ...s, selected: true }));
+        if (services.includes('sidings')) setSidings(s => ({ ...s, selected: true }));
+        if (services.includes('seat_covers')) setSeatCovers(s => ({ ...s, selected: true }));
+        if (services.includes('other')) setOtherServices(s => ({ ...s, selected: true }));
+
+        setMaterials((d.items || []).map((it: any, idx: number) => ({
+          id: `draft-${idx}`,
+          materialSource: it.materialId ? 'inventory' : 'custom',
+          materialId: it.materialId ?? '',
+          name: it.name || '',
+          quantity: Number(it.quantity) || 0,
+          unitPrice: Number(it.unitPrice ?? it.materialCost) || 0,
+        })));
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load draft.');
+      } finally {
+        if (!cancelled) setLoadingDraft(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [editingDraftId]);
+
+  useEffect(() => {
+    if (!choosesBranch) return;
+    api.settings.getBranchesPublic()
+      .then((res) => {
+        const retail = (res.data || []).filter((b) => !b.isWarehouse && b.isActive);
+        setRetailBranches(retail);
+        // A reopened draft keeps its branch only if it is still a retail branch
+        setOrderBranchId((cur) => (cur && retail.some((b) => b.id === cur) ? cur : ''));
+      })
+      .catch(() => setRetailBranches([]));
+  }, [choosesBranch]);
 
   // Save the current (possibly incomplete) job order as a draft so work isn't lost.
   // Drafts stay out of sales/pending counts until confirmed.
   const saveDraft = async () => {
-    if (!customerName.trim()) { setError('Enter a customer name to save a draft.'); return; }
-    setLoading(true); setError('');
+    setError('');
+    const draftProblems = {
+      orderBranch: choosesBranch && !orderBranchValid && 'Choose which branch this job order is for.',
+      customerName: !customerName.trim() && 'Enter a customer name to save a draft.',
+      customerEmail: emailProblem(customerEmail),
+    };
+    if (Object.values(draftProblems).some(Boolean)) { setStep(1); fe.show(draftProblems); return; }
+    setLoading(true);
     try {
-      const branchId = user?.branchId || 1;
+      const branchId = choosesBranch ? (orderBranchId as number) : (user?.branchId || 1);
 
       const selectedServices: string[] = [];
       if (flooring.selected) selectedServices.push('flooring');
@@ -328,11 +570,19 @@ export default function NewJobOrderPage() {
         vehicleInfo,
         items: normalizedItems,
         notes,
+        priority,
         ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
-        ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, totalPrice: discountedTotal } : {}),
+        vatIncluded: vatOn,
+        ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, priceForWork: estimatedTotal } : {}),
       };
 
-      await api.sales.createJobOrder(draftData);
+      if (editingDraftId) {
+        // Editing an existing draft — update in place so we don't leave a duplicate.
+        const { isDraft: _isDraft, ...updates } = draftData;
+        await api.sales.updateJobOrder(editingDraftId, updates);
+      } else {
+        await api.sales.createJobOrder(draftData);
+      }
       router.push('/sales');
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : 'Failed to save draft.');
@@ -344,41 +594,40 @@ export default function NewJobOrderPage() {
     e.preventDefault();
 
     if (orderType === 'normal' && step < 5) {
-      if (step === 1) {
-        if (!customerName.trim()) { setError('Customer name is required.'); return; }
-        if (!customerPhone.trim()) { setError('Phone number is required.'); return; }
-      }
+      setError('');
+      if (step === 1 && fe.show({
+        orderBranch: choosesBranch && !orderBranchValid && 'Choose which branch this job order is for.',
+        customerName: !customerName.trim() && 'Customer name is required.',
+        customerEmail: emailProblem(customerEmail),
+      })) return;
       if (step === 3) {
         const anyService = flooring.selected || reupholstery.selected || ceiling.selected ||
           sidings.selected || seatCovers.selected || otherServices.selected;
-        if (!anyService) { setError('Please select at least one service.'); return; }
-        if (reupholstery.selected && !reupholsteryItemType.trim()) {
-          setError('Please specify what item will be reupholstered.');
-          return;
-        }
+        if (fe.show({
+          services: !anyService && 'Please select at least one service.',
+          reupholsteryItem: reupholstery.selected && !reupholsteryItemType.trim() && 'Please specify what item will be reupholstered.',
+          completionDate: estimatedCompletionDate && estimatedCompletionDate < manilaDateString()
+            && 'Estimated completion date cannot be in the past.',
+        })) return;
       }
-      if (step === 4) {
-        for (const m of materials) {
-          if (m.materialSource === 'inventory' && !m.materialId) {
-            setError('Please select an inventory material or switch to "Type new material".');
-            return;
-          }
-          if (!m.name.trim()) { setError('Please provide a name for all material rows.'); return; }
-        }
-      }
+      if (step === 4 && fe.show(Object.fromEntries(materials.map((m) => [`material-${m.id}`,
+        m.materialSource === 'inventory' && !m.materialId ? 'Select a material from inventory, or switch this row to "Type New".'
+          : !m.name.trim() ? 'Enter a name for this material.' : '',
+      ])))) return;
       goNext();
       return;
     }
 
     // Premade step 1 → 2
     if (orderType === 'premade' && premadeStep === 1) {
-      if (!customerName.trim() || !customerPhone.trim()) {
-        setError('Customer name and phone are required.');
-        return;
-      }
-      const hasItems = premadeSelections.some((s) => s.productId);
-      if (!hasItems) { setError('Please select at least one premade inventory item.'); return; }
       setError('');
+      const hasItems = premadeSelections.some((s) => s.productId);
+      if (fe.show({
+        customerName: !customerName.trim() && 'Customer name is required.',
+        customerEmail: emailProblem(customerEmail),
+        premadeItems: !hasItems ? 'Please select at least one premade inventory item.'
+          : premadeHasStockIssue && 'Some items are out of stock or short. Lower or remove them, or save the draft and wait for stock.',
+      })) return;
       setPremadeStep(2);
       return;
     }
@@ -389,14 +638,42 @@ export default function NewJobOrderPage() {
     // ── Premade order submit ──────────────────────────────────────────────────
     if (orderType === 'premade') {
       const selected = premadeSelections.filter((s) => s.productId && s.quantity > 0);
-      if (!customerName.trim() || !customerPhone.trim()) {
-        setError('Customer name and phone are required.');
+      const premadeProblems = {
+        customerName: !customerName.trim() && 'Customer name is required.',
+        customerEmail: emailProblem(customerEmail),
+        premadeItems: selected.length === 0 ? 'Please select at least one premade inventory item.'
+          : editingPremadeDraftId && premadeHasStockIssue
+          && 'Some items are out of stock or short. Edit the draft, remove them, or wait for stock.',
+      };
+      if (Object.values(premadeProblems).some(Boolean)) {
         setLoading(false);
+        setPremadeStep(1);
+        fe.show(premadeProblems);
         return;
       }
-      if (selected.length === 0) {
-        setError('Please select at least one premade inventory item.');
-        setLoading(false);
+
+      if (editingPremadeDraftId) {
+        try {
+          // Save what is on screen first, so the recorded order matches it
+          await api.premadeDrafts.update(editingPremadeDraftId, premadeDraftInput());
+          await api.premadeDrafts.confirm(editingPremadeDraftId, {
+            paymentAmount: typeof paymentAmount === 'number' ? paymentAmount : 0,
+            paymentMethod,
+          });
+          router.push('/product-orders');
+        } catch (err) {
+          // Stock moved since the page loaded: show the draft as it stands now
+          if (err instanceof ApiError && err.status === 409 && err.body?.data) {
+            applyPremadeDraft(err.body.data as PremadeDraft);
+            const fresh = await api.inventory.getFinishedGoods({ branchId: (err.body.data as PremadeDraft).branchId })
+              .catch(() => null);
+            if (fresh?.data) setPremadeItems(fresh.data);
+            setPremadeStep(1);
+          }
+          setError(err instanceof Error && err.message ? err.message : 'Failed to record the job order.');
+        } finally {
+          setLoading(false);
+        }
         return;
       }
 
@@ -432,8 +709,8 @@ export default function NewJobOrderPage() {
           setLoading(false);
           return;
         }
-        const branchId = user?.branchId || inferredBranchId;
-        if (user?.branchId && user.branchId !== inferredBranchId) {
+        const branchId = premadeBranchId || user?.branchId || inferredBranchId;
+        if (branchId !== inferredBranchId) {
           setError('Selected finished goods do not match your assigned branch.');
           setLoading(false);
           return;
@@ -468,17 +745,50 @@ export default function NewJobOrderPage() {
     if (seatCovers.selected) selectedServices.push({ type: 'seat_covers', design: seatCovers.design, material: seatCovers.material, pocket: seatCovers.pocket, others: seatCovers.others });
     if (otherServices.selected) selectedServices.push({ type: 'other', description: otherServices.description });
 
-    if (selectedServices.length === 0) {
-      setError('Please select at least one service');
-      setLoading(false);
+    // Checked on their own steps too; these catch what changed since (e.g. the date passed)
+    if (choosesBranch && !orderBranchValid) {
+      setLoading(false); setStep(1);
+      fe.show({ orderBranch: 'Choose which branch this job order is for.' });
       return;
     }
+    const serviceProblems = {
+      services: selectedServices.length === 0 && 'Please select at least one service.',
+      completionDate: estimatedCompletionDate && estimatedCompletionDate < manilaDateString()
+        && 'Estimated completion date cannot be in the past.',
+    };
+    if (Object.values(serviceProblems).some(Boolean)) {
+      setLoading(false); setStep(3);
+      fe.show(serviceProblems);
+      return;
+    }
+    const branchId = choosesBranch ? (orderBranchId as number) : (user?.branchId || 1);
 
-    const branchId = user?.branchId || 1;
+    // Add typed-in materials to inventory first (flagged as needed), so the order's
+    // lines carry their inventory id and the stock is deducted when the job completes.
+    const createdIds = new Map<string, number>();
+    for (const m of materials.filter((x) => x.materialSource === 'custom' && x.name.trim())) {
+      const existing = inventoryMaterials.find(
+        (inv) => inv.materialType.trim().toLowerCase() === m.name.trim().toLowerCase());
+      if (existing) { createdIds.set(m.id, existing.id); continue; }
+      try {
+        const res = await api.inventory.createRawMaterial({
+          materialType: m.name.trim(),
+          color: '', pattern: '',
+          unitPrice: Number(m.unitPrice) || 0,
+          stockQuantity: 0,
+          branchId,
+          status: 'needed',
+        });
+        if (res.data) createdIds.set(m.id, res.data.id);
+      } catch (customErr) {
+        console.error('Failed to save needed material:', customErr);
+      }
+    }
 
     const normalizedItems = materials.map((m) => ({
       name: m.name.trim(),
-      materialId: m.materialId ? Number(m.materialId) : undefined,
+      category: 'material' as const,
+      materialId: m.materialId ? Number(m.materialId) : createdIds.get(m.id),
       quantity: Number(m.quantity) || 0,
       unitPrice: Number(m.unitPrice) || 0,
       materialCost: Number(m.unitPrice) || 0,
@@ -486,7 +796,7 @@ export default function NewJobOrderPage() {
     }));
 
     if (normalizedItems.length === 0) {
-      normalizedItems.push({ name: 'Service Package', materialId: undefined, quantity: 1, unitPrice: 0, materialCost: 0, laborCost: 0 });
+      normalizedItems.push({ name: 'Service Package', category: 'material', materialId: undefined, quantity: 1, unitPrice: 0, materialCost: 0, laborCost: 0 });
     }
 
     if (labor.length > 0) {
@@ -508,22 +818,18 @@ export default function NewJobOrderPage() {
 
     const hasSlipData = slipRows.some((r) => r.description || r.hr) ||
       materialCenter || materialSides || materialBack ||
-      dStitch || piping || pockets || logo || specification ||
-      cutterName || sewerName;
+      dStitch || piping || pockets || logo || specification || cutterName || sewerName;
 
     const slipData = hasSlipData ? {
       rows: slipRows,
       materialCenter, materialSides, materialBack,
       dStitch, piping, pockets, logo, specification,
-      cutterName, sewerName,
+      ...(seesLaborCost ? { cutterName, sewerName } : {}),
     } : undefined;
 
-    const computedTotal = materialTotal > 0 ? materialTotal : (estimatedTotal > 0 ? estimatedTotal : 0);
-    const grossTotal = estimatedTotal > 0 ? estimatedTotal : computedTotal;
-    const finalTotal = orderDiscountPct > 0
-      ? Math.round(grossTotal * (1 - orderDiscountPct / 100) * 100) / 100
-      : grossTotal;
-    const finalDown = estimatedTotal > 0 ? Math.round((finalTotal / 2) * 100) / 100 : 0;
+    const grossTotal = estimatedTotal > 0 ? estimatedTotal : materialTotal;
+    const orderTotal = jobOrderTotalFrom(grossTotal, orderDiscountPct);
+    const finalDown = estimatedTotal > 0 ? Math.round((orderTotal / 2) * 100) / 100 : 0;
 
     try {
       const jobOrderData: any = {
@@ -537,35 +843,14 @@ export default function NewJobOrderPage() {
         downPayment: finalDown,
         paymentMethod,
         notes,
+        priority,
         ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
+        vatIncluded: vatOn,
         ...(slipData ? { slipData } : {}),
-        ...(finalTotal > 0 ? { estimatedCost: grossTotal, totalPrice: finalTotal } : {}),
+        ...(orderTotal > 0 ? { estimatedCost: grossTotal, priceForWork: grossTotal } : {}),
       };
 
-      const createResponse = await api.sales.createJobOrder(jobOrderData);
-      const createdJobOrderId = (createResponse.data as any)?.jobOrderId || 'PENDING-JO';
-
-      const customNeeded = materials.filter((m) => m.materialSource === 'custom' && m.name.trim());
-      if (customNeeded.length > 0) {
-        try {
-          await Promise.all(
-            customNeeded.map((m) =>
-              api.inventory.createRawMaterial({
-                materialType: m.name.trim(),
-                color: '', pattern: '',
-                unitPrice: Number(m.unitPrice) || 0,
-                stockQuantity: 0,
-                branchId: user?.branchId || 1,
-                status: 'needed',
-                sourceJobOrderId: createdJobOrderId
-              })
-            )
-          );
-        } catch (customErr) {
-          console.error('Failed to save some needed materials:', customErr);
-        }
-      }
-
+      await api.sales.createJobOrder(jobOrderData);
       router.push('/sales');
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : 'Failed to create job order. Please try again.');
@@ -574,6 +859,51 @@ export default function NewJobOrderPage() {
       setLoading(false);
     }
   };
+
+  const premadeDraftInput = () => ({
+    customerId: linkedCustomerId,
+    customerName: customerName.trim(),
+    customerPhone: customerPhone.trim(),
+    customerEmail: customerEmail.trim(),
+    customerAddress: customerAddress.trim(),
+    notes,
+    paymentMethod,
+    items: premadeSelections.filter((s) => s.productId && s.quantity > 0)
+      .map((s) => ({ productId: s.productId as number, quantity: s.quantity })),
+  });
+
+  // Saves without taking stock. A new draft is opened in place afterwards, so
+  // saving again updates the same draft instead of making another.
+  const savePremadeDraft = async () => {
+    setError(''); setNotice('');
+    const firstProduct = premadeItems.find((i) => premadeSelections.some((s) => s.productId === i.id));
+    const branchId = premadeBranchId || user?.branchId || firstProduct?.branchId;
+    const draftProblems = {
+      customerName: !customerName.trim() && 'Enter the customer name to save a draft.',
+      customerEmail: emailProblem(customerEmail),
+      premadeItems: !branchId && 'Select at least one product so the draft knows which branch it sells from.',
+    };
+    if (!branchId || Object.values(draftProblems).some(Boolean)) { setPremadeStep(1); fe.show(draftProblems); return; }
+    setSavingPremadeDraft(true);
+    try {
+      if (editingPremadeDraftId) {
+        const res = await api.premadeDrafts.update(editingPremadeDraftId, premadeDraftInput());
+        if (res.data) applyPremadeDraft(res.data);
+        setNotice('Draft saved. No stock has been taken.');
+      } else {
+        const res = await api.premadeDrafts.create({ ...premadeDraftInput(), branchId });
+        if (res.data) router.replace(`/sales/new?premadeDraftId=${res.data.id}&saved=1`);
+      }
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : 'Failed to save the draft.');
+    } finally {
+      setSavingPremadeDraft(false);
+    }
+  };
+
+  useEffect(() => {
+    if (searchParams.get('saved')) setNotice('Draft saved. No stock has been taken; confirm it when the customer is ready.');
+  }, [searchParams]);
 
   const premadePaymentAmount = typeof paymentAmount === 'number' ? paymentAmount : 0;
   const isPremadeFullPayment = premadePaymentAmount >= premadeTotal && premadeTotal > 0;
@@ -585,26 +915,36 @@ export default function NewJobOrderPage() {
       return (
         <div className="space-y-6">
           <div>
-            <h3 className="text-lg font-semibold text-gray-900 mb-1">Walk-in Premade Order</h3>
-            <p className="text-sm text-gray-500 mb-4">Step 1 of 2 — Customer &amp; Items</p>
+            <h3 className="text-lg font-semibold text-gray-900 mb-1 flex items-center gap-2 flex-wrap">
+              {premadeDraft ? <>Premade Draft {premadeDraft.draftNumber}</> : 'Premade Order'}
+              {premadeDraft && (
+                <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-800">Draft</span>
+              )}
+            </h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Step 1 of 2 — Customer &amp; Items
+              {premadeDraft?.branchName ? ` · ${premadeDraft.branchName}` : ''}
+            </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
+              <div {...fe.field('customerName')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Customer Name *</label>
-                <input type="text" value={customerName} onChange={(e) => setCustomerName(e.target.value)} required
+                <input type="text" value={customerName} onChange={(e) => { setCustomerName(e.target.value); unlinkCustomer(); }} required
                   className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                  placeholder="Walk-in customer name" />
+                  placeholder="Customer name" />
+                <FieldError message={fe.errors.customerName} />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Phone Number *</label>
-                <input type="tel" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} required
+                <label className="block text-sm font-medium text-gray-700 mb-2">Phone Number <span className="font-normal text-gray-400">(optional)</span></label>
+                <input type="tel" value={customerPhone} onChange={(e) => { setCustomerPhone(e.target.value); unlinkCustomer(); }}
                   className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="09XX XXX XXXX" />
               </div>
-              <div>
+              <div {...fe.field('customerEmail')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
                 <input type="email" value={customerEmail} onChange={(e) => setCustomerEmail(e.target.value)}
                   className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   placeholder="customer@email.com" />
+                <FieldError message={fe.errors.customerEmail} />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Address</label>
@@ -613,9 +953,36 @@ export default function NewJobOrderPage() {
                   placeholder="Customer address" />
               </div>
             </div>
+            {linkedCustomerId ? (
+              <p className="mt-3 text-xs text-green-700">
+                Linked to an existing customer record.{' '}
+                <button type="button" onClick={unlinkCustomer} className="underline">Unlink</button>
+              </p>
+            ) : customerSuggestions.length > 0 && (
+              <div className="mt-3 border border-[#c7d2f5] rounded-xl overflow-hidden">
+                <div className="bg-[#eef1fb] px-4 py-2 flex items-center justify-between">
+                  <p className="text-xs font-semibold text-[#011c72]">
+                    {customerSuggestions.length} existing customer{customerSuggestions.length !== 1 ? 's' : ''} found
+                  </p>
+                  <button type="button" onClick={() => setCustomerSuggestions([])} className="text-xs text-[#011c72] underline">Dismiss</button>
+                </div>
+                {customerSuggestions.map((c) => (
+                  <div key={c.id} className="flex items-center justify-between px-4 py-2.5 border-t border-gray-100 bg-white">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-900 truncate">{c.name}</p>
+                      <p className="text-xs text-gray-500 truncate">{[c.phone, c.email].filter(Boolean).join(' · ')}</p>
+                    </div>
+                    <button type="button" onClick={() => linkCustomer(c)}
+                      className="text-xs font-medium text-white bg-[#011c72] hover:bg-[#022494] px-3 py-1.5 rounded-lg shrink-0 ml-3">
+                      Use This Customer
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
-          <div>
+          <div {...fe.field('premadeItems', true)}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-gray-900">Finished Goods</h3>
               <button type="button" onClick={addPremadeSelection}
@@ -636,28 +1003,37 @@ export default function NewJobOrderPage() {
                 <div className="space-y-3">
                   {premadeSelections.map((selection) => {
                     const selectedItem = premadeItems.find((i) => i.id === selection.productId);
+                    const stockIssue = premadeStockIssue(selection);
+                    // A saved line whose product is no longer listed keeps its saved name
+                    const savedLine = !selectedItem && selection.productId
+                      ? premadeDraft?.items.find((it) => it.productId === selection.productId) : undefined;
                     return (
-                      <div key={selection.id} className="grid grid-cols-1 md:grid-cols-12 gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                      <div key={selection.id} className={`grid grid-cols-1 md:grid-cols-12 gap-3 p-3 rounded-lg border ${stockIssue ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'}`}>
                         <div className="md:col-span-7">
                           <select value={selection.productId}
                             onChange={(e) => updatePremadeSelection(selection.id, 'productId', e.target.value ? Number(e.target.value) : '')}
                             className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
                             disabled={premadeItems.length === 0}>
                             <option value="">Select finished good item</option>
+                            {savedLine && (
+                              <option value={savedLine.productId}>{savedLine.name} (no longer available)</option>
+                            )}
                             {premadeItems.map((item) => (
                               <option key={item.id} value={item.id}>
                                 {item.name} ({item.sku}) - Stock: {item.quantity} - ₱{item.price.toLocaleString()}
                               </option>
                             ))}
                           </select>
+                          {stockIssue && (
+                            <p className="mt-1 text-xs font-semibold text-red-700">{stockIssue}</p>
+                          )}
                         </div>
                         <div className="md:col-span-2">
-                          <input type="number" min={1} max={selectedItem ? Number(selectedItem.quantity) : undefined}
+                          {/* Not capped at the stock: a draft may wait for stock, and is flagged above instead */}
+                          <input type="number" min={1}
                             value={selection.quantity}
                             onChange={(e) => {
-                              const next = Math.max(1, parseInt(e.target.value) || 1);
-                              const bounded = selectedItem ? Math.min(next, Number(selectedItem.quantity)) : next;
-                              updatePremadeSelection(selection.id, 'quantity', bounded);
+                              updatePremadeSelection(selection.id, 'quantity', Math.max(1, parseInt(e.target.value) || 1));
                             }}
                             className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm" />
                         </div>
@@ -666,7 +1042,7 @@ export default function NewJobOrderPage() {
                         </div>
                         <div className="md:col-span-1 flex items-center justify-end">
                           <button type="button" onClick={() => removePremadeSelection(selection.id)}
-                            disabled={premadeSelections.length === 1}
+                            disabled={premadeSelections.length === 1} title="Remove this item"
                             className="p-2 text-red-500 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -679,6 +1055,7 @@ export default function NewJobOrderPage() {
                 </div>
               </>
             )}
+            <FieldError message={fe.errors.premadeItems} />
           </div>
 
           <div className="bg-[#eef1fb] border border-[#c7d2f5] rounded-xl p-4 flex justify-between items-center">
@@ -830,6 +1207,27 @@ export default function NewJobOrderPage() {
               <p className="text-sm text-gray-500 mt-1">Who is this job order for?</p>
             </div>
 
+            {/* All-branch accounts say which branch the work is for */}
+            {choosesBranch && (
+              <div {...fe.field('orderBranch')}>
+                <label htmlFor="order-branch" className="block text-sm font-medium text-gray-700 mb-2">
+                  Branch <span className="text-red-500">*</span>
+                </label>
+                <select id="order-branch" value={orderBranchId}
+                  onChange={(e) => { setOrderBranchId(e.target.value ? Number(e.target.value) : ''); setError(''); }}
+                  className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
+                  <option value="">Select the branch this order is for</option>
+                  {retailBranches.map((b) => (
+                    <option key={b.id} value={b.id}>{b.name}</option>
+                  ))}
+                </select>
+                <p className="text-xs text-gray-400 mt-1">
+                  Your account works across branches, so choose the branch where this work or order belongs.
+                </p>
+                <FieldError message={fe.errors.orderBranch} />
+              </div>
+            )}
+
             {/* Linked account banner */}
             {linkedCustomerId && (
               <div className="flex items-center justify-between bg-green-50 border border-green-200 rounded-xl px-4 py-3">
@@ -850,27 +1248,29 @@ export default function NewJobOrderPage() {
             )}
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-              <div>
+              <div {...fe.field('customerName')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Customer Name <span className="text-red-500">*</span>
                 </label>
                 <input type="text" value={customerName}
                   onChange={(e) => { setCustomerName(e.target.value); unlinkCustomer(); }}
                   required className={inputCls} placeholder="e.g. Juan dela Cruz" autoFocus />
+                <FieldError message={fe.errors.customerName} />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Phone Number <span className="text-red-500">*</span>
+                  Phone Number <span className="font-normal text-gray-400">(optional)</span>
                 </label>
                 <input type="tel" value={customerPhone}
                   onChange={(e) => { setCustomerPhone(e.target.value); unlinkCustomer(); }}
-                  required className={inputCls} placeholder="09XX XXX XXXX" />
+                  className={inputCls} placeholder="09XX XXX XXXX" />
               </div>
-              <div>
+              <div {...fe.field('customerEmail')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
                 <input type="email" value={customerEmail}
                   onChange={(e) => { setCustomerEmail(e.target.value); unlinkCustomer(); }}
                   className={inputCls} placeholder="customer@email.com" />
+                <FieldError message={fe.errors.customerEmail} />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Address</label>
@@ -920,18 +1320,35 @@ export default function NewJobOrderPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Vehicle Make</label>
-                <input type="text" value={vehicleMake} onChange={(e) => setVehicleMake(e.target.value)}
-                  className={inputCls} placeholder="Toyota" />
+                <Combobox
+                  value={vehicleMake}
+                  onChange={(v) => {
+                    if (v !== vehicleMake) setVehicleModel(''); // reset model when make changes
+                    setVehicleMake(v);
+                  }}
+                  options={vehicleMakes}
+                  placeholder="Search or type a make (e.g. Toyota)"
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Vehicle Model</label>
-                <input type="text" value={vehicleModel} onChange={(e) => setVehicleModel(e.target.value)}
-                  className={inputCls} placeholder="Fortuner" />
+                <Combobox
+                  value={vehicleModel}
+                  onChange={setVehicleModel}
+                  options={vehicleModels}
+                  loading={loadingModels}
+                  disabled={!vehicleMake.trim()}
+                  placeholder={vehicleMake.trim() ? 'Search or type a model (e.g. Fortuner)' : 'Select a make first'}
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Year</label>
-                <input type="text" value={vehicleYear} onChange={(e) => setVehicleYear(e.target.value)}
-                  className={inputCls} placeholder="2023" />
+                <Combobox
+                  value={vehicleYear}
+                  onChange={setVehicleYear}
+                  options={yearOptions}
+                  placeholder="Search or type a year (e.g. 2023)"
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Plate Number</label>
@@ -949,9 +1366,10 @@ export default function NewJobOrderPage() {
             <div>
               <h3 className="text-xl font-bold text-gray-900">Select Services</h3>
               <p className="text-sm text-gray-500 mt-1">Choose one or more services needed</p>
+              <FieldError message={fe.errors.services} />
             </div>
 
-            <div className="grid grid-cols-1 gap-3">
+            <div className="grid grid-cols-1 gap-3" {...fe.field('services', true)}>
               {/* Flooring */}
               <div onClick={() => setFlooring({ ...flooring, selected: !flooring.selected })}
                 className={`cursor-pointer rounded-xl border-2 p-4 transition-all ${flooring.selected ? 'border-[#011c72] bg-[#eef1fb]' : 'border-gray-200 hover:border-[#011c72]'}`}>
@@ -996,8 +1414,11 @@ export default function NewJobOrderPage() {
                     </ul>
                     {reupholstery.selected && (
                       <div className="mt-3 space-y-2" onClick={(e) => e.stopPropagation()}>
-                        <input type="text" value={reupholsteryItemType} onChange={(e) => setReupholsteryItemType(e.target.value)}
-                          placeholder="Item to reupholster (e.g. Sofa set, dining chair)" className={smallInputCls} />
+                        <div {...fe.field('reupholsteryItem')}>
+                          <input type="text" value={reupholsteryItemType} onChange={(e) => setReupholsteryItemType(e.target.value)}
+                            placeholder="Item to reupholster (e.g. Sofa set, dining chair)" className={smallInputCls} />
+                          <FieldError message={fe.errors.reupholsteryItem} />
+                        </div>
                         <input type="text" value={reupholstery.material}
                           onChange={(e) => setReupholstery({ ...reupholstery, material: e.target.value })}
                           placeholder="Specify material" className={smallInputCls} />
@@ -1116,9 +1537,12 @@ export default function NewJobOrderPage() {
                   <option value="urgent">Urgent</option>
                 </select>
               </div>
-              <div>
+              <div {...fe.field('completionDate')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Estimated Completion Date</label>
-                <input type="date" value={estimatedCompletionDate} onChange={(e) => setEstimatedCompletionDate(e.target.value)} className={inputCls} />
+                {/* Completion can't be in the past (Manila date) */}
+                <input type="date" value={estimatedCompletionDate} min={manilaDateString()}
+                  onChange={(e) => setEstimatedCompletionDate(e.target.value)} className={inputCls} />
+                <FieldError message={fe.errors.completionDate} />
               </div>
             </div>
           </div>
@@ -1205,20 +1629,26 @@ export default function NewJobOrderPage() {
               </div>
 
               {/* Cutter & Sewer */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">CUTTER</label>
-                  <input type="text" value={cutterName} onChange={(e) => setCutterName(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                    placeholder="Cutter name" />
+              {seesLaborCost && (
+                <div className="grid grid-cols-2 gap-3">
+                  {[
+                    { label: 'Cutter', type: 'cutter', value: cutterName, set: setCutterName },
+                    { label: 'Sewer', type: 'sewer', value: sewerName, set: setSewerName },
+                  ].map(({ label, type, value, set }) => {
+                    const choices = slipWorkers.filter(w => w.workType.toLowerCase() === type);
+                    return (
+                      <div key={label}>
+                        <label className="block text-xs text-gray-500 mb-1">{label}</label>
+                        <select value={value} onChange={(e) => set(e.target.value)}
+                          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
+                          <option value="">{choices.length ? '— Select —' : `No active ${type}s`}</option>
+                          {choices.map(w => <option key={w.id} value={w.name}>{w.name}</option>)}
+                        </select>
+                      </div>
+                    );
+                  })}
                 </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">SEWER</label>
-                  <input type="text" value={sewerName} onChange={(e) => setSewerName(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                    placeholder="Sewer name" />
-                </div>
-              </div>
+              )}
             </div>
 
             {/* Material Items List */}
@@ -1252,7 +1682,8 @@ export default function NewJobOrderPage() {
                     <div className="col-span-1"></div>
                   </div>
                   {materials.map((m) => (
-                    <div key={m.id} className="grid grid-cols-12 gap-2 items-center p-3 bg-gray-50 rounded-lg border border-gray-200">
+                    <div key={m.id} {...fe.field(`material-${m.id}`)}
+                      className={`grid grid-cols-12 gap-2 items-center p-3 rounded-lg border ${fe.errors[`material-${m.id}`] ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'}`}>
                       <div className="col-span-4">
                         <select value={m.materialSource}
                           onChange={(e) => updateMaterial(m.id, 'materialSource', e.target.value as 'inventory' | 'custom')}
@@ -1295,6 +1726,7 @@ export default function NewJobOrderPage() {
                           </svg>
                         </button>
                       </div>
+                      <FieldError message={fe.errors[`material-${m.id}`]} className="col-span-12 mt-0" />
                     </div>
                   ))}
                   {materialTotal > 0 && (
@@ -1341,6 +1773,15 @@ export default function NewJobOrderPage() {
               </div>
             </div>
 
+            {choosesBranch && (
+              <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Branch</p>
+                <p className="font-semibold text-gray-900">
+                  {retailBranches.find((b) => b.id === orderBranchId)?.name || 'Not chosen'}
+                </p>
+              </div>
+            )}
+
             {/* Services */}
             <div className="bg-[#eef1fb] rounded-xl p-4 border border-[#c7d2f5]">
               <p className="text-xs font-medium text-[#011c72] uppercase tracking-wide mb-2">Selected Services</p>
@@ -1385,7 +1826,7 @@ export default function NewJobOrderPage() {
                   <span className="font-medium text-gray-900">₱{materialTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                 </div>
                 <div className="flex items-center gap-3">
-                  <label className="text-sm text-gray-600 shrink-0">Profit Margin</label>
+                  <label className="text-sm text-gray-600 shrink-0">Price as % of materials</label>
                   <div className="relative flex-1">
                     <input
                       type="number" min="0" max="1000" step="1"
@@ -1399,7 +1840,9 @@ export default function NewJobOrderPage() {
                 <div className="flex items-center justify-between bg-white border border-[#c7d2f5] rounded-lg px-4 py-3">
                   <div>
                     <p className="text-sm font-medium text-[#011c72]">Suggested Price</p>
-                    <p className="text-xs text-gray-500 mt-0.5">{profitMargin}% of materials cost (100% = break-even)</p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {(profitMargin / 100).toLocaleString('en-PH', { maximumFractionDigits: 2 })}× materials cost (100% = break-even, before labor)
+                    </p>
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="text-lg font-bold text-[#011c72]">
@@ -1407,8 +1850,10 @@ export default function NewJobOrderPage() {
                     </span>
                     <button
                       type="button"
-                      onClick={() => { setEstimatedTotal(suggestedPrice); setDownPayment(suggestedPrice / 2); }}
-                      className="text-xs font-medium text-white bg-[#011c72] hover:bg-[#022494] px-3 py-1.5 rounded-lg transition-colors shrink-0"
+                      onClick={() => setEstimatedTotal(suggestedPrice)}
+                      disabled={suggestedPrice > MAX_JOB_ORDER_PRICE}
+                      title={suggestedPrice > MAX_JOB_ORDER_PRICE ? 'Above the ₱99,999,999.99 price limit' : undefined}
+                      className="text-xs font-medium text-white bg-[#011c72] hover:bg-[#022494] px-3 py-1.5 rounded-lg transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       Use This
                     </button>
@@ -1421,20 +1866,21 @@ export default function NewJobOrderPage() {
             <div className="space-y-3">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Total Amount for the Work
+                  Price for the Work <span className="text-xs font-normal text-gray-400">(VAT included, before discount)</span>
                 </label>
                 <div className="relative">
                   <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">₱</span>
-                  <input type="number" min="0" step="0.01"
+                  <input type="number" min="0" max={MAX_JOB_ORDER_PRICE} step="0.01"
                     value={estimatedTotal || ''}
                     onChange={(e) => {
-                      const val = parseFloat(e.target.value) || 0;
-                      setEstimatedTotal(val);
-                      setDownPayment(val / 2);
+                      // Up to 8 digits (under ₱100M): longer input is ignored
+                      if (!isValidPriceInput(e.target.value)) return;
+                      setEstimatedTotal(parseFloat(e.target.value) || 0);
                     }}
                     className="w-full pl-8 pr-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                     placeholder="0.00" />
                 </div>
+                <p className="text-xs text-gray-400 mt-1">Up to ₱99,999,999.99</p>
               </div>
 
               {/* Discount (editable per-order; pre-filled from the customer's loyalty discount) */}
@@ -1457,16 +1903,34 @@ export default function NewJobOrderPage() {
                 </div>
               </div>
 
-              {estimatedTotal > 0 && orderDiscountPct > 0 && (
-                <div className="bg-green-50 border border-green-200 rounded-xl p-4 space-y-1">
-                  <div className="flex items-center justify-between text-sm text-green-800">
-                    <span>Discount ({orderDiscountPct}%)</span>
-                    <span>− ₱{discountAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+              <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
+                <input type="checkbox" checked={vatOn} onChange={(e) => setVatOn(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300 text-[#011c72]" />
+                Price includes {vatRate}% VAT
+              </label>
+
+              {estimatedTotal > 0 && (orderDiscountPct > 0 || vatPct > 0) && (
+                <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-1 text-sm">
+                  <div className="flex items-center justify-between text-gray-600">
+                    <span>Price</span>
+                    <span>₱{estimatedTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   </div>
-                  <div className="flex items-center justify-between text-sm font-semibold text-green-900">
-                    <span>Total after discount</span>
-                    <span>₱{discountedTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  {orderDiscountPct > 0 && (
+                    <div className="flex items-center justify-between text-green-700">
+                      <span>Discount ({orderDiscountPct}%)</span>
+                      <span>− ₱{discountAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between font-semibold text-gray-900 pt-1 border-t border-gray-200">
+                    <span>Total</span>
+                    <span>₱{finalTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   </div>
+                  {vatPct > 0 && (
+                    <div className="flex items-center justify-between text-xs text-gray-500">
+                      <span>Includes VAT ({vatPct}%) · ₱{(finalTotal - vatAmount).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} before VAT</span>
+                      <span>₱{vatAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1474,10 +1938,10 @@ export default function NewJobOrderPage() {
                 <div className="bg-[#eef1fb] border border-[#c7d2f5] rounded-xl p-4 flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-[#011c72]">Down Payment (50%)</p>
-                    <p className="text-xs text-[#011c72] mt-0.5">{orderDiscountPct > 0 ? 'Half of total after discount' : 'Half of total'}</p>
+                    <p className="text-xs text-[#011c72] mt-0.5">Half of the total</p>
                   </div>
                   <span className="text-xl font-bold text-[#011c72]">
-                    ₱{(discountedTotal / 2).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    ₱{(finalTotal / 2).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </span>
                 </div>
               )}
@@ -1532,15 +1996,22 @@ export default function NewJobOrderPage() {
             </svg>
             Back
           </button>
-          <h1 className="text-3xl font-bold text-gray-900">New Job Order</h1>
-          <p className="text-gray-500 mt-1">Create a new service order for a customer</p>
+          <h1 className="text-3xl font-bold text-gray-900">
+            {editingPremadeDraftId ? 'Premade Draft' : 'New Job Order'}
+          </h1>
+          <p className="text-gray-500 mt-1">
+            {editingPremadeDraftId
+                ? 'Not yet a job order: no stock is taken until you confirm it'
+                : 'Record a job order for work the customer has confirmed'}
+          </p>
         </div>
 
         {/* Order Type Selector */}
+        {!editingPremadeDraftId && (
         <div className="mb-6 bg-white rounded-2xl shadow-sm border border-gray-200 p-5">
           <p className="text-sm font-semibold text-gray-700 mb-3">Order Type</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <button type="button" onClick={() => { setOrderType('normal'); setStep(1); setError(''); }}
+            <button type="button" onClick={() => { setOrderType('normal'); setStep(1); setError(''); fe.clear(); }}
               className={`text-left px-4 py-3.5 rounded-xl border-2 transition-all ${orderType === 'normal' ? 'border-[#011c72] bg-[#eef1fb] text-[#011c72] shadow-sm' : 'border-gray-200 text-gray-700 hover:border-[#011c72]'}`}>
               <div className="flex items-center gap-2 mb-1">
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1550,7 +2021,7 @@ export default function NewJobOrderPage() {
               </div>
               <div className="text-xs opacity-70">Custom service work order flow</div>
             </button>
-            <button type="button" onClick={() => { setOrderType('premade'); setError(''); }}
+            <button type="button" onClick={() => { setOrderType('premade'); setError(''); fe.clear(); }}
               className={`text-left px-4 py-3.5 rounded-xl border-2 transition-all ${orderType === 'premade' ? 'border-[#011c72] bg-[#eef1fb] text-[#011c72] shadow-sm' : 'border-gray-200 text-gray-700 hover:border-[#011c72]'}`}>
               <div className="flex items-center gap-2 mb-1">
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1562,6 +2033,7 @@ export default function NewJobOrderPage() {
             </button>
           </div>
         </div>
+        )}
 
         {/* Step Indicator (Normal orders only) */}
         {orderType === 'normal' && (
@@ -1570,7 +2042,7 @@ export default function NewJobOrderPage() {
               {STEPS.map((s, index) => (
                 <div key={s.num} className="flex items-start flex-1">
                   <div className="flex flex-col items-center">
-                    <button type="button" onClick={() => { if (s.num < step) { setError(''); setStep(s.num); } }}
+                    <button type="button" onClick={() => { if (s.num < step) { setError(''); fe.clear(); setStep(s.num); } }}
                       className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold text-sm transition-all duration-200 ${
                         step > s.num ? 'bg-[#011c72] text-white shadow-md cursor-pointer'
                         : step === s.num ? 'bg-[#011c72] text-white shadow-lg ring-4 ring-amber-200'
@@ -1595,8 +2067,23 @@ export default function NewJobOrderPage() {
           </div>
         )}
 
+        {editingDraftId && (
+          <div className="mb-5 flex items-center gap-3 rounded-xl border border-[#c7d2f5] bg-[#eef1fb] px-4 py-3">
+            <svg className="w-5 h-5 shrink-0 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+            </svg>
+            <p className="text-sm text-[#011c72]">
+              {loadingDraft
+                ? 'Loading draft…'
+                : <>Editing a saved draft. <span className="font-semibold">Update Draft</span> saves your changes; confirming it from the Sales page turns it into a real job order.</>}
+            </p>
+          </div>
+        )}
+
         {/* Form Card */}
-        <form onSubmit={handleSubmit}>
+        {/* noValidate: problems are shown next to their fields, not as browser bubbles */}
+        <form onSubmit={handleSubmit} noValidate>
           <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-5">
             {orderType === 'normal' ? renderStep() : renderPremadeForm()}
           </div>
@@ -1604,7 +2091,7 @@ export default function NewJobOrderPage() {
           {/* Navigation Buttons */}
           {orderType === 'normal' ? (
             <div className="flex justify-between items-center gap-3">
-              <button type="button" onClick={() => { setError(''); setStep(step - 1); }} disabled={step === 1}
+              <button type="button" onClick={() => { setError(''); fe.clear(); setStep(step - 1); }} disabled={step === 1}
                 className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors ${
                   step === 1 ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'
                 }`}>
@@ -1615,12 +2102,12 @@ export default function NewJobOrderPage() {
               </button>
               <div className="flex items-center gap-3">
                 <button type="button" onClick={saveDraft} disabled={loading}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Save this order as a draft to finish later">
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  className="inline-flex items-center gap-2.5 px-6 py-3 rounded-xl text-base font-semibold bg-white border-2 border-[#011c72] text-[#011c72] hover:bg-[#eef1fb] transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  title={editingDraftId ? 'Save your changes to this draft' : 'Save this order as a draft to finish later'}>
+                  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h8l4 4v10a2 2 0 01-2 2H7a2 2 0 01-2-2V5z M9 3v4h6" />
                   </svg>
-                  Save as Draft
+                  {loading ? 'Saving…' : editingDraftId ? 'Update Draft' : 'Save as Draft'}
                 </button>
               {step < 5 ? (
                 <button key="next-btn" type="submit"
@@ -1658,7 +2145,7 @@ export default function NewJobOrderPage() {
                   Cancel
                 </button>
               ) : (
-                <button type="button" onClick={() => { setError(''); setPremadeStep(1); }}
+                <button type="button" onClick={() => { setError(''); fe.clear(); setPremadeStep(1); }}
                   className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 transition-colors">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -1666,13 +2153,18 @@ export default function NewJobOrderPage() {
                   Back
                 </button>
               )}
-              <div className="flex gap-3">
+              <div className="flex flex-wrap justify-end gap-3">
                 {premadeStep === 2 && (
                   <button type="button" onClick={() => router.back()}
                     className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium bg-white border border-red-200 text-red-600 hover:bg-red-50 transition-colors">
                     Cancel
                   </button>
                 )}
+                <button type="button" onClick={savePremadeDraft} disabled={savingPremadeDraft || loading || loadingPremadeDraft}
+                  title="Save to finish later. No stock is taken."
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-semibold bg-white border-2 border-[#011c72] text-[#011c72] hover:bg-[#eef1fb] transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                  {savingPremadeDraft ? 'Saving…' : editingPremadeDraftId ? 'Save Draft' : 'Save as Draft'}
+                </button>
                 <button type="submit" disabled={loading}
                   className="inline-flex items-center gap-2 px-6 py-2.5 bg-[#011c72] hover:bg-[#01268c] text-white rounded-xl font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">
                   {loading ? (
@@ -1692,7 +2184,7 @@ export default function NewJobOrderPage() {
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                       </svg>
-                      Create Premade Order
+                      {editingPremadeDraftId ? 'Confirm Job Order' : 'Create Premade Order'}
                     </>
                   )}
                 </button>
@@ -1700,6 +2192,9 @@ export default function NewJobOrderPage() {
             </div>
           )}
 
+          {notice && !error && (
+            <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-xl text-green-700 text-sm">{notice}</div>
+          )}
           {error && (
             <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-xl text-red-600 text-sm flex items-start gap-2">
               <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">

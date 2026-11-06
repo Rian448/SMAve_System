@@ -1,9 +1,10 @@
 ﻿'use client';
-import { formatDate, formatDateTime } from '@/lib/dateUtils';
+import { formatDate } from '@/lib/dateUtils';
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, PurchaseOrder } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 
 export default function PurchaseOrderDetailPage() {
   const router = useRouter();
@@ -14,6 +15,7 @@ export default function PurchaseOrderDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
+  const { can } = useAuth();
 
   useEffect(() => {
     if (poId) {
@@ -43,8 +45,7 @@ export default function PurchaseOrderDetailPage() {
       await api.purchaseOrders.approve(Number(poId));
       await fetchPurchaseOrder();
     } catch (error) {
-      console.error('Error approving purchase order:', error);
-      setError('Failed to approve purchase order');
+      setError(error instanceof Error && error.message ? error.message : 'Failed to approve purchase order');
     } finally {
       setActionLoading(false);
     }
@@ -56,8 +57,7 @@ export default function PurchaseOrderDetailPage() {
       await api.purchaseOrders.receive(Number(poId));
       await fetchPurchaseOrder();
     } catch (error) {
-      console.error('Error receiving purchase order:', error);
-      setError('Failed to confirm purchase order');
+      setError(error instanceof Error && error.message ? error.message : 'Failed to confirm purchase order');
     } finally {
       setActionLoading(false);
     }
@@ -256,7 +256,7 @@ export default function PurchaseOrderDetailPage() {
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h2>
               <div className="space-y-3">
-                {purchaseOrder.status === 'pending' && (
+                {purchaseOrder.status === 'pending' && can('purchase_orders.approve') && (
                   <button
                     onClick={handleApprove}
                     disabled={actionLoading}
@@ -278,7 +278,7 @@ export default function PurchaseOrderDetailPage() {
                   </button>
                 )}
 
-                {purchaseOrder.status === 'approved' && (
+                {purchaseOrder.status === 'approved' && can('purchase_orders.receive') && (
                   <button
                     onClick={handleReceive}
                     disabled={actionLoading}
@@ -331,6 +331,7 @@ export default function PurchaseOrderDetailPage() {
                     <p className="text-sm font-medium text-gray-900">Order Created</p>
                     <p className="text-xs text-gray-500">
                       {formatDate(purchaseOrder.createdAt)}
+                      {purchaseOrder.createdByName && <> · {purchaseOrder.createdByName}</>}
                     </p>
                   </div>
                 </div>
@@ -345,6 +346,7 @@ export default function PurchaseOrderDetailPage() {
                       <p className="text-sm font-medium text-gray-900">Order Approved</p>
                       <p className="text-xs text-gray-500">
                         {formatDate(purchaseOrder.approvedAt)}
+                        {purchaseOrder.approvedByName && <> · {purchaseOrder.approvedByName}</>}
                       </p>
                     </div>
                   </div>
@@ -358,7 +360,8 @@ export default function PurchaseOrderDetailPage() {
                     <div>
                       <p className="text-sm font-medium text-gray-900">Order Received</p>
                       <p className="text-xs text-gray-500">
-                        {formatDate(purchaseOrder.createdAt)}
+                        {formatDate(purchaseOrder.receivedAt)}
+                        {purchaseOrder.receivedByName && <> · {purchaseOrder.receivedByName}</>}
                       </p>
                     </div>
                   </div>

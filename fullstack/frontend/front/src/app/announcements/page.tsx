@@ -2,6 +2,9 @@
 import { useEffect, useState, Fragment } from 'react';
 import { api, type Announcement } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
+import { useConfirm } from '@/components/ConfirmDialog';
+import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
+import { formatDateTime, isMeaningfullyLater } from '@/lib/dateUtils';
 
 const PRIORITY_STYLES: Record<string, { bar: string; badge: string; label: string }> = {
   urgent: { bar: 'border-l-red-500', badge: 'bg-red-100 text-red-700', label: 'Urgent' },
@@ -13,7 +16,15 @@ const BLANK_FORM = { title: '', body: '', priority: 'info', isPinned: false };
 
 const inputCls = 'w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm';
 
-function PostForm({ f, setF, onSubmit, onCancel, submitLabel, saving, formError }: {
+/** The checks a post must pass, keyed by the form's field names under `prefix`. */
+function postProblems(f: typeof BLANK_FORM, prefix: string) {
+  return {
+    [`${prefix}-title`]: !f.title.trim() && 'Enter a title.',
+    [`${prefix}-body`]: !f.body.trim() && 'Write the message.',
+  };
+}
+
+function PostForm({ f, setF, onSubmit, onCancel, submitLabel, saving, formError, fe, prefix }: {
   f: typeof BLANK_FORM;
   setF: (v: typeof BLANK_FORM) => void;
   onSubmit: () => void;
@@ -21,22 +32,27 @@ function PostForm({ f, setF, onSubmit, onCancel, submitLabel, saving, formError 
   submitLabel: string;
   saving: boolean;
   formError: string;
+  fe: ReturnType<typeof useFieldErrors>;
+  /** Keeps the create and edit forms' fields apart when both are open */
+  prefix: string;
 }) {
   return (
     <div className="bg-white rounded-2xl border border-gray-200 p-6 space-y-4 shadow-sm">
       {formError && (
         <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-2 text-sm">{formError}</div>
       )}
-      <div>
+      <div {...fe.field(`${prefix}-title`)}>
         <label className="block text-xs font-medium text-gray-500 mb-1.5">Title <span className="text-red-500">*</span></label>
         <input type="text" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })}
           placeholder="Announcement title…" className={inputCls} />
+        <FieldError message={fe.errors[`${prefix}-title`]} />
       </div>
-      <div>
+      <div {...fe.field(`${prefix}-body`)}>
         <label className="block text-xs font-medium text-gray-500 mb-1.5">Message <span className="text-red-500">*</span></label>
         <textarea rows={4} value={f.body} onChange={(e) => setF({ ...f, body: e.target.value })}
           placeholder="Write the announcement here…"
           className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm resize-none" />
+        <FieldError message={fe.errors[`${prefix}-body`]} />
       </div>
       <div className="flex items-center gap-4 flex-wrap">
         <div>
@@ -71,10 +87,14 @@ function PostForm({ f, setF, onSubmit, onCancel, submitLabel, saving, formError 
 }
 
 export default function AnnouncementsPage() {
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'administrator' || user?.role === 'supervisor';
+  const { can } = useAuth();
+  // Those who manage the board can post, edit, archive and see archived notices
+  const isAdmin = can('announcements.manage');
+  const { confirm, confirmDialog } = useConfirm();
 
   const [items, setItems] = useState<Announcement[]>([]);
+  // Archived posts are hidden by default; only admins can reveal them to restore.
+  const [showArchived, setShowArchived] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -83,28 +103,25 @@ export default function AnnouncementsPage() {
   const [form, setForm] = useState({ ...BLANK_FORM });
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
+  const fe = useFieldErrors();
 
   // Edit
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState({ ...BLANK_FORM });
 
-  // Delete confirm
-  const [deletingId, setDeletingId] = useState<number | null>(null);
-
-  const load = () => {
+  const load = (includeArchived = showArchived) => {
     setLoading(true);
-    api.announcements.list()
+    api.announcements.list(includeArchived && isAdmin)
       .then((res) => setItems(res.data || []))
       .catch(() => setError('Failed to load announcements.'))
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(showArchived); }, [showArchived, isAdmin]);
 
   const handleCreate = async () => {
     setFormError('');
-    if (!form.title.trim()) { setFormError('Title is required.'); return; }
-    if (!form.body.trim()) { setFormError('Body is required.'); return; }
+    if (fe.show(postProblems(form, 'new'))) return;
     setSaving(true);
     try {
       await api.announcements.create({ title: form.title.trim(), body: form.body.trim(), priority: form.priority, isPinned: form.isPinned });
@@ -126,6 +143,7 @@ export default function AnnouncementsPage() {
   const handleEdit = async () => {
     if (!editingId) return;
     setFormError('');
+    if (fe.show(postProblems(editForm, 'edit'))) return;
     setSaving(true);
     try {
       await api.announcements.update(editingId, { title: editForm.title.trim(), body: editForm.body.trim(), priority: editForm.priority, isPinned: editForm.isPinned });
@@ -138,10 +156,18 @@ export default function AnnouncementsPage() {
     }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (a: Announcement) => {
+    const ok = await confirm({
+      title: 'Delete this announcement?',
+      message: <>“{a.title}” will be permanently removed from the bulletin board.</>,
+      warning: 'This cannot be undone. To keep a copy you can restore later, archive it instead.',
+      confirmLabel: 'Delete permanently',
+      variant: 'danger',
+      requireText: 'DELETE',
+    });
+    if (!ok) return;
     try {
-      await api.announcements.delete(id);
-      setDeletingId(null);
+      await api.announcements.delete(a.id);
       load();
     } catch {
       setError('Failed to delete.');
@@ -149,8 +175,25 @@ export default function AnnouncementsPage() {
   };
 
   const toggleArchive = async (a: Announcement) => {
-    await api.announcements.update(a.id, { isActive: !a.isActive });
-    load();
+    const archiving = a.isActive;
+    const ok = await confirm({
+      title: archiving ? 'Archive this announcement?' : 'Restore this announcement?',
+      message: archiving
+        ? <>“{a.title}” will be hidden from the bulletin board for all staff.</>
+        : <>“{a.title}” will reappear on the bulletin board for all staff.</>,
+      warning: archiving
+        ? 'You can bring it back any time with "Show archived".'
+        : undefined,
+      confirmLabel: archiving ? 'Archive' : 'Restore',
+      variant: archiving ? 'warning' : 'info',
+    });
+    if (!ok) return;
+    try {
+      await api.announcements.update(a.id, { isActive: !a.isActive });
+      load();
+    } catch {
+      setError(archiving ? 'Failed to archive.' : 'Failed to restore.');
+    }
   };
 
   const togglePin = async (a: Announcement) => {
@@ -171,15 +214,25 @@ export default function AnnouncementsPage() {
             <h1 className="text-2xl font-bold text-gray-900">Bulletin Board</h1>
             <p className="text-sm text-gray-500 mt-1">Staff announcements and notices</p>
           </div>
-          {isAdmin && !showCreate && (
-            <button onClick={() => { setShowCreate(true); setFormError(''); }}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#011c72] text-white text-sm font-medium hover:bg-[#022494] transition-colors">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-              </svg>
-              Post Announcement
-            </button>
-          )}
+          <div className="flex items-center gap-3">
+            {isAdmin && (
+              <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-600 select-none">
+                <input type="checkbox" checked={showArchived}
+                  onChange={(e) => setShowArchived(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300 text-[#011c72] focus:ring-[#011c72]" />
+                Show archived
+              </label>
+            )}
+            {isAdmin && !showCreate && (
+              <button onClick={() => { setShowCreate(true); setFormError(''); }}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#011c72] text-white text-sm font-medium hover:bg-[#022494] transition-colors">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                Post Announcement
+              </button>
+            )}
+          </div>
         </div>
 
         {error && (
@@ -197,6 +250,7 @@ export default function AnnouncementsPage() {
               submitLabel="Post"
               saving={saving}
               formError={formError}
+              fe={fe} prefix="new"
             />
           </div>
         )}
@@ -220,7 +274,6 @@ export default function AnnouncementsPage() {
             {sortedItems.map((a, idx) => {
               const style = PRIORITY_STYLES[a.priority] || PRIORITY_STYLES.info;
               const isEditing = editingId === a.id;
-              const isDeleting = deletingId === a.id;
               const showDivider = !a.isPinned && idx > 0 && sortedItems[idx - 1].isPinned;
 
               return (
@@ -253,6 +306,7 @@ export default function AnnouncementsPage() {
                         submitLabel="Save Changes"
                         saving={saving}
                         formError={formError}
+                        fe={fe} prefix="edit"
                       />
                     </div>
                   ) : (
@@ -267,7 +321,7 @@ export default function AnnouncementsPage() {
                             <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500">Archived</span>
                           )}
                         </div>
-                        {isAdmin && !isDeleting && (
+                        {isAdmin && (
                           <div className="flex items-center gap-2 shrink-0">
                             <button onClick={() => togglePin(a)}
                               title={a.isPinned ? 'Unpin' : 'Pin to top'}
@@ -282,22 +336,11 @@ export default function AnnouncementsPage() {
                               className="text-xs text-gray-500 hover:text-yellow-600 transition-colors">
                               {a.isActive ? 'Archive' : 'Restore'}
                             </button>
-                            <button onClick={() => setDeletingId(a.id)}
+                            <button onClick={() => handleDelete(a)}
                               className="text-xs text-gray-500 hover:text-red-600 transition-colors">Delete</button>
                           </div>
                         )}
                       </div>
-
-                      {/* Delete confirm inline */}
-                      {isDeleting && (
-                        <div className="mt-3 flex items-center gap-3 bg-red-50 rounded-lg px-4 py-2.5">
-                          <span className="text-sm text-red-700 flex-1">Delete this announcement?</span>
-                          <button onClick={() => handleDelete(a.id)}
-                            className="px-3 py-1 rounded-lg bg-red-600 text-white text-xs font-medium hover:bg-red-700">Yes, delete</button>
-                          <button onClick={() => setDeletingId(null)}
-                            className="px-3 py-1 rounded-lg border border-gray-300 text-xs text-gray-600 hover:bg-gray-100">Cancel</button>
-                        </div>
-                      )}
 
                       {/* Content */}
                       <h3 className="mt-3 text-base font-semibold text-gray-900">{a.title}</h3>
@@ -313,7 +356,19 @@ export default function AnnouncementsPage() {
                         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
-                        <span>{a.createdAt}</span>
+                        {/* The API sends UTC with a Z suffix; formatDateTime renders it
+                            in Asia/Manila so staff see Philippine time. */}
+                        <span title={`Posted ${formatDateTime(a.createdAt)} (PHT)`}>
+                          {formatDateTime(a.createdAt)}
+                        </span>
+                        {isMeaningfullyLater(a.updatedAt, a.createdAt) && (
+                          <>
+                            <span className="mx-1">·</span>
+                            <span title={`Edited ${formatDateTime(a.updatedAt)} (PHT)`}>
+                              edited {formatDateTime(a.updatedAt)}
+                            </span>
+                          </>
+                        )}
                       </div>
                     </div>
                   )}
@@ -324,6 +379,7 @@ export default function AnnouncementsPage() {
           </div>
         )}
       </main>
+      {confirmDialog}
     </div>
   );
 }

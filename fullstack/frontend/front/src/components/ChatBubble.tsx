@@ -8,6 +8,21 @@ const ROLE_COLOR: Record<string, string> = {
   supervisor:    'bg-purple-700',
 };
 
+const ROLE_LABEL: Record<string, string> = {
+  administrator: 'Admin',
+  supervisor:    'Supervisor',
+  sales_manager: 'Sales Manager',
+  owner:         'Owner',
+};
+
+// Shown above each message as Role(Username), e.g. Admin(carol)
+function senderLabel(m: ChatMessage) {
+  const role = ROLE_LABEL[m.senderRole]
+    || m.senderRole.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  const name = m.senderUsername || m.senderName;
+  return role ? `${role}(${name})` : name;
+}
+
 function initials(name: string) {
   return name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
 }
@@ -27,7 +42,7 @@ function formatDay(iso: string) {
 }
 
 export default function ChatBubble() {
-  const { user } = useAuth();
+  const { user, can } = useAuth();
 
   // ── All hooks unconditionally at the top ──────────────────────────────────
   const [open, setOpen]         = useState(false);
@@ -40,9 +55,11 @@ export default function ChatBubble() {
   const bottomRef   = useRef<HTMLDivElement>(null);
   const inputRef    = useRef<HTMLTextAreaElement>(null);
   const pollRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Without chat access the bubble is hidden, so don't ask the server for messages either
+  const allowed = !!user && can('chat.use');
 
   const fetchMessages = useCallback(async (sinceParam?: string) => {
-    if (!user) return;
+    if (!user || !allowed) return;
     try {
       const res = await api.chat.list(sinceParam ?? undefined);
       const msgs: ChatMessage[] = (res as any).data ?? res ?? [];
@@ -63,20 +80,21 @@ export default function ChatBubble() {
       const last = msgs[msgs.length - 1];
       if (last) latestTs.current = last.createdAt;
     } catch { /* ignore */ }
-  }, [open, user]);
+  }, [open, user, allowed]);
 
-  // Initial load
-  useEffect(() => { fetchMessages(); }, []);  // eslint-disable-line react-hooks/exhaustive-deps
+  // Initial load (again once chat access is known, e.g. right after login)
+  useEffect(() => { fetchMessages(); }, [allowed]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // Polling: 3s when open, 15s when closed
   useEffect(() => {
     if (pollRef.current) clearInterval(pollRef.current);
+    if (!allowed) return;
     pollRef.current = setInterval(
       () => fetchMessages(latestTs.current ?? undefined),
       open ? 3000 : 15000,
     );
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [open, fetchMessages]);
+  }, [open, fetchMessages, allowed]);
 
   // Scroll to bottom when messages change and panel is open
   useEffect(() => {
@@ -93,7 +111,6 @@ export default function ChatBubble() {
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Early return AFTER all hooks ─────────────────────────────────────────
-  const allowed = user?.role === 'administrator' || user?.role === 'supervisor';
   if (!allowed) return null;
 
   // ── Handlers ──────────────────────────────────────────────────────────────
@@ -133,8 +150,8 @@ export default function ChatBubble() {
 
       {/* Chat panel */}
       {open && (
-        <div className="w-80 bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col overflow-hidden"
-          style={{ height: '480px' }}>
+        <div className="w-80 max-w-[calc(100vw-2.5rem)] bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col overflow-hidden"
+          style={{ height: 'min(480px, calc(100dvh - 7rem))' }}>
 
           {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 bg-[#011c72] text-white">
@@ -186,13 +203,14 @@ export default function ChatBubble() {
                             </div>
                           )}
                         </div>
-                        <div className={`flex flex-col max-w-50 ${isMe ? 'items-end' : 'items-start'}`}>
+                        <div className={`flex flex-col min-w-0 max-w-50 ${isMe ? 'items-end' : 'items-start'}`}>
                           {!prevSame && (
                             <span className="text-[10px] text-gray-400 mb-0.5 px-1">
-                              {isMe ? 'You' : m.senderName}
+                              {senderLabel(m)}
                             </span>
                           )}
-                          <div className={`px-3 py-2 rounded-2xl text-sm leading-snug whitespace-pre-wrap wrap-break-word
+                          {/* wrap-anywhere: an unbroken word (a long link, "ahhhh…") wraps inside the bubble */}
+                          <div className={`max-w-full px-3 py-2 rounded-2xl text-sm leading-snug whitespace-pre-wrap wrap-anywhere
                             ${isMe ? 'bg-[#011c72] text-white rounded-br-sm' : 'bg-gray-100 text-gray-900 rounded-bl-sm'}`}>
                             {m.content}
                           </div>

@@ -1,7 +1,20 @@
 ﻿'use client';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { api, CostingData, ApiResponse } from '@/lib/api';
+import { api, CostingData, ApiResponse, CostComparison } from '@/lib/api';
+import { formatDate } from '@/lib/dateUtils';
+
+const peso = (n: number) => `₱${(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** Variance in pesos: over the estimate is a loss (red), under is a saving (green) */
+function Variance({ value }: { value: number }) {
+  if (Math.abs(value) < 0.005) return <span className="text-gray-500">₱0.00</span>;
+  return (
+    <span className={value > 0 ? 'text-red-600 font-semibold' : 'text-green-600 font-semibold'}>
+      {value > 0 ? '+' : '−'}{peso(Math.abs(value))}
+    </span>
+  );
+}
 
 export default function CostingDetailPage() {
   const params = useParams();
@@ -54,8 +67,18 @@ export default function CostingDetailPage() {
   }
 
   const totalCost = costing.materialCost + costing.laborCost + costing.overheadCost;
+  const comp = costing.components;
+  const compRows: { key: string; label: string; hint: string; c: CostComparison }[] = comp ? [
+    { key: 'materials', label: 'Materials', hint: 'Estimated: planned materials · Actual: planned + extra materials issued', c: comp.materials },
+    { key: 'labor', label: 'Labor', hint: "Estimated: labor rates · Actual: the workers' actual pay once finished", c: comp.labor },
+    { key: 'overhead', label: 'Other Expenses (Overhead)', hint: 'Thread, glue, delivery and other job expenses', c: comp.overhead },
+  ] : [];
+  const extras = costing.extraMaterials || [];
   const profit = costing.totalPrice - totalCost;
   const profitMargin = costing.totalPrice > 0 ? (profit / costing.totalPrice) * 100 : 0;
+  // Share of total cost; an order with no recorded costs would otherwise show NaN%
+  const share = (value: number) => (totalCost > 0 ? (value / totalCost) * 100 : 0);
+  const gaugePct = Math.min(Math.max(profitMargin, 0), 100);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -97,7 +120,7 @@ export default function CostingDetailPage() {
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">Total Revenue</p>
+                <p className="text-sm font-medium text-gray-500">Total Revenue <span className="text-xs font-normal text-gray-400">(excl. VAT)</span></p>
                 <p className="text-2xl font-bold text-gray-900 mt-1">
                   ₱{costing.totalPrice.toLocaleString()}
                 </p>
@@ -170,21 +193,21 @@ export default function CostingDetailPage() {
               <div className="h-8 flex rounded-lg overflow-hidden">
                 <div 
                   className="bg-blue-500 flex items-center justify-center text-xs text-white font-medium"
-                  style={{ width: `${(costing.materialCost / totalCost) * 100}%` }}
+                  style={{ width: `${share(costing.materialCost)}%` }}
                 >
-                  {((costing.materialCost / totalCost) * 100).toFixed(0)}%
+                  {share(costing.materialCost).toFixed(0)}%
                 </div>
                 <div 
                   className="bg-green-500 flex items-center justify-center text-xs text-white font-medium"
-                  style={{ width: `${(costing.laborCost / totalCost) * 100}%` }}
+                  style={{ width: `${share(costing.laborCost)}%` }}
                 >
-                  {((costing.laborCost / totalCost) * 100).toFixed(0)}%
+                  {share(costing.laborCost).toFixed(0)}%
                 </div>
                 <div 
                   className="bg-[#011c72] flex items-center justify-center text-xs text-white font-medium"
-                  style={{ width: `${(costing.overheadCost / totalCost) * 100}%` }}
+                  style={{ width: `${share(costing.overheadCost)}%` }}
                 >
-                  {((costing.overheadCost / totalCost) * 100).toFixed(0)}%
+                  {share(costing.overheadCost).toFixed(0)}%
                 </div>
               </div>
             </div>
@@ -200,7 +223,7 @@ export default function CostingDetailPage() {
                 </div>
                 <div className="text-right">
                   <p className="text-sm font-bold text-gray-900">₱{costing.materialCost.toLocaleString()}</p>
-                  <p className="text-xs text-gray-500">{((costing.materialCost / totalCost) * 100).toFixed(1)}%</p>
+                  <p className="text-xs text-gray-500">{share(costing.materialCost).toFixed(1)}%</p>
                 </div>
               </div>
               <div className="flex items-center justify-between p-4 bg-green-50 rounded-lg">
@@ -213,20 +236,20 @@ export default function CostingDetailPage() {
                 </div>
                 <div className="text-right">
                   <p className="text-sm font-bold text-gray-900">₱{costing.laborCost.toLocaleString()}</p>
-                  <p className="text-xs text-gray-500">{((costing.laborCost / totalCost) * 100).toFixed(1)}%</p>
+                  <p className="text-xs text-gray-500">{share(costing.laborCost).toFixed(1)}%</p>
                 </div>
               </div>
               <div className="flex items-center justify-between p-4 bg-[#eef1fb] rounded-lg">
                 <div className="flex items-center">
                   <div className="w-3 h-3 bg-[#011c72] rounded-full mr-3"></div>
                   <div>
-                    <p className="text-sm font-medium text-gray-900">Overhead</p>
-                    <p className="text-xs text-gray-500">Indirect costs and expenses</p>
+                    <p className="text-sm font-medium text-gray-900">Other Expenses</p>
+                    <p className="text-xs text-gray-500">Thread, glue, delivery and other job expenses</p>
                   </div>
                 </div>
                 <div className="text-right">
                   <p className="text-sm font-bold text-gray-900">₱{costing.overheadCost.toLocaleString()}</p>
-                  <p className="text-xs text-gray-500">{((costing.overheadCost / totalCost) * 100).toFixed(1)}%</p>
+                  <p className="text-xs text-gray-500">{share(costing.overheadCost).toFixed(1)}%</p>
                 </div>
               </div>
             </div>
@@ -247,7 +270,7 @@ export default function CostingDetailPage() {
                     stroke={profitMargin >= 30 ? '#22c55e' : profitMargin >= 15 ? '#eab308' : '#ef4444'}
                     strokeWidth="20" 
                     strokeLinecap="round"
-                    strokeDasharray={`${(profitMargin / 100) * 251.2} 251.2`}
+                    strokeDasharray={`${(gaugePct / 100) * 251.2} 251.2`}
                   />
                 </svg>
                 <div className="absolute inset-0 flex items-end justify-center pb-2">
@@ -274,7 +297,7 @@ export default function CostingDetailPage() {
               <div className="flex items-center justify-between py-3">
                 <span className="text-sm text-gray-500">Cost per Peso Revenue</span>
                 <span className="text-sm font-medium text-gray-900">
-                  ₱{(totalCost / costing.totalPrice).toFixed(2)}
+                  {costing.totalPrice > 0 ? `₱${(totalCost / costing.totalPrice).toFixed(2)}` : '—'}
                 </span>
               </div>
             </div>
@@ -322,27 +345,122 @@ export default function CostingDetailPage() {
           </div>
         </div>
 
-        {/* Material Details */}
-        {costing.items && costing.items.length > 0 && (
+        {/* Estimated vs Actual */}
+        {comp && (
           <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Material Details</h2>
+            <h2 className="text-lg font-semibold text-gray-900">Estimated vs Actual Cost</h2>
+            <p className="text-xs text-gray-500 mt-1 mb-4">A positive variance means the job cost more than planned.</p>
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="w-full min-w-[560px]">
                 <thead className="bg-gray-50">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Material</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Quantity</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Unit Price</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Total</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Component</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Estimated</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actual</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Variance</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
-                  {costing.items.map((item, index: number) => (
+                  {compRows.map(r => (
+                    <tr key={r.key}>
+                      <td className="px-4 py-3 text-sm text-gray-900">
+                        {r.label}
+                        <span className="block text-xs text-gray-400">{r.hint}</span>
+                      </td>
+                      <td className="px-4 py-3 text-sm text-right text-gray-700">{peso(r.c.estimated)}</td>
+                      <td className="px-4 py-3 text-sm text-right text-gray-900">{peso(r.c.actual)}</td>
+                      <td className="px-4 py-3 text-sm text-right"><Variance value={r.c.variance} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="bg-gray-50 font-semibold">
+                    <td className="px-4 py-3 text-sm text-gray-900">Total</td>
+                    <td className="px-4 py-3 text-sm text-right text-gray-900">{peso(comp.total.estimated)}</td>
+                    <td className="px-4 py-3 text-sm text-right text-gray-900">{peso(comp.total.actual)}</td>
+                    <td className="px-4 py-3 text-sm text-right"><Variance value={comp.total.variance} /></td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Extra materials issued beyond the plan */}
+        {comp && (
+          <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <h2 className="text-lg font-semibold text-gray-900">Extra Materials</h2>
+            <p className="text-xs text-gray-500 mt-1 mb-4">Material taken beyond the plan, such as a recut after a mistake. Included in the actual material cost above.</p>
+            {extras.length === 0 ? (
+              <p className="text-sm text-gray-500">No extra materials were issued for this job order.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[640px]">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Material</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reason</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Worker</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200">
+                    {extras.map(x => (
+                      <tr key={x.id}>
+                        <td className="px-4 py-3 text-sm text-gray-600 whitespace-nowrap">{formatDate(x.createdAt)}</td>
+                        <td className="px-4 py-3 text-sm text-gray-900">{x.materialName || '—'}{x.materialColor ? ` - ${x.materialColor}` : ''}</td>
+                        <td className="px-4 py-3 text-sm text-right text-gray-700">{x.quantity}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700">
+                          {x.reason}
+                          {x.notes && <span className="block text-xs text-gray-400">{x.notes}</span>}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-700">{x.workerName || '—'}</td>
+                        <td className="px-4 py-3 text-sm text-right font-medium text-red-600">{peso(x.value || 0)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-gray-50">
+                      <td colSpan={5} className="px-4 py-3 text-sm font-semibold text-gray-700 text-right">Total</td>
+                      <td className="px-4 py-3 text-sm text-right font-bold text-red-600">{peso(costing.extraMaterialsCost || 0)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Planned lines, at cost (what they cost us, not their selling price) */}
+        {costing.lines && costing.lines.length > 0 && (
+          <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Planned Lines</h2>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[560px]">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Quantity</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Unit Cost</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Estimated</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actual</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {costing.lines.map((ln, index) => (
                     <tr key={index}>
-                      <td className="px-4 py-3 text-sm text-gray-900">{item.name}</td>
-                      <td className="px-4 py-3 text-sm text-center text-gray-600">{item.quantity}</td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-600">₱{item.unitPrice.toLocaleString()}</td>
-                      <td className="px-4 py-3 text-sm text-right font-medium text-gray-900">₱{(item.quantity * item.unitPrice).toLocaleString()}</td>
+                      <td className="px-4 py-3 text-sm text-gray-900">
+                        {ln.name || `Item ${index + 1}`}
+                        {ln.workerName && <span className="block text-xs text-gray-400">{ln.workerName}</span>}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-gray-600 capitalize">{ln.category === 'expense' ? 'other' : ln.category}</td>
+                      <td className="px-4 py-3 text-sm text-center text-gray-600">{ln.quantity}</td>
+                      <td className="px-4 py-3 text-sm text-right text-gray-600">{peso(ln.unitCost)}</td>
+                      <td className="px-4 py-3 text-sm text-right text-gray-700">{peso(ln.estimatedCost)}</td>
+                      <td className="px-4 py-3 text-sm text-right font-medium text-gray-900">{peso(ln.actualCost)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -354,7 +472,7 @@ export default function CostingDetailPage() {
         {/* Actions */}
         <div className="mt-6 flex flex-wrap gap-3">
           <button 
-            onClick={() => router.push(`/sales/${costing.jobOrderId}`)}
+            onClick={() => router.push(`/sales/${costing.id}`)}
             className="inline-flex items-center px-4 py-2 bg-white border border-gray-200 hover:border-[#011c72] text-gray-700 rounded-lg font-medium transition-colors"
           >
             <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -362,11 +480,14 @@ export default function CostingDetailPage() {
             </svg>
             View Job Order
           </button>
-          <button className="inline-flex items-center px-4 py-2 bg-white border border-gray-200 hover:border-[#011c72] text-gray-700 rounded-lg font-medium transition-colors">
+          <button
+            type="button"
+            onClick={() => window.print()}
+            className="inline-flex items-center px-4 py-2 bg-white border border-gray-200 hover:border-[#011c72] text-gray-700 rounded-lg font-medium transition-colors">
             <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
             </svg>
-            Export Report
+            Print Report
           </button>
         </div>
       </main>

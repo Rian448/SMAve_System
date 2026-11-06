@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, RawMaterial, Supplier } from '@/lib/api';
+import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
 
 interface POItem {
   material_id: string;
@@ -14,6 +15,8 @@ interface POItem {
 export default function NewPurchaseOrderPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const fe = useFieldErrors();
   const [materials, setMaterials] = useState<RawMaterial[]>([]);
   const [loadingMaterials, setLoadingMaterials] = useState(true);
   const [savedSuppliers, setSavedSuppliers] = useState<Supplier[]>([]);
@@ -29,7 +32,8 @@ export default function NewPurchaseOrderPage() {
   ]);
 
   useEffect(() => {
-    api.inventory.getRawMaterials()
+    // Shops order their own stock and the warehouse's (which supplies them)
+    api.inventory.getRawMaterials({ includeWarehouse: true })
       .then(response => {
         setMaterials(response.data || []);
         setLoadingMaterials(false);
@@ -56,14 +60,16 @@ export default function NewPurchaseOrderPage() {
   const updateItem = (index: number, field: keyof POItem, value: string | number) => {
     const newItems = [...items];
     if (field === 'material_id') {
-      const material = materials.find(m => m.id === value);
+      // The dropdown gives the id as text
+      const material = materials.find(m => String(m.id) === String(value));
       if (material) {
         const label = [material.materialType, material.color, material.pattern].filter(Boolean).join(' - ');
         newItems[index] = {
           ...newItems[index],
           material_id: material.id.toString(),
           material_name: label,
-          unit_cost: material.unitPrice,
+          // A purchase order pays the supplier's cost, not our selling price
+          unit_cost: material.costPerUnit || material.unitPrice,
           unit: 'unit'
         };
       }
@@ -79,11 +85,26 @@ export default function NewPurchaseOrderPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError('');
+    const anyMaterial = items.some(item => item.material_id);
+    if (fe.show({
+      'po-supplier': !supplier.trim() && 'Choose a saved supplier or type the supplier name.',
+      'po-email': emailProblem(supplierEmail),
+      'po-date': !expectedDate && 'Choose the expected delivery date.',
+      ...Object.fromEntries(items.flatMap((item, index) => [
+        [`po-material-${index}`, !item.material_id && (anyMaterial ? 'Select a material, or remove this row.'
+          : 'Add at least one material to the purchase order.')],
+        [`po-qty-${index}`, !(item.quantity >= 1) && 'At least 1.'],
+      ])),
+    })) return;
     setLoading(true);
 
     try {
+      // A name that matches a saved supplier links the order to that supplier
+      const saved = savedSuppliers.find((s: Supplier) => s.name.trim().toLowerCase() === supplier.trim().toLowerCase());
       const purchaseOrder = {
         supplierName: supplier,
+        supplierId: saved?.id,
         items: items.filter(item => item.material_id).map(item => ({
           materialId: Number(item.material_id),
           name: item.material_name,
@@ -98,6 +119,7 @@ export default function NewPurchaseOrderPage() {
       router.push('/inventory?tab=purchase-orders');
     } catch (err) {
       console.error(err);
+      setError(err instanceof Error && err.message ? err.message : 'Failed to create the purchase order.');
     }
     setLoading(false);
   };
@@ -123,7 +145,10 @@ export default function NewPurchaseOrderPage() {
           </p>
         </div>
 
-        <form onSubmit={handleSubmit}>
+        {error && (
+          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>
+        )}
+        <form onSubmit={handleSubmit} noValidate>
           {/* Supplier Information */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
@@ -134,7 +159,7 @@ export default function NewPurchaseOrderPage() {
             </h2>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="md:col-span-2">
+              <div className="md:col-span-2" {...fe.field('po-supplier')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Supplier Name *
                 </label>
@@ -163,6 +188,7 @@ export default function NewPurchaseOrderPage() {
                   className="mt-2 w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   required
                 />
+                <FieldError message={fe.errors['po-supplier']} />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -176,7 +202,7 @@ export default function NewPurchaseOrderPage() {
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                 />
               </div>
-              <div>
+              <div {...fe.field('po-email')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Email Address
                 </label>
@@ -187,8 +213,9 @@ export default function NewPurchaseOrderPage() {
                   placeholder="supplier@email.com"
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                 />
+                <FieldError message={fe.errors['po-email']} />
               </div>
-              <div>
+              <div {...fe.field('po-date')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Expected Delivery Date *
                 </label>
@@ -199,6 +226,7 @@ export default function NewPurchaseOrderPage() {
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   required
                 />
+                <FieldError message={fe.errors['po-date']} />
               </div>
             </div>
           </div>
@@ -233,7 +261,7 @@ export default function NewPurchaseOrderPage() {
                 {items.map((item, index) => (
                   <div key={index} className="p-4 bg-gray-50 rounded-lg">
                     <div className="grid grid-cols-12 gap-4 items-end">
-                      <div className="col-span-12 md:col-span-4">
+                      <div className="col-span-12 md:col-span-4" {...fe.field(`po-material-${index}`)}>
                         <label className="block text-xs font-medium text-gray-500 mb-1">
                           Material
                         </label>
@@ -250,8 +278,9 @@ export default function NewPurchaseOrderPage() {
                             </option>
                           ))}
                         </select>
+                        <FieldError message={fe.errors[`po-material-${index}`]} />
                       </div>
-                      <div className="col-span-4 md:col-span-2">
+                      <div className="col-span-4 md:col-span-2" {...fe.field(`po-qty-${index}`)}>
                         <label className="block text-xs font-medium text-gray-500 mb-1">
                           Quantity
                         </label>
@@ -263,6 +292,7 @@ export default function NewPurchaseOrderPage() {
                           className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                           required
                         />
+                        <FieldError message={fe.errors[`po-qty-${index}`]} />
                       </div>
                       <div className="col-span-4 md:col-span-2">
                         <label className="block text-xs font-medium text-gray-500 mb-1">

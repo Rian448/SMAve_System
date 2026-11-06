@@ -1,9 +1,10 @@
 ﻿'use client';
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, JobOrder, CustomerOrder, ProductOrder, ProductOrderTransfer } from '@/lib/api';
+import { api, JobOrder, CustomerOrder, ProductOrder, ProductOrderTransfer, PremadeDraft } from '@/lib/api';
 import { formatDate as _fmtDate } from '@/lib/dateUtils';
 import Link from 'next/link';
+import { useConfirm } from '@/components/ConfirmDialog';
 
 type SalesTab = 'all' | 'custom-jobs' | 'premade-purchase' | 'premade-sales' | 'pickup-queue';
 
@@ -14,7 +15,8 @@ type UnifiedOrder = (JobOrder | CustomerOrder | ProductOrder) & {
 };
 
 export default function SalesPage() {
-  const { user } = useAuth();
+  const { confirm, confirmDialog } = useConfirm();
+  const { user, can } = useAuth();
   const [activeTab, setActiveTab] = useState<SalesTab>('all');
   const [orders, setOrders] = useState<UnifiedOrder[]>([]);
   const [loading, setLoading] = useState(true);
@@ -34,10 +36,13 @@ export default function SalesPage() {
   const [drafts, setDrafts] = useState<JobOrder[]>([]);
   const [showDrafts, setShowDrafts] = useState(false);
   const [draftBusyId, setDraftBusyId] = useState<number | null>(null);
+  // Premade job orders being prepared: no stock is taken until they are confirmed
+  const [premadeDrafts, setPremadeDrafts] = useState<PremadeDraft[]>([]);
+  const [draftKind, setDraftKind] = useState<'custom' | 'premade'>('custom');
 
   const [transferDateFilter, setTransferDateFilter] = useState<'all' | 'day' | 'week' | 'month' | 'year'>('all');
 
-  const canSeePremadeFeatures = user && ['administrator', 'supervisor'].includes(user.role);
+  const canSeePremadeFeatures = !!user && can('product_orders.view');
 
   const fetchOrders = useCallback(async () => {
     try {
@@ -97,7 +102,18 @@ export default function SalesPage() {
 
   useEffect(() => { fetchOrders(); }, [fetchOrders]);
   useEffect(() => { fetchTabData(); }, [fetchTabData]);
+  // Stock is re-checked by the server on every load, so the flags are current
+  const fetchPremadeDrafts = useCallback(async () => {
+    try {
+      const res = await api.premadeDrafts.list();
+      setPremadeDrafts(res.data || []);
+    } catch {
+      setPremadeDrafts([]);
+    }
+  }, []);
+
   useEffect(() => { fetchDrafts(); }, [fetchDrafts]);
+  useEffect(() => { fetchPremadeDrafts(); }, [fetchPremadeDrafts]);
 
   const confirmDraft = async (id: number) => {
     setDraftBusyId(id); setActionError('');
@@ -109,8 +125,33 @@ export default function SalesPage() {
     } finally { setDraftBusyId(null); }
   };
 
+  const deletePremadeDraft = async (d: PremadeDraft) => {
+    const ok = await confirm({
+      title: `Delete draft ${d.draftNumber}?`,
+      message: 'The saved premade draft will be removed. No stock was taken, so none is returned.',
+      warning: 'This cannot be undone.',
+      confirmLabel: 'Delete draft',
+      variant: 'danger',
+    });
+    if (!ok) return;
+    setDraftBusyId(-d.id); setActionError('');
+    try {
+      await api.premadeDrafts.remove(d.id);
+      await fetchPremadeDrafts();
+    } catch (err: any) {
+      setActionError(err?.message || 'Failed to delete draft');
+    } finally { setDraftBusyId(null); }
+  };
+
   const deleteDraft = async (id: number) => {
-    if (!confirm('Delete this draft? This cannot be undone.')) return;
+    const ok = await confirm({
+      title: 'Delete this draft?',
+      message: 'The saved draft job order will be removed.',
+      warning: 'This cannot be undone.',
+      confirmLabel: 'Delete draft',
+      variant: 'danger',
+    });
+    if (!ok) return;
     setDraftBusyId(id); setActionError('');
     try {
       await api.sales.deleteJobOrder(id);
@@ -253,10 +294,31 @@ export default function SalesPage() {
               </svg>
               New Job Order
             </Link>
-            {drafts.length > 0 && (
-              <button onClick={() => setShowDrafts(true)}
-                className="text-xs font-medium text-[#011c72] hover:underline">
-                {drafts.length} saved draft{drafts.length !== 1 ? 's' : ''} →
+            {(drafts.length > 0 || premadeDrafts.length > 0) && (
+              <button
+                onClick={() => {
+                  // Open on whichever kind actually has drafts
+                  setDraftKind(drafts.length > 0 ? 'custom' : 'premade');
+                  fetchPremadeDrafts();
+                  setShowDrafts(true);
+                }}
+                className="inline-flex items-center gap-2.5 px-5 py-3 rounded-xl border-2 border-[#011c72] bg-white text-[#011c72] font-semibold hover:bg-[#eef1fb] transition-colors shadow-sm">
+                <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+                <span className="text-sm">
+                  View Drafts
+                </span>
+                <span className="inline-flex items-center justify-center min-w-6 h-6 px-1.5 rounded-full bg-[#011c72] text-white text-xs font-bold">
+                  {drafts.length + premadeDrafts.length}
+                </span>
+                {premadeDrafts.some(d => !d.isAvailable) && (
+                  <span title="A premade draft has items that are out of stock or short"
+                    className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-yellow-100 text-yellow-700 text-xs font-bold">
+                    !
+                  </span>
+                )}
               </button>
             )}
           </div>
@@ -365,8 +427,8 @@ export default function SalesPage() {
                   <p className="text-gray-500">Create a new job order to get started.</p>
                 </div>
               ) : (
-                <div>
-                  <table className="w-full">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[760px]">
                     <thead className="bg-gray-50">
                       <tr>
                         {['Order #', 'Type', 'Customer', 'Vehicle', 'Branch', 'Amount', 'Date', 'Status', ''].map(h => (
@@ -459,8 +521,8 @@ export default function SalesPage() {
                   <p className="text-gray-500">Create a new job order to get started.</p>
                 </div>
               ) : (
-                <div>
-                  <table className="w-full">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[760px]">
                     <thead className="bg-gray-50">
                       <tr>
                         {['Order #', 'Type', 'Customer', 'Vehicle', 'Branch', 'Amount', 'Date', 'Status', ''].map(h => (
@@ -553,8 +615,8 @@ export default function SalesPage() {
                   <p className="text-gray-500">No customers have purchased premade products yet.</p>
                 </div>
               ) : (
-                <div>
-                  <table className="w-full">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[600px]">
                     <thead className="bg-gray-50">
                       <tr>
                         {['Order #', 'Customer', 'Branch', 'Amount', 'Date', 'Status', ''].map(h => (
@@ -1097,16 +1159,94 @@ export default function SalesPage() {
                 <button onClick={() => setShowDrafts(false)}
                   className="text-gray-400 hover:text-gray-700 text-xl leading-none">✕</button>
               </div>
-              <div className="overflow-y-auto divide-y divide-gray-100">
+
+              <div className="px-6 pt-4">
+                <div className="flex gap-1 p-1 bg-gray-100 rounded-xl">
+                  <button onClick={() => setDraftKind('custom')}
+                    className={`flex-1 py-2 px-3 text-sm font-semibold rounded-lg transition-colors ${draftKind === 'custom' ? 'bg-white text-[#011c72] shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>
+                    Custom Made ({drafts.length})
+                  </button>
+                  <button onClick={() => setDraftKind('premade')}
+                    className={`flex-1 py-2 px-3 text-sm font-semibold rounded-lg transition-colors ${draftKind === 'premade' ? 'bg-white text-[#011c72] shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>
+                    Premade ({premadeDrafts.length})
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500 mt-2">
+                  {draftKind === 'custom'
+                    ? 'Job orders your team saved to finish later. Edit or confirm them here.'
+                    : 'Premade job orders saved to finish later. No stock is taken until one is confirmed; stock shown is as of now.'}
+                </p>
+              </div>
+
+              {draftKind === 'premade' ? (
+              <div className="overflow-y-auto divide-y divide-gray-100 mt-3">
+                {premadeDrafts.length === 0 ? (
+                  <p className="p-8 text-center text-gray-400 text-sm">No premade drafts saved.</p>
+                ) : premadeDrafts.map(d => (
+                  <div key={d.id} className="px-6 py-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-gray-900 truncate">
+                          {d.draftNumber}
+                          <span className="ml-2 align-middle text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-yellow-100 text-yellow-800">Draft</span>
+                        </p>
+                        <p className="text-xs text-gray-500 truncate">
+                          {d.customerName}{d.customerPhone ? ` · ${d.customerPhone}` : ''}{d.branchName ? ` · ${d.branchName}` : ''}
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          {d.itemCount} item{d.itemCount !== 1 ? 's' : ''} · ₱{d.totalAmount.toLocaleString()} · saved {formatDate(d.updatedAt)}
+                        </p>
+                      </div>
+                      <span className={`shrink-0 px-2 py-0.5 rounded-full text-xs font-semibold ${d.isAvailable ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                        {d.items.length === 0 ? 'No items' : d.isAvailable ? 'In stock' : 'Needs attention'}
+                      </span>
+                    </div>
+                    <ul className="mt-2 space-y-1">
+                      {d.items.map(it => (
+                        <li key={it.productId} className="text-xs flex flex-wrap gap-x-2">
+                          <span className="text-gray-700">{it.quantity}× {it.name}</span>
+                          {it.issue && (
+                            <span className="font-semibold text-red-700">
+                              {it.issue === 'out_of_stock' ? 'Out of stock'
+                                : it.issue === 'insufficient' ? `Insufficient stock (${it.available} available)`
+                                : 'No longer sold here'}
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="mt-3 flex items-center gap-2">
+                      <Link href={`/sales/new?premadeDraftId=${d.id}`}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#011c72] text-white hover:bg-[#01268c]">
+                        Open &amp; Confirm
+                      </Link>
+                      {can('sales.delete') && (
+                        <button onClick={() => deletePremadeDraft(d)} disabled={draftBusyId === -d.id}
+                          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-50 text-red-600 hover:bg-red-100 disabled:opacity-50">
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              ) : (
+              <div className="overflow-y-auto divide-y divide-gray-100 mt-3">
                 {drafts.length === 0 ? (
                   <p className="p-8 text-center text-gray-400 text-sm">No drafts saved.</p>
                 ) : drafts.map(d => (
                   <div key={d.id} className="px-6 py-4 flex items-center justify-between gap-3">
                     <div className="min-w-0">
-                      <p className="text-sm font-medium text-gray-900 truncate">{d.customerName || 'Unnamed customer'}</p>
+                      <p className="text-sm font-medium text-gray-900 truncate">
+                        {d.customerName || 'Unnamed customer'}
+                      </p>
                       <p className="text-xs text-gray-500 truncate">{d.description || '—'} · {formatDate(d.createdAt)}</p>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
+                      <Link href={`/sales/new?draftId=${d.id}`}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#eef1fb] text-[#011c72] hover:bg-[#dde3f7]">
+                        Edit
+                      </Link>
                       <Link href={`/sales/${d.id}`}
                         className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200">
                         Open
@@ -1123,10 +1263,12 @@ export default function SalesPage() {
                   </div>
                 ))}
               </div>
+              )}
             </div>
           </div>
         )}
       </main>
+      {confirmDialog}
     </div>
   );
 }
