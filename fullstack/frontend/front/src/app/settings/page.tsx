@@ -8,8 +8,9 @@ import VatRateSetting from '@/components/VatRateSetting';
 import { formatDate } from '@/lib/dateUtils';
 import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
 import Paginated from '@/components/Paginated';
+import AuditTrailPanel from '@/components/AuditTrailPanel';
 
-type TabType = 'general' | 'users' | 'branches' | 'notifications';
+type TabType = 'general' | 'users' | 'branches' | 'notifications' | 'audit';
 
 // Roles not offered when adding a user: workers are managed in Worker Management
 const HIDDEN_ROLES = ['seat_maker', 'sewer'];
@@ -18,6 +19,13 @@ export default function SettingsPage() {
   const { user, can, checkAuth } = useAuth();
   const { confirm, confirmDialog } = useConfirm();
   const [activeTab, setActiveTab] = useState<TabType>('general');
+  // ?tab=audit opens the Audit Trail directly (old Item Trail links point here)
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('tab') === 'audit' && can('reports.audit_trail')) {
+      setActiveTab('audit');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [saving, setSaving] = useState(false);
   
     // Users state
@@ -197,7 +205,7 @@ export default function SettingsPage() {
       try {
         if (editingUser) {
           // Update existing user
-          const updateData: any = {
+          const updateData: Parameters<typeof api.settings.updateUser>[1] = {
             email: userFormData.email,
             fullName: userFormData.fullName,
             role: userFormData.role,
@@ -222,8 +230,8 @@ export default function SettingsPage() {
       
         setShowUserModal(false);
         loadUsers();
-      } catch (err: any) {
-        setUserError(err.message || 'Failed to save user');
+      } catch (err) {
+        setUserError((err as Error)?.message || 'Failed to save user');
       } finally {
         setSaving(false);
       }
@@ -232,10 +240,13 @@ export default function SettingsPage() {
     // Mirrors the server's delegation rule: only administrators manage their own
     // account here or any administrator account
     const isAdministrator = user?.role === 'administrator';
+    // Accounts can only be managed by a role ranked above theirs (Administrator › Owner ›
+    // Supervisor › Sales Manager › Seat Maker / Sewer), never your own here. The server
+    // works this out per account and refuses the same changes, so the page just follows it.
     const offLimitsReason = (target: UserType): string | null => {
-      if (isAdministrator) return null;
-      if (target.id === user?.id) return 'Only an administrator can change your own account here';
-      if (target.role === 'administrator') return 'Only an administrator can change an administrator account';
+      if (target.canManage !== undefined) return target.canManage ? null : (target.manageBlockedReason || "You can't change this account");
+      if (target.id === user?.id) return "You can't change your own account here. Use My Profile.";
+      if (!isAdministrator && target.role === 'administrator') return 'Only an administrator can change an administrator account';
       return null;
     };
 
@@ -278,8 +289,8 @@ export default function SettingsPage() {
           await api.settings.restoreUser(target.id);
         }
         loadUsers();
-      } catch (err: any) {
-        setUserError(err?.message || 'Failed to update user status');
+      } catch (err) {
+        setUserError((err as Error)?.message || 'Failed to update user status');
       }
     };
 
@@ -294,8 +305,8 @@ export default function SettingsPage() {
       try {
         const response = await api.settings.checkUserDeletable(target.id);
         check = response.data!;
-      } catch (err: any) {
-        setUserError(err?.message || 'Could not check whether this user can be deleted');
+      } catch (err) {
+        setUserError((err as Error)?.message || 'Could not check whether this user can be deleted');
         return;
       }
 
@@ -326,8 +337,8 @@ export default function SettingsPage() {
       try {
         await api.settings.deleteUser(target.id);
         loadUsers();
-      } catch (err: any) {
-        setUserError(err?.message || 'Failed to delete user');
+      } catch (err) {
+        setUserError((err as Error)?.message || 'Failed to delete user');
       }
     };
 
@@ -375,8 +386,8 @@ export default function SettingsPage() {
       
       setShowBranchModal(false);
       reloadBranches();
-    } catch (err: any) {
-      setBranchError(err.message || 'Failed to save branch');
+    } catch (err) {
+      setBranchError((err as Error)?.message || 'Failed to save branch');
     } finally {
       setSaving(false);
     }
@@ -402,8 +413,8 @@ export default function SettingsPage() {
         isActive: !branch.isActive
       });
       reloadBranches();
-    } catch (err: any) {
-      setBranchError(err?.message || 'Failed to update branch status');
+    } catch (err) {
+      setBranchError((err as Error)?.message || 'Failed to update branch status');
     }
   };
 
@@ -424,8 +435,8 @@ export default function SettingsPage() {
       if (archiving) await api.settings.archiveBranch(branch.id);
       else await api.settings.unarchiveBranch(branch.id);
       reloadBranches();
-    } catch (err: any) {
-      setBranchError(err?.message || (archiving ? 'Failed to archive branch' : 'Failed to restore branch'));
+    } catch (err) {
+      setBranchError((err as Error)?.message || (archiving ? 'Failed to archive branch' : 'Failed to restore branch'));
     }
   };
 
@@ -436,8 +447,8 @@ export default function SettingsPage() {
     try {
       const response = await api.settings.checkBranchDeletable(branch.id);
       check = response.data!;
-    } catch (err: any) {
-      setBranchError(err?.message || 'Could not check whether this branch can be deleted');
+    } catch (err) {
+      setBranchError((err as Error)?.message || 'Could not check whether this branch can be deleted');
       return;
     }
 
@@ -470,8 +481,8 @@ export default function SettingsPage() {
     try {
       await api.settings.deleteBranch(branch.id);
       reloadBranches();
-    } catch (err: any) {
-      setBranchError(err?.message || 'Failed to delete branch');
+    } catch (err) {
+      setBranchError((err as Error)?.message || 'Failed to delete branch');
     }
   };
 
@@ -510,9 +521,16 @@ export default function SettingsPage() {
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
       </svg>
     )},
+    { id: 'audit' as TabType, name: 'Audit Trail', icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+      </svg>
+    )},
   ];
 
-  const tabs = allTabs.filter(t => t.id !== 'users' || can('users.manage'));
+  // The audit log is administrator-only on the server, so only show it to those allowed
+  const tabs = allTabs.filter(t =>
+    (t.id !== 'users' || can('users.manage')) && (t.id !== 'audit' || can('reports.audit_trail')));
 
   const renderContent = () => {
     switch (activeTab) {
@@ -929,6 +947,17 @@ export default function SettingsPage() {
           </div>
         );
 
+      case 'audit':
+        return (
+          <div className="space-y-4">
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900">Audit Trail</h3>
+              <p className="text-sm text-gray-500">Every recorded action in the system: who did what, and when</p>
+            </div>
+            <AuditTrailPanel />
+          </div>
+        );
+
       default:
         return null;
     }
@@ -1296,8 +1325,9 @@ export default function SettingsPage() {
                     {/* An existing account keeps its own role in the list so editing it still works */}
                     {roles
                       .filter((role) => !HIDDEN_ROLES.includes(role.id) || (editingUser && editingUser.role === role.id))
-                      // Only administrators can give out the administrator role
-                      .filter((role) => role.id !== 'administrator' || user?.role === 'administrator')
+                      // Only roles below your own can be given out (administrators may also add administrators)
+                      .filter((role) => (role.assignable ?? (role.id !== 'administrator' || user?.role === 'administrator'))
+                        || (editingUser && editingUser.role === role.id))
                       .map((role) => (
                         <option key={role.id} value={role.id}>
                           {role.name}

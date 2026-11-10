@@ -10,7 +10,7 @@ export function userCan(permissions: string[] | undefined, ...wanted: string[]):
 
 /**
  * Pages and the permissions that open them (any one is enough). The longest
- * matching path wins, so /inventory/purchase-orders overrides /inventory.
+ * matching path wins, so /purchase-orders/new overrides /purchase-orders.
  * Pages not listed (home, shop, My Orders, My Profile, the dashboard, which
  * shows customers and workers a simple view) need no permission.
  */
@@ -21,17 +21,20 @@ const PAGE_PERMISSIONS: [string, string[]][] = [
   ['/payments', ['payments.view']],
   ['/owner', ['owner.view']],
   ['/expenses', ['expenses.view', 'expenses.add']],
-  ['/inventory/purchase-orders/new', ['purchase_orders.add']],
-  ['/inventory/purchase-orders', ['purchase_orders.view']],
-  ['/inventory', ['inventory.view', 'premade.view', 'premade.receive', 'suppliers.view']],
+  ['/purchase-orders/new', ['purchase_orders.add']],
+  ['/purchase-orders/receiving', ['purchase_orders.receive']],
+  ['/purchase-orders', ['purchase_orders.view']],
+  ['/suppliers', ['suppliers.view']],
+  ['/inventory', ['inventory.view', 'premade.view', 'premade.receive']],
   ['/product-orders', ['product_orders.view']],
   ['/customer-orders', ['custom_requests.view']],
   ['/costing', ['costing.view']],
   ['/forecasting', ['forecasting.view']],
   ['/delivery/new', ['item_trail.add']],
   ['/delivery', ['item_trail.view']],
+  ['/item-history', ['inventory.view', 'premade.view']],
   ['/reports', ['reports.sales', 'reports.inventory', 'reports.settlement', 'reports.audit_trail']],
-  ['/settings', ['settings.edit', 'users.manage', 'branches.manage']],
+  ['/settings', ['settings.edit', 'users.manage', 'branches.manage', 'reports.audit_trail']],
   ['/announcements', ['announcements.view']],
   ['/worker-dashboard', ['workers.add', 'workers.edit', 'workers.delete']],
 ];

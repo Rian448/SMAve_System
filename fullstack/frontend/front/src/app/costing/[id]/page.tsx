@@ -116,57 +116,57 @@ export default function CostingDetailPage() {
         </div>
 
         {/* Summary Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <div className="flex items-center justify-between">
-              <div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 lg:gap-6 mb-8">
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
                 <p className="text-sm font-medium text-gray-500">Total Revenue <span className="text-xs font-normal text-gray-400">(excl. VAT)</span></p>
-                <p className="text-2xl font-bold text-gray-900 mt-1">
+                <p className="text-xl xl:text-2xl font-bold break-words text-gray-900 mt-1">
                   ₱{costing.totalPrice.toLocaleString()}
                 </p>
               </div>
-              <div className="w-12 h-12 rounded-xl bg-green-100 flex items-center justify-center">
+              <div className="w-12 h-12 shrink-0 rounded-xl bg-green-100 flex items-center justify-center">
                 <svg className="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
               </div>
             </div>
           </div>
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <div className="flex items-center justify-between">
-              <div>
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
                 <p className="text-sm font-medium text-gray-500">Total Cost</p>
-                <p className="text-2xl font-bold text-gray-900 mt-1">
+                <p className="text-xl xl:text-2xl font-bold break-words text-gray-900 mt-1">
                   ₱{totalCost.toLocaleString()}
                 </p>
               </div>
-              <div className="w-12 h-12 rounded-xl bg-red-100 flex items-center justify-center">
+              <div className="w-12 h-12 shrink-0 rounded-xl bg-red-100 flex items-center justify-center">
                 <svg className="w-6 h-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z" />
                 </svg>
               </div>
             </div>
           </div>
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <div className="flex items-center justify-between">
-              <div>
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
                 <p className="text-sm font-medium text-gray-500">Net Profit</p>
-                <p className={`text-2xl font-bold mt-1 ${profit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                <p className={`text-xl xl:text-2xl font-bold break-words mt-1 ${profit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                   ₱{profit.toLocaleString()}
                 </p>
               </div>
-              <div className="w-12 h-12 rounded-xl bg-[#dde6ff] flex items-center justify-center">
+              <div className="w-12 h-12 shrink-0 rounded-xl bg-[#dde6ff] flex items-center justify-center">
                 <svg className="w-6 h-6 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
                 </svg>
               </div>
             </div>
           </div>
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <div className="flex items-center justify-between">
-              <div>
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
                 <p className="text-sm font-medium text-gray-500">Profit Margin</p>
-                <p className={`text-2xl font-bold mt-1 ${
+                <p className={`text-xl xl:text-2xl font-bold break-words mt-1 ${
                   profitMargin >= 30 ? 'text-green-600' :
                   profitMargin >= 15 ? 'text-yellow-600' :
                   'text-red-600'
@@ -174,7 +174,7 @@ export default function CostingDetailPage() {
                   {profitMargin.toFixed(1)}%
                 </p>
               </div>
-              <div className="w-12 h-12 rounded-xl bg-blue-100 flex items-center justify-center">
+              <div className="w-12 h-12 shrink-0 rounded-xl bg-blue-100 flex items-center justify-center">
                 <svg className="w-6 h-6 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                 </svg>
@@ -185,69 +185,69 @@ export default function CostingDetailPage() {
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Cost Breakdown */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-6">Cost Breakdown</h2>
             
             {/* Visual Chart */}
             <div className="mb-6">
               <div className="h-8 flex rounded-lg overflow-hidden">
                 <div 
-                  className="bg-blue-500 flex items-center justify-center text-xs text-white font-medium"
+                  className="bg-blue-500 flex items-center justify-center text-xs text-white font-medium overflow-hidden whitespace-nowrap"
                   style={{ width: `${share(costing.materialCost)}%` }}
                 >
-                  {share(costing.materialCost).toFixed(0)}%
+                  {share(costing.materialCost) >= 8 ? `${share(costing.materialCost).toFixed(0)}%` : ""}
                 </div>
                 <div 
-                  className="bg-green-500 flex items-center justify-center text-xs text-white font-medium"
+                  className="bg-green-500 flex items-center justify-center text-xs text-white font-medium overflow-hidden whitespace-nowrap"
                   style={{ width: `${share(costing.laborCost)}%` }}
                 >
-                  {share(costing.laborCost).toFixed(0)}%
+                  {share(costing.laborCost) >= 8 ? `${share(costing.laborCost).toFixed(0)}%` : ""}
                 </div>
                 <div 
-                  className="bg-[#011c72] flex items-center justify-center text-xs text-white font-medium"
+                  className="bg-[#011c72] flex items-center justify-center text-xs text-white font-medium overflow-hidden whitespace-nowrap"
                   style={{ width: `${share(costing.overheadCost)}%` }}
                 >
-                  {share(costing.overheadCost).toFixed(0)}%
+                  {share(costing.overheadCost) >= 8 ? `${share(costing.overheadCost).toFixed(0)}%` : ""}
                 </div>
               </div>
             </div>
 
             <div className="space-y-4">
-              <div className="flex items-center justify-between p-4 bg-blue-50 rounded-lg">
+              <div className="flex items-center justify-between gap-3 p-4 bg-blue-50 rounded-lg">
                 <div className="flex items-center">
-                  <div className="w-3 h-3 bg-blue-500 rounded-full mr-3"></div>
+                  <div className="w-3 h-3 bg-blue-500 rounded-full mr-3 shrink-0"></div>
                   <div>
                     <p className="text-sm font-medium text-gray-900">Materials</p>
                     <p className="text-xs text-gray-500">Raw materials and supplies</p>
                   </div>
                 </div>
-                <div className="text-right">
+                <div className="text-right shrink-0">
                   <p className="text-sm font-bold text-gray-900">₱{costing.materialCost.toLocaleString()}</p>
                   <p className="text-xs text-gray-500">{share(costing.materialCost).toFixed(1)}%</p>
                 </div>
               </div>
-              <div className="flex items-center justify-between p-4 bg-green-50 rounded-lg">
+              <div className="flex items-center justify-between gap-3 p-4 bg-green-50 rounded-lg">
                 <div className="flex items-center">
-                  <div className="w-3 h-3 bg-green-500 rounded-full mr-3"></div>
+                  <div className="w-3 h-3 bg-green-500 rounded-full mr-3 shrink-0"></div>
                   <div>
                     <p className="text-sm font-medium text-gray-900">Labor</p>
                     <p className="text-xs text-gray-500">Direct labor costs</p>
                   </div>
                 </div>
-                <div className="text-right">
+                <div className="text-right shrink-0">
                   <p className="text-sm font-bold text-gray-900">₱{costing.laborCost.toLocaleString()}</p>
                   <p className="text-xs text-gray-500">{share(costing.laborCost).toFixed(1)}%</p>
                 </div>
               </div>
-              <div className="flex items-center justify-between p-4 bg-[#eef1fb] rounded-lg">
+              <div className="flex items-center justify-between gap-3 p-4 bg-[#eef1fb] rounded-lg">
                 <div className="flex items-center">
-                  <div className="w-3 h-3 bg-[#011c72] rounded-full mr-3"></div>
+                  <div className="w-3 h-3 bg-[#011c72] rounded-full mr-3 shrink-0"></div>
                   <div>
                     <p className="text-sm font-medium text-gray-900">Other Expenses</p>
                     <p className="text-xs text-gray-500">Thread, glue, delivery and other job expenses</p>
                   </div>
                 </div>
-                <div className="text-right">
+                <div className="text-right shrink-0">
                   <p className="text-sm font-bold text-gray-900">₱{costing.overheadCost.toLocaleString()}</p>
                   <p className="text-xs text-gray-500">{share(costing.overheadCost).toFixed(1)}%</p>
                 </div>
@@ -256,7 +256,7 @@ export default function CostingDetailPage() {
           </div>
 
           {/* Profitability Analysis */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-6">Profitability Analysis</h2>
             
             {/* Profit Gauge */}
@@ -280,21 +280,21 @@ export default function CostingDetailPage() {
             </div>
 
             <div className="space-y-4">
-              <div className="flex items-center justify-between py-3 border-b border-gray-100">
+              <div className="flex items-center justify-between py-3 border-b border-gray-100 gap-3">
                 <span className="text-sm text-gray-500">Revenue</span>
                 <span className="text-sm font-medium text-gray-900">₱{costing.totalPrice.toLocaleString()}</span>
               </div>
-              <div className="flex items-center justify-between py-3 border-b border-gray-100">
+              <div className="flex items-center justify-between py-3 border-b border-gray-100 gap-3">
                 <span className="text-sm text-gray-500">Total Cost</span>
                 <span className="text-sm font-medium text-red-600">-₱{totalCost.toLocaleString()}</span>
               </div>
-              <div className="flex items-center justify-between py-3 border-b border-gray-100">
+              <div className="flex items-center justify-between py-3 border-b border-gray-100 gap-3">
                 <span className="text-sm font-medium text-gray-900">Gross Profit</span>
                 <span className={`text-sm font-bold ${profit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                   ₱{profit.toLocaleString()}
                 </span>
               </div>
-              <div className="flex items-center justify-between py-3">
+              <div className="flex items-center justify-between py-3 gap-3">
                 <span className="text-sm text-gray-500">Cost per Peso Revenue</span>
                 <span className="text-sm font-medium text-gray-900">
                   {costing.totalPrice > 0 ? `₱${(totalCost / costing.totalPrice).toFixed(2)}` : '—'}
@@ -347,7 +347,7 @@ export default function CostingDetailPage() {
 
         {/* Estimated vs Actual */}
         {comp && (
-          <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6">
             <h2 className="text-lg font-semibold text-gray-900">Estimated vs Actual Cost</h2>
             <p className="text-xs text-gray-500 mt-1 mb-4">A positive variance means the job cost more than planned.</p>
             <div className="overflow-x-auto">
@@ -388,7 +388,7 @@ export default function CostingDetailPage() {
 
         {/* Extra materials issued beyond the plan */}
         {comp && (
-          <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6">
             <h2 className="text-lg font-semibold text-gray-900">Extra Materials</h2>
             <p className="text-xs text-gray-500 mt-1 mb-4">Material taken beyond the plan, such as a recut after a mistake. Included in the actual material cost above.</p>
             {extras.length === 0 ? (
@@ -435,7 +435,7 @@ export default function CostingDetailPage() {
 
         {/* Planned lines, at cost (what they cost us, not their selling price) */}
         {costing.lines && costing.lines.length > 0 && (
-          <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Planned Lines</h2>
             <div className="overflow-x-auto">
               <table className="w-full min-w-[560px]">

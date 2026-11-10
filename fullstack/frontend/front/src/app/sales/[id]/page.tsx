@@ -2,10 +2,12 @@
 import { formatDate } from '@/lib/dateUtils';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import { createPortal } from 'react-dom';
+import Link from 'next/link';
 import {
   api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord, ManagedWorker, PaymentOverride,
   type ExcessPayment, type CustomerOrderSummary, type JobOrderPriority, PRIORITY_LABELS, type MaterialWasteLog,
-  jobOrderItemCategory, jobOrderPriceBreakdown, jobOrderTotalFrom, MAX_JOB_ORDER_PRICE, isValidPriceInput,
+  jobOrderItemCategory, jobOrderPriceBreakdown, jobOrderTotalFrom, MAX_JOB_ORDER_PRICE, isValidPriceInput, ACCEPTED_PAYMENT_METHODS, PAYMENT_METHOD_LABELS
 } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useVatRate } from '@/lib/useVatRate';
@@ -252,7 +254,7 @@ export default function JobOrderDetailPage() {
           logo: slipLogo,
           specification: slipSpec,
         }
-      } as any);
+      });
       setSlipMessage({ ok: true, text: 'Slip saved.' });
     } catch (err) {
       setSlipMessage({ ok: false, text: err instanceof Error && err.message ? err.message : 'Could not save the slip.' });
@@ -330,8 +332,8 @@ export default function JobOrderDetailPage() {
     setUpdating(true);
     setError('');
     try {
-      await api.sales.updateJobOrder(jobOrder.id, { status: newStatus as any });
-      setJobOrder({ ...jobOrder, status: newStatus as any });
+      await api.sales.updateJobOrder(jobOrder.id, { status: newStatus as JobOrder['status'] });
+      setJobOrder({ ...jobOrder, status: newStatus as JobOrder['status'] });
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : 'Could not change the status.');
     }
@@ -678,7 +680,22 @@ export default function JobOrderDetailPage() {
     }).format(amount || 0);
   };
 
-  const printReceipt = () => { window.print(); };
+  /** Prints on half-letter paper (5.5 x 8.5 in). The size is set only for this print,
+   *  so other pages that print (reports, costing) keep the A4 default. */
+  const printInvoice = () => {
+    const pageSize = document.createElement('style');
+    pageSize.textContent = '@page { size: 5.5in 8.5in; margin: 8mm 9mm; }';
+    document.head.appendChild(pageSize);
+    document.documentElement.classList.add('printing-invoice');
+    const cleanUp = () => {
+      pageSize.remove();
+      document.documentElement.classList.remove('printing-invoice');
+    };
+    window.addEventListener('afterprint', cleanUp, { once: true });
+    window.print();
+    // Browsers that don't fire afterprint still return here once the dialog closes
+    setTimeout(cleanUp, 1000);
+  };
 
   if (loading) {
     return (
@@ -955,7 +972,7 @@ export default function JobOrderDetailPage() {
               </div>
               <div>
                 <p className="text-xs text-gray-400">Address</p>
-                <p className="text-sm font-medium text-gray-700">{(jobOrder as any).customer_address || (jobOrder as any).customerAddress || 'N/A'}</p>
+                <p className="text-sm font-medium text-gray-700">{jobOrder.customerAddress || 'N/A'}</p>
               </div>
             </div>
           </div>
@@ -1919,7 +1936,14 @@ export default function JobOrderDetailPage() {
 
           {/* Payment History */}
           <div className="mb-5">
-            <h3 className="text-sm font-semibold text-gray-700 mb-3">Payment History</h3>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-gray-700">Payment History</h3>
+              {can('payments.view') && paymentRecords.length > 0 && (
+                <Link href={`/payments?jobOrderId=${jobOrder.id}`} className="text-xs font-medium text-[#011c72] hover:underline">
+                  View in Payments
+                </Link>
+              )}
+            </div>
             {loadingPayments ? (
               <div className="flex items-center justify-center py-6">
                 <div className="animate-spin w-5 h-5 border-2 border-[#011c72] border-t-transparent rounded-full"></div>
@@ -2035,23 +2059,9 @@ export default function JobOrderDetailPage() {
                         onChange={(e) => setNewPaymentMethod(e.target.value)}
                         className="w-full px-3 py-2.5 rounded-lg border border-gray-300 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm"
                       >
-                        <optgroup label="Cash">
-                          <option value="cash">Cash</option>
-                        </optgroup>
-                        <optgroup label="E-Wallet">
-                          <option value="gcash">GCash</option>
-                          <option value="maya">Maya</option>
-                        </optgroup>
-                        <optgroup label="Bank Transfer">
-                          <option value="bank_transfer">Bank Transfer</option>
-                        </optgroup>
-                        <optgroup label="Card">
-                          <option value="credit_card">Credit Card</option>
-                          <option value="debit_card">Debit Card</option>
-                        </optgroup>
-                        <optgroup label="Cheque">
-                          <option value="check">Cheque</option>
-                        </optgroup>
+                        {ACCEPTED_PAYMENT_METHODS.map((m) => (
+                          <option key={m} value={m}>{PAYMENT_METHOD_LABELS[m]}</option>
+                        ))}
                       </select>
                     </div>
                     <div>
@@ -2387,13 +2397,13 @@ export default function JobOrderDetailPage() {
         {/* ── Bottom Actions ── */}
         <div className="no-print flex flex-wrap gap-3">
           <button
-            onClick={printReceipt}
+            onClick={printInvoice}
             className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 hover:border-[#011c72] text-gray-700 rounded-lg font-medium text-sm transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
             </svg>
-            Print Receipt
+            Print Invoice
           </button>
           {/* A completed order's materials have been used, so it can't be cancelled */}
           {canEditParts && !['cancelled', 'delivered', 'completed'].includes(jobOrder.status) && (
@@ -2410,132 +2420,96 @@ export default function JobOrderDetailPage() {
           )}
         </div>
 
-        {/* ── PRINT RECEIPT (hidden on screen via CSS + inline style) ── */}
-        <div id="print-receipt" style={{display:'none', fontFamily:'Arial,Helvetica,sans-serif', color:'#000', fontSize:'10.5pt', lineHeight:'1.5', maxWidth:'680px', margin:'0 auto', padding:'0 8px'}}>
+        {/* ── PRINT INVOICE (hidden on screen via CSS + inline style). Rendered under
+             <body> so printing can drop the rest of the page (see globals.css).
+             Laid out like the Job Order Slip: ruled boxes, each with a small label. ── */}
+        {createPortal((() => {
+          const line = '1px solid #000';
+          const label: React.CSSProperties = { fontSize:'6.5pt', fontWeight:700, textTransform:'uppercase', letterSpacing:'0.5px', color:'#444' };
+          const cell: React.CSSProperties = { border:line, padding:'3px 6px', verticalAlign:'top' };
+          const value: React.CSSProperties = { fontSize:'9pt', fontWeight:700, marginTop:'1px', wordBreak:'break-word' };
+          const vehicle = jobOrder.vehicleInfo;
+          const car = vehicle ? [vehicle.make, vehicle.model].filter(Boolean).join(' ') : '';
+          const paidUp = (jobOrder.balance || 0) <= 0;
+          const materialLines = itemBreakdown.filter(item => item.category === 'material' && item.name && item.unitPrice + item.materialCostPerUnit > 0);
+          const amountRow = (name: string, amount: string, strong = false) => (
+            <tr>
+              <td style={{...cell, borderRight:'none', fontWeight: strong ? 900 : 400, fontSize: strong ? '10pt' : '8.5pt'}}>{name}</td>
+              <td style={{...cell, borderLeft:'none', textAlign:'right', fontWeight: strong ? 900 : 400, fontSize: strong ? '10pt' : '8.5pt', whiteSpace:'nowrap'}}>{amount}</td>
+            </tr>
+          );
+          return (
+        <div id="print-invoice" style={{display:'none', fontFamily:'Arial,Helvetica,sans-serif', color:'#000', fontSize:'9pt', lineHeight:'1.35', maxWidth:'none', margin:'0', padding:'0'}}>
 
-          {/* Header */}
-          <div style={{textAlign:'center', borderBottom:'2px solid #000', paddingBottom:'10px', marginBottom:'12px'}}>
-            <div style={{fontSize:'18pt', fontWeight:900, letterSpacing:'1px', textTransform:'uppercase'}}>Seatmakers Avenue</div>
-            <div style={{fontSize:'9pt', color:'#555', marginTop:'2px'}}>Premium Automotive Upholstery &amp; Custom Seat Covers</div>
-            <div style={{fontSize:'9pt', marginTop:'2px'}}>{jobOrder.branchName}</div>
+          {/* Shop header + form title */}
+          <div style={{textAlign:'center', marginBottom:'6px'}}>
+            <div style={{fontSize:'14pt', fontWeight:900, letterSpacing:'1px', textTransform:'uppercase'}}>Seatmakers Avenue</div>
+            <div style={{fontSize:'7.5pt', color:'#444'}}>Premium Automotive Upholstery &amp; Custom Seat Covers</div>
+            <div style={{fontSize:'7.5pt'}}>{jobOrder.branchName}</div>
+            <div style={{display:'inline-block', marginTop:'5px', padding:'2px 14px', border:'2px solid #000', fontSize:'11pt', fontWeight:900, letterSpacing:'2px'}}>INVOICE</div>
           </div>
 
-          {/* Receipt label + meta row */}
-          <div style={{display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:'12px'}}>
-            <div>
-              <div style={{fontSize:'13pt', fontWeight:900, textTransform:'uppercase', letterSpacing:'1.5px'}}>Official Receipt</div>
-              <div style={{fontSize:'9pt', marginTop:'3px'}}>
-                Status: <strong>{jobOrder.status.replace(/_/g,' ').toUpperCase()}</strong>
-              </div>
-            </div>
-            <div style={{fontSize:'9pt', textAlign:'right', lineHeight:'1.7'}}>
-              <div><strong style={{fontSize:'10pt'}}>{jobOrder.jobOrderId}</strong></div>
-              <div>Date: {formatDate(jobOrder.createdAt)}</div>
-              {jobOrder.completedAt && (
-                <div>Completed: {formatDate(jobOrder.completedAt)}</div>
+          {/* Header boxes: J.O#, date, customer, car, year (as on the Job Order Slip) */}
+          <table style={{width:'100%', borderCollapse:'collapse', tableLayout:'fixed', marginBottom:'6px'}}>
+            <tbody>
+              <tr>
+                <td style={cell} colSpan={2}><div style={label}>J.O#</div><div style={value}>{jobOrder.jobOrderId}</div></td>
+                <td style={cell}><div style={label}>Date</div><div style={value}>{formatDate(jobOrder.createdAt)}</div></td>
+              </tr>
+              <tr>
+                <td style={cell} colSpan={3}><div style={label}>Customer</div><div style={value}>{jobOrder.customerName || '—'}</div></td>
+              </tr>
+              <tr>
+                <td style={cell} colSpan={2}><div style={label}>Car</div><div style={value}>{car || '—'}</div></td>
+                <td style={cell}><div style={label}>Yr</div><div style={value}>{vehicle?.year || '—'}</div></td>
+              </tr>
+              {jobOrder.description && (
+                <tr>
+                  <td style={cell} colSpan={3}><div style={label}>Services</div><div style={{...value, fontWeight:400}}>{jobOrder.description}</div></td>
+                </tr>
               )}
-            </div>
-          </div>
+            </tbody>
+          </table>
 
-          <hr style={{border:'none', borderTop:'1px solid #000', margin:'0 0 10px'}} />
-
-          {/* Customer + Vehicle */}
-          <div style={{display:'flex', gap:'24px', marginBottom:'10px'}}>
-            <div style={{flex:1}}>
-              <div style={{fontSize:'8pt', fontWeight:700, textTransform:'uppercase', letterSpacing:'1px', color:'#555', marginBottom:'4px'}}>Bill To</div>
-              <div style={{fontWeight:700}}>{jobOrder.customerName}</div>
-              {jobOrder.customerPhone && <div style={{fontSize:'9.5pt'}}>Tel: {jobOrder.customerPhone}</div>}
-              {jobOrder.customerEmail && <div style={{fontSize:'9.5pt'}}>{jobOrder.customerEmail}</div>}
-            </div>
-            {jobOrder.vehicleInfo && (
-              <div style={{flex:1}}>
-                <div style={{fontSize:'8pt', fontWeight:700, textTransform:'uppercase', letterSpacing:'1px', color:'#555', marginBottom:'4px'}}>Vehicle</div>
-                <div style={{fontWeight:700}}>{[jobOrder.vehicleInfo.make, jobOrder.vehicleInfo.model, jobOrder.vehicleInfo.year].filter(Boolean).join(' ')}</div>
-                {jobOrder.vehicleInfo.plateNumber && <div style={{fontSize:'9.5pt'}}>Plate: {jobOrder.vehicleInfo.plateNumber}</div>}
-                {jobOrder.vehicleInfo.color && <div style={{fontSize:'9.5pt'}}>Color: {jobOrder.vehicleInfo.color}</div>}
-              </div>
-            )}
-          </div>
-
-          {jobOrder.description && (
-            <div style={{fontSize:'9.5pt', marginBottom:'10px', color:'#333'}}>
-              <span style={{fontWeight:700}}>Services: </span>{jobOrder.description}
-            </div>
-          )}
-
-          <hr style={{border:'none', borderTop:'2px solid #000', margin:'0 0 8px'}} />
-
-          {/* Items table */}
-          <table style={{width:'100%', borderCollapse:'collapse', fontSize:'9.5pt', marginBottom:'8px'}}>
+          {/* Items (customer copy: no internal costs, labor rates or workers) */}
+          <table style={{width:'100%', borderCollapse:'collapse', fontSize:'8.5pt', marginBottom:'6px'}}>
             <thead>
-              <tr style={{borderBottom:'1px solid #000'}}>
-                <th style={{textAlign:'left', padding:'4px 6px', fontWeight:700}}>Item</th>
-                <th style={{textAlign:'right', padding:'4px 6px', fontWeight:700, width:'60px'}}>Qty</th>
+              <tr>
+                <th style={{...cell, ...label, textAlign:'left'}}>Description</th>
+                <th style={{...cell, ...label, textAlign:'center', width:'48px'}}>Qty</th>
               </tr>
             </thead>
             <tbody>
-              {/* Customer copy: what went into the job, without our internal costs, labor or workers */}
-              {itemBreakdown.filter(item => item.category === 'material' && item.name && item.unitPrice + item.materialCostPerUnit > 0).map((item, i) => (
-                <tr key={i} style={{borderBottom:'1px solid #eee'}}>
-                  <td style={{padding:'4px 6px'}}>{item.name}</td>
-                  <td style={{textAlign:'right', padding:'4px 6px'}}>{item.quantity}</td>
+              {materialLines.map((item, i) => (
+                <tr key={i}>
+                  <td style={cell}>{item.name}</td>
+                  <td style={{...cell, textAlign:'center'}}>{item.quantity}</td>
                 </tr>
               ))}
-              <tr style={{borderBottom:'1px solid #eee'}}>
-                <td style={{padding:'4px 6px'}} colSpan={2}>Labor &amp; workmanship — {jobOrder.description || 'service'}</td>
+              <tr>
+                <td style={cell}>Labor &amp; workmanship — {jobOrder.description || 'service'}</td>
+                <td style={cell}></td>
               </tr>
             </tbody>
           </table>
 
-          {/* Payment summary */}
-          <div style={{display:'flex', justifyContent:'flex-end', marginBottom:'14px'}}>
-            <table style={{fontSize:'10pt', borderCollapse:'collapse', minWidth:'260px'}}>
+          {/* Amounts box */}
+          <div style={{display:'flex', justifyContent:'flex-end', breakInside:'avoid'}}>
+            <table style={{borderCollapse:'collapse', width:'62%'}}>
               <tbody>
-                {showPriceBreakdown && <tr><td style={{padding:'3px 8px', color:'#555'}}>Price</td><td style={{padding:'3px 8px', textAlign:'right'}}>{formatCurrency(price.subtotal)}</td></tr>}
-                {price.discount > 0 && <tr><td style={{padding:'3px 8px', color:'#555'}}>Discount ({price.discountPercent}%)</td><td style={{padding:'3px 8px', textAlign:'right'}}>− {formatCurrency(price.discount)}</td></tr>}
-                {price.vat > 0 && <tr><td style={{padding:'3px 8px', color:'#555'}}>VAT ({price.vatPercent}%)</td><td style={{padding:'3px 8px', textAlign:'right'}}>{formatCurrency(price.vat)}</td></tr>}
-                <tr style={{borderTop:'2px solid #000'}}>
-                  <td style={{padding:'5px 8px', fontWeight:900, fontSize:'11pt'}}>Total</td>
-                  <td style={{padding:'5px 8px', textAlign:'right', fontWeight:900, fontSize:'11pt'}}>{formatCurrency(jobOrder.totalPrice || 0)}</td>
-                </tr>
-                <tr>
-                  <td style={{padding:'3px 8px'}}>Amount Paid</td>
-                  <td style={{padding:'3px 8px', textAlign:'right'}}>{formatCurrency(jobOrder.downPayment || 0)}</td>
-                </tr>
-                <tr>
-                  <td style={{padding:'3px 8px', fontWeight:700, color:(jobOrder.balance||0)<=0?'#1a6e1a':'#b91c1c'}}>
-                    {(jobOrder.balance||0)<=0 ? 'Fully Paid' : 'Balance Due'}
-                  </td>
-                  <td style={{padding:'3px 8px', textAlign:'right', fontWeight:700, color:(jobOrder.balance||0)<=0?'#1a6e1a':'#b91c1c'}}>
-                    {formatCurrency(Math.max(0, jobOrder.balance||0))}
-                  </td>
-                </tr>
+                {showPriceBreakdown && amountRow('Price', formatCurrency(price.subtotal))}
+                {price.discount > 0 && amountRow(`Discount (${price.discountPercent}%)`, `− ${formatCurrency(price.discount)}`)}
+                {price.vat > 0 && amountRow(`VAT (${price.vatPercent}%)`, formatCurrency(price.vat))}
+                {amountRow('Total', formatCurrency(jobOrder.totalPrice || 0), true)}
+                {amountRow('Amount Paid', formatCurrency(jobOrder.downPayment || 0))}
+                {amountRow(paidUp ? 'Fully Paid' : 'Balance Due', formatCurrency(Math.max(0, jobOrder.balance || 0)), true)}
               </tbody>
             </table>
           </div>
 
-          <hr style={{border:'none', borderTop:'1px solid #000', margin:'0 0 20px'}} />
-
-          {/* Signature lines */}
-          <div style={{display:'flex', gap:'40px', marginBottom:'24px'}}>
-            <div style={{flex:1, textAlign:'center'}}>
-              <div style={{height:'40px'}} />
-              <div style={{borderTop:'1px solid #000', paddingTop:'4px', fontSize:'9pt'}}>Authorized Signature</div>
-            </div>
-            <div style={{flex:1, textAlign:'center'}}>
-              <div style={{height:'40px'}} />
-              <div style={{borderTop:'1px solid #000', paddingTop:'4px', fontSize:'9pt'}}>Customer Signature</div>
-            </div>
-          </div>
-
-          {/* Footer */}
-          <div style={{textAlign:'center', fontSize:'8.5pt', color:'#555', borderTop:'1px dashed #aaa', paddingTop:'8px'}}>
-            <div>Thank you for choosing <strong>Seatmakers Avenue</strong>!</div>
-            <div style={{marginTop:'2px'}}>This is your official receipt. Please keep this for your records.</div>
-            <div style={{marginTop:'2px', fontSize:'8pt'}}>Printed: {new Date().toLocaleDateString('en-PH',{month:'long',day:'numeric',year:'numeric'})}</div>
-          </div>
-
         </div>
+          );
+        })(), document.body)}
 
         {/* Issue extra materials */}
         {showExtra && (

@@ -1,34 +1,33 @@
 ﻿'use client';
 import { formatDate, formatDateTime } from '@/lib/dateUtils';
 import { useState, useEffect, useMemo, useRef, useCallback, Suspense } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { api, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus, PremadeTransfer, FORECAST_METHOD_LABELS } from '@/lib/api';
+import { api, ApiError, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus, PremadeTransfer, FORECAST_METHOD_LABELS, type PremadeRecipe } from '@/lib/api';
+import PremadeItemPicker from '@/components/PremadeItemPicker';
 import { useConfirm } from '@/components/ConfirmDialog';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import Link from 'next/link';
 import Paginated from '@/components/Paginated';
 
-type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'purchase-orders' | 'suppliers' | 'waste-log' | 'ai-predictions';
+type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'waste-log' | 'ai-predictions';
 
-const TAB_IDS: TabType[] = ['raw-materials', 'finished-goods', 'material-usage', 'purchase-orders', 'suppliers', 'waste-log', 'ai-predictions'];
+const TAB_IDS: TabType[] = ['raw-materials', 'finished-goods', 'material-usage', 'waste-log', 'ai-predictions'];
 // Permissions that show each tab (any one is enough), matching what its data needs
 const TAB_PERMISSIONS: Record<TabType, string[]> = {
   'raw-materials': ['inventory.view'],
   'finished-goods': ['premade.view', 'premade.receive'],  // receivers confirm incoming deliveries here
   'material-usage': ['inventory.view'],
-  'purchase-orders': ['purchase_orders.view'],
-  'suppliers': ['suppliers.view'],
   'waste-log': ['inventory.view'],
   'ai-predictions': ['forecasting.view'],
 };
 
 /** Same rules as the server: a number from 0 up to 1,000,000 (the most of one item it takes) */
-function stockQuantityProblem(qty: number): string | false {
-  if (Number.isNaN(qty)) return 'Stock quantity must be a number.';
-  if (qty < 0) return 'Stock quantity cannot be negative.';
-  return qty > 1_000_000 && 'Stock quantity cannot be more than 1,000,000.';
-}
+/** An item whose stock is being corrected by hand (Adjust stock) */
+type AdjustTarget = { kind: 'material' | 'premade'; id: number; name: string; current: number; unit: string; promised?: number };
+// Same list as the server (STOCK_ADJUST_REASONS)
+const STOCK_ADJUST_REASONS = ['Physical count correction', 'Data entry error', 'Opening stock', 'Damaged / lost', 'Other'];
+
 
 export default function InventoryPage() {
   // useSearchParams needs a Suspense boundary for this route to prerender.
@@ -50,6 +49,12 @@ function InventoryContent() {
   // Deep links from the dashboard's low-stock alerts arrive as
   // ?tab=raw-materials&status=low-stock&q=<material>
   const tabParam = searchParams.get('tab');
+  // Purchase Orders and Suppliers have their own pages now; forward old ?tab= links
+  const router = useRouter();
+  useEffect(() => {
+    if (tabParam === 'purchase-orders') router.replace('/purchase-orders');
+    else if (tabParam === 'suppliers') router.replace('/suppliers');
+  }, [tabParam, router]);
   const initialTab: TabType = TAB_IDS.includes(tabParam as TabType) ? (tabParam as TabType) : 'raw-materials';
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
   const tabAllowed = useCallback((tab: TabType) => can(...TAB_PERMISSIONS[tab]), [can]);
@@ -126,10 +131,6 @@ function InventoryContent() {
 
   // Suppliers
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
-  const [newSupplier, setNewSupplier] = useState({ name: '', contactPerson: '', phone: '', email: '', address: '', materialsSupplied: '', notes: '' });
-  const [editingSupplierId, setEditingSupplierId] = useState<number | null>(null);
-  const [editSupplier, setEditSupplier] = useState({ name: '', contactPerson: '', phone: '', email: '', address: '', materialsSupplied: '', notes: '' });
-  const [supplierSearch, setSupplierSearch] = useState('');
 
   // Waste Log
   const [wasteLogs, setWasteLogs] = useState<MaterialWasteLog[]>([]);
@@ -158,8 +159,53 @@ function InventoryContent() {
   const [premadeMaterials, setPremadeMaterials] = useState<Array<{ materialId: string; quantityUsed: string }>>([
     { materialId: '', quantityUsed: '' }
   ]);
+  // Adding stock to a product already in the warehouse (its quantity goes up) vs a new product
+  const [premadeMode, setPremadeMode] = useState<'new' | 'restock'>('new');
+  const [restockProductId, setRestockProductId] = useState<number | ''>('');
+  const [recipe, setRecipe] = useState<PremadeRecipe | null>(null);
+  const [recipeLoading, setRecipeLoading] = useState(false);
+  // Once the amounts are changed by hand, a new quantity no longer refills them
+  const [materialsEdited, setMaterialsEdited] = useState(false);
+  const [premadeNotice, setPremadeNotice] = useState('');
   const [editingPremadeId, setEditingPremadeId] = useState<number | null>(null);
   const [editPremade, setEditPremade] = useState({ quantity: '', price: '' });
+  // Adjust stock: the only way to change stock by hand, and it needs a reason
+  const [adjusting, setAdjusting] = useState<AdjustTarget | null>(null);
+  const [adjustForm, setAdjustForm] = useState({ newQuantity: '', reason: '', notes: '' });
+  const [adjustError, setAdjustError] = useState('');
+  const [adjustSaving, setAdjustSaving] = useState(false);
+  const openAdjust = (target: AdjustTarget) => {
+    setAdjusting(target);
+    setAdjustForm({ newQuantity: String(target.current), reason: '', notes: '' });
+    setAdjustError('');
+  };
+  const submitAdjust = async () => {
+    if (!adjusting || adjustSaving) return;
+    const qty = Number(adjustForm.newQuantity);
+    const problem = adjustForm.newQuantity.trim() === '' || Number.isNaN(qty) ? 'Enter the correct stock.'
+      : qty < 0 ? 'Stock cannot be negative.'
+      : adjusting.kind === 'premade' && !Number.isInteger(qty) ? 'Premade stock is counted in whole pieces.'
+      : adjusting.kind === 'premade' && qty < (adjusting.promised || 0) ? `${adjusting.promised} pcs are promised to deliveries awaiting receipt.`
+      : qty === adjusting.current ? 'That is already the current stock.'
+      : !adjustForm.reason ? 'Choose the reason.'
+      : adjustForm.reason === 'Other' && !adjustForm.notes.trim() ? 'Explain the reason.'
+      : '';
+    if (problem) { setAdjustError(problem); return; }
+    setAdjustSaving(true);
+    setAdjustError('');
+    try {
+      await api.inventory.adjustStock({
+        kind: adjusting.kind, itemId: adjusting.id, newQuantity: qty,
+        reason: adjustForm.reason, notes: adjustForm.notes.trim() || undefined,
+      });
+      setAdjusting(null);
+      await fetchInventory();
+    } catch (err) {
+      setAdjustError(err instanceof Error && err.message ? err.message : 'Could not adjust the stock.');
+    } finally {
+      setAdjustSaving(false);
+    }
+  };
 
   // ── Premade distribution (warehouse -> branches) ──────────────────────────
   type BranchOption = { id: number; name: string; isWarehouse: boolean; isActive: boolean };
@@ -243,16 +289,16 @@ function InventoryContent() {
   useEffect(() => {
     api.settings.getBranches().then(r => {
       if (r.data) {
-        const active = r.data.filter((b: any) => b.isActive);
+        const active = r.data.filter((b) => b.isActive);
         // The warehouse is where premade stock is produced, so it belongs in the
         // location list; shop branches are kept separately for distribution.
-        const wh = active.find((b: any) => b.isWarehouse) || null;
+        const wh = active.find((b) => b.isWarehouse) || null;
         setWarehouse(wh);
-        setBranches(active.filter((b: any) => !b.isWarehouse));
+        setBranches(active.filter((b) => !b.isWarehouse));
         if (!newPremade.branchId) {
           // Default to the warehouse so adding stock doesn't silently raise a
           // delivery the admin didn't ask for.
-          const def = wh || active.find((b: any) => b.id === user?.branchId) || active[0];
+          const def = wh || active.find((b) => b.id === user?.branchId) || active[0];
           if (def) setNewPremade(prev => ({ ...prev, branchId: String(def.id) }));
         }
       }
@@ -297,9 +343,6 @@ function InventoryContent() {
       } else if (activeTab === 'material-usage') {
         const response = await api.inventory.getMaterialUsage({ branchId: listBranchId });
         setMaterialUsageLogs(response.data || []);
-      } else if (activeTab === 'suppliers') {
-        const res = await api.inventory.getSuppliers(true);
-        setSuppliers(res.data || []);
       } else if (activeTab === 'waste-log') {
         const [wasteRes, matRes] = await Promise.all([
           api.inventory.getWasteLogs({ branchId: listBranchId }),
@@ -324,11 +367,9 @@ function InventoryContent() {
 
     const costPerUnit = Number(newMaterial.costPerUnit);
     const markupPercent = Number(newMaterial.markupPercent);
-    const stockQuantity = Number(newMaterial.stockQuantity);
     const byMarkup = newMaterial.priceMode === 'markup';
     if (fe.show({
       'new-materialType': !newMaterial.materialType.trim() && 'Enter the material name.',
-      'new-stockQuantity': stockQuantityProblem(stockQuantity),
       'new-costPerUnit': byMarkup && (Number.isNaN(costPerUnit) || costPerUnit <= 0) && 'Enter the cost per unit (more than ₱0).',
       'new-markupPercent': byMarkup && Number.isNaN(markupPercent) && 'Markup must be a number.',
       'new-unitPrice': !byMarkup && Number.isNaN(Number(newMaterial.unitPrice)) && 'Selling price must be a number.',
@@ -348,14 +389,15 @@ function InventoryContent() {
         markupPercent: Number.isNaN(markupPercent) ? 25 : markupPercent,
         ...(newMaterial.priceMode === 'manual' ? { unitPrice: Number(newMaterial.unitPrice) } : {}),
         supplierId: newMaterial.supplierId ? Number(newMaterial.supplierId) : null,
-        stockQuantity,
+        // New items start at 0 yd: stock comes in by receiving a purchase order
+        stockQuantity: 0,
         branchId: user?.branchId || 1
       });
 
       setNewMaterial({ itemId: '', materialType: '', color: '', pattern: '', sku: '', costPerUnit: '', markupPercent: '25', unitPrice: '', priceMode: 'markup', supplierId: '', stockQuantity: '' });
       await fetchInventory();
-    } catch (error: any) {
-      setFormError(error?.message || 'Failed to add item.');
+    } catch (error) {
+      setFormError((error as Error)?.message || 'Failed to add item.');
     } finally {
       setSaving(false);
     }
@@ -383,10 +425,9 @@ function InventoryContent() {
 
     const costPerUnit = Number(editMaterial.costPerUnit);
     const markupPercent = Number(editMaterial.markupPercent);
-    const stockQuantity = Number(editMaterial.stockQuantity);
+    // Stock isn't edited here: it comes from purchase orders and is corrected with Adjust stock
     if (fe.show({
       'edit-materialType': !editMaterial.materialType.trim() && 'Enter the material name.',
-      'edit-stockQuantity': stockQuantityProblem(stockQuantity),
       'edit-unitPrice': editMaterial.priceMode === 'manual' && Number.isNaN(Number(editMaterial.unitPrice))
         && 'Selling price must be a number.',
     })) return;
@@ -402,13 +443,12 @@ function InventoryContent() {
         markupPercent: Number.isNaN(markupPercent) ? 25 : markupPercent,
         ...(editMaterial.priceMode === 'manual' ? { unitPrice: Number(editMaterial.unitPrice) } : {}),
         supplierId: editMaterial.supplierId ? Number(editMaterial.supplierId) : null,
-        stockQuantity
       });
 
       setEditingMaterialId(null);
       await fetchInventory();
-    } catch (error: any) {
-      setFormError(error?.message || 'Failed to update item.');
+    } catch (error) {
+      setFormError((error as Error)?.message || 'Failed to update item.');
     } finally {
       setSaving(false);
     }
@@ -424,10 +464,12 @@ function InventoryContent() {
     const parsedMaterialsUsed = premadeMaterials.map((entry) => ({
       materialId: Number(entry.materialId), quantityUsed: Number(entry.quantityUsed),
     }));
+    const restocking = premadeMode === 'restock';
     if (fe.show({
-      'premade-name': !newPremade.name.trim() && 'Enter the product name.',
-      'premade-quantity': Number.isNaN(quantity) && 'Amount must be a number.',
-      'premade-price': Number.isNaN(price) && 'Price must be a number.',
+      'premade-product': restocking && !restockProductId && 'Choose the product to add stock to.',
+      'premade-name': !restocking && !newPremade.name.trim() && 'Enter the product name.',
+      'premade-quantity': (Number.isNaN(quantity) || !(quantity > 0)) && 'Enter how many pieces (more than 0).',
+      'premade-price': !restocking && Number.isNaN(price) && 'Price must be a number.',
       'premade-branch': !branchId && 'Choose where this product goes.',
       'premade-materials': parsedMaterialsUsed.length === 0 && 'Add at least one material used.',
       ...Object.fromEntries(parsedMaterialsUsed.map((m, index) => [`premade-material-${index}`,
@@ -441,7 +483,7 @@ function InventoryContent() {
     const target = branches.find(b => b.id === branchId);
     if (target && !target.isWarehouse) {
       const ok = await confirm({
-        title: `Send ${quantity} pcs to ${target.name}?`,
+        title: `Send ${quantity} pcs${restocking && restockProduct ? ` of ${restockProduct.name}` : ''} to ${target.name}?`,
         message: (
           <>
             The stock is produced at {warehouse?.name || 'the warehouse'} and sent to{' '}
@@ -457,23 +499,37 @@ function InventoryContent() {
 
     setSaving(true);
     try {
-      await api.inventory.createFinishedGood({
-        name: newPremade.name.trim(),
-        quantity,
-        unit: 'pcs',
-        category: newPremade.category,
-        price,
-        // No cost: the server works it out from the materials used
-        branchId,
-        materialsUsed: parsedMaterialsUsed
-      });
+      const res = await api.inventory.createFinishedGood(restocking
+        ? { existingProductId: restockProductId as number, quantity, branchId, materialsUsed: parsedMaterialsUsed }
+        : {
+          name: newPremade.name.trim(),
+          quantity,
+          unit: 'pcs',
+          category: newPremade.category,
+          price,
+          // No cost: the server works it out from the materials used
+          branchId,
+          materialsUsed: parsedMaterialsUsed
+        });
 
       const def = branches.find(b => b.id === user?.branchId) || branches[0];
       setNewPremade({ name: '', quantity: '', price: '', category: 'General', branchId: def ? String(def.id) : '' });
       setPremadeMaterials([{ materialId: '', quantityUsed: '' }]);
+      setRestockProductId(''); setRecipe(null); setMaterialsEdited(false);
+      setPremadeNotice((res as { message?: string }).message || (restocking ? 'Stock added.' : 'Product added.'));
       await fetchInventory();
-    } catch (error: any) {
-      setFormError(error?.message || 'Failed to add premade product.');
+    } catch (error) {
+      // The same product is already in stock: offer to add to it instead of a second item
+      if (error instanceof ApiError && error.status === 409 && error.body?.existingProduct) {
+        const existing = error.body.existingProduct as FinishedGood;
+        setPremadeMode('restock');
+        setFinishedGoods((prev) => (prev.some((g) => g.id === existing.id) ? prev : [...prev, existing]));
+        await chooseRestockProduct(existing.id);
+        setFormError('');
+        setPremadeNotice(`${existing.name} is already in stock (${existing.quantity} pcs). Switched to Add Stock: check the materials and save to add ${quantity || ''} more.`);
+      } else {
+        setFormError((error as Error)?.message || 'Failed to add premade product.');
+      }
     } finally {
       setSaving(false);
     }
@@ -495,10 +551,51 @@ function InventoryContent() {
     field: 'materialId' | 'quantityUsed',
     value: string
   ) => {
+    setMaterialsEdited(true);
     setPremadeMaterials((prev) =>
       prev.map((entry, i) => (i === index ? { ...entry, [field]: value } : entry))
     );
   };
+
+  /** Material rows from the product's last batch, scaled to the pieces being made now */
+  const rowsFromRecipe = (r: PremadeRecipe | null, pieces: number) => {
+    const usable = (r?.materials || []).filter((m) => m.available);
+    if (usable.length === 0) return [{ materialId: '', quantityUsed: '' }];
+    return usable.map((m) => ({
+      materialId: String(m.materialId),
+      quantityUsed: m.perPiece != null && pieces > 0 ? String(Math.round(m.perPiece * pieces * 10000) / 10000) : '',
+    }));
+  };
+
+  const chooseRestockProduct = async (id: number) => {
+    setRestockProductId(id);
+    setRecipe(null);
+    setMaterialsEdited(false);
+    setRecipeLoading(true);
+    try {
+      const res = await api.inventory.getPremadeRecipe(id);
+      setRecipe(res.data || null);
+      setPremadeMaterials(rowsFromRecipe(res.data || null, Number(newPremade.quantity) || 0));
+    } catch {
+      setRecipe(null);
+      setPremadeMaterials([{ materialId: '', quantityUsed: '' }]);
+    } finally { setRecipeLoading(false); }
+  };
+
+  const switchPremadeMode = (mode: 'new' | 'restock') => {
+    setPremadeMode(mode);
+    setRestockProductId('');
+    setRecipe(null);
+    setMaterialsEdited(false);
+    setPremadeNotice('');
+    setPremadeMaterials([{ materialId: '', quantityUsed: '' }]);
+    fe.clear();
+  };
+
+  // Warehouse rows are the ones stock is made into (branches get theirs by delivery)
+  const restockable = finishedGoods.filter((g) => g.isWarehouse && !g.isArchived);
+  const restockProduct = restockable.find((g) => g.id === restockProductId);
+  const recipeById = new Map((recipe?.materials || []).map((m) => [String(m.materialId), m]));
 
   // ── Distribution ──────────────────────────────────────────────────────────
 
@@ -559,8 +656,8 @@ function InventoryContent() {
       }
       setDistributing(null);
       await fetchInventory();
-    } catch (err: any) {
-      setDistributeError(err?.message || 'Failed to send the stock.');
+    } catch (err) {
+      setDistributeError((err as Error)?.message || 'Failed to send the stock.');
     } finally {
       setDistributeSaving(false);
     }
@@ -593,8 +690,8 @@ function InventoryContent() {
     try {
       await api.inventory.confirmPremadeTransfer(transfer.id);
       await fetchInventory();
-    } catch (err: any) {
-      setTransferError(err?.message || 'Failed to confirm the delivery.');
+    } catch (err) {
+      setTransferError((err as Error)?.message || 'Failed to confirm the delivery.');
     } finally {
       setTransferBusyId(null);
     }
@@ -619,8 +716,8 @@ function InventoryContent() {
     try {
       await api.inventory.cancelPremadeTransfer(transfer.id);
       await fetchInventory();
-    } catch (err: any) {
-      setTransferError(err?.message || 'Failed to reject the delivery.');
+    } catch (err) {
+      setTransferError((err as Error)?.message || 'Failed to reject the delivery.');
     } finally {
       setTransferBusyId(null);
     }
@@ -634,61 +731,22 @@ function InventoryContent() {
 
   const handleSavePremade = async (itemId: number) => {
     setFormError('');
-    const quantity = Number(editPremade.quantity);
     const price = Number(editPremade.price);
     if (fe.show({
-      'editPremade-quantity': Number.isNaN(quantity) && 'Must be a number.',
       'editPremade-price': Number.isNaN(price) && 'Must be a number.',
     })) return;
 
     setSaving(true);
     try {
-      await api.inventory.updateFinishedGood(itemId, { quantity, price, unit: 'pcs' });
+      // Only the price: stock is corrected with Adjust stock, with a reason
+      await api.inventory.updateFinishedGood(itemId, { price, unit: 'pcs' });
       setEditingPremadeId(null);
       await fetchInventory();
-    } catch (error: any) {
-      setFormError(error?.message || 'Failed to update premade product.');
+    } catch (error) {
+      setFormError((error as Error)?.message || 'Failed to update premade product.');
     } finally {
       setSaving(false);
     }
-  };
-
-  const handleCreateSupplier = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setFormError('');
-    if (fe.show({ 'supplier-name': !newSupplier.name.trim() && 'Enter the supplier name.' })) return;
-    setSaving(true);
-    try {
-      await api.inventory.createSupplier(newSupplier);
-      setNewSupplier({ name: '', contactPerson: '', phone: '', email: '', address: '', materialsSupplied: '', notes: '' });
-      await fetchInventory();
-    } catch (err: any) { setFormError(err?.message || 'Failed to add supplier.'); }
-    finally { setSaving(false); }
-  };
-
-  const startEditSupplier = (s: Supplier) => {
-    setEditingSupplierId(s.id);
-    setEditSupplier({ name: s.name, contactPerson: s.contactPerson || '', phone: s.phone || '', email: s.email || '', address: s.address || '', materialsSupplied: s.materialsSupplied || '', notes: s.notes || '' });
-  };
-
-  const handleSaveSupplier = async (id: number) => {
-    setFormError('');
-    setSaving(true);
-    try {
-      await api.inventory.updateSupplier(id, editSupplier);
-      setEditingSupplierId(null);
-      await fetchInventory();
-    } catch (err: any) { setFormError(err?.message || 'Failed to update supplier.'); }
-    finally { setSaving(false); }
-  };
-
-  const handleDeactivateSupplier = async (id: number) => {
-    setSaving(true);
-    try {
-      await api.inventory.updateSupplier(id, { isActive: false });
-      await fetchInventory();
-    } catch { }
-    finally { setSaving(false); }
   };
 
   const handleCreateWasteLog = async (e: React.FormEvent) => {
@@ -710,7 +768,7 @@ function InventoryContent() {
       });
       setNewWaste({ materialId: '', quantity: '', reason: '', notes: '' });
       await fetchInventory();
-    } catch (err: any) { setFormError(err?.message || 'Failed to log waste.'); }
+    } catch (err) { setFormError((err as Error)?.message || 'Failed to log waste.'); }
     finally { setSaving(false); }
   };
 
@@ -720,7 +778,7 @@ function InventoryContent() {
       title: 'Undo this waste entry?',
       message: (
         <>
-          {l.quantity} of <span className="font-medium text-gray-900">{l.materialName}</span> goes back into stock
+          {l.quantity} yd of <span className="font-medium text-gray-900">{l.materialName}</span> goes back into stock
           {l.jobOrderNumber ? <> and comes off {l.jobOrderNumber}&apos;s cost</> : null}.
         </>
       ),
@@ -732,8 +790,8 @@ function InventoryContent() {
     try {
       await api.inventory.undoWasteLog(l.id);
       await fetchInventory();
-    } catch (err: any) {
-      setFormError(err?.message || 'Could not undo the waste entry.');
+    } catch (err) {
+      setFormError((err as Error)?.message || 'Could not undo the waste entry.');
     }
   };
 
@@ -763,8 +821,8 @@ function InventoryContent() {
       const res = await api.inventory.ai.uploadHistorical(file);
       setUploadSuccess(res.message || `Uploaded ${res.data?.rowsSaved} rows. Computing predictions...`);
       await fetchAIPredictions();
-    } catch (err: any) {
-      setUploadError(err?.message || 'Upload failed.');
+    } catch (err) {
+      setUploadError((err as Error)?.message || 'Upload failed.');
     } finally {
       setUploading(false);
       e.target.value = '';
@@ -775,8 +833,8 @@ function InventoryContent() {
     try {
       await api.inventory.ai.recompute();
       await fetchAIPredictions();
-    } catch (err: any) {
-      setUploadError(err?.message || 'Failed to recompute.');
+    } catch (err) {
+      setUploadError((err as Error)?.message || 'Failed to recompute.');
     }
   };
 
@@ -852,10 +910,6 @@ function InventoryContent() {
     );
   });
 
-  const filteredSuppliers = suppliers.filter(s => !supplierSearch
-    || s.name.toLowerCase().includes(supplierSearch.toLowerCase())
-    || (s.contactPerson || '').toLowerCase().includes(supplierSearch.toLowerCase()));
-
   const filteredWasteLogs = wasteLogs.filter(l => {
     if (!wasteSearch) return true;
     const q = wasteSearch.toLowerCase();
@@ -892,16 +946,6 @@ function InventoryContent() {
     { id: 'material-usage' as TabType, name: 'Material Usage', icon: (
       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-      </svg>
-    )},
-    { id: 'purchase-orders' as TabType, name: 'Purchase Orders', icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
-      </svg>
-    )},
-    { id: 'suppliers' as TabType, name: 'Suppliers', icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
       </svg>
     )},
     { id: 'waste-log' as TabType, name: 'Waste / Scrap', icon: (
@@ -961,7 +1005,7 @@ function InventoryContent() {
                 ) : (
                   <>
                     <span className="text-xs text-orange-700">
-                      Low stock alert: <strong>{globalThreshold > 0 ? `≤ ${globalThreshold} units` : 'Off'}</strong>
+                      Low stock alert: <strong>{globalThreshold > 0 ? `≤ ${globalThreshold} yd` : 'Off'}</strong>
                     </span>
                     <button
                       onClick={() => { setEditingThreshold(true); setThresholdInput(String(globalThreshold)); }}
@@ -974,7 +1018,7 @@ function InventoryContent() {
               </div>
             )}
             <Link
-              href="/inventory/purchase-orders/new"
+              href="/purchase-orders/new"
               className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors"
             >
               <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1069,7 +1113,7 @@ function InventoryContent() {
                             {lowStockItems.length} item{lowStockItems.length > 1 ? 's' : ''} running low on stock
                           </p>
                           <Link
-                            href="/inventory/purchase-orders/new"
+                            href="/purchase-orders/new"
                             className="flex-shrink-0 inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-medium transition-colors"
                           >
                             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1081,7 +1125,7 @@ function InventoryContent() {
                         <ul className="mt-1 space-y-0.5">
                           {lowStockItems.map(m => (
                             <li key={m.id} className="text-xs text-orange-600">
-                              {m.materialType}{m.color ? ` (${m.color})` : ''}{m.pattern ? ` / ${m.pattern}` : ''} — {m.stockQuantity} remaining
+                              {m.materialType}{m.color ? ` (${m.color})` : ''}{m.pattern ? ` / ${m.pattern}` : ''} — {m.stockQuantity} yd remaining
                             </li>
                           ))}
                         </ul>
@@ -1147,18 +1191,9 @@ function InventoryContent() {
                 placeholder="Pattern (optional)"
                 className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
               />
-              <div {...fe.field('new-stockQuantity')}>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={newMaterial.stockQuantity}
-                  onChange={(e) => setNewMaterial((prev) => ({ ...prev, stockQuantity: e.target.value }))}
-                  placeholder="Stock Quantity"
-                  className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
-                />
-                <FieldError message={fe.errors['new-stockQuantity']} />
-              </div>
+              <p className="self-center text-xs text-gray-500">
+                Starts at <strong>0 yd</strong>. Stock is added by receiving a purchase order.
+              </p>
             </div>
 
             {/* Pricing: cost -> selling price via markup, or manual override */}
@@ -1180,7 +1215,7 @@ function InventoryContent() {
               </div>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
                 <div {...fe.field('new-costPerUnit')}>
-                  <label className="block text-xs text-gray-500 mb-1">Cost per Unit (₱)</label>
+                  <label className="block text-xs text-gray-500 mb-1">Cost per Yard (₱)</label>
                   <input type="number" min="0" step="0.01" value={newMaterial.costPerUnit}
                     onChange={(e) => setNewMaterial((prev) => ({ ...prev, costPerUnit: e.target.value }))}
                     placeholder="0.00"
@@ -1230,9 +1265,35 @@ function InventoryContent() {
         {/* Add Premade Form */}
         {activeTab === 'finished-goods' && can('premade.add') && managesAllInventory && (
           <form onSubmit={handleCreatePremade} noValidate className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Add Premade Product</h2>
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <h2 className="text-lg font-semibold text-gray-900">{premadeMode === 'restock' ? 'Add Stock to a Premade Product' : 'Add Premade Product'}</h2>
+              <div role="tablist" aria-label="Add premade" className="inline-flex p-1 bg-gray-100 rounded-lg text-sm">
+                {([['new', 'New product'], ['restock', 'Add stock to existing']] as const).map(([id, label]) => (
+                  <button key={id} type="button" role="tab" aria-selected={premadeMode === id} onClick={() => switchPremadeMode(id)}
+                    className={`px-3 py-1.5 rounded-md font-medium ${premadeMode === id ? 'bg-white shadow-sm text-[#011c72]' : 'text-gray-600'}`}>{label}</button>
+                ))}
+              </div>
+            </div>
+            {premadeNotice && <p className="mb-3 p-3 rounded-lg bg-[#eef1fb] border border-[#c7d2f5] text-sm text-[#011c72]">{premadeNotice}</p>}
+            {premadeMode === 'restock' && (
+              <div className="mb-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div {...fe.field('premade-product')} className="md:col-span-2">
+                  <PremadeItemPicker items={restockable} value={restockProductId}
+                    onSelect={(id) => { setPremadeNotice(''); chooseRestockProduct(id); }}
+                    invalid={!!fe.errors['premade-product']} />
+                  <FieldError message={fe.errors['premade-product']} />
+                </div>
+                {restockProduct && (
+                  <div className="text-sm text-gray-600 flex flex-wrap items-center gap-x-4 gap-y-1">
+                    <span>In stock: <strong className="text-gray-900">{restockProduct.quantity}</strong></span>
+                    <span>Price: <strong className="text-gray-900">₱{restockProduct.price.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</strong></span>
+                    <span>{restockProduct.category}</span>
+                  </div>
+                )}
+              </div>
+            )}
             <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
-              <div {...fe.field('premade-name')} className="md:col-span-2">
+              {premadeMode === 'new' && <div {...fe.field('premade-name')} className="md:col-span-2">
                 <input
                   type="text"
                   value={newPremade.name}
@@ -1241,20 +1302,25 @@ function InventoryContent() {
                   className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
                 />
                 <FieldError message={fe.errors['premade-name']} />
-              </div>
+              </div>}
               <div {...fe.field('premade-quantity')}>
                 <input
                   type="number"
                   min="0"
                   step="0.01"
                   value={newPremade.quantity}
-                  onChange={(e) => setNewPremade((prev) => ({ ...prev, quantity: e.target.value }))}
-                  placeholder="Amount"
+                  onChange={(e) => {
+                    setNewPremade((prev) => ({ ...prev, quantity: e.target.value }));
+                    if (premadeMode === 'restock' && recipe && !materialsEdited) {
+                      setPremadeMaterials(rowsFromRecipe(recipe, Number(e.target.value) || 0));
+                    }
+                  }}
+                  placeholder={premadeMode === 'restock' ? 'Pieces to add' : 'Amount'}
                   className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
                 />
                 <FieldError message={fe.errors['premade-quantity']} />
               </div>
-              <div {...fe.field('premade-price')}>
+              {premadeMode === 'new' && <div {...fe.field('premade-price')}>
                 <input
                   type="number"
                   min="0"
@@ -1265,20 +1331,24 @@ function InventoryContent() {
                   className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
                 />
                 <FieldError message={fe.errors['premade-price']} />
-              </div>
-              <input
+              </div>}
+              {premadeMode === 'new' && <input
                 type="text"
                 value={newPremade.category}
                 onChange={(e) => setNewPremade((prev) => ({ ...prev, category: e.target.value }))}
                 placeholder="Category"
                 className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
-              />
+              />}
               <div {...fe.field('premade-branch')}>
                 <select
                   value={newPremade.branchId}
                   onChange={(e) => {
                     setNewPremade((prev) => ({ ...prev, branchId: e.target.value }));
-                    setPremadeMaterials([{ materialId: '', quantityUsed: '' }]);
+                    // A restock keeps its filled-in materials (they come from the warehouse either way)
+                    setPremadeMaterials(premadeMode === 'restock' && recipe
+                      ? rowsFromRecipe(recipe, Number(newPremade.quantity) || 0)
+                      : [{ materialId: '', quantityUsed: '' }]);
+                    setMaterialsEdited(false);
                   }}
                   required
                   className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
@@ -1298,6 +1368,10 @@ function InventoryContent() {
             <div className="mt-4" {...fe.field('premade-materials', true)}>
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-sm font-semibold text-gray-700">Materials Used (Required)</h3>
+                {premadeMode === 'restock' && recipe?.basedOn && materialsEdited && (
+                  <button type="button" onClick={() => { setMaterialsEdited(false); setPremadeMaterials(rowsFromRecipe(recipe, Number(newPremade.quantity) || 0)); }}
+                    className="text-xs text-gray-600 hover:text-[#011c72] underline ml-auto mr-4">Reset to previous materials</button>
+                )}
                 <button
                   type="button"
                   onClick={addPremadeMaterialRow}
@@ -1317,7 +1391,7 @@ function InventoryContent() {
                       <option value="">Select material</option>
                       {rawMaterials.map((material) => (
                         <option key={material.id} value={material.id}>
-                          {material.materialType}{material.color ? ` - ${material.color}` : ''}{material.pattern ? ` (${material.pattern})` : ''} ({material.stockQuantity} available)
+                          {material.materialType}{material.color ? ` - ${material.color}` : ''}{material.pattern ? ` (${material.pattern})` : ''} ({material.stockQuantity} yd available)
                         </option>
                       ))}
                     </select>
@@ -1327,7 +1401,7 @@ function InventoryContent() {
                       step="0.01"
                       value={entry.quantityUsed}
                       onChange={(e) => updatePremadeMaterialRow(index, 'quantityUsed', e.target.value)}
-                      placeholder="Qty used"
+                      placeholder="Yards used"
                       className="md:col-span-3 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
                     />
                     <button
@@ -1337,13 +1411,29 @@ function InventoryContent() {
                     >
                       Remove
                     </button>
+                    {premadeMode === 'restock' && recipeById.get(entry.materialId) && (() => {
+                      const r = recipeById.get(entry.materialId)!;
+                      const needed = Number(entry.quantityUsed) || 0;
+                      return (
+                        <p className={`md:col-span-12 -mt-1 text-xs ${needed > r.stock ? 'text-red-600' : 'text-gray-500'}`}>
+                          Previously {r.perPiece != null ? `${r.perPiece.toLocaleString('en-PH', { maximumFractionDigits: 4 })} yd per piece` : `${r.batchQuantity} yd for a batch`}
+                          {r.costPerUnit > 0 && ` · ₱${r.costPerUnit.toLocaleString('en-PH', { minimumFractionDigits: 2 })} per yard (≈ ₱${(needed * r.costPerUnit).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} for this)`}
+                          {` · ${r.stock.toLocaleString('en-PH')} yd in stock`}{needed > r.stock && ' — not enough'}
+                        </p>
+                      );
+                    })()}
                     <FieldError message={fe.errors[`premade-material-${index}`]} className="md:col-span-12 mt-0" />
                   </div>
                 ))}
               </div>
               <FieldError message={fe.errors['premade-materials']} />
               <p className="mt-2 text-xs text-gray-500">
-                Stock will be deducted automatically based on the material quantities you enter.
+                {premadeMode === 'restock'
+                  ? recipeLoading ? 'Loading the materials used last time…'
+                    : recipe?.basedOn
+                      ? `Filled in from the last batch (${recipe.basedOn.pieces ? `${recipe.basedOn.pieces} pcs, ` : ''}${recipe.basedOn.date ? formatDate(recipe.basedOn.date) : ''}) for the pieces you're adding. Adjust if needed: only what is entered here is deducted.`
+                      : restockProductId ? 'No earlier material record for this product: enter the materials used.' : 'Choose a product to fill in the materials it used last time.'
+                  : 'Stock will be deducted automatically based on the material quantities you enter.'}
               </p>
             </div>
             <div className="mt-4">
@@ -1352,31 +1442,7 @@ function InventoryContent() {
                 disabled={saving}
                 className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors disabled:opacity-60"
               >
-                {saving ? 'Saving...' : 'Add Premade Product'}
-              </button>
-            </div>
-          </form>
-        )}
-
-        {/* Add Supplier Form */}
-        {activeTab === 'suppliers' && can('suppliers.view') && (
-          <form onSubmit={handleCreateSupplier} noValidate className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Add Supplier</h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div {...fe.field('supplier-name')}>
-                <input type="text" value={newSupplier.name} onChange={e => setNewSupplier(p => ({ ...p, name: e.target.value }))} placeholder="Supplier Name *" className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
-                <FieldError message={fe.errors['supplier-name']} />
-              </div>
-              <input type="text" value={newSupplier.contactPerson} onChange={e => setNewSupplier(p => ({ ...p, contactPerson: e.target.value }))} placeholder="Contact Person" className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
-              <input type="text" value={newSupplier.phone} onChange={e => setNewSupplier(p => ({ ...p, phone: e.target.value }))} placeholder="Phone" className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
-              <input type="email" value={newSupplier.email} onChange={e => setNewSupplier(p => ({ ...p, email: e.target.value }))} placeholder="Email" className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
-              <input type="text" value={newSupplier.address} onChange={e => setNewSupplier(p => ({ ...p, address: e.target.value }))} placeholder="Address" className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
-              <input type="text" value={newSupplier.materialsSupplied} onChange={e => setNewSupplier(p => ({ ...p, materialsSupplied: e.target.value }))} placeholder="Materials Supplied" className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
-              <input type="text" value={newSupplier.notes} onChange={e => setNewSupplier(p => ({ ...p, notes: e.target.value }))} placeholder="Notes" className="md:col-span-3 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
-            </div>
-            <div className="mt-4">
-              <button type="submit" disabled={saving} className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors disabled:opacity-60">
-                {saving ? 'Saving...' : 'Add Supplier'}
+                {saving ? 'Saving...' : premadeMode === 'restock' ? 'Add Stock' : 'Add Premade Product'}
               </button>
             </div>
           </form>
@@ -1422,7 +1488,7 @@ function InventoryContent() {
                       {p.itemId} — {p.materialType}{p.color ? ` (${p.color})` : ''}
                     </span>
                     <span className={p.daysUntilStockout <= 7 ? 'text-red-600 font-semibold' : 'text-orange-600'}>
-                      {p.daysUntilStockout <= 7 ? `${p.daysUntilStockout}d left — order ${p.suggestedRestockQty} units` : `Restock by ${p.restockByDate}`}
+                      {p.daysUntilStockout <= 7 ? `${p.daysUntilStockout}d left — order ${p.suggestedRestockQty} yd` : `Restock by ${p.restockByDate}`}
                     </span>
                   </div>
                 ))}
@@ -1512,13 +1578,13 @@ function InventoryContent() {
                 <select value={newWaste.materialId} onChange={e => setNewWaste(p => ({ ...p, materialId: e.target.value }))} className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900">
                   <option value="">Select Material *</option>
                   {rawMaterials.map(m => (
-                    <option key={m.id} value={m.id}>{m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} available)</option>
+                    <option key={m.id} value={m.id}>{m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} yd available)</option>
                   ))}
                 </select>
                 <FieldError message={fe.errors['waste-material']} />
               </div>
               <div {...fe.field('waste-quantity')}>
-                <input type="number" min="0.01" step="0.01" value={newWaste.quantity} onChange={e => setNewWaste(p => ({ ...p, quantity: e.target.value }))} placeholder="Quantity Wasted *" className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
+                <input type="number" min="0.01" step="0.01" value={newWaste.quantity} onChange={e => setNewWaste(p => ({ ...p, quantity: e.target.value }))} placeholder="Yards Wasted *" className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
                 <FieldError message={fe.errors['waste-quantity']} />
               </div>
               <div {...fe.field('waste-reason')}>
@@ -1714,18 +1780,6 @@ function InventoryContent() {
                                 <option key={s.id} value={s.id}>{s.name}</option>
                               ))}
                             </select>
-                            <div {...fe.field('edit-stockQuantity')}>
-                              <input
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                value={editMaterial.stockQuantity}
-                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, stockQuantity: e.target.value }))}
-                                placeholder="Stock Qty"
-                                className="w-full px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
-                              />
-                              <FieldError message={fe.errors['edit-stockQuantity']} />
-                            </div>
                             <input
                               type="text"
                               value={editMaterial.color}
@@ -1760,7 +1814,7 @@ function InventoryContent() {
                             </div>
                             <div className="grid grid-cols-3 gap-2 items-end">
                               <div>
-                                <label className="block text-xs text-gray-500 mb-1">Cost/Unit (₱)</label>
+                                <label className="block text-xs text-gray-500 mb-1">Cost/Yard (₱)</label>
                                 <input type="number" min="0" step="0.01" value={editMaterial.costPerUnit}
                                   onChange={(e) => setEditMaterial((prev) => ({ ...prev, costPerUnit: e.target.value }))}
                                   placeholder="0.00"
@@ -1841,7 +1895,7 @@ function InventoryContent() {
                                 </span>
                               )}
                               <span>Selling: <span className="font-medium text-gray-700">{formatCurrency(material.unitPrice)}</span></span>
-                              <span>Stock: <span className="font-medium text-gray-700">{material.stockQuantity}</span></span>
+                              <span>Stock: <span className="font-medium text-gray-700">{material.stockQuantity} yd</span></span>
                             </div>
                           </div>
                           {/* Status + actions */}
@@ -1855,6 +1909,15 @@ function InventoryContent() {
                                 className="text-sm font-medium text-[#011c72] hover:text-[#011c72] transition-colors"
                               >
                                 Edit
+                              </button>
+                            )}
+                            {canChangeMaterial(material) && can('inventory.adjust_stock') && (
+                              <button
+                                onClick={() => openAdjust({ kind: 'material', id: material.id, current: material.stockQuantity,
+                                  name: [material.materialType, material.color, material.pattern].filter(Boolean).join(' - '), unit: 'yd' })}
+                                className="text-sm font-medium text-amber-700 hover:text-amber-800 transition-colors"
+                              >
+                                Adjust stock
                               </button>
                             )}
                           </div>
@@ -1997,19 +2060,8 @@ function InventoryContent() {
                             {item.category}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
-                            {editingPremadeId === item.id ? (
-                              <div {...fe.field('editPremade-quantity')}>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="0.01"
-                                  value={editPremade.quantity}
-                                  onChange={(e) => setEditPremade((prev) => ({ ...prev, quantity: e.target.value }))}
-                                  className="w-24 px-2 py-1 rounded border border-gray-200 bg-white text-sm text-gray-900"
-                                />
-                                <FieldError message={fe.errors['editPremade-quantity']} />
-                              </div>
-                            ) : (
+                            {/* Stock is corrected with Adjust stock (with a reason), not edited here */}
+                            {(
                               <div>
                                 <span className="text-sm font-medium text-gray-900">{item.quantity}</span>
                                 {/* Pending deliveries are still counted in `quantity`,
@@ -2061,12 +2113,23 @@ function InventoryContent() {
                                 </button>
                               </div>
                             ) : (
+                              <>
                               <button
                                 onClick={() => startEditPremade(item)}
                                 className="text-[#011c72] hover:text-[#011c72] text-sm font-medium"
                               >
                                 Edit
                               </button>
+                              {can('premade.adjust_stock') && (can('branches.all') || item.branchId === user?.branchId) && (
+                                <button
+                                  onClick={() => openAdjust({ kind: 'premade', id: item.id, current: item.quantity, name: item.name,
+                                    unit: 'pcs', promised: item.pendingOutgoing || 0 })}
+                                  className="ml-3 text-amber-700 hover:text-amber-800 text-sm font-medium"
+                                >
+                                  Adjust stock
+                                </button>
+                              )}
+                              </>
                             )}
                             {/* Only warehouse stock is handed out to branches. */}
                             {editingPremadeId !== item.id && canDistribute && item.isWarehouse && (
@@ -2145,107 +2208,6 @@ function InventoryContent() {
                           )}
                         </tr>
                       ))}
-                  </tbody>
-                </table>
-                )}</Paginated>
-              )}
-            </div>
-          ) : activeTab === 'purchase-orders' ? (
-            <div className="p-8 text-center">
-              <svg className="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-              </svg>
-              <h3 className="text-lg font-medium text-gray-900 mb-2">Purchase Orders</h3>
-              <p className="text-gray-500 mb-4">View and manage purchase orders for restocking inventory.</p>
-              <Link href="/inventory/purchase-orders" className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors">
-                View Purchase Orders
-              </Link>
-            </div>
-          ) : activeTab === 'suppliers' ? (
-            <div className="overflow-x-auto">
-              {/* Search */}
-              <div className="p-4 border-b border-gray-200">
-                <input type="text" placeholder="Search suppliers..." value={supplierSearch} onChange={e => setSupplierSearch(e.target.value)} className="w-full max-w-md pl-4 pr-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-900" />
-              </div>
-              {suppliers.filter(s => !supplierSearch || s.name.toLowerCase().includes(supplierSearch.toLowerCase()) || (s.contactPerson || '').toLowerCase().includes(supplierSearch.toLowerCase())).length === 0 ? (
-                <div className="p-8 text-center">
-                  <p className="text-gray-500">No suppliers found. Add your first supplier above.</p>
-                </div>
-              ) : (
-                <Paginated items={filteredSuppliers} resetKey={supplierSearch} label="suppliers">{rows => (
-                <table className="w-full">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Supplier</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Contact</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone / Email</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Materials</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                      <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {rows.map(s => (
-                      <tr key={s.id} className="hover:bg-gray-50 transition-colors">
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          {editingSupplierId === s.id ? (
-                            <input type="text" value={editSupplier.name} onChange={e => setEditSupplier(p => ({ ...p, name: e.target.value }))} className="w-36 px-2 py-1 rounded border border-gray-200 bg-white text-sm text-gray-900" />
-                          ) : (
-                            <div>
-                              <p className="text-sm font-medium text-gray-900">{s.name}</p>
-                              {s.address && <p className="text-xs text-gray-500 truncate max-w-40">{s.address}</p>}
-                            </div>
-                          )}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          {editingSupplierId === s.id ? (
-                            <input type="text" value={editSupplier.contactPerson} onChange={e => setEditSupplier(p => ({ ...p, contactPerson: e.target.value }))} placeholder="Contact Person" className="w-32 px-2 py-1 rounded border border-gray-200 bg-white text-sm text-gray-900" />
-                          ) : (
-                            <span className="text-sm text-gray-600">{s.contactPerson || '—'}</span>
-                          )}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          {editingSupplierId === s.id ? (
-                            <div className="space-y-1">
-                              <input type="text" value={editSupplier.phone} onChange={e => setEditSupplier(p => ({ ...p, phone: e.target.value }))} placeholder="Phone" className="w-32 px-2 py-1 rounded border border-gray-200 bg-white text-sm text-gray-900" />
-                              <input type="email" value={editSupplier.email} onChange={e => setEditSupplier(p => ({ ...p, email: e.target.value }))} placeholder="Email" className="w-40 px-2 py-1 rounded border border-gray-200 bg-white text-sm text-gray-900" />
-                            </div>
-                          ) : (
-                            <div>
-                              <p className="text-sm text-gray-600">{s.phone || '—'}</p>
-                              <p className="text-xs text-gray-500">{s.email || ''}</p>
-                            </div>
-                          )}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          {editingSupplierId === s.id ? (
-                            <input type="text" value={editSupplier.materialsSupplied} onChange={e => setEditSupplier(p => ({ ...p, materialsSupplied: e.target.value }))} placeholder="Materials" className="w-36 px-2 py-1 rounded border border-gray-200 bg-white text-sm text-gray-900" />
-                          ) : (
-                            <span className="text-sm text-gray-600 truncate max-w-35 block">{s.materialsSupplied || '—'}</span>
-                          )}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${s.isActive ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
-                            {s.isActive ? 'Active' : 'Inactive'}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-right">
-                          {editingSupplierId === s.id ? (
-                            <div className="flex items-center justify-end gap-2">
-                              <button onClick={() => handleSaveSupplier(s.id)} className="text-[#011c72] text-sm font-medium">Save</button>
-                              <button onClick={() => setEditingSupplierId(null)} className="text-gray-500 text-sm font-medium">Cancel</button>
-                            </div>
-                          ) : (
-                            <div className="flex items-center justify-end gap-3">
-                              <button onClick={() => startEditSupplier(s)} className="text-[#011c72] text-sm font-medium">Edit</button>
-                              {s.isActive && can('suppliers.edit') && (
-                                <button onClick={() => handleDeactivateSupplier(s.id)} className="text-red-500 text-sm font-medium">Deactivate</button>
-                              )}
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
                   </tbody>
                 </table>
                 )}</Paginated>
@@ -2407,8 +2369,8 @@ function InventoryContent() {
                                   <div className="text-xs text-gray-500">{p.materialType}{p.color ? ` · ${p.color}` : ''}{p.pattern ? ` · ${p.pattern}` : ''}</div>
                                   {!p.hasCurrentInventory && <span className="text-xs text-orange-500">Not in current inventory</span>}
                                 </td>
-                                <td className="px-4 py-3 text-sm text-gray-700">{p.currentStock}</td>
-                                <td className="px-4 py-3 text-sm text-gray-700">{p.avgDailyUsage}/day</td>
+                                <td className="px-4 py-3 text-sm text-gray-700">{p.currentStock} yd</td>
+                                <td className="px-4 py-3 text-sm text-gray-700">{p.avgDailyUsage} yd/day</td>
                                 <td className="px-4 py-3">
                                   <span className={`text-sm ${daysClass}`}>
                                     {p.daysUntilStockout >= 9999 ? '—' : `${p.daysUntilStockout} days`}
@@ -2425,7 +2387,7 @@ function InventoryContent() {
                                     </div>
                                   ) : <span className="text-sm text-gray-400">—</span>}
                                 </td>
-                                <td className="px-4 py-3 text-sm font-medium text-gray-900">{p.suggestedRestockQty} units</td>
+                                <td className="px-4 py-3 text-sm font-medium text-gray-900">{p.suggestedRestockQty} yd</td>
                                 <td className="px-4 py-3">
                                   <div className="flex flex-col gap-1">
                                     <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${srcColors[p.dataSource]}`}>
@@ -2475,7 +2437,7 @@ function InventoryContent() {
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Material</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Qty Wasted</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Yards Wasted</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reason</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Job Order</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cost</th>
@@ -2495,7 +2457,7 @@ function InventoryContent() {
                           {l.materialColor && <span className="text-xs text-gray-500 ml-1">({l.materialColor})</span>}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <span className="text-sm font-medium text-red-600">{l.quantity}</span>
+                          <span className="text-sm font-medium text-red-600">{l.quantity} yd</span>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <span className="text-sm text-gray-600">{l.reason}</span>
@@ -2691,6 +2653,78 @@ function InventoryContent() {
         </div>
       )}
 
+      {/* Adjust stock: correcting a count by hand, always with a reason */}
+      {adjusting && (() => {
+        const qty = Number(adjustForm.newQuantity);
+        const change = adjustForm.newQuantity.trim() !== '' && !Number.isNaN(qty) ? qty - adjusting.current : null;
+        const close = () => { if (!adjustSaving) setAdjusting(null); };
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={close}>
+            <div role="dialog" aria-modal="true" aria-labelledby="adjust-title"
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+              <div className="p-5 border-b border-gray-200 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 id="adjust-title" className="text-base font-semibold text-gray-900">Adjust stock</h2>
+                  <p className="text-xs text-gray-500 truncate">{adjusting.name}</p>
+                </div>
+                <button onClick={close} aria-label="Close" className="text-gray-400 hover:text-gray-600 text-xl leading-none">✕</button>
+              </div>
+              <div className="p-5 space-y-4">
+                <p className="text-xs text-gray-500">
+                  For correcting the count only. New stock comes in through{' '}
+                  {adjusting.kind === 'material' ? 'purchase orders' : 'Add Stock (made from raw materials) or deliveries'}.
+                  Every adjustment is recorded with your name and reason.
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1">Current stock</p>
+                    <p className="px-3 py-2 rounded-lg bg-gray-50 border border-gray-200 text-sm font-medium text-gray-900">
+                      {adjusting.current.toLocaleString('en-PH')} {adjusting.unit}
+                    </p>
+                  </div>
+                  <div>
+                    <label htmlFor="adjust-qty" className="block text-xs text-gray-500 mb-1">Correct stock ({adjusting.unit}) *</label>
+                    <input id="adjust-qty" type="number" min="0" step={adjusting.kind === 'premade' ? '1' : '0.01'} autoFocus
+                      value={adjustForm.newQuantity} onChange={e => setAdjustForm(f => ({ ...f, newQuantity: e.target.value }))}
+                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+                  </div>
+                </div>
+                {change !== null && change !== 0 && (
+                  <p className={`text-sm font-medium ${change > 0 ? 'text-green-700' : 'text-red-600'}`}>
+                    {change > 0 ? '+' : ''}{Math.round(change * 100) / 100} {adjusting.unit}
+                  </p>
+                )}
+                <div>
+                  <label htmlFor="adjust-reason" className="block text-xs text-gray-500 mb-1">Reason *</label>
+                  <select id="adjust-reason" value={adjustForm.reason} onChange={e => setAdjustForm(f => ({ ...f, reason: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900">
+                    <option value="">Choose a reason…</option>
+                    {STOCK_ADJUST_REASONS.map(r => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="adjust-notes" className="block text-xs text-gray-500 mb-1">
+                    Notes {adjustForm.reason === 'Other' ? '*' : '(optional)'}
+                  </label>
+                  <input id="adjust-notes" type="text" maxLength={200} value={adjustForm.notes}
+                    onChange={e => setAdjustForm(f => ({ ...f, notes: e.target.value }))}
+                    placeholder="e.g. Counted 2 more rolls in storage"
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+                </div>
+                {adjustError && <p role="alert" className="text-sm text-red-600">{adjustError}</p>}
+              </div>
+              <div className="p-5 border-t border-gray-200 flex gap-3">
+                <button type="button" onClick={submitAdjust} disabled={adjustSaving}
+                  className="flex-1 py-2.5 bg-[#011c72] hover:bg-[#022a9e] text-white text-sm font-medium rounded-xl disabled:opacity-50">
+                  {adjustSaving ? 'Saving…' : 'Save adjustment'}
+                </button>
+                <button type="button" onClick={close} disabled={adjustSaving}
+                  className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl hover:bg-gray-200 text-sm disabled:opacity-50">Cancel</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
       {confirmDialog}
     </div>
   );

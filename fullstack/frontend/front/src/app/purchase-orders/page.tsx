@@ -5,13 +5,19 @@ import Link from 'next/link';
 import { api, PurchaseOrder } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import Paginated from '@/components/Paginated';
+import ReceivePurchaseOrderDialog from '@/components/ReceivePurchaseOrderDialog';
+import { poStatusInfo, isOpenForReceiving } from '@/lib/purchaseOrderStatus';
 
 export default function PurchaseOrdersPage() {
   const { can } = useAuth();
   const canCreate = can('purchase_orders.add');
+  const canReceive = can('purchase_orders.receive');
+  const [receiving, setReceiving] = useState<PurchaseOrder | null>(null);
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'pending' | 'approved' | 'received' | 'all'>('all');
+  const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'to_receive' | 'received'>('all');
+  // Counts come from the full list, whatever tab is open
+  const [allOrders, setAllOrders] = useState<PurchaseOrder[]>([]);
 
   useEffect(() => {
     fetchPurchaseOrders();
@@ -20,9 +26,13 @@ export default function PurchaseOrdersPage() {
   const fetchPurchaseOrders = async () => {
     setLoading(true);
     try {
-      const status = activeTab === 'all' ? undefined : activeTab;
-      const response = await api.purchaseOrders.getAll(status);
-      setPurchaseOrders(response.data || []);
+      const response = await api.purchaseOrders.getAll();
+      const all = response.data || [];
+      setAllOrders(all);
+      setPurchaseOrders(all.filter((po) => activeTab === 'all'
+        || (activeTab === 'pending' && po.status === 'pending')
+        || (activeTab === 'to_receive' && isOpenForReceiving(po))
+        || (activeTab === 'received' && po.status === 'received')));
     } catch (error) {
       console.error('Error fetching purchase orders:', error);
     } finally {
@@ -39,15 +49,6 @@ export default function PurchaseOrdersPage() {
     }
   };
 
-  const handleReceive = async (id: number) => {
-    try {
-      await api.purchaseOrders.receive(id);
-      await fetchPurchaseOrders();
-    } catch (error) {
-      console.error('Error receiving purchase order:', error);
-    }
-  };
-
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat('en-PH', {
       style: 'currency',
@@ -56,26 +57,11 @@ export default function PurchaseOrdersPage() {
     }).format(amount);
   };
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'pending':
-        return 'bg-yellow-100 text-yellow-700';
-      case 'approved':
-        return 'bg-blue-100 text-blue-700';
-      case 'received':
-        return 'bg-green-100 text-green-700';
-      case 'cancelled':
-        return 'bg-red-100 text-red-700';
-      default:
-        return 'bg-gray-100 text-gray-700';
-    }
-  };
-
   const tabs = [
-    { id: 'all' as const, name: 'All Orders', count: purchaseOrders.length },
-    { id: 'pending' as const, name: 'Pending', count: purchaseOrders.filter(po => po.status === 'pending').length },
-    { id: 'approved' as const, name: 'Approved', count: purchaseOrders.filter(po => po.status === 'approved').length },
-    { id: 'received' as const, name: 'Received', count: purchaseOrders.filter(po => po.status === 'received').length }
+    { id: 'all' as const, name: 'All Orders', count: allOrders.length },
+    { id: 'pending' as const, name: 'Pending Approval', count: allOrders.filter(po => po.status === 'pending').length },
+    { id: 'to_receive' as const, name: 'To Receive', count: allOrders.filter(isOpenForReceiving).length },
+    { id: 'received' as const, name: 'Received', count: allOrders.filter(po => po.status === 'received').length }
   ];
 
   return (
@@ -89,15 +75,21 @@ export default function PurchaseOrdersPage() {
               View and manage purchase orders for raw materials
             </p>
           </div>
+          <div className="mt-4 sm:mt-0 flex flex-wrap gap-2">
+          {canReceive && <Link href="/purchase-orders/receiving"
+            className="inline-flex items-center px-4 py-2 border border-[#011c72] text-[#011c72] hover:bg-[#eef1fb] rounded-lg font-medium transition-colors">
+            Go to Receiving
+          </Link>}
           {canCreate && <Link
-            href="/inventory/purchase-orders/new"
-            className="mt-4 sm:mt-0 inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors"
+            href="/purchase-orders/new"
+            className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors"
           >
             <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
             New Purchase Order
           </Link>}
+          </div>
         </div>
 
         {/* Tabs */}
@@ -143,7 +135,7 @@ export default function PurchaseOrdersPage() {
                 {activeTab !== 'all' ? 'No purchase orders in this status.' : canCreate ? 'Create your first purchase order to get started.' : 'No purchase orders yet.'}
               </p>
               {canCreate && <Link
-                href="/inventory/purchase-orders/new"
+                href="/purchase-orders/new"
                 className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors"
               >
                 Create Purchase Order
@@ -169,7 +161,7 @@ export default function PurchaseOrdersPage() {
                     <tr key={po.id} className="hover:bg-gray-50 transition-colors">
                       <td className="px-6 py-4 whitespace-nowrap">
                         <Link
-                          href={`/inventory/purchase-orders/${po.id}`}
+                          href={`/purchase-orders/${po.id}`}
                           className="text-sm font-medium text-[#011c72] hover:text-[#011c72]"
                         >
                           {po.poNumber}
@@ -185,8 +177,8 @@ export default function PurchaseOrdersPage() {
                         {formatDate(po.expectedDelivery)}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <span className={`px-3 py-1 text-xs font-medium rounded-full ${getStatusColor(po.status)}`}>
-                          {po.status.charAt(0).toUpperCase() + po.status.slice(1)}
+                        <span className={`px-3 py-1 text-xs font-medium rounded-full whitespace-nowrap ${poStatusInfo(po).className}`}>
+                          {poStatusInfo(po).label}
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
@@ -195,7 +187,7 @@ export default function PurchaseOrdersPage() {
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <div className="flex items-center justify-end gap-2">
                           <Link
-                            href={`/inventory/purchase-orders/${po.id}`}
+                            href={`/purchase-orders/${po.id}`}
                             className="text-[#011c72] hover:text-[#011c72] text-sm font-medium"
                           >
                             View Details
@@ -208,12 +200,12 @@ export default function PurchaseOrdersPage() {
                               Approve
                             </button>
                           )}
-                          {po.status === 'approved' && (
+                          {isOpenForReceiving(po) && canReceive && (
                             <button
-                              onClick={() => handleReceive(po.id)}
+                              onClick={() => setReceiving(po)}
                               className="text-green-600 hover:text-green-700 text-sm font-medium"
                             >
-                              Confirm
+                              Receive
                             </button>
                           )}
                         </div>
@@ -227,6 +219,10 @@ export default function PurchaseOrdersPage() {
           )}
         </div>
       </main>
+      {receiving && (
+        <ReceivePurchaseOrderDialog po={receiving} onClose={() => setReceiving(null)}
+          onSaved={() => { setReceiving(null); fetchPurchaseOrders(); }} />
+      )}
     </div>
   );
 }
