@@ -128,8 +128,8 @@ export default function AnnouncementsPage() {
       setForm({ ...BLANK_FORM });
       setShowCreate(false);
       load();
-    } catch (err: any) {
-      setFormError(err?.message || 'Failed to post.');
+    } catch (err) {
+      setFormError((err as Error)?.message || 'Failed to post.');
     } finally {
       setSaving(false);
     }
@@ -149,8 +149,8 @@ export default function AnnouncementsPage() {
       await api.announcements.update(editingId, { title: editForm.title.trim(), body: editForm.body.trim(), priority: editForm.priority, isPinned: editForm.isPinned });
       setEditingId(null);
       load();
-    } catch (err: any) {
-      setFormError(err?.message || 'Failed to update.');
+    } catch (err) {
+      setFormError((err as Error)?.message || 'Failed to update.');
     } finally {
       setSaving(false);
     }
@@ -266,7 +266,7 @@ export default function AnnouncementsPage() {
             </svg>
             <p className="text-gray-400 text-sm">No announcements yet.</p>
             {isAdmin && (
-              <p className="text-gray-400 text-xs mt-1">Click "Post Announcement" to add one.</p>
+              <p className="text-gray-400 text-xs mt-1">Click &quot;Post Announcement&quot; to add one.</p>
             )}
           </div>
         ) : (

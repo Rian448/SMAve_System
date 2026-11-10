@@ -84,6 +84,11 @@ export default function MyWork() {
                     {t.vehicle?.make && t.vehicle.make !== 'N/A' ? ` · ${[t.vehicle.make, t.vehicle.model].filter(Boolean).join(' ')}` : ''}
                   </p>
                   {t.scheduledDate && <p className="text-[11px] text-gray-400 mt-0.5">{formatDate(t.scheduledDate)}</p>}
+                  {t.waitingOn && (
+                    <p className="text-[11px] text-amber-700 mt-0.5">
+                      Wait for {t.waitingOn.workerName} to finish {t.waitingOn.description || 'their part'} first.
+                    </p>
+                  )}
                 </div>
                 <span className={`shrink-0 px-2 py-0.5 rounded-full text-xs font-medium ${STATUS[t.status].cls}`}>{STATUS[t.status].label}</span>
               </div>

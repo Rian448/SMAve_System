@@ -88,7 +88,7 @@ export default function CustomersPage() {
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Customers</h1>
-            <p className="text-sm text-gray-500 mt-1">Customers recorded on job orders and sales, including former online accounts</p>
+            <p className="text-sm text-gray-500 mt-1">Customers recorded on job orders and sales</p>
           </div>
           {canCreate && (
             <button onClick={() => { setShowCreate(true); setCreateError(''); }}
@@ -119,7 +119,8 @@ export default function CustomersPage() {
             aria-label="Filter by account"
             className="px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
             <option value="all">All customers</option>
-            <option value="online">Former online account</option>
+            {/* No "Former online account" option: online ordering was retired. Those customers
+                and their records stay, and still show under All customers. */}
             <option value="walkin">Walk-in only</option>
           </select>
           <select value={orderFilter} onChange={(e) => setOrderFilter(e.target.value as typeof orderFilter)}

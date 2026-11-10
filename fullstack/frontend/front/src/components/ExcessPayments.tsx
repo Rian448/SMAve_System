@@ -1,11 +1,12 @@
 'use client';
 import { useState } from 'react';
 import Link from 'next/link';
-import { api, PAYMENT_METHOD_LABELS, type ExcessPayment, type CustomerOrderSummary } from '@/lib/api';
+import { api, PAYMENT_METHOD_LABELS, ACCEPTED_PAYMENT_METHODS, type ExcessPayment, type CustomerOrderSummary } from '@/lib/api';
 import { formatDate } from '@/lib/dateUtils';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 
-const REFUND_METHODS = ['gcash', 'maya', 'bank_transfer', 'cash', 'check', 'other'];
+// Money goes back the same ways it can come in
+const REFUND_METHODS = ACCEPTED_PAYMENT_METHODS;
 
 const peso = (n: number) =>
   new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(n || 0);

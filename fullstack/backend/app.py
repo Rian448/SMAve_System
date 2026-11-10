@@ -204,6 +204,8 @@ class JobOrder(db.Model):
     __tablename__ = 'job_orders'
     id = db.Column(db.Integer, primary_key=True)
     job_order_id = db.Column(db.String(50), unique=True, nullable=False)
+    # True when the number was typed in on the form rather than generated
+    number_is_manual = db.Column(db.Boolean, default=False)
     customer_id = db.Column(db.Integer, nullable=True)
     customer_name = db.Column(db.String(255), nullable=False)
     customer_phone = db.Column(db.String(50), nullable=False)
@@ -321,6 +323,8 @@ class ProductOrder(db.Model):
     __tablename__ = 'product_orders'
     id = db.Column(db.Integer, primary_key=True)
     order_number = db.Column(db.String(50), unique=True, nullable=False)
+    # True when the number was typed in on the form rather than generated
+    number_is_manual = db.Column(db.Boolean, default=False)
     customer_name = db.Column(db.String(255), nullable=False)
     customer_phone = db.Column(db.String(50), nullable=False)
     customer_email = db.Column(db.String(255))
@@ -542,6 +546,8 @@ class MaterialUsageLog(db.Model):
     used_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     managed_worker_id = db.Column(db.Integer, db.ForeignKey('managed_workers.id'), nullable=True)
     notes = db.Column(db.Text)
+    # Ties together the logs of one premade add / restock (and its stock record)
+    batch_id = db.Column(db.String(36), nullable=True, index=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     material = db.relationship('InventoryMaterial')
@@ -634,6 +640,41 @@ class MaterialWasteLog(db.Model):
     logged_by_user = db.relationship('User', foreign_keys=[logged_by])
     job_order = db.relationship('JobOrder')
     worker = db.relationship('ManagedWorker')
+
+class StockAdjustmentLog(db.Model):
+    """A stock quantity typed in by hand (an edit on the Inventory page) or an
+    item's starting stock. Every other stock change already has its own record
+    (usage, waste, purchase orders, sales, deliveries); these didn't, so they are
+    kept here for the Item History. Recorded from when this table was added."""
+    __tablename__ = 'stock_adjustment_logs'
+    id = db.Column(db.Integer, primary_key=True)
+    item_kind = db.Column(db.String(20), nullable=False)  # 'material' | 'premade'
+    item_id = db.Column(db.Integer, nullable=False, index=True)
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
+    # 'starting' | 'production' | 'manual_edit' (older edits) | 'adjustment' (Adjust stock, with a reason)
+    reason = db.Column(db.String(20), nullable=False)
+    old_quantity = db.Column(db.Float, nullable=True)
+    new_quantity = db.Column(db.Float, nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    batch_id = db.Column(db.String(36), nullable=True)
+    # Why the stock was adjusted, e.g. "Physical count correction — found 2 rolls in storage"
+    note = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    branch = db.relationship('Branch')
+    user = db.relationship('User', foreign_keys=[user_id])
+
+
+def log_stock_adjustment(kind, item_id, branch_id, reason, old_qty, new_qty, user, batch_id=None, note=None):
+    """Record a hand-made stock change (only when the quantity really changed)."""
+    if reason in ('manual_edit', 'adjustment') and old_qty is not None and abs(float(old_qty) - float(new_qty)) < 1e-9:
+        return
+    db.session.add(StockAdjustmentLog(
+        item_kind=kind, item_id=item_id, branch_id=branch_id, reason=reason,
+        old_quantity=None if old_qty is None else float(old_qty), new_quantity=float(new_qty),
+        user_id=(user or {}).get('id'), batch_id=batch_id, note=(note or None) and note[:255],
+    ))
+
 
 class HistoricalInventoryData(db.Model):
     __tablename__ = 'historical_inventory_data'
@@ -830,6 +871,22 @@ class PurchaseOrder(db.Model):
     received_at = db.Column(db.DateTime, nullable=True)
     received_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
 
+class PurchaseOrderReceipt(db.Model):
+    """One delivery received against a purchase order (a PO may arrive in several),
+    or the closing of a PO whose remaining items will not come (kind 'closed')."""
+    __tablename__ = 'purchase_order_receipts'
+    id = db.Column(db.Integer, primary_key=True)
+    purchase_order_id = db.Column(db.Integer, db.ForeignKey('purchase_orders.id'), nullable=False, index=True)
+    kind = db.Column(db.String(20), nullable=False, default='delivery')  # 'delivery' | 'closed'
+    # [{line, materialId, name, quantity}]: line is the index in the PO's items
+    items = db.Column(db.JSON, nullable=False, default=list)
+    notes = db.Column(db.Text, nullable=True)
+    received_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    received_by_user = db.relationship('User', foreign_keys=[received_by])
+
+
 class LineupSlip(db.Model):
     """Production line-up slip for a job order: its tasks and who is on them."""
     __tablename__ = 'lineup_slips'
@@ -933,9 +990,10 @@ PERMISSION_MODULES = [
     ('payments', 'Payments', [('view', 'View'), ('add', 'Add'), ('request_override', 'Request override'),
                               ('approve_override', 'Approve overrides')]),
     ('inventory', 'Inventory', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'), ('delete', 'Archive'),
-                                ('log_waste', 'Log waste')]),
+                                ('log_waste', 'Log waste'), ('adjust_stock', 'Adjust stock')]),
     ('premade', 'Premade Products', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'),
-                                     ('distribute', 'Distribute'), ('receive', 'Receive deliveries')]),
+                                     ('distribute', 'Distribute'), ('receive', 'Receive deliveries'),
+                                     ('adjust_stock', 'Adjust stock')]),
     ('suppliers', 'Suppliers', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit')]),
     ('purchase_orders', 'Purchase Orders', [('view', 'View'), ('add', 'Add'), ('approve', 'Approve'),
                                             ('receive', 'Receive')]),
@@ -969,6 +1027,8 @@ _SUPERVISOR_EXCLUDED = {
     'workers.add', 'workers.edit', 'workers.delete', 'workers.delete_assignment',
     'catalog.manage', 'blacklist.manage', 'branches.manage', 'branches.all', 'users.manage',
     'owner.view', 'expenses.delete',
+    # Correcting stock by hand is for administrators (or whoever they give it to)
+    'inventory.adjust_stock', 'premade.adjust_stock',
 }
 # Defaults reproduce what each role could do before permissions existed
 ROLE_DEFAULT_PERMISSIONS = {
@@ -1070,9 +1130,40 @@ def raw_material_branch_error(user, branch_id):
         return None
     return inventory_branch_error(user, branch_id)
 
-# Delegation policy. Administrators may change anyone's access. Anyone else who
-# manages users can't change their own account, can't touch administrator
-# accounts or hand out the administrator role, and can only grant or remove
+# Account hierarchy. Managing users (editing, role, permissions, password reset,
+# archive/restore, delete) only works on accounts whose role ranks BELOW your own:
+# an administrator can't change another administrator, a supervisor can't change
+# another supervisor or the owner. Nobody changes their own account here (My
+# Profile is for that). Per-user permission grants never move anyone up this
+# ladder: it goes by role alone.
+ROLE_RANK = {
+    'administrator': 5,
+    'owner': 4,
+    'supervisor': 3,
+    'sales_manager': 2,
+    'seat_maker': 1,
+    'sewer': 1,
+    'customer': 0,
+}
+
+def role_rank(role_key):
+    return ROLE_RANK.get(role_key or '', 0)
+
+ROLE_NAMES = {r['key']: r['name'] for r in default_roles}
+
+def role_assign_error(actor, role_key):
+    """Why `actor` may not give an account this role, or None. Only roles below
+    your own -- except that administrators may make new administrators, since
+    nobody ranks above them (otherwise no administrator could ever be added)."""
+    if is_administrator(actor):
+        return None
+    if role_rank(role_key) >= role_rank(actor.get('role')):
+        return (f"You can only give out roles below your own. "
+                f"{ROLE_NAMES.get(role_key, role_key)} is not below {ROLE_NAMES.get(actor.get('role'), actor.get('role'))}.")
+    return None
+
+# Delegation policy for permissions. Administrators may grant anything to the
+# accounts below them. Anyone else who manages users can only grant or remove
 # permissions they hold themselves -- never these privileged ones, which decide
 # who manages accounts and who sees every branch.
 PRIVILEGED_PERMISSIONS = frozenset({'users.manage', 'branches.manage', 'branches.all'})
@@ -1082,21 +1173,37 @@ def is_administrator(user):
 
 def target_account_error(actor, target):
     """Why `actor` may not manage the `target` account at all, or None."""
-    if is_administrator(actor):
-        return None
     if target.id == actor['id']:
-        return 'Only an administrator can change your own account here. Use My Profile for your details.'
-    if target.role and target.role.key == 'administrator':
-        return 'Only an administrator can change an administrator account.'
+        return ("You can't change your own account here: your role and permissions can only be "
+                "changed by someone above you. Use My Profile for your details and password.")
+    target_role = target.role.key if target.role else None
+    if role_rank(target_role) >= role_rank(actor.get('role')):
+        same = target_role == actor.get('role')
+        name = ROLE_NAMES.get(target_role, target_role or 'this')
+        return (f"You can't change another {name} account: accounts at your own level can't manage each other."
+                if same else f"You can't change a {name} account: it ranks above yours.")
     return None
+
+def refuse_account_change(what, reason):
+    """Record a refused account change ("edit maria", "archive juan") in the
+    Audit Trail, then build the 403 response."""
+    me = request.current_user
+    # log_action commits: drop anything the request had already changed first,
+    # so a refused edit can't half-save
+    db.session.rollback()
+    log_action(me['id'], me['fullName'], 'ACCESS_DENIED', 'Settings',
+               f"Refused to {what}: {reason}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'error', 'message': reason}), 403
 
 def delegation_error(actor, perms_before, perms_after, new_role_key=None):
     """Why `actor` may not change an account's access from perms_before to
     perms_after (and to new_role_key, if the role changes), or None."""
+    if new_role_key is not None:
+        error = role_assign_error(actor, new_role_key)
+        if error:
+            return error
     if is_administrator(actor):
         return None
-    if new_role_key == 'administrator':
-        return 'Only an administrator can give out the administrator role.'
     changed = set(perms_before) ^ set(perms_after)
     privileged = changed & PRIVILEGED_PERMISSIONS
     if privileged:
@@ -1291,6 +1398,11 @@ def run_migrations():
         "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS materials_used JSON",
         # Track which managed worker used materials (FK to managed_workers)
         "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS managed_worker_id INTEGER REFERENCES managed_workers(id)",
+        "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS batch_id VARCHAR(36)",
+        "ALTER TABLE stock_adjustment_logs ADD COLUMN IF NOT EXISTS batch_id VARCHAR(36)",
+        "ALTER TABLE stock_adjustment_logs ADD COLUMN IF NOT EXISTS note VARCHAR(255)",
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS number_is_manual BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE product_orders ADD COLUMN IF NOT EXISTS number_is_manual BOOLEAN DEFAULT FALSE",
         # Per-order discount override on job orders
         "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS discount_percent REAL",
         # Printed job order slip snapshot
@@ -1701,14 +1813,17 @@ def lock_product_order_numbering():
     SystemSetting.query.filter_by(key=PRODUCT_ORDER_NUMBER_LOCK).with_for_update().first()
 
 def generate_job_order_id(branch_code):
-    """Generate unique job order ID"""
+    """Next job order number for this branch and year (JO-BA-2026-0001, ...).
+    Numbers typed in by hand don't move the sequence (a typed JO-BA-2026-9999 won't
+    make the next one 10000), but a number already taken is always skipped."""
     year = datetime.now().year
     prefix = f'JO-{branch_code}-{year}-'
 
     existing_ids = [
         row[0]
         for row in db.session.query(JobOrder.job_order_id)
-        .filter(JobOrder.job_order_id.like(f'{prefix}%'))
+        .filter(JobOrder.job_order_id.like(f'{prefix}%'),
+                db.or_(JobOrder.number_is_manual.is_(None), JobOrder.number_is_manual.is_(False)))
         .all()
         if row[0]
     ]
@@ -1721,7 +1836,32 @@ def generate_job_order_id(branch_code):
             continue
         next_sequence = max(next_sequence, sequence + 1)
 
+    while order_number_taken('job', f'{prefix}{next_sequence:04d}'):
+        next_sequence += 1
     return f'{prefix}{next_sequence:04d}'
+
+
+# A number typed in on the New Job Order form: letters, digits and - _ / . (no spaces)
+ORDER_NUMBER_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_./-]{2,49}$')
+
+def order_number_taken(kind, number):
+    """Whether a job order ('job') or premade sale ('premade') already has this
+    number. Case doesn't matter: JO-BA-1 and jo-ba-1 count as the same."""
+    model = JobOrder if kind == 'job' else ProductOrder
+    column = JobOrder.job_order_id if kind == 'job' else ProductOrder.order_number
+    return db.session.query(model.id).filter(db.func.lower(column) == number.strip().lower()).first() is not None
+
+def manual_order_number_error(kind, number):
+    """Why a typed order number can't be used, or None."""
+    number = (number or '').strip()
+    if not number:
+        return 'Enter the order number, or press Generate.'
+    if not ORDER_NUMBER_PATTERN.match(number):
+        return ('Order numbers are 3 to 50 characters: letters, numbers and - _ / . '
+                '(no spaces), starting with a letter or number.')
+    if order_number_taken(kind, number):
+        return f'{number} is already used by another order. Use a different number or press Generate.'
+    return None
 
 def generate_lineup_slip_number(branch_code):
     """Next line-up slip number for this branch and year (LS-MW-2026-0001, ...)"""
@@ -2824,9 +2964,14 @@ def raw_material_numbers_error(data):
 def create_raw_material():
     data = request.get_json()
 
-    required = ['materialType', 'stockQuantity', 'branchId']
+    required = ['materialType', 'branchId']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    # Adding an item only registers it: it starts at 0 and its stock comes in by
+    # receiving purchase orders. (0 may still be sent, as job orders do.)
+    if data.get('stockQuantity') not in (None, '') and finite_number(data.get('stockQuantity')) != 0:
+        return jsonify({'status': 'error', 'message': 'New items start with 0 stock. '
+                        'Stock is added by receiving a purchase order.'}), 400
     # Selling price may be given directly (unitPrice) or derived from cost + markup
     if 'unitPrice' not in data and 'costPerUnit' not in data:
         return jsonify({'status': 'error', 'message': 'Either unitPrice or costPerUnit is required'}), 400
@@ -2859,7 +3004,7 @@ def create_raw_material():
 
     cost_per_unit = finite_number(data.get('costPerUnit'), 0.0)
     markup_percent = finite_number(data.get('markupPercent'), 25.0)
-    stock_quantity = finite_number(data.get('stockQuantity'))
+    stock_quantity = 0.0
     low_stock_threshold = finite_number(data.get('lowStockThreshold'), 0.0)
     # If a selling price is supplied use it; otherwise derive it from cost + markup
     unit_price = finite_number(data.get('unitPrice'))
@@ -2869,8 +3014,6 @@ def create_raw_material():
         return jsonify({'status': 'error', 'message': 'Cost must be a number of zero or more'}), 400
     if markup_percent is None or markup_percent < 0:
         return jsonify({'status': 'error', 'message': 'Markup must be a number of zero or more'}), 400
-    if stock_quantity is None or stock_quantity < 0:
-        return jsonify({'status': 'error', 'message': 'Stock quantity must be a number of zero or more'}), 400
     if low_stock_threshold is None or low_stock_threshold < 0:
         return jsonify({'status': 'error', 'message': 'Reorder level must be a number of zero or more'}), 400
     if unit_price is None:
@@ -2895,6 +3038,9 @@ def create_raw_material():
     )
 
     db.session.add(material)
+    db.session.flush()
+    log_stock_adjustment('material', material.id, material.branch_id, 'starting', None,
+                         material.stock_quantity or 0, request.current_user)
     db.session.commit()
 
     log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory',
@@ -2902,6 +3048,75 @@ def create_raw_material():
                request.remote_addr or '0.0.0.0')
 
     return jsonify({'status': 'success', 'data': material_to_dict(material)}), 201
+
+STOCK_EDIT_MOVED_MSG = ('Stock can no longer be changed by editing the item. '
+                        'Use Adjust stock and give the reason.')
+
+STOCK_ADJUST_REASONS = ('Physical count correction', 'Data entry error', 'Opening stock',
+                        'Damaged / lost', 'Other')
+
+@app.route('/api/inventory/stock-adjustments', methods=['POST'])
+@require_auth
+def adjust_stock():
+    """Correct an item's stock by hand, with a reason. Body: {kind: 'material' | 'premade',
+    itemId, newQuantity, reason, notes?}. Recorded in the Item History and the Audit Trail."""
+    user = request.current_user
+    data = request.get_json(silent=True) or {}
+    kind = data.get('kind')
+    if kind not in ('material', 'premade'):
+        return jsonify({'status': 'error', 'message': 'kind must be material or premade'}), 400
+    permission = 'inventory.adjust_stock' if kind == 'material' else 'premade.adjust_stock'
+    if not has_perm(user, permission):
+        return jsonify({'status': 'error', 'message': "You don't have permission to adjust stock."}), 403
+    Model = InventoryMaterial if kind == 'material' else PremadeProduct
+    item = Model.query.filter_by(id=data.get('itemId')).with_for_update().first()
+    if not item:
+        return jsonify({'status': 'error', 'message': 'Item not found'}), 404
+    error = inventory_branch_error(user, item.branch_id)
+    if error:
+        return error
+
+    new_qty = finite_number(data.get('newQuantity'))
+    if new_qty is None:
+        return jsonify({'status': 'error', 'message': 'Enter the correct stock as a number'}), 400
+    if new_qty < 0:
+        return jsonify({'status': 'error', 'message': 'Stock cannot be negative'}), 400
+    if kind == 'premade' and new_qty != int(new_qty):
+        return jsonify({'status': 'error', 'message': 'Premade stock is counted in whole pieces'}), 400
+    reason = (data.get('reason') or '').strip()
+    if reason not in STOCK_ADJUST_REASONS:
+        return jsonify({'status': 'error', 'message': 'Choose the reason for the adjustment'}), 400
+    notes = (data.get('notes') or '').strip()
+    if reason == 'Other' and not notes:
+        return jsonify({'status': 'error', 'message': 'Explain the reason for the adjustment'}), 400
+    note = f'{reason} — {notes}' if notes else reason
+
+    old_qty = float((item.stock_quantity if kind == 'material' else item.quantity) or 0)
+    if abs(new_qty - old_qty) < 1e-9:
+        return jsonify({'status': 'error', 'message': 'That is already the current stock'}), 400
+    if kind == 'premade':
+        promised = premade_pending_outgoing(item.id)
+        if new_qty < promised:
+            return jsonify({'status': 'error',
+                            'message': f'{promised:g} pcs are promised to deliveries still awaiting receipt. '
+                                       f'Stock can\'t go below that; cancel a delivery first.'}), 400
+    if kind == 'material':
+        item.stock_quantity = new_qty
+        if new_qty > 0:
+            item.status = 'available'  # as receiving a purchase order does
+        unit, name = 'yd', item.material_type
+    else:
+        item.quantity = new_qty
+        unit, name = 'pcs', item.name
+    item.updated_at = datetime.utcnow()
+    log_stock_adjustment(kind, item.id, item.branch_id, 'adjustment', old_qty, new_qty, user, note=note)
+    db.session.commit()
+
+    change = new_qty - old_qty
+    log_action(user['id'], user['fullName'], 'STOCK_ADJUST', 'Inventory',
+               f"Adjusted {name}: {old_qty:g} → {new_qty:g} {unit} ({change:+g}). {note}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': {'oldQuantity': old_qty, 'newQuantity': new_qty}})
 
 @app.route('/api/inventory/raw-materials/<int:material_id>', methods=['PUT'])
 @require_auth
@@ -2943,13 +3158,13 @@ def update_raw_material(material_id):
         material.unit_price = float(data['unitPrice'])
     elif 'costPerUnit' in data or 'markupPercent' in data:
         material.unit_price = round((material.cost_per_unit or 0) * (1 + (material.markup_percent if material.markup_percent is not None else 25) / 100), 2)
+    # Stock isn't edited here any more: it comes in through purchase orders, goes out
+    # through job orders and waste, and is corrected with Adjust stock (with a reason).
+    # The same number sent back unchanged is fine.
     if 'stockQuantity' in data:
-        new_stock = finite_number(data['stockQuantity'])  # None for text, NaN and Infinity
-        if new_stock is None:
-            return jsonify({'status': 'error', 'message': 'Stock quantity must be a number'}), 400
-        if not new_stock >= 0:
-            return jsonify({'status': 'error', 'message': 'Stock quantity cannot be negative'}), 400
-        material.stock_quantity = new_stock
+        sent = finite_number(data['stockQuantity'])
+        if sent is None or abs(sent - float(material.stock_quantity or 0)) > 1e-9:
+            return jsonify({'status': 'error', 'message': STOCK_EDIT_MOVED_MSG}), 400
     if 'lowStockThreshold' in data:
         material.low_stock_threshold = float(data['lowStockThreshold'] or 0)
     if 'supplierId' in data:
@@ -3050,9 +3265,12 @@ def premade_cost_per_piece(entered, materials_cost, pieces):
 @require_auth
 @require_permission('premade.add')
 def create_finished_good():
-    data = request.get_json()
+    data = request.get_json() or {}
+    # existingProductId: make more of a product already in stock (its quantity goes
+    # up; its name, category and price stay as they are) instead of a new row
+    existing_id = data.get('existingProductId')
 
-    required = ['name', 'quantity', 'category', 'price', 'branchId', 'materialsUsed']
+    required = ['quantity', 'branchId', 'materialsUsed'] + ([] if existing_id else ['name', 'category', 'price'])
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
 
@@ -3060,7 +3278,8 @@ def create_finished_good():
         return jsonify({'status': 'error', 'message': 'Please provide materials used for this premade product'}), 400
 
     try:
-        made_qty, price = float(data['quantity']), float(data['price'])
+        made_qty = float(data['quantity'])
+        price = float(data['price']) if not existing_id else 0.0
     except (TypeError, ValueError):
         return jsonify({'status': 'error', 'message': 'Quantity and price must be numbers'}), 400
     if not made_qty > 0 or not price >= 0:
@@ -3089,6 +3308,30 @@ def create_finished_good():
 
     production_branch = warehouse
     deliver_to = None if branch.id == warehouse.id else branch
+
+    existing = None
+    if existing_id:
+        # Only the warehouse's own rows are produced into (branch rows are filled by deliveries)
+        existing = PremadeProduct.query.filter_by(id=existing_id).with_for_update().first()
+        if not existing or existing.is_archived or existing.branch_id != warehouse.id:
+            return jsonify({'status': 'error', 'message': 'That product is not in the warehouse stock list. '
+                            'Choose it from the warehouse, or add it as a new product.'}), 400
+    else:
+        # The same product (same name and category) already at the warehouse: add to it
+        # instead of making a second row. A different name or category is a different variant.
+        name_key = (data.get('name') or '').strip().lower()
+        category_key = (data.get('category') or '').strip().lower()
+        duplicate = PremadeProduct.query.filter(
+            PremadeProduct.branch_id == warehouse.id,
+            PremadeProduct.is_archived.is_(False),
+            db.func.lower(db.func.trim(PremadeProduct.name)) == name_key,
+            db.func.lower(db.func.trim(db.func.coalesce(PremadeProduct.category, ''))) == category_key,
+        ).first()
+        if duplicate:
+            return jsonify({'status': 'error', 'code': 'premade_exists',
+                            'message': f'{duplicate.name} ({duplicate.category}) is already in stock. '
+                                       'Add stock to it instead of creating a second item.',
+                            'existingProduct': premade_product_to_dict(duplicate)}), 409
 
     usage_entries = []
     computed_cost = 0
@@ -3125,20 +3368,34 @@ def create_finished_good():
         # recorded cost fall back to their price
         computed_cost += (float(material.cost_per_unit or 0) or float(material.unit_price or 0)) * quantity_used
 
-    next_id = (db.session.query(db.func.max(PremadeProduct.id)).scalar() or 0) + 1
-    product = PremadeProduct(
-        name=data['name'].strip(),
-        sku=data.get('sku') or f"FG-{next_id:03d}",
-        quantity=float(data['quantity']),
-        unit='pcs',
-        category=data['category'],
-        price=float(data['price']),
-        cost=premade_cost_per_piece(data.get('cost'), computed_cost, made_qty),
-        branch_id=production_branch.id,
-        is_archived=False
-    )
-
-    db.session.add(product)
+    batch_cost = premade_cost_per_piece(data.get('cost'), computed_cost, made_qty)
+    batch_id = uuid.uuid4().hex
+    if existing:
+        product = existing
+        old_qty = float(product.quantity or 0)
+        # Cost per piece becomes the average over the stock on hand and the new batch,
+        # so earlier pieces keep the cost they were made at
+        if old_qty > 0 and float(product.cost or 0) > 0:
+            product.cost = money((old_qty * float(product.cost) + made_qty * batch_cost) / (old_qty + made_qty))
+        else:
+            product.cost = batch_cost
+        product.quantity = old_qty + made_qty
+        product.updated_at = datetime.utcnow()
+    else:
+        old_qty = None
+        next_id = (db.session.query(db.func.max(PremadeProduct.id)).scalar() or 0) + 1
+        product = PremadeProduct(
+            name=data['name'].strip(),
+            sku=data.get('sku') or f"FG-{next_id:03d}",
+            quantity=made_qty,
+            unit='pcs',
+            category=data['category'],
+            price=price,
+            cost=batch_cost,
+            branch_id=production_branch.id,
+            is_archived=False
+        )
+        db.session.add(product)
 
     # Flush so product.id is available for usage logs before commit.
     db.session.flush()
@@ -3156,7 +3413,9 @@ def create_finished_good():
             used_in_reference=f"{product.sku} - {product.name}",
             branch_id=product.branch_id,
             used_by=request.current_user['id'],
-            notes=f"Used to add premade product stock (qty: {product.quantity})"
+            notes=(f"Used to restock premade product (+{made_qty:g}, qty: {made_qty:g})" if existing
+                   else f"Used to add premade product stock (qty: {made_qty:g})"),
+            batch_id=batch_id,
         ))
 
     # A shop branch was chosen, so hand the stock over as a pending delivery
@@ -3165,7 +3424,7 @@ def create_finished_good():
     if deliver_to:
         transfers, error = create_premade_transfers(
             product,
-            [{'branchId': deliver_to.id, 'quantity': float(product.quantity)}],
+            [{'branchId': deliver_to.id, 'quantity': made_qty}],
             request.current_user,
             notes=f'Raised automatically when {product.name} was added for {deliver_to.name}.',
         )
@@ -3175,23 +3434,110 @@ def create_finished_good():
             return jsonify(payload), code
         pending_transfer = transfers[0]
 
+    log_stock_adjustment('premade', product.id, product.branch_id, 'production' if existing else 'starting',
+                         old_qty, product.quantity or 0, request.current_user, batch_id=batch_id)
     db.session.commit()
 
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory',
-               f"Created finished good: {product.name} at {production_branch.name}"
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE' if existing else 'CREATE', 'Inventory',
+               (f"Restocked finished good: {product.name} +{made_qty:g} (now {float(product.quantity):g}) at {production_branch.name}"
+                if existing else f"Created finished good: {product.name} at {production_branch.name}")
                + (f" — delivery raised for {deliver_to.name}" if deliver_to else ''),
                request.remote_addr or '0.0.0.0')
 
     return jsonify({
         'status': 'success',
         'data': premade_product_to_dict(product),
+        'restocked': bool(existing),
         'pendingTransfer': premade_transfer_to_dict(pending_transfer) if pending_transfer else None,
         'message': (
-            f'Added to {production_branch.name}. {float(product.quantity):g} '
+            f'{"Added" if not existing else f"+{made_qty:g} added"} to {production_branch.name}. {made_qty:g} '
             f'{product.unit or "pcs"} awaiting confirmation at {deliver_to.name}.'
-            if deliver_to else f'Added to {production_branch.name}.'
+            if deliver_to else
+            (f'+{made_qty:g} added to {product.name} (now {float(product.quantity):g}).' if existing
+             else f'Added to {production_branch.name}.')
         ),
-    }), 201
+    }), 200 if existing else 201
+
+
+def premade_production_batches(product_ids):
+    """Material usage of premade production, grouped into batches (one per add or
+    restock: the logs written by one request share their time to the second).
+    Returns [{at, logs, pieces}], newest first; pieces is None when not recorded."""
+    import re as _re
+    logs = (MaterialUsageLog.query.filter(MaterialUsageLog.premade_product_id.in_(product_ids or [-1]))
+            .order_by(MaterialUsageLog.created_at.desc()).all())
+    batches = []
+    by_batch = {}
+    for log in logs:
+        if log.batch_id:
+            if log.batch_id in by_batch:
+                by_batch[log.batch_id]['logs'].append(log)
+                continue
+            by_batch[log.batch_id] = {'at': log.created_at, 'productId': log.premade_product_id, 'logs': [log],
+                                      'pieces': None, 'batchId': log.batch_id}
+            batches.append(by_batch[log.batch_id])
+        elif (batches and not batches[-1].get('batchId') and log.premade_product_id == batches[-1]['productId']
+              and log.created_at and batches[-1]['at']
+              and abs((batches[-1]['at'] - log.created_at).total_seconds()) <= 2):
+            # Older logs (before batch ids): those of one add were written together
+            batches[-1]['logs'].append(log)
+        else:
+            batches.append({'at': log.created_at, 'productId': log.premade_product_id, 'logs': [log], 'pieces': None})
+    for b in batches:
+        # Pieces made: from the stock record of that add/restock, else from the usage note
+        adj = StockAdjustmentLog.query.filter_by(batch_id=b['batchId']).first() if b.get('batchId') else None
+        adj = adj or (StockAdjustmentLog.query.filter(
+            StockAdjustmentLog.batch_id.is_(None),
+            StockAdjustmentLog.item_kind == 'premade', StockAdjustmentLog.item_id == b['productId'],
+            StockAdjustmentLog.reason.in_(('starting', 'production')),
+            StockAdjustmentLog.created_at.between(b['at'] - timedelta(seconds=3), b['at'] + timedelta(seconds=3)))
+            .first()) if b['at'] else None
+        if adj:
+            b['pieces'] = float(adj.new_quantity) - float(adj.old_quantity or 0)
+            b['adjustment'] = adj
+        else:
+            m = _re.search(r'qty: ([\d.]+)', b['logs'][0].notes or '')
+            b['pieces'] = float(m.group(1)) if m else None
+    return batches
+
+
+@app.route('/api/inventory/finished-goods/<int:item_id>/recipe', methods=['GET'])
+@require_auth
+@require_permission('premade.add')
+def get_premade_recipe(item_id):
+    """The materials the latest batch of this product used, per piece, to fill in
+    a restock. Older rows of the same product (same name) count too."""
+    product = PremadeProduct.query.get(item_id)
+    if not product:
+        return jsonify({'status': 'error', 'message': 'Premade product not found'}), 404
+    same = [p.id for p in PremadeProduct.query.filter(
+        db.func.lower(db.func.trim(PremadeProduct.name)) == (product.name or '').strip().lower()).all()]
+    batches = premade_production_batches([product.id]) or premade_production_batches(same)
+    if not batches:
+        return jsonify({'status': 'success', 'data': {'materials': [], 'basedOn': None}})
+    latest = batches[0]
+    pieces = latest['pieces'] if latest['pieces'] and latest['pieces'] > 0 else None
+    totals = {}
+    for log in latest['logs']:
+        totals[log.material_id] = totals.get(log.material_id, 0) + float(log.quantity_used or 0)
+    materials = []
+    for material_id, total in totals.items():
+        m = InventoryMaterial.query.get(material_id)
+        materials.append({
+            'materialId': material_id,
+            'name': m.material_type if m else 'Removed material',
+            'detail': ' · '.join(v for v in ((m.color, m.pattern) if m else ()) if v),
+            'batchQuantity': round(total, 4),
+            'perPiece': round(total / pieces, 6) if pieces else None,
+            'costPerUnit': float((m.cost_per_unit or 0) or (m.unit_price or 0)) if m else 0,
+            'stock': float(m.stock_quantity or 0) if m else 0,
+            'branchName': m.branch.name if m and m.branch else None,
+            'available': bool(m and not m.is_archived),
+        })
+    return jsonify({'status': 'success', 'data': {
+        'materials': materials,
+        'basedOn': {'date': _iso(latest['at']), 'pieces': pieces},
+    }})
 
 @app.route('/api/inventory/finished-goods/<int:item_id>', methods=['PUT'])
 @require_auth
@@ -3210,8 +3556,12 @@ def update_finished_good(item_id):
         product.name = data['name'].strip()
     if 'sku' in data:
         product.sku = data['sku']
+    # As with raw materials: stock is changed by production, deliveries and sales,
+    # and corrected with Adjust stock (with a reason), not by editing the product
     if 'quantity' in data:
-        product.quantity = float(data['quantity'])
+        sent = finite_number(data['quantity'])
+        if sent is None or abs(sent - float(product.quantity or 0)) > 1e-9:
+            return jsonify({'status': 'error', 'message': STOCK_EDIT_MOVED_MSG}), 400
     product.unit = 'pcs'
     if 'category' in data:
         product.category = data['category']
@@ -3281,6 +3631,13 @@ def create_premade_transfers(product, allocations, actor, notes='', batch_id=Non
     """
     if not allocations:
         return None, ({'status': 'error', 'message': 'Select at least one branch to give stock to'}, 400)
+    # Premade stock only moves warehouse → branch. Branches don't send to each other:
+    # they restock on the scheduled delivery from the warehouse.
+    warehouse = get_warehouse_branch()
+    if not warehouse or product.branch_id != warehouse.id:
+        return None, ({'status': 'error',
+                       'message': 'Premade stock can only be transferred from the main warehouse. '
+                                  'Branches are restocked by the warehouse, not by each other.'}, 403)
 
     available = premade_available_quantity(product)
     requested_total = 0.0
@@ -3962,7 +4319,32 @@ def get_payments():
         # for (no branch on the account = nothing)
         own_orders = db.session.query(JobOrder.id).filter(JobOrder.branch_id == (user_branch_id(user) or -1))
         query = query.filter(PaymentRecord.job_order_id.in_(own_orders))
-    payments = query.order_by(PaymentRecord.created_at.desc()).all()
+    # Optional ?startDate=&endDate= (YYYY-MM-DD, Philippine calendar days, both
+    # inclusive; either may be left out). Stored times are UTC, so a PH day runs
+    # 16:00 UTC the day before to 16:00 UTC that day.
+    start_date, end_date = request.args.get('startDate'), request.args.get('endDate')
+    try:
+        start_utc = datetime.strptime(start_date, '%Y-%m-%d') - PH_OFFSET if start_date else None
+        end_utc = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - PH_OFFSET if end_date else None
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Dates must be YYYY-MM-DD'}), 400
+    if start_utc and end_utc and start_utc >= end_utc:
+        return jsonify({'status': 'error', 'message': 'The start date must be on or before the end date'}), 400
+    if start_utc:
+        query = query.filter(PaymentRecord.created_at >= start_utc)
+    if end_utc:
+        query = query.filter(PaymentRecord.created_at < end_utc)
+    # ?sort= latest (default) | oldest | amount_desc | amount_asc; ties fall back to newest first
+    sort_orders = {
+        'latest': [PaymentRecord.created_at.desc(), PaymentRecord.id.desc()],
+        'oldest': [PaymentRecord.created_at.asc(), PaymentRecord.id.asc()],
+        'amount_desc': [PaymentRecord.amount.desc(), PaymentRecord.created_at.desc(), PaymentRecord.id.desc()],
+        'amount_asc': [PaymentRecord.amount.asc(), PaymentRecord.created_at.desc(), PaymentRecord.id.desc()],
+    }
+    sort = request.args.get('sort') or 'latest'
+    if sort not in sort_orders:
+        return jsonify({'status': 'error', 'message': f'sort must be one of: {", ".join(sort_orders)}'}), 400
+    payments = query.order_by(*sort_orders[sort]).all()
     return jsonify({'status': 'success', 'data': [payment_record_to_dict(p) for p in payments]})
 
 @app.route('/api/payments', methods=['POST'])
@@ -3992,6 +4374,8 @@ def create_payment():
     amount = money(amount)
     remaining = money(max(float(job_order.total_price or 0) - float(job_order.down_payment or 0), 0))
     method = data.get('paymentMethod', 'cash')
+    if method not in ACCEPTED_PAYMENT_METHODS:
+        return jsonify({'status': 'error', 'message': PAYMENT_METHOD_ERROR}), 400
     reference = (data.get('referenceNumber') or '').strip() or None
     notes = (data.get('notes') or '').strip() or None
     excess = None
@@ -4112,8 +4496,8 @@ def refund_excess_payment(excess_id):
         return error
     data = request.get_json() or {}
     method = data.get('refundMethod')
-    if method not in PAYMENT_METHODS:
-        return jsonify({'status': 'error', 'message': 'Choose how the money was returned'}), 400
+    if method not in ACCEPTED_PAYMENT_METHODS:
+        return jsonify({'status': 'error', 'message': 'Choose how the money was returned: Cash, GCash or Bank Transfer'}), 400
     excess.status = 'refunded'
     excess.refund_method = method
     excess.refund_reference = (data.get('referenceNumber') or '').strip() or None
@@ -4536,9 +4920,12 @@ def sync_labor_assignments(order, previous_items):
                       if c.id not in claimed and c.id not in linked_ids
                       and c.worker_id == worker.id and (c.description or '').strip() == desc), None)
         if a is None:
+            # A worker chosen on the job order gets the work on their calendar for the
+            # next day (Philippine time); it can still be moved from Worker Management
             a = WorkerAssignment(worker_id=worker.id, job_order_ref=order.job_order_id,
                                  job_order_db_id=order.id, description=desc,
-                                 status='pending', assignment_type='job_order')
+                                 status='pending', assignment_type='job_order',
+                                 scheduled_date=manila_today() + timedelta(days=1))
             db.session.add(a)
             db.session.flush()
         elif a.status == 'pending':
@@ -4802,6 +5189,44 @@ def job_order_entered_price(order):
     total = float(order.total_price or 0)
     return money(total / (1 - d / 100)) if d < 100 else total
 
+def job_order_completeness_error(description, vehicle_info, items, total_price):
+    """Why a job order isn't complete enough to be a real (non-draft) order, or None.
+    The same rules as the New Job Order form's steps: a service, a vehicle unless
+    the job is reupholstery alone, at least one material line with a quantity and
+    unit price above zero, and a price above zero. Drafts skip this."""
+    services = [part.strip().lower() for part in (description or '').split(',') if part.strip()]
+    if not services:
+        return 'Select at least one service'
+    reupholstery_only = all(part.startswith('reupholstery') for part in services)
+    if not reupholstery_only:
+        vehicle = vehicle_info or {}
+        missing = lambda v: not str(v or '').strip() or str(v).strip().upper() == 'N/A'
+        if missing(vehicle.get('make')) or missing(vehicle.get('model')):
+            return 'Enter the vehicle make and model'
+        try:
+            year = int(vehicle.get('year'))
+        except (TypeError, ValueError):
+            return 'Enter the vehicle year'
+        if not (1970 <= year <= manila_today().year + 1):
+            return f'Vehicle year must be from 1970 to {manila_today().year + 1}'
+    materials = [it for it in (items or []) if (it.get('category') or 'material') == 'material']
+    if not materials:
+        return 'Add at least one material'
+    for it in materials:
+        name = str(it.get('name') or '').strip() or 'a material'
+        try:
+            qty, unit = float(it.get('quantity') or 0), float(it.get('unitPrice') or 0)
+        except (TypeError, ValueError):
+            return f'Quantity and unit price of {name} must be numbers'
+        if qty <= 0:
+            return f'Quantity of {name} must be more than 0'
+        if unit <= 0:
+            return f'Unit price of {name} must be more than ₱0'
+    if not total_price or total_price <= 0:
+        return 'Enter the price for the work'
+    return None
+
+
 def job_order_pricing(data, order=None):
     """Work out a job order's price on the server. Returns (fields, error).
 
@@ -4882,7 +5307,15 @@ def create_job_order():
         return error
 
     lock_branch_numbering(branch_db.id)
-    job_order_id = generate_job_order_id(branch_db.code)
+    # A number typed on the form, or else the next one generated for the branch
+    typed_number = (data.get('jobOrderNumber') or '').strip()
+    if typed_number:
+        number_error = manual_order_number_error('job', typed_number)
+        if number_error:
+            return jsonify({'status': 'error', 'message': number_error, 'code': 'order_number'}), 400
+        job_order_id = typed_number
+    else:
+        job_order_id = generate_job_order_id(branch_db.code)
     
     items = data.get('items') or []
     material_error = material_branch_error(items, branch_db.id)
@@ -4894,6 +5327,10 @@ def create_job_order():
     if price_error:
         return jsonify({'status': 'error', 'message': price_error}), 400
     total_price = pricing['total_price']
+    if not is_draft:
+        incomplete = job_order_completeness_error(data.get('description'), data.get('vehicleInfo'), items, total_price)
+        if incomplete:
+            return jsonify({'status': 'error', 'message': incomplete}), 400
     computed_cost = sum(item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0)) for item in items)
     estimated_cost = data.get('estimatedCost') if data.get('estimatedCost') is not None else computed_cost
     try:
@@ -4902,6 +5339,8 @@ def create_job_order():
         return jsonify({'status': 'error', 'message': 'Down payment must be a number'}), 400
     if down_payment < 0 or down_payment > total_price:
         return jsonify({'status': 'error', 'message': 'Down payment must be between ₱0 and the order total'}), 400
+    if down_payment > 0 and data.get('paymentMethod', 'cash') not in ACCEPTED_PAYMENT_METHODS:
+        return jsonify({'status': 'error', 'message': PAYMENT_METHOD_ERROR}), 400
     if down_payment > 0 and not has_perm(request.current_user, 'payments.add'):
         return jsonify({'status': 'error', 'message': 'You do not have permission to record payments'}), 403
     balance = max(total_price - down_payment, 0) if total_price > 0 else 0
@@ -4950,6 +5389,7 @@ def create_job_order():
     # Create database record
     new_order = JobOrder(
         job_order_id=job_order_id,
+        number_is_manual=bool(typed_number),
         customer_id=resolved_customer_id,
         customer_name=str(data['customerName']).strip(),
         customer_phone=str(data.get('customerPhone') or '').strip(),
@@ -4977,12 +5417,14 @@ def create_job_order():
     )
 
     db.session.add(new_order)
+    clash_message = (f'{job_order_id} was just used by another order. Use a different number or press Generate.'
+                     if typed_number else NUMBER_CLASH_MESSAGE)
     try:
         db.session.flush()  # get new_order.id before commit
     except IntegrityError:
-        # Two saves picked the same number (only possible without row locks)
+        # Two saves picked the same number at the same moment
         db.session.rollback()
-        return jsonify({'status': 'error', 'message': NUMBER_CLASH_MESSAGE}), 409
+        return jsonify({'status': 'error', 'message': clash_message, 'code': 'order_number'}), 409
     if not is_draft:
         sync_labor_assignments(new_order, [])
     new_order.actual_cost = job_order_cost(new_order.items)
@@ -5011,9 +5453,9 @@ def create_job_order():
     try:
         db.session.commit()
     except IntegrityError:
-        # Two saves picked the same number (only possible without row locks)
+        # Two saves picked the same number at the same moment
         db.session.rollback()
-        return jsonify({'status': 'error', 'message': NUMBER_CLASH_MESSAGE}), 409
+        return jsonify({'status': 'error', 'message': clash_message, 'code': 'order_number'}), 409
 
     log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Sales', f"Created job order: {job_order_id}", request.remote_addr or '0.0.0.0')
 
@@ -5212,11 +5654,22 @@ def update_job_order(order_id):
                 slip.pop(key, None)
                 if (order.slip_data or {}).get(key):
                     slip[key] = order.slip_data[key]
+        # The job order page's slip editor doesn't send the service details typed
+        # on the New Job Order form; keep them
+        if 'serviceDetails' not in slip and (order.slip_data or {}).get('serviceDetails'):
+            slip['serviceDetails'] = order.slip_data['serviceDetails']
         order.slip_data = slip
 
     # A new price changes what is still owed
     if pricing:
         refresh_job_order_balance(order)
+
+    # Confirming a draft makes it a real order: it must be complete, like a new one
+    if prev_status == 'draft' and order.status not in ('draft', 'cancelled', 'voided'):
+        incomplete = job_order_completeness_error(order.description, order.vehicle_info, order.items, order.total_price)
+        if incomplete:
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': f'This draft is not complete yet: {incomplete}. Edit the draft first.'}), 400
 
     if data.get('status') == 'completed' and prev_status != 'completed':
         order.completed_at = datetime.now()
@@ -5853,7 +6306,7 @@ def get_purchase_orders():
     status = request.args.get('status')
     query = PurchaseOrder.query
     if status:
-        query = query.filter_by(status=status)
+        query = query.filter(PurchaseOrder.status.in_([s.strip() for s in status.split(',') if s.strip()]))
     pos = query.order_by(PurchaseOrder.created_at.desc()).all()
     user = request.current_user
     if not all_branches(user):
@@ -5886,17 +6339,68 @@ def purchase_order_materials_error(user, items):
     return None
 
 
+# Receiving: open = still waiting for (more of) its items
+PO_OPEN_FOR_RECEIVING = ('approved', 'partially_received')
+
+
+def purchase_order_receipts(po):
+    """Deliveries received for a PO, oldest first, as dicts. A PO fully received
+    before deliveries were recorded one by one counts as one delivery of everything."""
+    rows = PurchaseOrderReceipt.query.filter_by(purchase_order_id=po.id).order_by(PurchaseOrderReceipt.created_at.asc()).all()
+    if rows:
+        return [{'id': r.id, 'kind': r.kind, 'at': r.created_at, 'by': r.received_by,
+                 'byName': r.received_by_user.full_name if r.received_by_user else None,
+                 'items': r.items or [], 'notes': r.notes} for r in rows]
+    if po.status == 'received':
+        by = User.query.get(po.received_by) if po.received_by else None
+        return [{'id': None, 'kind': 'delivery', 'at': po.received_at or po.created_at, 'by': po.received_by,
+                 'byName': by.full_name if by else None, 'notes': None,
+                 'items': [{'line': i, 'materialId': it.get('materialId'), 'name': it.get('name'),
+                            'quantity': float(it.get('quantity') or 0)} for i, it in enumerate(po.items or [])]}]
+    return []
+
+
+def purchase_order_received_by_line(po, receipts=None):
+    received = [0.0] * len(po.items or [])
+    for r in (receipts if receipts is not None else purchase_order_receipts(po)):
+        for it in r['items']:
+            line = it.get('line')
+            if isinstance(line, int) and 0 <= line < len(received):
+                received[line] += float(it.get('quantity') or 0)
+    return received
+
+
+def purchase_order_receiving_status(po, received=None):
+    """not_received | partial | complete | closed_short, or None while not yet approved / cancelled."""
+    if po.status in ('pending', 'cancelled'):
+        return None
+    received = received if received is not None else purchase_order_received_by_line(po)
+    ordered = [float(it.get('quantity') or 0) for it in (po.items or [])]
+    everything = all(r + 1e-9 >= o for r, o in zip(received, ordered))
+    if po.status == 'received':
+        return 'complete' if everything else 'closed_short'
+    return 'partial' if any(r > 0 for r in received) else 'not_received'
+
+
 def purchase_order_to_dict(po):
     day = lambda dt: dt.strftime('%Y-%m-%d') if dt else None
     people = {u.id: u.full_name or u.username for u in User.query.filter(
         User.id.in_([i for i in (po.created_by, po.approved_by, po.received_by) if i]))}
+    receipts = purchase_order_receipts(po)
+    received = purchase_order_received_by_line(po, receipts)
     return {
         'id': po.id,
         'poNumber': po.po_number,
         'supplierId': po.supplier_id,
         'supplierName': po.supplier_name,
-        'items': [{**it, 'totalPrice': round(float(it.get('quantity') or 0) * float(it.get('unitPrice') or 0), 2)}
-                  for it in (po.items or [])],
+        'items': [{**it, 'line': i,
+                   'totalPrice': round(float(it.get('quantity') or 0) * float(it.get('unitPrice') or 0), 2),
+                   'receivedQuantity': round(received[i], 4),
+                   'remainingQuantity': round(max(float(it.get('quantity') or 0) - received[i], 0), 4)}
+                  for i, it in enumerate(po.items or [])],
+        'receivingStatus': purchase_order_receiving_status(po, received),
+        'receipts': [{'id': r['id'], 'kind': r['kind'], 'receivedAt': _iso(r['at']), 'receivedByName': r['byName'],
+                      'notes': r['notes'], 'items': r['items']} for r in receipts],
         'totalAmount': po.total_amount,
         'status': po.status,
         'expectedDelivery': po.expected_delivery,
@@ -5928,9 +6432,16 @@ def get_purchase_order(po_id):
 def create_purchase_order():
     data = request.get_json() or {}
 
-    required = ['supplierName', 'items', 'expectedDelivery']
+    required = ['supplierId', 'items', 'expectedDelivery']
     if not all(data.get(f) for f in required):
         return jsonify({'status': 'error', 'message': 'Supplier, at least one item and an expected delivery date are required'}), 400
+    # Only saved suppliers: add a new one under Suppliers first
+    try:
+        supplier = Supplier.query.get(int(data['supplierId']))
+    except (TypeError, ValueError):
+        supplier = None
+    if not supplier or not supplier.is_active:
+        return jsonify({'status': 'error', 'message': 'Choose a saved, active supplier'}), 400
 
     if not isinstance(data['items'], list) or not all(isinstance(it, dict) for it in data['items']):
         return jsonify({'status': 'error', 'message': 'Items are not in the right format'}), 400
@@ -5947,18 +6458,27 @@ def create_purchase_order():
         return jsonify({'status': 'error', 'message': 'Every item needs a quantity above zero'}), 400
     if any(it['unitPrice'] < 0 for it in items):
         return jsonify({'status': 'error', 'message': 'Unit prices cannot be negative'}), 400
+    # Every line restocks a material already in Inventory: register new ones there first.
+    # The name is taken from Inventory so the line always matches its record.
+    for it in items:
+        try:
+            material = InventoryMaterial.query.get(int(it['materialId'])) if it.get('materialId') else None
+        except (TypeError, ValueError):
+            material = None
+        if not material or material.is_archived:
+            return jsonify({'status': 'error', 'message': 'Every item must be a material already in Inventory. '
+                            'Add new materials in Inventory first.'}), 400
+        it['materialId'] = material.id
+        it['name'] = ' - '.join(filter(None, [material.material_type, material.color, material.pattern]))
+        it['unit'] = 'yd'
     error = purchase_order_materials_error(request.current_user, items)
     if error:
         return error
 
-    supplier_id = data.get('supplierId')
-    if supplier_id and not Supplier.query.get(supplier_id):
-        supplier_id = None
-
     po = PurchaseOrder(
         po_number=generate_po_number(),
-        supplier_id=supplier_id,
-        supplier_name=data['supplierName'],
+        supplier_id=supplier.id,
+        supplier_name=supplier.name,
         items=items,
         total_amount=round(sum(it['quantity'] * it['unitPrice'] for it in items), 2),
         status='pending',
@@ -5997,35 +6517,104 @@ def approve_purchase_order(po_id):
 @require_auth
 @require_permission('purchase_orders.receive')
 def receive_purchase_order(po_id):
-    # Row lock: a second "Receive" waits and then sees the PO already received
+    """Record a delivery: {items: [{line, quantity}], notes}. Without items, everything
+    still outstanding is received (the old one-step receive). Stock goes up by what
+    arrived; the PO becomes partially_received until every line is in."""
+    # Row lock: two people receiving at once go one after the other
     po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
     if not po:
         return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
-
-    if not can_see_purchase_order(request.current_user, po):
+    user = request.current_user
+    if not can_see_purchase_order(user, po):
         return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
-    if po.status != 'approved':
-        return jsonify({'status': 'error', 'message': 'PO must be approved first'}), 400
-    # Receiving adds to each material's stock, so it must all be the user's own
-    error = purchase_order_materials_error(request.current_user, po.items)
+    if po.status not in PO_OPEN_FOR_RECEIVING:
+        message = 'PO must be approved first' if po.status == 'pending' else f'This PO is already {po.status.replace("_", " ")}'
+        return jsonify({'status': 'error', 'message': message}), 400
+    error = purchase_order_materials_error(user, po.items)
     if error:
         return error
 
-    # Update inventory
-    for item in po.items or []:
+    data = request.get_json(silent=True) or {}
+    lines = po.items or []
+    received = purchase_order_received_by_line(po)
+    remaining = [max(float(it.get('quantity') or 0) - received[i], 0) for i, it in enumerate(lines)]
+
+    if data.get('items') is None:
+        wanted = {i: q for i, q in enumerate(remaining) if q > 0}
+    else:
+        wanted = {}
+        for entry in data.get('items') or []:
+            try:
+                line = int(entry.get('line'))
+            except (TypeError, ValueError):
+                return jsonify({'status': 'error', 'message': 'Each received line needs its line number'}), 400
+            if not 0 <= line < len(lines):
+                return jsonify({'status': 'error', 'message': 'That line is not on this purchase order'}), 400
+            qty = finite_number(entry.get('quantity'), 0.0)
+            if qty is None or qty < 0:
+                return jsonify({'status': 'error', 'message': 'Quantities received must be numbers of 0 or more'}), 400
+            if qty == 0:
+                continue
+            name = lines[line].get('name') or 'an item'
+            if qty > remaining[line] + 1e-9:
+                return jsonify({'status': 'error', 'message':
+                                f'Only {remaining[line]:g} of {name} is still to be received'}), 400
+            wanted[line] = wanted.get(line, 0) + qty
+    if not wanted:
+        return jsonify({'status': 'error', 'message': 'Enter how much of at least one item arrived'}), 400
+
+    receipt_items = []
+    for line, qty in sorted(wanted.items()):
+        item = lines[line]
         material = InventoryMaterial.query.get(item.get('materialId')) if item.get('materialId') else None
         if material:
-            material.stock_quantity = float(material.stock_quantity) + float(item['quantity'])
+            material.stock_quantity = float(material.stock_quantity) + qty
             material.status = 'available'
             material.updated_at = datetime.utcnow()
+        receipt_items.append({'line': line, 'materialId': item.get('materialId'), 'name': item.get('name'),
+                              'quantity': round(qty, 4)})
+    db.session.add(PurchaseOrderReceipt(purchase_order_id=po.id, kind='delivery', items=receipt_items,
+                                        notes=(data.get('notes') or '').strip() or None, received_by=user['id']))
 
-    po.status = 'received'
-    po.received_at = datetime.utcnow()
-    po.received_by = request.current_user['id']
+    complete = all(remaining[i] - wanted.get(i, 0) <= 1e-9 for i in range(len(lines)))
+    po.status = 'received' if complete else 'partially_received'
+    if complete:
+        po.received_at = datetime.utcnow()
+        po.received_by = user['id']
     db.session.commit()
 
-    log_action(request.current_user['id'], request.current_user['fullName'], 'RECEIVE', 'Purchase Orders', f"Received PO: {po.po_number}", request.remote_addr or '0.0.0.0')
+    summary = ', '.join(f"{it['name']} × {it['quantity']:g}" for it in receipt_items)
+    log_action(user['id'], user['fullName'], 'RECEIVE', 'Purchase Orders',
+               f"Received {'all remaining items of' if complete else 'part of'} PO {po.po_number}: {summary}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
 
+
+@app.route('/api/purchase-orders/<int:po_id>/close-receiving', methods=['POST'])
+@require_auth
+@require_permission('purchase_orders.receive')
+def close_purchase_order_receiving(po_id):
+    """The rest of a partly received PO will not come: stop waiting for it.
+    Nothing is added to stock; the PO shows as closed with items not received."""
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
+    if not po:
+        return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    user = request.current_user
+    if not can_see_purchase_order(user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
+    if po.status != 'partially_received':
+        return jsonify({'status': 'error', 'message': 'Only a partly received purchase order can be closed this way'}), 400
+    reason = ((request.get_json(silent=True) or {}).get('reason') or '').strip()
+    if not reason:
+        return jsonify({'status': 'error', 'message': 'Say why the rest will not be received'}), 400
+    db.session.add(PurchaseOrderReceipt(purchase_order_id=po.id, kind='closed', items=[], notes=reason,
+                                        received_by=user['id']))
+    po.status = 'received'
+    po.received_at = datetime.utcnow()
+    po.received_by = user['id']
+    db.session.commit()
+    log_action(user['id'], user['fullName'], 'UPDATE', 'Purchase Orders',
+               f"Closed PO {po.po_number} with items not received: {reason}", request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
 
 # Delivery status changes; delivered and cancelled deliveries are final
@@ -6290,9 +6879,9 @@ def generate_product_order_number():
     """Generate a unique PS-XXXX premade sale number that won't collide."""
     max_id = db.session.query(db.func.max(ProductOrder.id)).scalar() or 0
     candidate = f"{PREMADE_SALE_PREFIX}{max_id + 1:04d}"
-    # If somehow it already exists, keep incrementing
+    # If it's already taken (e.g. typed in by hand), keep incrementing
     offset = 1
-    while ProductOrder.query.filter_by(order_number=candidate).first():
+    while order_number_taken('premade', candidate):
         offset += 1
         candidate = f"{PREMADE_SALE_PREFIX}{max_id + offset:04d}"
     return candidate
@@ -6771,6 +7360,8 @@ def build_premade_sale(staff, data):
         return fail('You do not have permission to record payments', 403)
     if payment_amount < 0 or payment_amount > money(total_amount):
         return fail(f'Payment must be between ₱0 and the order total of ₱{total_amount:,.2f}')
+    if payment_amount > 0 and data.get('paymentMethod', 'cash') not in ACCEPTED_PAYMENT_METHODS:
+        return fail(PAYMENT_METHOD_ERROR)
     if payment_amount >= total_amount and total_amount > 0:
         initial_payment_status = 'paid'
     elif payment_amount > 0:
@@ -6779,8 +7370,15 @@ def build_premade_sale(staff, data):
         initial_payment_status = 'unpaid'
 
     lock_product_order_numbering()
+    # A number typed on the form, or else the next PS- number
+    typed_number = str(data.get('orderNumber') or '').strip()
+    if typed_number:
+        number_error = manual_order_number_error('premade', typed_number)
+        if number_error:
+            return None, None, ({'status': 'error', 'message': number_error, 'code': 'order_number'}, 400)
     order = ProductOrder(
-        order_number=generate_product_order_number(),
+        order_number=typed_number or generate_product_order_number(),
+        number_is_manual=bool(typed_number),
         customer_name=str(data['customerName']).strip(),
         customer_phone=str(data.get('customerPhone') or '').strip(),
         customer_email=data.get('customerEmail') or '',
@@ -6808,21 +7406,49 @@ def create_product_order():
     """Record a premade product sale made at a branch (walk-in, phone or
     message). Staff only: customers no longer order online."""
     staff = request.current_user
-    order, branch, error = build_premade_sale(staff, request.get_json(silent=True) or {})
+    data = request.get_json(silent=True) or {}
+    order, branch, error = build_premade_sale(staff, data)
     if error:
         db.session.rollback()
         payload, code = error
         return jsonify(payload), code
+    typed = str(data.get('orderNumber') or '').strip()
     try:
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
-        return jsonify({'status': 'error', 'message': NUMBER_CLASH_MESSAGE}), 409
+        message = (f'{typed} was just used by another order. Use a different number or press Generate.'
+                   if typed else NUMBER_CLASH_MESSAGE)
+        return jsonify({'status': 'error', 'message': message, 'code': 'order_number'}), 409
 
     log_action(staff['id'], staff['fullName'], 'CREATE', 'Product Orders',
                f"Recorded product order {order.order_number} for {order.customer_name} at {branch.name}",
                request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': product_order_to_dict(order)}), 201
+
+@app.route('/api/order-numbers/next', methods=['GET'])
+@require_auth
+@require_permission('sales.add')
+def next_order_number():
+    """The number a new order would get if saved now, for the New Job Order form.
+    ?kind=job&branchId=… (per branch and year) or ?kind=premade. Only a preview:
+    saving without a typed number generates it again, so it can never clash."""
+    kind = request.args.get('kind', 'job')
+    if kind == 'premade':
+        return jsonify({'status': 'success', 'data': {'number': generate_product_order_number()}})
+    branch = Branch.query.get(request.args.get('branchId', type=int) or 0)
+    if not branch:
+        return jsonify({'status': 'error', 'message': 'Choose a branch first'}), 400
+    return jsonify({'status': 'success', 'data': {'number': generate_job_order_id(branch.code)}})
+
+@app.route('/api/order-numbers/check', methods=['GET'])
+@require_auth
+@require_permission('sales.add')
+def check_order_number():
+    """Whether a typed number can be used: ?kind=job|premade&number=…"""
+    kind = 'premade' if request.args.get('kind') == 'premade' else 'job'
+    error = manual_order_number_error(kind, request.args.get('number', ''))
+    return jsonify({'status': 'success', 'data': {'available': error is None, 'message': error}})
 
 # ============================================
 # PREMADE JOB ORDER DRAFTS
@@ -7083,14 +7709,20 @@ def confirm_premade_draft(draft_id):
                    if rows else 'Add at least one product before confirming.')
         return jsonify({'status': 'error', 'message': message, 'data': payload}), 409
     payment_method = str(data.get('paymentMethod') or draft.payment_method or 'cash')[:30]
-    notes = [draft.notes or '', f'Recorded from draft {draft.draft_number}', f'Payment Method: {payment_method}']
+    paid_now = finite_number(data.get('paymentAmount'), 0.0) or 0
+    # The method is only needed (and checked, in build_premade_sale) when money is paid now
+    notes = [draft.notes or '', f'Recorded from draft {draft.draft_number}',
+             f'Payment Method: {payment_method}' if paid_now > 0 else '']
     order, _branch, sale_error = build_premade_sale(staff, {
         'customerName': draft.customer_name, 'customerPhone': draft.customer_phone or '',
         'customerEmail': draft.customer_email, 'customerAddress': draft.customer_address,
         'branchId': draft.branch_id, 'paymentAmount': data.get('paymentAmount') or 0,
+        'paymentMethod': payment_method,
         'items': [{'productId': it['productId'], 'quantity': it['quantity'], 'name': it.get('name')}
                   for it in draft.items or []],
         'notes': '\n'.join(n for n in notes if n),
+        # A sale number typed in when confirming, if any
+        'orderNumber': data.get('orderNumber'),
     })
     if sale_error:
         # Stock moved between the check above and the locked re-check: nothing is saved
@@ -7476,6 +8108,274 @@ def get_transfer_dashboard():
             'overdue': sum(1 for e in enriched if e['isOverdue']),
         },
     })
+
+# ============================================
+# ITEM HISTORY (read only: nothing here changes stock)
+# ============================================
+# Built from the records the system already keeps for each kind of stock change.
+# Nothing is invented: what was never recorded (hand edits and starting stock
+# before stock_adjustment_logs existed) is listed as a limitation instead.
+
+def _iso(dt):
+    return dt.isoformat() + 'Z' if dt else None
+
+
+def _item_history_access(kind):
+    """(branch ids the user may see or None for all, error response)."""
+    user = request.current_user
+    needed = ('inventory.view',) if kind == 'material' else ('inventory.view', 'premade.view')
+    if not has_perm(user, *needed):
+        return None, (jsonify({'status': 'error', 'message': "You don't have access to this inventory"}), 403)
+    return inventory_read_branches(user, request.args.get('branchId'), include_warehouse=True)
+
+
+@app.route('/api/item-history/items', methods=['GET'])
+@require_auth
+def item_history_items():
+    """Items to pick from (archived ones too: their history still matters)."""
+    kind = request.args.get('kind', 'material')
+    if kind not in ('material', 'premade'):
+        return jsonify({'status': 'error', 'message': 'kind must be material or premade'}), 400
+    branch_ids, error = _item_history_access(kind)
+    if error:
+        return error
+    Model = InventoryMaterial if kind == 'material' else PremadeProduct
+    q = Model.query
+    if branch_ids is not None:
+        q = q.filter(Model.branch_id.in_(branch_ids or [-1]))
+    rows = q.all()
+    out = []
+    for r in rows:
+        if kind == 'material':
+            out.append({'id': r.id, 'name': r.material_type, 'detail': ' · '.join(v for v in (r.color, r.pattern) if v),
+                        'code': r.item_id or r.sku or '', 'stock': float(r.stock_quantity or 0),
+                        'branchId': r.branch_id, 'branchName': r.branch.name if r.branch else None,
+                        'isArchived': bool(r.is_archived)})
+        else:
+            out.append({'id': r.id, 'name': r.name, 'detail': r.category or '', 'code': r.sku or '',
+                        'stock': float(r.quantity or 0), 'branchId': r.branch_id,
+                        'branchName': r.branch.name if getattr(r, 'branch', None) else
+                        (Branch.query.get(r.branch_id).name if r.branch_id and Branch.query.get(r.branch_id) else None),
+                        'isArchived': bool(r.is_archived), 'price': float(r.price or 0)})
+    out.sort(key=lambda x: (x['isArchived'], (x['name'] or '').lower(), x['branchName'] or ''))
+    return jsonify({'status': 'success', 'data': out})
+
+
+def _event(key, at, type_, label, qty, **extra):
+    """One line of an item's history. qty is the stock change: + in, - out, 0 = none."""
+    return {'key': key, 'at': _iso(at), 'type': type_, 'label': label, 'quantity': qty, **extra}
+
+
+def _material_history(material, see_customers):
+    events = []
+    branch_name = material.branch.name if material.branch else None
+    jo_cache = {}
+
+    def job_order_by_code(code):
+        if code not in jo_cache:
+            jo_cache[code] = JobOrder.query.filter_by(job_order_id=code).first()
+        return jo_cache[code]
+
+    for log in MaterialUsageLog.query.filter_by(material_id=material.id).all():
+        qty = float(log.quantity_used or 0)
+        who = log.used_by_user.full_name if log.used_by_user else None
+        worker = log.managed_worker.name if log.managed_worker else None
+        branch = log.branch.name if log.branch else branch_name
+        if log.used_in_type == 'job_order':
+            jo = job_order_by_code(log.used_in_reference)
+            took_stock = log.used_by is not None  # written by a completion, which moves stock
+            events.append(_event(
+                f'usage-{log.id}', log.created_at,
+                'job_order_use' if qty >= 0 else 'job_order_return',
+                ('Used in custom job order' if qty >= 0 else 'Returned from job order') if took_stock
+                else 'Recorded use (imported, no stock change)',
+                (-qty if took_stock else 0), usage='custom',
+                reference=log.used_in_reference,
+                link={'kind': 'job_order', 'id': jo.id} if jo else None,
+                customerName=(jo.customer_name if jo and see_customers else None),
+                status=jo.status if jo else None, branchName=branch, by=who, worker=worker, notes=log.notes))
+        elif log.used_in_type == 'premade_product':
+            events.append(_event(
+                f'usage-{log.id}', log.created_at, 'premade_production', 'Used to make premade item', -qty,
+                usage='premade', reference=log.used_in_reference,
+                link={'kind': 'premade', 'id': log.premade_product_id} if log.premade_product_id else None,
+                branchName=branch, by=who, worker=worker, notes=log.notes))
+        else:
+            events.append(_event(f'usage-{log.id}', log.created_at, 'other_use', f'Used ({log.used_in_type})', -qty,
+                                 reference=log.used_in_reference, branchName=branch, by=who, notes=log.notes))
+
+    for w in MaterialWasteLog.query.filter_by(material_id=material.id).all():
+        qty = float(w.quantity or 0)
+        common = dict(branchName=w.branch.name if w.branch else branch_name,
+                      by=w.logged_by_user.full_name if w.logged_by_user else None,
+                      worker=w.worker.name if w.worker else None,
+                      notes=' — '.join(v for v in (w.reason, w.notes) if v))
+        if w.job_order_id:
+            jo = w.job_order
+            events.append(_event(f'waste-{w.id}', w.created_at, 'extra_material', 'Extra material for job order', -qty,
+                                 usage='custom', reference=jo.job_order_id if jo else None,
+                                 link={'kind': 'job_order', 'id': w.job_order_id},
+                                 customerName=(jo.customer_name if jo and see_customers else None),
+                                 status=jo.status if jo else None, **common))
+        else:
+            events.append(_event(f'waste-{w.id}', w.created_at, 'waste', 'Waste / scrap', -qty, **common))
+
+    for po in PurchaseOrder.query.filter(PurchaseOrder.status.in_(('partially_received', 'received'))).all():
+        for r_index, receipt in enumerate(purchase_order_receipts(po)):
+            for it in receipt['items']:
+                if str(it.get('materialId') or '') != str(material.id):
+                    continue
+                qty = float(it.get('quantity') or 0)
+                line = it.get('line')
+                unit = float(((po.items or [])[line] if isinstance(line, int) and line < len(po.items or []) else {}).get('unitPrice') or 0)
+                events.append(_event(f'po-{po.id}-{receipt["id"] or "all"}-{r_index}-{line}', receipt['at'],
+                                     'purchase_received', 'Received from purchase order', qty, reference=po.po_number,
+                                     link={'kind': 'purchase_order', 'id': po.id}, unitPrice=unit,
+                                     total=round(qty * unit, 2), branchName=branch_name, by=receipt['byName'],
+                                     notes=f'Supplier: {po.supplier_name}' + (f" — {receipt['notes']}" if receipt['notes'] else '')))
+    return events
+
+
+def _premade_history(product, see_customers):
+    events = []
+    branch = Branch.query.get(product.branch_id) if product.branch_id else None
+    branch_name = branch.name if branch else None
+
+    # Sales (product orders) that included this item
+    for order in ProductOrder.query.order_by(ProductOrder.created_at.asc()).all():
+        for i, item in enumerate(order.items or []):
+            if str(item.get('productId') or '') != str(product.id):
+                continue
+            qty = float(item.get('quantity') or 0)
+            unit = float(item.get('unitPrice', item.get('price', 0)) or 0)
+            cancelled = order.status == 'cancelled'
+            # Orders take stock when placed (or, for older walk-in ones, when completed);
+            # a cancelled one gave its stock back, so it no longer moves stock
+            moved = (not cancelled) and (stock_taken_at_placement(item) or order.status == 'completed')
+            events.append(_event(
+                f'sale-{order.id}-{i}', order.created_at, 'sale',
+                'Sold (cancelled, stock returned)' if cancelled else 'Sold', -qty if moved else 0,
+                reference=order.order_number, link={'kind': 'product_order', 'id': order.id},
+                customerName=order.customer_name if see_customers else None,
+                unitPrice=unit, total=float(item.get('total') or round(qty * unit, 2)),
+                soldQuantity=qty, status=order.status, paymentStatus=order.payment_status,
+                branchName=order.branch.name if order.branch else branch_name))
+
+    # Warehouse → branch deliveries: sent from this row, or received into it
+    for t in PremadeStockTransfer.query.filter_by(product_id=product.id).all():
+        dest = t.destination_branch.name if t.destination_branch else 'a branch'
+        events.append(_event(
+            f'delivery-out-{t.id}', t.resolved_at if t.status == 'received' else t.created_at, 'delivery_out',
+            f'Delivered to {dest}' if t.status == 'received' else
+            (f'Delivery to {dest} cancelled' if t.status == 'cancelled' else f'Delivery to {dest} (awaiting receipt)'),
+            -float(t.quantity or 0) if t.status == 'received' else 0,
+            status=t.status, branchName=branch_name,
+            by=(t.resolved_by.full_name if t.resolved_by else t.created_by.full_name if t.created_by else None),
+            notes=t.notes))
+    incoming = (PremadeStockTransfer.query
+                .filter(PremadeStockTransfer.destination_branch_id == product.branch_id,
+                        PremadeStockTransfer.status == 'received').all())
+    for t in incoming:
+        src = t.product
+        # The same rule the receipt used to pick this row: same branch, same name
+        if not src or src.id == product.id or (src.name or '').strip().lower() != (product.name or '').strip().lower():
+            continue
+        events.append(_event(
+            f'delivery-in-{t.id}', t.resolved_at or t.created_at, 'delivery_in',
+            f'Received from {t.source_branch.name if t.source_branch else "warehouse"}', float(t.quantity or 0),
+            status='received', branchName=branch_name,
+            by=t.resolved_by.full_name if t.resolved_by else None, notes=t.notes))
+
+    # Made from raw materials: one row per add or restock, with what it used.
+    # Its stock record (if any) is folded in here so it isn't listed twice.
+    for b in premade_production_batches([product.id]):
+        parts = [f"{u.material.material_type if u.material else 'material'} × {float(u.quantity_used or 0):g}" for u in b['logs']]
+        adj = b.get('adjustment')
+        events.append(_event(
+            f'made-{product.id}-{b["logs"][0].id}', b['at'], 'production',
+            'Restocked (made from raw materials)' if adj is not None and adj.reason == 'production' else 'Made from raw materials',
+            (b['pieces'] or 0) if adj is not None else 0,
+            branchName=branch_name, by=b['logs'][0].used_by_user.full_name if b['logs'][0].used_by_user else None,
+            notes=(f"{b['pieces']:g} pcs made · " if b['pieces'] else '') + 'Materials used: ' + ', '.join(parts),
+            _adjustmentId=adj.id if adj is not None else None))
+    return events
+
+
+@app.route('/api/item-history', methods=['GET'])
+@require_auth
+def item_history():
+    """Every recorded stock movement of one item, newest first. Read only."""
+    kind = request.args.get('kind', 'material')
+    if kind not in ('material', 'premade'):
+        return jsonify({'status': 'error', 'message': 'kind must be material or premade'}), 400
+    try:
+        item_id = int(request.args.get('itemId'))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Choose an item'}), 400
+    branch_ids, error = _item_history_access(kind)
+    if error:
+        return error
+    Model = InventoryMaterial if kind == 'material' else PremadeProduct
+    item = Model.query.get(item_id)
+    if not item or (branch_ids is not None and item.branch_id not in branch_ids):
+        return jsonify({'status': 'error', 'message': 'Item not found'}), 404
+
+    user = request.current_user
+    see_customers = has_perm(user, 'sales.view', 'product_orders.view')
+    events = _material_history(item, see_customers) if kind == 'material' else _premade_history(item, see_customers)
+
+    adjustments = StockAdjustmentLog.query.filter_by(item_kind=kind, item_id=item.id).all()
+    folded = {e.pop('_adjustmentId') for e in events if e.get('_adjustmentId')}
+    for e in events:
+        e.pop('_adjustmentId', None)
+    for a in adjustments:
+        if a.id in folded:
+            continue
+        change = float(a.new_quantity) - float(a.old_quantity or 0)
+        events.append({
+            'key': f'adj-{a.id}', 'at': _iso(a.created_at),
+            'type': {'starting': 'starting_stock', 'production': 'production',
+                     'adjustment': 'stock_adjustment'}.get(a.reason, 'manual_edit'),
+            'label': {'starting': 'Starting stock', 'production': 'Restocked',
+                      'adjustment': 'Stock adjusted'}.get(a.reason, 'Stock edited by hand'),
+            'quantity': float(a.new_quantity) if a.reason == 'starting' else change,
+            'branchName': a.branch.name if a.branch else None,
+            'by': a.user.full_name if a.user else None,
+            'notes': ' · '.join(filter(None, [
+                (f'{float(a.old_quantity):g} → {float(a.new_quantity):g}' if a.old_quantity is not None
+                 else f'Added with {float(a.new_quantity):g} in stock'),
+                getattr(a, 'note', None)])),
+        })
+    if not any(a.reason == 'starting' for a in adjustments):
+        events.append(_event(f'created-{item.id}', item.created_at, 'added', 'Added to inventory', 0,
+                             notes='Starting quantity not recorded (added before stock edits were tracked)'))
+
+    events.sort(key=lambda e: e['at'] or '', reverse=True)
+    tracked_since = db.session.query(db.func.min(StockAdjustmentLog.created_at)).scalar()
+    limitations = [
+        'Stock edited by hand and starting stock are only recorded from '
+        + ((tracked_since + PH_OFFSET).strftime('%B %d, %Y') if tracked_since else 'today')
+        + ' on; earlier hand edits were never saved, so there is no running balance.',
+    ]
+    if kind == 'material':
+        limitations.append('Materials are taken from stock when a job order is completed, so open job orders do not appear yet.')
+    else:
+        limitations.append('Premade items are sold through premade (product) orders, not job orders.')
+    if not see_customers:
+        limitations.append('Customer names are hidden: you do not have access to sales.')
+
+    name = item.material_type if kind == 'material' else item.name
+    stock = float((item.stock_quantity if kind == 'material' else item.quantity) or 0)
+    branch = Branch.query.get(item.branch_id) if item.branch_id else None
+    return jsonify({'status': 'success', 'data': {
+        'item': {'id': item.id, 'kind': kind, 'name': name, 'stock': stock,
+                 'code': (item.item_id or item.sku or '') if kind == 'material' else (item.sku or ''),
+                 'branchName': branch.name if branch else None, 'isArchived': bool(item.is_archived),
+                 'price': float((item.unit_price if kind == 'material' else item.price) or 0)},
+        'events': events,
+        'limitations': limitations,
+    }})
+
 
 @app.route('/api/product-order-transfers/bulk-action', methods=['POST'])
 @require_auth
@@ -8214,7 +9114,12 @@ def get_branch_settlement():
 
 EXPENSE_CATEGORIES = ['Rent', 'Electricity', 'Water', 'Internet & Phone', 'Salaries & Wages', 'Supplies',
                       'Transportation', 'Repairs & Maintenance', 'Marketing', 'Taxes & Permits', 'Other']
+# Expenses: how the shop paid for something (any of these)
 PAYMENT_METHODS = ['cash', 'gcash', 'maya', 'bank_transfer', 'credit_card', 'debit_card', 'check', 'other']
+# Customer payments and refunds: the only ways the shop accepts money. Older records
+# may hold card, Maya or cheque payments; they stay as they are, but no new ones.
+ACCEPTED_PAYMENT_METHODS = ['cash', 'gcash', 'bank_transfer']
+PAYMENT_METHOD_ERROR = 'Payment method must be Cash, GCash or Bank Transfer'
 
 def parse_period():
     """(start, end) dates from ?startDate=&endDate= (YYYY-MM-DD); defaults to
@@ -8624,11 +9529,14 @@ def owner_inventory():
         movements.append({'date': to_pht(w.created_at) if w.created_at else None, 'direction': 'out',
                           'item': w.material.material_type if w.material else '', 'quantity': float(w.quantity),
                           'reason': f'Waste: {w.reason}', 'branchName': w.branch.name if w.branch else None})
-    for po in PurchaseOrder.query.filter(PurchaseOrder.status == 'received').order_by(PurchaseOrder.received_at.desc()).limit(20).all():
-        for it in po.items or []:
-            movements.append({'date': to_pht(po.received_at) if po.received_at else None, 'direction': 'in',
-                              'item': it.get('name') or '', 'quantity': float(it.get('quantity') or 0),
-                              'reason': f'Received {po.po_number} from {po.supplier_name}', 'branchName': None})
+    recent_pos = (PurchaseOrder.query.filter(PurchaseOrder.status.in_(('partially_received', 'received')))
+                  .order_by(PurchaseOrder.created_at.desc()).limit(40).all())
+    for po in recent_pos:
+        for receipt in purchase_order_receipts(po):
+            for it in receipt['items']:
+                movements.append({'date': to_pht(receipt['at']) if receipt['at'] else None, 'direction': 'in',
+                                  'item': it.get('name') or '', 'quantity': float(it.get('quantity') or 0),
+                                  'reason': f'Received {po.po_number} from {po.supplier_name}', 'branchName': None})
     movements.sort(key=lambda m: m['date'] or '', reverse=True)
 
     cogs = owner_financials(today.replace(month=1, day=1), today)['cogs']
@@ -8687,7 +9595,16 @@ def get_users():
         query = query.filter(User.is_active == True)
 
     users_list = query.all()
-    return jsonify({'status': 'success', 'data': [user_to_dict(u) for u in users_list]})
+    me = request.current_user
+    data = []
+    for u in users_list:
+        d = user_to_dict(u)
+        # Same rule the server applies to every change: the page locks what it refuses
+        reason = target_account_error(me, u)
+        d['canManage'] = reason is None
+        d['manageBlockedReason'] = reason
+        data.append(d)
+    return jsonify({'status': 'success', 'data': data})
 
 @app.route('/api/settings/users', methods=['POST'])
 @require_auth
@@ -8718,7 +9635,7 @@ def create_user():
         return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
     error = delegation_error(request.current_user, set(), ROLE_DEFAULT_PERMISSIONS.get(role.key, ()), role.key)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"create account {data['username']} ({role.name})", error)
 
     # Handle branch - support both branchId and branch (string)
     branch_id = data.get('branchId')
@@ -8785,7 +9702,7 @@ def update_user(user_id):
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
     error = target_account_error(request.current_user, user)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"edit {user.username}", error)
 
     data = request.get_json()
 
@@ -8836,7 +9753,7 @@ def update_user(user_id):
             error = delegation_error(request.current_user, effective_permissions(user.id, old_role_key),
                                      perms_after, role.key)
             if error:
-                return jsonify({'status': 'error', 'message': error}), 403
+                return refuse_account_change(f"change the role of {user.username} to {role.name}", error)
         if user.id == request.current_user['id'] and 'users.manage' not in perms_after:
             return jsonify({'status': 'error', 'message': "You can't remove your own access to user management"}), 400
         if user.is_active and would_leave_no_user_manager(user.id, perms_after):
@@ -8918,7 +9835,7 @@ def archive_user(user_id):
         return jsonify({'status': 'error', 'message': 'Cannot archive yourself'}), 400
     error = target_account_error(request.current_user, user)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"archive {user.username}", error)
 
     # Archiving blocks login, so the last administrator must stay active.
     if user.role and user.role.key == 'administrator' and last_active_administrator(user):
@@ -8945,7 +9862,7 @@ def restore_user(user_id):
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
     error = target_account_error(request.current_user, user)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"restore {user.username}", error)
 
     user.is_active = True
     bump_auth_version(user)
@@ -9116,7 +10033,7 @@ def set_user_permissions(user_id):
         return jsonify({'status': 'error', 'message': 'Customer accounts cannot be given staff permissions'}), 400
     error = target_account_error(me, user)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"change the permissions of {user.username}", error)
 
     data = request.get_json(silent=True) or {}
     current = UserPermissionOverride.query.filter_by(user_id=user.id).all()
@@ -9143,7 +10060,7 @@ def set_user_permissions(user_id):
     perms_after = (set(defaults) | grants) - revokes
     error = delegation_error(me, effective_permissions(user.id, role_key, current), perms_after)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"change the permissions of {user.username}", error)
 
     if user.id == me['id'] and 'users.manage' not in perms_after:
         return jsonify({'status': 'error', 'message': "You can't remove your own access to user management"}), 400
@@ -9204,7 +10121,7 @@ def delete_user(user_id):
         return jsonify({'status': 'error', 'message': 'You cannot delete your own account'}), 400
     error = target_account_error(request.current_user, user)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"delete {user.username}", error)
 
     if user.role and user.role.key == 'administrator' and last_active_administrator(user):
         return jsonify({'status': 'error',
@@ -9267,13 +10184,17 @@ def delete_user(user_id):
 @require_permission('users.manage')
 def get_roles():
     roles = Role.query.filter(Role.key != 'customer').all()
+    me = request.current_user
     role_list = [
         {
             'id': role.key,
             'name': role.name,
-            'description': ''
+            'description': '',
+            'rank': role_rank(role.key),
+            # Whether the signed-in user may give this role out (see role_assign_error)
+            'assignable': role_assign_error(me, role.key) is None,
         }
-        for role in roles
+        for role in sorted(roles, key=lambda r: -role_rank(r.key))
     ]
     return jsonify({'status': 'success', 'data': role_list})
 
@@ -9681,6 +10602,7 @@ def get_my_work():
     rows = WorkerAssignment.query.filter_by(worker_id=worker.id).order_by(WorkerAssignment.created_at.desc()).all()
     order_ids = {a.job_order_db_id for a in rows if a.job_order_db_id}
     orders = {o.id: o for o in JobOrder.query.filter(JobOrder.id.in_(order_ids))} if order_ids else {}
+    waits = waiting_on_map(rows)
     return jsonify({'status': 'success', 'data': {
         'linked': True,
         'worker': {'name': worker.name, 'workType': worker.work_type, 'payMode': worker.pay_mode or 'per_hour'},
@@ -9697,6 +10619,7 @@ def get_my_work():
             'hoursWorked': a.hours_worked,
             'pay': a.pay if a.status == 'completed' else None,
             'endTime': fmt_dt(a.end_time),
+            'waitingOn': waiting_on_dict(waits.get(a.id)),
         } for a in rows],
     }})
 
@@ -9710,6 +10633,50 @@ def deactivate_managed_worker(worker_id):
     worker.is_active = False
     db.session.commit()
     return jsonify({'status': 'success', 'message': 'Worker deactivated'})
+
+def task_base_name(description):
+    """The kind of work a task is, without the "(2)" / "(Rework: ...)" added to repeats."""
+    name = (description or '').strip()
+    cut = name.find(' (')
+    return (name[:cut] if cut > 0 else name).strip().lower()
+
+
+def _job_order_task_filter():
+    """Assignments that are work on a job order (not special tasks; older rows may have no type)."""
+    return db.or_(WorkerAssignment.assignment_type.is_(None), WorkerAssignment.assignment_type != 'special_task')
+
+
+def waiting_on_map(assignments):
+    """{assignment id: the earlier unfinished task it waits on}, for pending job order tasks.
+
+    Work on a job order goes in the order it was given out: a task can't start
+    until every task assigned to the job order before it is finished."""
+    pending = [a for a in assignments if a.status == 'pending' and a.job_order_db_id
+               and a.assignment_type != 'special_task']
+    if not pending:
+        return {}
+    unfinished = WorkerAssignment.query.filter(
+        WorkerAssignment.job_order_db_id.in_({a.job_order_db_id for a in pending}),
+        _job_order_task_filter(),
+        WorkerAssignment.status != 'completed',
+    ).order_by(WorkerAssignment.id).all()
+    by_order = {}
+    for t in unfinished:
+        by_order.setdefault(t.job_order_db_id, []).append(t)
+    waits = {}
+    for a in pending:
+        blocker = next((t for t in by_order.get(a.job_order_db_id, []) if t.id < a.id), None)
+        if blocker:
+            waits[a.id] = blocker
+    return waits
+
+
+def waiting_on_dict(blocker):
+    if not blocker:
+        return None
+    return {'assignmentId': blocker.id, 'workerName': blocker.worker.name if blocker.worker else '',
+            'description': blocker.description, 'status': blocker.status}
+
 
 def assignment_in_branch(user):
     """Predicate: is this assignment the user's to see in full? Workers are shared
@@ -9739,6 +10706,7 @@ def list_worker_assignments():
     order_ids = {a.job_order_db_id for a in assignments if a.job_order_db_id}
     priorities = dict(db.session.query(JobOrder.id, JobOrder.priority).filter(JobOrder.id.in_(order_ids))) \
         if order_ids else {}
+    waits = waiting_on_map(assignments)
     result = []
     for a in assignments:
         is_overdue = False
@@ -9774,6 +10742,8 @@ def list_worker_assignments():
             'createdAt': fmt_dt(a.created_at),
             'isOverdue': is_overdue,
             'overdueByHours': overdue_by_hours,
+            # The earlier task on the job order this one can't start before
+            'waitingOn': waiting_on_dict(waits.get(a.id)),
         })
     return jsonify({'status': 'success', 'data': {'assignments': result}})
 
@@ -9790,6 +10760,15 @@ def create_worker_assignment():
     if not worker:
         return jsonify({'error': 'Worker not found'}), 404
     description = (data.get('description', '') or '').strip()
+    # A task name sent by the caller is a specific task; without one, the worker's
+    # trade is used and any task this worker has on the job order counts as theirs
+    explicit_description = bool(description)
+    # Rework: doing a job order again after already finishing it (recut, fixing a mistake...)
+    rework = bool(data.get('rework'))
+    rework_reason = (data.get('reworkReason') or '').strip()[:150]
+    # Another task for a worker who already has open work on the job order (asked for
+    # on purpose; otherwise assigning again reuses the open task)
+    another = bool(data.get('another'))
     assignment_type = data.get('assignmentType', 'job_order')
     if assignment_type not in ('job_order', 'special_task'):
         assignment_type = 'job_order'
@@ -9810,11 +10789,34 @@ def create_worker_assignment():
 
     # Prevent exact duplicates (same worker + job order + task). Special tasks all
     # share one reference, so their title is part of what makes them different.
+    # The task name alone isn't enough: a task moved over from another worker keeps
+    # that worker's trade as its name, so it would be missed and a second copy made.
     existing = None
     if assignment_type == 'job_order':
-        existing = WorkerAssignment.query.filter_by(
-            worker_id=worker_id, job_order_db_id=order.id, description=description,
-        ).first()
+        query = WorkerAssignment.query.filter(
+            WorkerAssignment.worker_id == worker_id,
+            WorkerAssignment.job_order_db_id == order.id,
+            WorkerAssignment.assignment_type != 'special_task',
+        )
+        if explicit_description:
+            query = query.filter(WorkerAssignment.description == description)
+        mine = query.order_by(WorkerAssignment.id).all()
+        still_open = [a for a in mine if a.status != 'completed']
+        # Open work first. Otherwise, only the same work finished by them makes this a
+        # rework: a finished task from another step (e.g. cutting moved over to them,
+        # with the sewing still to do) is the normal flow, so it's just assigned.
+        same_done = [a for a in mine if a.status == 'completed'
+                     and task_base_name(a.description) == task_base_name(description)]
+        existing = still_open[0] if still_open else (same_done[-1] if same_done else None)
+        if another and still_open:
+            # A separate task, numbered so it reads apart from the first on the job order
+            names = {(a.description or '').strip() for a in mine}
+            n = 2
+            while f'{description} ({n})' in names:
+                n += 1
+            if description in names:
+                description = f'{description} ({n})'
+            existing = None
     scheduled_date = None
     if data.get('scheduledDate'):
         try:
@@ -9822,6 +10824,31 @@ def create_worker_assignment():
             scheduled_date = _date.fromisoformat(data['scheduledDate'])
         except Exception:
             pass
+    if scheduled_date and scheduled_date < manila_today():
+        msg = 'Work can only be scheduled for today or a later day.'
+        return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
+    if existing and existing.status == 'completed':
+        if not rework:
+            # A second copy would pay the worker twice by accident, so ask first: the
+            # page offers to give it to them again as rework, with the reason why.
+            finished = existing.end_time or existing.updated_at
+            msg = f'{worker.name} already completed {existing.description or "this task"} on {existing.job_order_ref}.'
+            return jsonify({
+                'status': 'error', 'error': msg, 'message': msg, 'code': 'already_completed',
+                'data': {
+                    'assignmentId': existing.id,
+                    'description': existing.description,
+                    'completedAt': finished.isoformat() if finished else None,
+                    'pay': existing.pay,
+                },
+            }), 409
+        if not rework_reason:
+            msg = 'Give the reason for the rework (for example additional cutting or a mistake to fix).'
+            return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
+        # A new task of its own: the first one keeps its pay, this one is paid when done
+        base = existing.description or description
+        description = f'{base} (Rework: {rework_reason})'[:255]
+        existing = None
     if existing:
         # Assigning it again with a date (dropped on the calendar) schedules the
         # existing assignment for that day instead of being silently ignored
@@ -9854,7 +10881,8 @@ def create_worker_assignment():
         special_task_title=special_task_title,
         scheduled_date=scheduled_date,
         status='pending',
-        notes=data.get('notes', ''),
+        notes=(f'Rework: {rework_reason}' + (f' — {data["notes"]}' if data.get('notes') else '')
+               if rework and rework_reason else data.get('notes', '')),
     )
     db.session.add(assignment)
     db.session.flush()
@@ -9893,6 +10921,17 @@ def update_worker_assignment(assignment_id):
         msg = 'Status must be pending, in progress or completed'
         return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
 
+    # Work on a job order goes in the order it was given out: this task can't start
+    # (or be marked done) while one assigned before it is still unfinished
+    if new_status in ('in_progress', 'completed') and assignment.status == 'pending':
+        blocker = waiting_on_map([assignment]).get(assignment.id)
+        if blocker:
+            who = blocker.worker.name if blocker.worker else 'another worker'
+            msg = (f"{assignment.job_order_ref} can't start yet: {who} must finish "
+                   f"{blocker.description or 'their part'} first.")
+            return jsonify({'status': 'error', 'error': msg, 'message': msg, 'code': 'waiting_on_earlier',
+                            'data': waiting_on_dict(blocker)}), 400
+
     # Move a task that hasn't started to another worker
     if data.get('workerId') and finite_number(data['workerId']) and int(data['workerId']) != assignment.worker_id:
         if assignment.status != 'pending':
@@ -9902,6 +10941,7 @@ def update_worker_assignment(assignment_id):
         if not new_worker or not new_worker.is_active:
             msg = 'Worker not found'
             return jsonify({'status': 'error', 'error': msg, 'message': msg}), 404
+        # A worker may hold several tasks on one job order, just not the same task twice
         if order and WorkerAssignment.query.filter(
                 WorkerAssignment.worker_id == new_worker.id, WorkerAssignment.job_order_db_id == order.id,
                 WorkerAssignment.description == assignment.description, WorkerAssignment.id != assignment.id).first():
@@ -9982,9 +11022,15 @@ def update_worker_assignment(assignment_id):
         if data['scheduledDate']:
             try:
                 from datetime import date as _date
-                assignment.scheduled_date = _date.fromisoformat(data['scheduledDate'])
+                new_date = _date.fromisoformat(data['scheduledDate'])
             except Exception:
-                pass
+                new_date = None
+            # Only a change of date is checked, so work already on a past day can still be updated
+            if new_date and new_date != assignment.scheduled_date:
+                if new_date < manila_today():
+                    msg = 'Work can only be scheduled for today or a later day.'
+                    return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
+                assignment.scheduled_date = new_date
         else:
             assignment.scheduled_date = None
     if 'notes' in data:
@@ -10096,8 +11142,16 @@ def delete_worker_assignment(assignment_id):
         items = [dict(it) for it in order.items if it.get('assignmentId') != assignment.id]
         order.items = items
         order.actual_cost = job_order_actual_cost(order, items)
+    # Only the assignment goes: the job order keeps its status, priority and details,
+    # so it simply shows up again as available work
+    worker_name = assignment.worker.name if assignment.worker else 'a worker'
+    task_label = (assignment.special_task_title or 'special task') if assignment.assignment_type == 'special_task'         else assignment.job_order_ref
+    task_desc = assignment.description or 'task'
     db.session.delete(assignment)
     db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'DELETE', 'Workers',
+               f"Unassigned {task_label} ({task_desc}) from {worker_name}",
+               request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'message': 'Assignment deleted'})
 
 # ============================================

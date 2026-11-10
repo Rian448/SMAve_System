@@ -1,8 +1,9 @@
 ﻿'use client';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { api, RawMaterial, Supplier } from '@/lib/api';
-import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
+import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 
 interface POItem {
   material_id: string;
@@ -22,13 +23,13 @@ export default function NewPurchaseOrderPage() {
   const [savedSuppliers, setSavedSuppliers] = useState<Supplier[]>([]);
   
   // Form state
-  const [supplier, setSupplier] = useState('');
-  const [supplierContact, setSupplierContact] = useState('');
-  const [supplierEmail, setSupplierEmail] = useState('');
+  // A saved supplier only (add new ones under Suppliers first); its contact details come with it
+  const [supplierId, setSupplierId] = useState('');
+  const chosenSupplier = savedSuppliers.find(s => String(s.id) === supplierId);
   const [expectedDate, setExpectedDate] = useState('');
   const [notes, setNotes] = useState('');
   const [items, setItems] = useState<POItem[]>([
-    { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'pcs' }
+    { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd' }
   ]);
 
   useEffect(() => {
@@ -48,7 +49,7 @@ export default function NewPurchaseOrderPage() {
   }, []);
 
   const addItem = () => {
-    setItems([...items, { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'pcs' }]);
+    setItems([...items, { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd' }]);
   };
 
   const removeItem = (index: number) => {
@@ -70,7 +71,7 @@ export default function NewPurchaseOrderPage() {
           material_name: label,
           // A purchase order pays the supplier's cost, not our selling price
           unit_cost: material.costPerUnit || material.unitPrice,
-          unit: 'unit'
+          unit: 'yd'
         };
       }
     } else {
@@ -88,23 +89,20 @@ export default function NewPurchaseOrderPage() {
     setError('');
     const anyMaterial = items.some(item => item.material_id);
     if (fe.show({
-      'po-supplier': !supplier.trim() && 'Choose a saved supplier or type the supplier name.',
-      'po-email': emailProblem(supplierEmail),
+      'po-supplier': !chosenSupplier && 'Choose the supplier.',
       'po-date': !expectedDate && 'Choose the expected delivery date.',
       ...Object.fromEntries(items.flatMap((item, index) => [
         [`po-material-${index}`, !item.material_id && (anyMaterial ? 'Select a material, or remove this row.'
           : 'Add at least one material to the purchase order.')],
-        [`po-qty-${index}`, !(item.quantity >= 1) && 'At least 1.'],
+        [`po-qty-${index}`, !(item.quantity > 0) && 'More than 0.'],
       ])),
     })) return;
     setLoading(true);
 
     try {
-      // A name that matches a saved supplier links the order to that supplier
-      const saved = savedSuppliers.find((s: Supplier) => s.name.trim().toLowerCase() === supplier.trim().toLowerCase());
       const purchaseOrder = {
-        supplierName: supplier,
-        supplierId: saved?.id,
+        supplierName: chosenSupplier!.name,
+        supplierId: chosenSupplier!.id,
         items: items.filter(item => item.material_id).map(item => ({
           materialId: Number(item.material_id),
           name: item.material_name,
@@ -116,7 +114,7 @@ export default function NewPurchaseOrderPage() {
       };
 
       await api.purchaseOrders.create(purchaseOrder);
-      router.push('/inventory?tab=purchase-orders');
+      router.push('/purchase-orders');
     } catch (err) {
       console.error(err);
       setError(err instanceof Error && err.message ? err.message : 'Failed to create the purchase order.');
@@ -131,13 +129,13 @@ export default function NewPurchaseOrderPage() {
         {/* Header */}
         <div className="mb-8">
           <button
-            onClick={() => router.push('/inventory')}
+            onClick={() => router.push('/purchase-orders')}
             className="flex items-center text-gray-600 hover:text-[#011c72] mb-2"
           >
             <svg className="w-5 h-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
-            Back to Inventory
+            Back to Purchase Orders
           </button>
           <h1 className="text-2xl font-bold text-gray-900">New Purchase Order</h1>
           <p className="text-gray-500 mt-1">
@@ -160,60 +158,38 @@ export default function NewPurchaseOrderPage() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="md:col-span-2" {...fe.field('po-supplier')}>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Supplier Name *
+                <label htmlFor="po-supplier" className="block text-sm font-medium text-gray-700 mb-2">
+                  Supplier *
                 </label>
                 <select
-                  value={supplier}
-                  onChange={(e) => {
-                    const selected = savedSuppliers.find((s: Supplier) => s.name === e.target.value);
-                    setSupplier(e.target.value);
-                    if (selected) {
-                      setSupplierContact(selected.phone || '');
-                      setSupplierEmail(selected.email || '');
-                    }
-                  }}
+                  id="po-supplier"
+                  value={supplierId}
+                  onChange={(e) => setSupplierId(e.target.value)}
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                  required
                 >
-                  <option value="">Select a saved supplier (optional)</option>
+                  <option value="">Select a supplier</option>
                   {savedSuppliers.map((s: Supplier) => (
-                    <option key={s.id} value={s.name}>{s.name}</option>
+                    <option key={s.id} value={String(s.id)}>{s.name}</option>
                   ))}
                 </select>
-                <input
-                  type="text"
-                  value={supplier}
-                  onChange={(e) => setSupplier(e.target.value)}
-                  placeholder="Or type supplier name manually"
-                  className="mt-2 w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                  required
-                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Not in the list? Add the supplier under{' '}
+                  <Link href="/suppliers" className="text-[#011c72] font-medium hover:underline">Suppliers</Link> first.
+                </p>
                 <FieldError message={fe.errors['po-supplier']} />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Contact Number
-                </label>
-                <input
-                  type="tel"
-                  value={supplierContact}
-                  onChange={(e) => setSupplierContact(e.target.value)}
-                  placeholder="(02) 8XXX-XXXX"
-                  className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                />
+                <p className="block text-sm font-medium text-gray-700 mb-2">Contact Number</p>
+                <p className="px-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-700 min-h-10.5">
+                  {chosenSupplier?.phone || <span className="text-gray-400">—</span>}
+                </p>
               </div>
-              <div {...fe.field('po-email')}>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Email Address
-                </label>
-                <input
-                  type="email"
-                  value={supplierEmail}
-                  onChange={(e) => setSupplierEmail(e.target.value)}
-                  placeholder="supplier@email.com"
-                  className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                />
-                <FieldError message={fe.errors['po-email']} />
+              <div>
+                <p className="block text-sm font-medium text-gray-700 mb-2">Email Address</p>
+                <p className="px-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-700 min-h-10.5 break-all">
+                  {chosenSupplier?.email || <span className="text-gray-400">—</span>}
+                </p>
               </div>
               <div {...fe.field('po-date')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -252,6 +228,11 @@ export default function NewPurchaseOrderPage() {
               </button>
             </div>
 
+            <p className="-mt-2 mb-4 text-xs text-gray-500">
+              Only materials already in Inventory can be ordered. For a new material, add it in{' '}
+              <Link href="/inventory" className="text-[#011c72] font-medium hover:underline">Inventory</Link> first
+              (it starts at 0 yd). Stock goes up only when this order is received.
+            </p>
             {loadingMaterials ? (
               <div className="flex items-center justify-center py-8">
                 <div className="animate-spin w-6 h-6 border-2 border-[#011c72] border-t-transparent rounded-full"></div>
@@ -272,21 +253,30 @@ export default function NewPurchaseOrderPage() {
                           required
                         >
                           <option value="">Select material</option>
-                          {materials.map(m => (
-                            <option key={m.id} value={m.id.toString()}>
-                              {m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} in stock)
-                            </option>
-                          ))}
+                          {/* Only materials registered in Inventory; the chosen supplier's own listed first */}
+                          {(chosenSupplier
+                            ? [['From ' + chosenSupplier.name, materials.filter(m => m.supplierId === chosenSupplier.id)],
+                               ['Other materials', materials.filter(m => m.supplierId !== chosenSupplier.id)]] as const
+                            : [['', materials]] as const
+                          ).filter(([, list]) => list.length > 0).map(([label, list]) => {
+                            const opts = list.map(m => (
+                              <option key={m.id} value={m.id.toString()}>
+                                {m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} yd in stock)
+                              </option>
+                            ));
+                            return label ? <optgroup key={label} label={label}>{opts}</optgroup> : opts;
+                          })}
                         </select>
                         <FieldError message={fe.errors[`po-material-${index}`]} />
                       </div>
                       <div className="col-span-4 md:col-span-2" {...fe.field(`po-qty-${index}`)}>
                         <label className="block text-xs font-medium text-gray-500 mb-1">
-                          Quantity
+                          Quantity (yd)
                         </label>
                         <input
                           type="number"
-                          min="1"
+                          min="0.01"
+                          step="0.01"
                           value={item.quantity}
                           onChange={(e) => updateItem(index, 'quantity', Number(e.target.value))}
                           className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
@@ -383,7 +373,7 @@ export default function NewPurchaseOrderPage() {
           <div className="flex items-center justify-end gap-4">
             <button
               type="button"
-              onClick={() => router.push('/inventory')}
+              onClick={() => router.push('/purchase-orders')}
               className="px-6 py-2 border border-gray-200 text-gray-700 rounded-lg font-medium hover:bg-gray-50 transition-colors"
             >
               Cancel

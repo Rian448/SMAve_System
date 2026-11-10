@@ -518,7 +518,7 @@ export default function Dashboard() {
               <>
                   {can('purchase_orders.add') && (
                   <Link
-                    href="/inventory/purchase-orders/new"
+                    href="/purchase-orders/new"
                     className="flex flex-col items-center justify-center p-6 bg-white rounded-xl border border-gray-200 hover:border-green-500 hover:shadow-md transition-all group"
                   >
                     <div className="w-12 h-12 rounded-xl bg-green-100 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">

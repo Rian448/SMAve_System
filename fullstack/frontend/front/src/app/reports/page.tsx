@@ -74,7 +74,7 @@ export default function ReportsPage() {
   useEffect(() => {
     if (!isAdmin) return;
     api.settings.getBranches().then(r => {
-      if (r.data) setBranches(r.data.filter((b: any) => b.isActive));
+      if (r.data) setBranches(r.data.filter((b) => b.isActive));
     }).catch(() => {});
   }, [isAdmin]);
 

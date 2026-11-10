@@ -60,11 +60,6 @@ const ForecastIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
   </svg>
 );
-const DeliveryIcon = () => (
-  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-  </svg>
-);
 const ReportsIcon = () => (
   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
@@ -86,9 +81,24 @@ const CustomersIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
   </svg>
 );
-const ShoppingIcon = () => (
+const PurchaseOrderIcon = () => (
+  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+  </svg>
+);
+const ReceivingIcon = () => (
   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V7a2 2 0 00-2-2H6a2 2 0 00-2 2v6m16 0v4a2 2 0 01-2 2H6a2 2 0 01-2-2v-4m16 0h-3.586a1 1 0 00-.707.293l-1.414 1.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-1.414-1.414A1 1 0 007.586 13H4" />
+  </svg>
+);
+const SupplierIcon = () => (
+  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0zM13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1m-6-1a1 1 0 001 1h1M5 17a2 2 0 104 0m-4 0a2 2 0 114 0m6 0a2 2 0 104 0m-4 0a2 2 0 114 0" />
+  </svg>
+);
+const HistoryIcon = () => (
+  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
   </svg>
 );
 const LogoIcon = () => (
@@ -263,13 +273,20 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     { name: 'Sales', icon: SalesIcon, items: [
       { name: 'Sales', path: '/sales', icon: SalesIcon, perms: ['sales.view'] },
       { name: 'Customers', path: '/customers', icon: CustomersIcon, perms: ['customers.view'] },
-      { name: 'Payments', path: '/payments', icon: PaymentsIcon, perms: ['payments.view'] },
     ] },
+    // Its own entry: payments are managed here, and each one still opens its job order
+    { name: 'Payments', path: '/payments', icon: PaymentsIcon, perms: ['payments.view'] },
     { name: 'Operations', icon: InventoryIcon, items: [
-      { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'premade.receive', 'suppliers.view'] },
-      { name: 'Product Orders', path: '/product-orders', icon: ShoppingIcon, perms: ['product_orders.view'] },
-      { name: 'Item Trail', path: '/delivery', icon: DeliveryIcon, perms: ['item_trail.view'] },
+      { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'premade.receive'] },
+      // Product orders are opened from Sales (View Details); /product-orders still works
+      // Replaces Item Trail (branch transfers from the retired online ordering; /delivery still opens it)
+      { name: 'Item History', path: '/item-history', icon: HistoryIcon, perms: ['inventory.view', 'premade.view'] },
       { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, perms: ['workers.add', 'workers.edit', 'workers.delete'] },
+    ] },
+    { name: 'Purchasing', icon: PurchaseOrderIcon, items: [
+      { name: 'Purchase Orders', path: '/purchase-orders', icon: PurchaseOrderIcon, perms: ['purchase_orders.view'] },
+      { name: 'Receiving', path: '/purchase-orders/receiving', icon: ReceivingIcon, perms: ['purchase_orders.receive'] },
+      { name: 'Suppliers', path: '/suppliers', icon: SupplierIcon, perms: ['suppliers.view'] },
     ] },
     { name: 'Finance', icon: CostingIcon, items: [
       { name: 'Expenses', path: '/expenses', icon: ExpensesIcon, perms: ['expenses.view', 'expenses.add'] },
@@ -279,7 +296,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
       { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, perms: ['forecasting.view'] },
       { name: 'Reports', path: '/reports', icon: ReportsIcon, perms: ['reports.sales', 'reports.inventory', 'reports.settlement', 'reports.audit_trail'] },
     ] },
-    { name: 'Settings', path: '/settings', icon: SettingsIcon, perms: ['settings.edit', 'users.manage', 'branches.manage'] },
+    { name: 'Settings', path: '/settings', icon: SettingsIcon, perms: ['settings.edit', 'users.manage', 'branches.manage', 'reports.audit_trail'] },
   ];
 
   const allowed = (item: NavItem) => (item.perms ? can(...item.perms) : true);

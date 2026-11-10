@@ -1,14 +1,16 @@
 'use client';
 import { formatDate, manilaDateString, nextSaturdayManila } from '@/lib/dateUtils';
-import { useEffect, useRef, useState, Suspense, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState, Suspense, type ReactElement } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import {
   api, ApiError, type Customer, type FinishedGood, type RawMaterial, type Branch,
-  type PremadeDraft, type ManagedWorker,
-  vatBreakdown, jobOrderTotalFrom, jobOrderPriceBreakdown, MAX_JOB_ORDER_PRICE, isValidPriceInput,
+  type PremadeDraft, type ManagedWorker, type VehicleInfo, type JobOrderPriority,
+  vatBreakdown, jobOrderTotalFrom, jobOrderPriceBreakdown, MAX_JOB_ORDER_PRICE, isValidPriceInput, ACCEPTED_PAYMENT_METHODS, isAcceptedPaymentMethod, PAYMENT_METHOD_LABELS
 } from '@/lib/api';
 import Combobox from '@/components/Combobox';
+import MaterialPicker from '@/components/MaterialPicker';
+import PremadeItemPicker from '@/components/PremadeItemPicker';
 import { useVatRate } from '@/lib/useVatRate';
 import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
 
@@ -90,6 +92,8 @@ function NewJobOrderForm() {
   // When present we are editing an existing draft rather than creating a new order.
   const draftId = searchParams.get('draftId');
   const editingDraftId = draftId ? Number(draftId) : null;
+  // ?confirm=1 (the Sales page's Confirm button): open the draft at its first unfinished step
+  const confirmingDraft = !!editingDraftId && searchParams.get('confirm') === '1';
   const [loadingDraft, setLoadingDraft] = useState(!!editingDraftId);
   const [retailBranches, setRetailBranches] = useState<Branch[]>([]);
   const { user, can } = useAuth();
@@ -113,6 +117,67 @@ function NewJobOrderForm() {
   // The branch whose finished goods a premade order sells (a draft keeps its own)
   const [premadeBranchId, setPremadeBranchId] = useState<number | ''>('');
   const [orderType, setOrderType] = useState<'normal' | 'premade'>(editingPremadeDraftId ? 'premade' : 'normal');
+
+  // Order number: the next generated one by default, or one typed in by hand.
+  // 'auto' sends no number, so the server generates it at save time and it can't clash.
+  const [numberMode, setNumberMode] = useState<'auto' | 'manual'>('auto');
+  const [typedNumber, setTypedNumber] = useState('');
+  const [previewNumber, setPreviewNumber] = useState('');
+  const [numberCheck, setNumberCheck] = useState<{ checking: boolean; message: string | null }>({ checking: false, message: null });
+  // An existing draft keeps the number it was saved with
+  const [existingNumber, setExistingNumber] = useState('');
+  const numberKind: 'job' | 'premade' = orderType === 'premade' ? 'premade' : 'job';
+  const numberBranchId = choosesBranch ? (orderBranchId || undefined) : (user?.branchId || undefined);
+  const refreshPreviewNumber = useCallback(() => {
+    if (numberKind === 'job' && !numberBranchId) { setPreviewNumber(''); return; }
+    api.orderNumbers.next(numberKind, numberKind === 'job' ? numberBranchId : undefined)
+      .then((r) => setPreviewNumber(r.data?.number || ''))
+      .catch(() => setPreviewNumber(''));
+  }, [numberKind, numberBranchId]);
+  useEffect(() => { if (!editingDraftId) refreshPreviewNumber(); }, [refreshPreviewNumber, editingDraftId]);
+  // A typed number is checked as you type (after a short pause)
+  useEffect(() => {
+    if (numberMode !== 'manual') return;
+    const value = typedNumber.trim();
+    if (!value) return;
+    const timer = setTimeout(() => {
+      setNumberCheck({ checking: true, message: null });
+      api.orderNumbers.check(numberKind, value)
+        .then((r) => setNumberCheck({ checking: false, message: r.data?.available ? null : (r.data?.message || 'This number cannot be used.') }))
+        .catch(() => setNumberCheck({ checking: false, message: null }));
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [numberMode, typedNumber, numberKind]);
+  const resetToGeneratedNumber = () => {
+    setNumberMode('auto'); setTypedNumber(''); setNumberCheck({ checking: false, message: null });
+    fe.clear(); refreshPreviewNumber();
+  };
+  /** Why the order number can't be saved yet, or false */
+  const orderNumberProblem = (): string | false => {
+    if (numberMode !== 'manual') return false;
+    if (!typedNumber.trim()) return 'Enter the order number, or press Generate.';
+    if (!/^[A-Za-z0-9][A-Za-z0-9_./-]{2,49}$/.test(typedNumber.trim()))
+      return 'Use 3 to 50 letters, numbers or - _ / . (no spaces).';
+    return numberCheck.message || false;
+  };
+  /** What to send: a typed number, or nothing so the server generates one */
+  const numberPayload = numberMode === 'manual' ? typedNumber.trim() : undefined;
+  /** Stop a save while the typed number can't be used, and say why next to the box */
+  const orderNumberBlocked = () => {
+    const problem = orderNumberProblem();
+    if (!problem) return false;
+    fe.show({ orderNumber: problem });
+    setError(problem);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    return true;
+  };
+  /** The server refused the number (taken meanwhile, or not allowed): show it at the box */
+  const showNumberError = (err: unknown) => {
+    if (err instanceof ApiError && err.body?.code === 'order_number') {
+      fe.show({ orderNumber: err.message });
+      if (numberMode === 'auto') refreshPreviewNumber();
+    }
+  };
   const [step, setStep] = useState(1);
   const [premadeStep, setPremadeStep] = useState(1);
   const [paymentAmount, setPaymentAmount] = useState<number | ''>('');
@@ -162,7 +227,7 @@ function NewJobOrderForm() {
   // Service Information
   // Defaults to the next Saturday; staff can pick another date
   const [estimatedCompletionDate, setEstimatedCompletionDate] = useState(() => nextSaturdayManila());
-  const [priority, setPriority] = useState('normal');
+  const [priority, setPriority] = useState<JobOrderPriority>('normal');
 
   // Services Selection
   const [flooring, setFlooring] = useState({ selected: false, material: '' });
@@ -244,7 +309,8 @@ function NewJobOrderForm() {
     setCustomerAddress(d.customerAddress || '');
     setLinkedCustomerId(d.customerId ?? null);
     setNotes(d.notes || '');
-    setPaymentMethod(d.paymentMethod || 'cash');
+    // A draft saved with a method no longer accepted (card, Maya, cheque) must pick a new one
+    setPaymentMethod(isAcceptedPaymentMethod(d.paymentMethod) ? d.paymentMethod : (d.paymentMethod ? '' : 'cash'));
     const lines: { productId: number | ''; quantity: number }[] =
       d.items.length > 0 ? d.items : [{ productId: '', quantity: 1 }];
     setPremadeSelections(lines.map((it, i) => ({ id: `premade-${i + 1}`, productId: it.productId, quantity: it.quantity })));
@@ -269,20 +335,18 @@ function NewJobOrderForm() {
     return () => { cancelled = true; };
   }, [editingPremadeDraftId]);
 
+  // Also called by the material lookup window, so it shows current stock and prices
+  const reloadInventoryMaterials = useCallback(async () => {
+    const response = await api.inventory.getRawMaterials(
+      user?.branchId ? { branchId: user.branchId, includeWarehouse: true } : undefined
+    );
+    setInventoryMaterials(response.data || []);
+  }, [user?.branchId]);
+
   useEffect(() => {
-    const loadInventoryMaterials = async () => {
-      if (orderType !== 'normal') return;
-      try {
-        const response = await api.inventory.getRawMaterials(
-          user?.branchId ? { branchId: user.branchId, includeWarehouse: true } : undefined
-        );
-        setInventoryMaterials(response.data || []);
-      } catch (err) {
-        console.error('Failed to load inventory materials:', err);
-      }
-    };
-    loadInventoryMaterials();
-  }, [orderType, user?.branchId]);
+    if (orderType !== 'normal') return;
+    reloadInventoryMaterials().catch((err) => console.error('Failed to load inventory materials:', err));
+  }, [orderType, reloadInventoryMaterials]);
 
   useEffect(() => {
     if (linkedCustomerId) return; // already linked, don't re-search
@@ -417,6 +481,37 @@ function NewJobOrderForm() {
     return item ? sum + item.price * s.quantity : sum;
   }, 0);
 
+  /** Step 1 of a premade order: customer, and every line has an item and a whole quantity */
+  const premadeItemProblems = (forConfirm: boolean): Record<string, string | false> => {
+    const lines = Object.fromEntries(premadeSelections.map((s) => [`premade-${s.id}`,
+      !s.productId ? (premadeSelections.length > 1 ? 'Choose a premade item, or remove this line.' : false)
+        : !(Number.isInteger(s.quantity) && s.quantity >= 1) ? 'Quantity must be a whole number of 1 or more.'
+        : false,
+    ]));
+    const hasItems = premadeSelections.some((s) => s.productId);
+    return {
+      customerName: !customerName.trim() && 'Customer name is required.',
+      customerEmail: emailProblem(customerEmail) || false,
+      premadeItems: !hasItems ? 'Please select at least one premade item.'
+        : premadeHasStockIssue && (forConfirm && editingPremadeDraftId
+          ? 'Some items are out of stock or short. Edit the draft, remove them, or wait for stock.'
+          : 'Some items are out of stock or short. Lower or remove them, or save the draft and wait for stock.'),
+      ...lines,
+    };
+  };
+
+  /** Step 2: the amount paid now (0 = unpaid) and, only when something is paid, how */
+  const premadePaymentProblems = (): Record<string, string | false> => {
+    const paid = paymentAmount === '' ? 0 : Number(paymentAmount);
+    return {
+      paymentAmount: !Number.isFinite(paid) ? 'Enter the amount paid as a number.'
+        : paid < 0 ? 'Amount paid cannot be negative.'
+        : Math.abs(paid * 100 - Math.round(paid * 100)) > 1e-6 ? 'Use at most 2 decimal places.'
+        : paid > premadeTotal + 1e-9 && `Amount paid can't be more than the total of ₱${premadeTotal.toLocaleString('en-PH', { minimumFractionDigits: 2 })}.`,
+      paymentMethod: paid > 0 && !isAcceptedPaymentMethod(paymentMethod) && 'Choose how it was paid: Cash, GCash or Bank Transfer.',
+    };
+  };
+
   const materialTotal = materials.reduce(
     (sum, m) => sum + (Number(m.quantity) || 0) * (Number(m.unitPrice) || 0),
     0
@@ -433,10 +528,117 @@ function NewJobOrderForm() {
   const finalTotal = estimatedTotal > 0 ? jobOrderTotalFrom(estimatedTotal, orderDiscountPct) : 0;
   const vatAmount = vatBreakdown(finalTotal, vatPct).vat;
 
+  // ── Steps: 1 Customer → 2 Service → 3 Vehicle → 4 Materials → 5 Review.
+  // Reupholstery on its own is furniture, not a car: the Vehicle step is skipped.
+  const reupholsteryOnly = reupholstery.selected && !flooring.selected && !ceiling.selected
+    && !sidings.selected && !seatCovers.selected && !otherServices.selected;
+  const skipVehicle = reupholsteryOnly;
+  const nextStepOf = (s: number) => (s === 2 && skipVehicle ? 4 : s + 1);
+  const prevStepOf = (s: number) => (s === 4 && skipVehicle ? 2 : s - 1);
+
+  /** What is missing or wrong on a step (empty when it is complete). Kept in line
+   *  with the server's checks in create_job_order. */
+  const stepProblems = (n: number): Record<string, string | false> => {
+    if (n === 1) return {
+      orderBranch: choosesBranch && !orderBranchValid && 'Choose which branch this job order is for.',
+      customerName: !customerName.trim() && 'Customer name is required.',
+      customerEmail: emailProblem(customerEmail) || false,
+    };
+    if (n === 2) {
+      const anyService = flooring.selected || reupholstery.selected || ceiling.selected ||
+        sidings.selected || seatCovers.selected || otherServices.selected;
+      const needMaterial = (on: boolean, value: string) => on && !value.trim() && 'Specify the material for this service.';
+      return {
+        services: !anyService && 'Please select at least one service.',
+        'svc-flooring': needMaterial(flooring.selected, flooring.material),
+        reupholsteryItem: reupholstery.selected && !reupholsteryItemType.trim() && 'Please specify what item will be reupholstered.',
+        'svc-reupholstery': needMaterial(reupholstery.selected, reupholstery.material),
+        'svc-ceiling': needMaterial(ceiling.selected, ceiling.material),
+        'svc-sidings': needMaterial(sidings.selected, sidings.material),
+        'svc-seatCovers': needMaterial(seatCovers.selected, seatCovers.material),
+        'svc-other': otherServices.selected && !otherServices.description.trim() && 'Describe the service needed.',
+        completionDate: !estimatedCompletionDate ? 'Choose the estimated completion date.'
+          : estimatedCompletionDate < manilaDateString() && 'Estimated completion date cannot be in the past.',
+      };
+    }
+    if (n === 3) {
+      if (skipVehicle) return {};
+      const year = Number(vehicleYear);
+      const maxYear = new Date().getFullYear() + 1;
+      return {
+        vehicleMake: !vehicleMake.trim() && 'Enter the vehicle make.',
+        vehicleModel: !vehicleModel.trim() && 'Enter the vehicle model.',
+        vehicleYear: !vehicleYear.trim() ? 'Enter the vehicle year.'
+          : (!Number.isInteger(year) || year < 1970 || year > maxYear) && `Enter a year from 1970 to ${maxYear}.`,
+      };
+    }
+    if (n === 4) {
+      const seen = new Set<string>();
+      const rows = Object.fromEntries(materials.map((m) => {
+        const key = m.materialSource === 'inventory' ? `inv-${m.materialId}` : `new-${m.name.trim().toLowerCase()}`;
+        const duplicate = (m.materialSource === 'inventory' ? !!m.materialId : !!m.name.trim()) && seen.has(key);
+        seen.add(key);
+        const problem =
+          m.materialSource === 'inventory' && !m.materialId ? 'Select a material from inventory, or switch this row to "Type New".'
+          : !m.name.trim() ? 'Enter a name for this material.'
+          : duplicate ? 'This material is already on another row. Change the quantity there instead.'
+          : !(Number(m.quantity) > 0) ? 'Quantity must be more than 0.'
+          : !(Number(m.unitPrice) > 0) ? 'Unit price must be more than ₱0.'
+          : '';
+        return [`material-${m.id}`, problem];
+      }));
+      return { materialsList: materials.length === 0 && 'Add at least one material for this job.', ...rows };
+    }
+    if (n === 5) {
+      const discount = Number(orderDiscount || 0);
+      return {
+        price: !(estimatedTotal > 0) ? 'Enter the price for the work.'
+          : estimatedTotal > MAX_JOB_ORDER_PRICE && 'Price for the work must be less than ₱100,000,000.',
+        discount: (!Number.isFinite(discount) || discount < 0 || discount > 100) && 'Discount must be between 0 and 100%.',
+        paymentMethod: !isAcceptedPaymentMethod(paymentMethod) && 'Choose the payment method: Cash, GCash or Bank Transfer.',
+      };
+    }
+    return {};
+  };
+
   const goNext = () => {
     setError(''); fe.clear();
-    setStep((s) => s + 1);
+    setStep((s) => nextStepOf(s));
   };
+
+  const goBack = () => {
+    setError(''); fe.clear();
+    setStep((s) => Math.max(1, prevStepOf(s)));
+  };
+
+  /** What was typed on each service card; kept on the slip data so a draft reopens with it */
+  const serviceDetails = () => ({
+    flooring: flooring.material, reupholstery: reupholstery.material,
+    ceiling: ceiling.material, sidings: sidings.material,
+    seatCovers: { design: seatCovers.design, material: seatCovers.material, pocket: seatCovers.pocket, others: seatCovers.others },
+    other: otherServices.description,
+  });
+  const buildSlipData = () => ({
+    rows: slipRows,
+    materialCenter, materialSides, materialBack,
+    dStitch, piping, pockets, logo, specification,
+    ...(seesLaborCost ? { cutterName, sewerName } : {}),
+    serviceDetails: serviceDetails(),
+  });
+
+  // Confirming a draft: once it has loaded, open the first step with something
+  // missing (with the messages shown), or the review step if it is complete.
+  const confirmChecked = useRef(false);
+  useEffect(() => {
+    if (!confirmingDraft || loadingDraft || confirmChecked.current) return;
+    confirmChecked.current = true;
+    for (const n of [1, 2, 3, 4, 5]) {
+      const problems = stepProblems(n);
+      if (Object.values(problems).some(Boolean)) { setStep(n); fe.show(problems); return; }
+    }
+    setStep(5);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirmingDraft, loadingDraft]);
 
   // ── Load an existing draft for editing (?draftId=…) ───────────────────────
   // saveDraft stores the chosen services as a joined description string, so the
@@ -448,7 +650,7 @@ function NewJobOrderForm() {
     (async () => {
       try {
         const res = await api.sales.getJobOrder(editingDraftId);
-        const d: any = res.data;
+        const d = res.data;
         if (cancelled || !d) return;
         if (d.status !== 'draft') {
           setError('That order is no longer a draft and cannot be edited here.');
@@ -460,6 +662,7 @@ function NewJobOrderForm() {
         setCustomerEmail(d.customerEmail || '');
         if (d.customerId) setLinkedCustomerId(d.customerId);
         if (d.branchId) setOrderBranchId(d.branchId);
+        setExistingNumber(d.jobOrderId || '');
         if (d.discountPercent != null) setOrderDiscount(String(d.discountPercent));
         setVatOn(Number(d.vatPercent) > 0);
         // Restore the price (it used to be lost when reopening a draft)
@@ -471,7 +674,7 @@ function NewJobOrderForm() {
         if (d.priority) setPriority(d.priority);
         if (d.estimatedCompletion) setEstimatedCompletionDate(String(d.estimatedCompletion).slice(0, 10));
 
-        const v = d.vehicleInfo || {};
+        const v: Partial<VehicleInfo> = d.vehicleInfo || {};
         if (v.make === 'Reupholstery') {
           setReupholsteryItemType(v.model || '');
         } else {
@@ -493,7 +696,26 @@ function NewJobOrderForm() {
         if (services.includes('seat_covers')) setSeatCovers(s => ({ ...s, selected: true }));
         if (services.includes('other')) setOtherServices(s => ({ ...s, selected: true }));
 
-        setMaterials((d.items || []).map((it: any, idx: number) => ({
+        // The slip and each service's details are kept on the draft's slip data
+        const slip = d.slipData || {};
+        const savedRows = slip.rows;
+        if (Array.isArray(savedRows) && savedRows.length) {
+          setSlipRows([0, 1, 2, 3].map((i) => ({ description: savedRows[i]?.description || '', hr: savedRows[i]?.hr || '' })));
+        }
+        setMaterialCenter(slip.materialCenter || ''); setMaterialSides(slip.materialSides || ''); setMaterialBack(slip.materialBack || '');
+        setDStitch(slip.dStitch || ''); setPiping(slip.piping || ''); setPockets(slip.pockets || ''); setLogo(slip.logo || '');
+        setSpecification(slip.specification || '');
+        if (slip.cutterName) setCutterName(slip.cutterName);
+        if (slip.sewerName) setSewerName(slip.sewerName);
+        const sd = slip.serviceDetails || {};
+        setFlooring(s => ({ ...s, material: sd.flooring || '' }));
+        setReupholstery(s => ({ ...s, material: sd.reupholstery || '' }));
+        setCeiling(s => ({ ...s, material: sd.ceiling || '' }));
+        setSidings(s => ({ ...s, material: sd.sidings || '' }));
+        setSeatCovers(s => ({ ...s, ...(sd.seatCovers || {}) }));
+        setOtherServices(s => ({ ...s, description: sd.other || '' }));
+
+        setMaterials((d.items || []).map((it, idx: number) => ({
           id: `draft-${idx}`,
           materialSource: it.materialId ? 'inventory' : 'custom',
           materialId: it.materialId ?? '',
@@ -533,6 +755,7 @@ function NewJobOrderForm() {
       customerEmail: emailProblem(customerEmail),
     };
     if (Object.values(draftProblems).some(Boolean)) { setStep(1); fe.show(draftProblems); return; }
+    if (!editingDraftId && orderNumberBlocked()) return;
     setLoading(true);
     try {
       const branchId = choosesBranch ? (orderBranchId as number) : (user?.branchId || 1);
@@ -557,11 +780,11 @@ function NewJobOrderForm() {
           laborCost: 0,
         }));
 
-      const vehicleInfo = reupholstery.selected
+      const vehicleInfo = reupholsteryOnly
         ? { make: 'Reupholstery', model: reupholsteryItemType.trim(), year: new Date().getFullYear(), plateNumber: '' }
-        : { make: vehicleMake || 'N/A', model: vehicleModel || 'N/A', year: Number(vehicleYear) || new Date().getFullYear(), plateNumber: vehiclePlate || '' };
+        : { make: vehicleMake || 'N/A', model: vehicleModel || 'N/A', year: Number(vehicleYear) || null, plateNumber: vehiclePlate || '' };
 
-      const draftData: any = {
+      const draftData = {
         isDraft: true,
         customerName, customerPhone, customerEmail,
         ...(linkedCustomerId ? { customerId: linkedCustomerId } : {}),
@@ -571,9 +794,13 @@ function NewJobOrderForm() {
         items: normalizedItems,
         notes,
         priority,
-        ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
+        discountPercent: orderDiscountPct,
         vatIncluded: vatOn,
+        slipData: buildSlipData(),
+        ...(estimatedCompletionDate ? { estimatedCompletion: estimatedCompletionDate } : {}),
         ...(estimatedTotal > 0 ? { estimatedCost: estimatedTotal, priceForWork: estimatedTotal } : {}),
+        // Only a new draft takes a number; an existing one keeps its own
+        ...(!editingDraftId && numberPayload ? { jobOrderNumber: numberPayload } : {}),
       };
 
       if (editingDraftId) {
@@ -585,6 +812,7 @@ function NewJobOrderForm() {
       }
       router.push('/sales');
     } catch (err) {
+      showNumberError(err);
       setError(err instanceof Error && err.message ? err.message : 'Failed to save draft.');
       setLoading(false);
     }
@@ -595,25 +823,7 @@ function NewJobOrderForm() {
 
     if (orderType === 'normal' && step < 5) {
       setError('');
-      if (step === 1 && fe.show({
-        orderBranch: choosesBranch && !orderBranchValid && 'Choose which branch this job order is for.',
-        customerName: !customerName.trim() && 'Customer name is required.',
-        customerEmail: emailProblem(customerEmail),
-      })) return;
-      if (step === 3) {
-        const anyService = flooring.selected || reupholstery.selected || ceiling.selected ||
-          sidings.selected || seatCovers.selected || otherServices.selected;
-        if (fe.show({
-          services: !anyService && 'Please select at least one service.',
-          reupholsteryItem: reupholstery.selected && !reupholsteryItemType.trim() && 'Please specify what item will be reupholstered.',
-          completionDate: estimatedCompletionDate && estimatedCompletionDate < manilaDateString()
-            && 'Estimated completion date cannot be in the past.',
-        })) return;
-      }
-      if (step === 4 && fe.show(Object.fromEntries(materials.map((m) => [`material-${m.id}`,
-        m.materialSource === 'inventory' && !m.materialId ? 'Select a material from inventory, or switch this row to "Type New".'
-          : !m.name.trim() ? 'Enter a name for this material.' : '',
-      ])))) return;
+      if (fe.show(stepProblems(step))) return;
       goNext();
       return;
     }
@@ -621,46 +831,41 @@ function NewJobOrderForm() {
     // Premade step 1 → 2
     if (orderType === 'premade' && premadeStep === 1) {
       setError('');
-      const hasItems = premadeSelections.some((s) => s.productId);
-      if (fe.show({
-        customerName: !customerName.trim() && 'Customer name is required.',
-        customerEmail: emailProblem(customerEmail),
-        premadeItems: !hasItems ? 'Please select at least one premade inventory item.'
-          : premadeHasStockIssue && 'Some items are out of stock or short. Lower or remove them, or save the draft and wait for stock.',
-      })) return;
+      if (fe.show(premadeItemProblems(false))) return;
       setPremadeStep(2);
       return;
     }
 
+    if (!editingDraftId && orderNumberBlocked()) return;
     setLoading(true);
     setError('');
 
     // ── Premade order submit ──────────────────────────────────────────────────
     if (orderType === 'premade') {
       const selected = premadeSelections.filter((s) => s.productId && s.quantity > 0);
-      const premadeProblems = {
-        customerName: !customerName.trim() && 'Customer name is required.',
-        customerEmail: emailProblem(customerEmail),
-        premadeItems: selected.length === 0 ? 'Please select at least one premade inventory item.'
-          : editingPremadeDraftId && premadeHasStockIssue
-          && 'Some items are out of stock or short. Edit the draft, remove them, or wait for stock.',
-      };
-      if (Object.values(premadeProblems).some(Boolean)) {
+      const itemProblems = premadeItemProblems(true);
+      if (Object.values(itemProblems).some(Boolean)) {
         setLoading(false);
         setPremadeStep(1);
-        fe.show(premadeProblems);
+        fe.show(itemProblems);
         return;
       }
+      if (fe.show(premadePaymentProblems())) { setLoading(false); return; }
+      const paidNow = typeof paymentAmount === 'number' ? paymentAmount : 0;
+      // The method only means something when money changed hands
+      const methodPaid = paidNow > 0 ? paymentMethod : undefined;
 
       if (editingPremadeDraftId) {
         try {
           // Save what is on screen first, so the recorded order matches it
           await api.premadeDrafts.update(editingPremadeDraftId, premadeDraftInput());
-          await api.premadeDrafts.confirm(editingPremadeDraftId, {
-            paymentAmount: typeof paymentAmount === 'number' ? paymentAmount : 0,
-            paymentMethod,
+          const recorded = await api.premadeDrafts.confirm(editingPremadeDraftId, {
+            paymentAmount: paidNow,
+            paymentMethod: methodPaid,
+            ...(numberPayload ? { orderNumber: numberPayload } : {}),
           });
-          router.push('/product-orders');
+          // Straight to the recorded order (Product Orders is no longer in the menu)
+          router.push(recorded.data?.id ? `/product-orders/${recorded.data.id}` : '/sales');
         } catch (err) {
           // Stock moved since the page loaded: show the draft as it stands now
           if (err instanceof ApiError && err.status === 409 && err.body?.data) {
@@ -670,6 +875,7 @@ function NewJobOrderForm() {
             if (fresh?.data) setPremadeItems(fresh.data);
             setPremadeStep(1);
           }
+          showNumberError(err);
           setError(err instanceof Error && err.message ? err.message : 'Failed to record the job order.');
         } finally {
           setLoading(false);
@@ -716,18 +922,21 @@ function NewJobOrderForm() {
           return;
         }
 
-        const premadeNotes = [notes, 'Order Source: Walk-in', `Payment Method: ${paymentMethod}`]
+        const premadeNotes = [notes, 'Order Source: Walk-in', methodPaid && `Payment Method: ${methodPaid}`]
           .filter(Boolean).join('\n');
 
-        await api.productOrders.create({
+        const recorded = await api.productOrders.create({
           customerName, customerPhone, customerEmail, customerAddress, branchId,
           notes: premadeNotes,
-          paymentAmount: typeof paymentAmount === 'number' ? paymentAmount : 0,
-          items: selected.map((s) => ({ productId: s.productId as number, quantity: s.quantity }))
+          paymentAmount: paidNow,
+          paymentMethod: methodPaid,
+          items: selected.map((s) => ({ productId: s.productId as number, quantity: s.quantity })),
+          ...(numberPayload ? { orderNumber: numberPayload } : {}),
         });
 
-        router.push('/product-orders');
+        router.push(recorded.data?.id ? `/product-orders/${recorded.data.id}` : '/sales');
       } catch (err) {
+        showNumberError(err);
         setError(err instanceof Error && err.message ? err.message : 'Failed to create premade order.');
         console.error(err);
       } finally {
@@ -745,21 +954,15 @@ function NewJobOrderForm() {
     if (seatCovers.selected) selectedServices.push({ type: 'seat_covers', design: seatCovers.design, material: seatCovers.material, pocket: seatCovers.pocket, others: seatCovers.others });
     if (otherServices.selected) selectedServices.push({ type: 'other', description: otherServices.description });
 
-    // Checked on their own steps too; these catch what changed since (e.g. the date passed)
-    if (choosesBranch && !orderBranchValid) {
-      setLoading(false); setStep(1);
-      fe.show({ orderBranch: 'Choose which branch this job order is for.' });
-      return;
-    }
-    const serviceProblems = {
-      services: selectedServices.length === 0 && 'Please select at least one service.',
-      completionDate: estimatedCompletionDate && estimatedCompletionDate < manilaDateString()
-        && 'Estimated completion date cannot be in the past.',
-    };
-    if (Object.values(serviceProblems).some(Boolean)) {
-      setLoading(false); setStep(3);
-      fe.show(serviceProblems);
-      return;
+    // Every step is checked again: something may have changed since (e.g. the date passed,
+    // or a service was added so the vehicle is now needed). Open the first step with a problem.
+    for (const n of [1, 2, 3, 4, 5]) {
+      const problems = stepProblems(n);
+      if (Object.values(problems).some(Boolean)) {
+        setLoading(false); setStep(n);
+        fe.show(problems);
+        return;
+      }
     }
     const branchId = choosesBranch ? (orderBranchId as number) : (user?.branchId || 1);
 
@@ -807,10 +1010,10 @@ function NewJobOrderForm() {
     }
 
     const serviceDescription = selectedServices
-      .map((s: any) => s.type === 'reupholstery' && s.itemType ? `reupholstery (${s.itemType})` : s.type)
+      .map((s) => s.type === 'reupholstery' && s.itemType ? `reupholstery (${s.itemType})` : s.type)
       .join(', ');
 
-    const computedVehicleInfo = reupholstery.selected
+    const computedVehicleInfo = reupholsteryOnly
       ? { make: 'Reupholstery', model: reupholsteryItemType.trim(), year: new Date().getFullYear(), plateNumber: '' }
       : { make: vehicleMake || 'N/A', model: vehicleModel || 'N/A', year: Number(vehicleYear) || new Date().getFullYear(), plateNumber: vehiclePlate || '' };
 
@@ -820,19 +1023,14 @@ function NewJobOrderForm() {
       materialCenter || materialSides || materialBack ||
       dStitch || piping || pockets || logo || specification || cutterName || sewerName;
 
-    const slipData = hasSlipData ? {
-      rows: slipRows,
-      materialCenter, materialSides, materialBack,
-      dStitch, piping, pockets, logo, specification,
-      ...(seesLaborCost ? { cutterName, sewerName } : {}),
-    } : undefined;
+    const slipData = hasSlipData ? buildSlipData() : { serviceDetails: serviceDetails() };
 
     const grossTotal = estimatedTotal > 0 ? estimatedTotal : materialTotal;
     const orderTotal = jobOrderTotalFrom(grossTotal, orderDiscountPct);
     const finalDown = estimatedTotal > 0 ? Math.round((orderTotal / 2) * 100) / 100 : 0;
 
     try {
-      const jobOrderData: any = {
+      const jobOrderData = {
         customerName, customerPhone, customerEmail,
         ...(linkedCustomerId ? { customerId: linkedCustomerId } : {}),
         branchId,
@@ -844,15 +1042,32 @@ function NewJobOrderForm() {
         paymentMethod,
         notes,
         priority,
-        ...(orderDiscountPct > 0 ? { discountPercent: orderDiscountPct } : {}),
+        discountPercent: orderDiscountPct,
         vatIncluded: vatOn,
-        ...(slipData ? { slipData } : {}),
+        slipData,
         ...(orderTotal > 0 ? { estimatedCost: grossTotal, priceForWork: grossTotal } : {}),
       };
 
-      await api.sales.createJobOrder(jobOrderData);
+      if (editingDraftId) {
+        // Confirm this draft in place (keeps its number, no duplicate left behind).
+        // Money goes through Payments, so the down payment is recorded after, as a new order's is.
+        const { downPayment: _down, paymentMethod: _method, ...updates } = jobOrderData;
+        await api.sales.updateJobOrder(editingDraftId, { ...updates, status: 'pending' });
+        if (finalDown > 0) {
+          try {
+            await api.payments.create({ jobOrderId: editingDraftId, amount: finalDown, paymentMethod, notes: 'Down payment' });
+          } catch (payErr) {
+            const why = payErr instanceof Error && payErr.message ? payErr.message : 'unknown error';
+            setError(`The job order was confirmed, but its down payment was not recorded (${why}). Record it from the job order's Payments panel.`);
+            return;
+          }
+        }
+      } else {
+        await api.sales.createJobOrder({ ...jobOrderData, ...(numberPayload ? { jobOrderNumber: numberPayload } : {}) });
+      }
       router.push('/sales');
     } catch (err) {
+      showNumberError(err);
       setError(err instanceof Error && err.message ? err.message : 'Failed to create job order. Please try again.');
       console.error(err);
     } finally {
@@ -1001,6 +1216,13 @@ function NewJobOrderForm() {
                   <div className="text-sm text-gray-500 mb-3">No finished goods found in inventory.</div>
                 )}
                 <div className="space-y-3">
+                  <div className="hidden md:grid grid-cols-12 gap-3 px-3 text-xs font-medium text-gray-500 uppercase tracking-wide">
+                    <div className="col-span-5">Item</div>
+                    <div className="col-span-2">Qty</div>
+                    <div className="col-span-2 text-right">Unit Price</div>
+                    <div className="col-span-2 text-right">Amount</div>
+                    <div className="col-span-1"></div>
+                  </div>
                   {premadeSelections.map((selection) => {
                     const selectedItem = premadeItems.find((i) => i.id === selection.productId);
                     const stockIssue = premadeStockIssue(selection);
@@ -1008,22 +1230,18 @@ function NewJobOrderForm() {
                     const savedLine = !selectedItem && selection.productId
                       ? premadeDraft?.items.find((it) => it.productId === selection.productId) : undefined;
                     return (
-                      <div key={selection.id} className={`grid grid-cols-1 md:grid-cols-12 gap-3 p-3 rounded-lg border ${stockIssue ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'}`}>
-                        <div className="md:col-span-7">
-                          <select value={selection.productId}
-                            onChange={(e) => updatePremadeSelection(selection.id, 'productId', e.target.value ? Number(e.target.value) : '')}
-                            className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm"
-                            disabled={premadeItems.length === 0}>
-                            <option value="">Select finished good item</option>
-                            {savedLine && (
-                              <option value={savedLine.productId}>{savedLine.name} (no longer available)</option>
-                            )}
-                            {premadeItems.map((item) => (
-                              <option key={item.id} value={item.id}>
-                                {item.name} ({item.sku}) - Stock: {item.quantity} - ₱{item.price.toLocaleString()}
-                              </option>
-                            ))}
-                          </select>
+                      <div key={selection.id} {...fe.field(`premade-${selection.id}`)}
+                        className={`grid grid-cols-1 md:grid-cols-12 gap-3 p-3 rounded-lg border ${stockIssue || fe.errors[`premade-${selection.id}`] ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'}`}>
+                        <div className="md:col-span-5">
+                          <PremadeItemPicker
+                            items={premadeItems}
+                            value={selection.productId}
+                            onSelect={(id) => updatePremadeSelection(selection.id, 'productId', id)}
+                            takenIds={new Set(premadeSelections.filter((x) => x.id !== selection.id && x.productId).map((x) => Number(x.productId)))}
+                            fallbackLabel={savedLine ? `${savedLine.name} (no longer available)` : undefined}
+                            disabled={premadeItems.length === 0 && !savedLine}
+                            invalid={!!fe.errors[`premade-${selection.id}`]}
+                          />
                           {stockIssue && (
                             <p className="mt-1 text-xs font-semibold text-red-700">{stockIssue}</p>
                           )}
@@ -1037,8 +1255,15 @@ function NewJobOrderForm() {
                             }}
                             className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm" />
                         </div>
-                        <div className="md:col-span-2 flex items-center text-sm font-semibold text-gray-900">
-                          {selectedItem ? `₱${(selectedItem.price * selection.quantity).toLocaleString()}` : '—'}
+                        {/* The product's set price: read-only, the server charges this price too */}
+                        <div className="md:col-span-2">
+                          <input type="text" readOnly tabIndex={-1} aria-label="Unit price (fixed)"
+                            value={selectedItem ? `₱${selectedItem.price.toLocaleString('en-PH', { minimumFractionDigits: 2 })}` : '—'}
+                            title="Fixed price from inventory"
+                            className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-gray-100 text-gray-700 text-sm text-right cursor-not-allowed" />
+                        </div>
+                        <div className="md:col-span-2 flex items-center justify-end text-sm font-semibold text-gray-900">
+                          {selectedItem ? `₱${(selectedItem.price * selection.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2 })}` : '—'}
                         </div>
                         <div className="md:col-span-1 flex items-center justify-end">
                           <button type="button" onClick={() => removePremadeSelection(selection.id)}
@@ -1049,6 +1274,7 @@ function NewJobOrderForm() {
                             </svg>
                           </button>
                         </div>
+                        <FieldError message={fe.errors[`premade-${selection.id}`]} className="md:col-span-12 mt-0" />
                       </div>
                     );
                   })}
@@ -1088,71 +1314,70 @@ function NewJobOrderForm() {
           </div>
         </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">Amount to Pay</label>
-          <div className="relative">
-            <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">₱</span>
-            <input type="number" min="0" step="0.01" max={premadeTotal} value={paymentAmount}
-              onChange={(e) => {
-                const val = e.target.value === '' ? '' : parseFloat(e.target.value);
-                setPaymentAmount(val === '' ? '' : (isNaN(val as number) ? '' : val as number));
-              }}
-              className="w-full pl-8 pr-4 py-3 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-lg"
-              placeholder="0.00" />
-          </div>
-          {premadePaymentAmount > 0 && (
-            <div className="mt-3">
-              {isPremadeFullPayment ? (
-                <div className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg">
-                  <svg className="w-5 h-5 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                  </svg>
-                  <span className="text-sm font-semibold text-green-700">Full Payment — Order will be marked as Paid</span>
-                </div>
-              ) : isPremadePartialPayment ? (
-                <div className="p-3 bg-[#eef1fb] border border-[#c7d2f5] rounded-lg space-y-1">
-                  <div className="flex items-center gap-2">
-                    <svg className="w-5 h-5 text-[#011c72] flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    <span className="text-sm font-semibold text-[#011c72]">Partial Payment</span>
-                  </div>
-                  <div className="flex justify-between text-sm text-[#011c72] pl-7">
-                    <span>Remaining balance:</span>
-                    <span className="font-bold">₱{premadeRemaining.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                  </div>
-                  <p className="text-xs text-[#011c72] pl-7">The remaining balance can be settled from the order detail page.</p>
-                </div>
-              ) : null}
+        {/* Payment details: total, amount paid now, what is left, how it was paid, and the resulting status */}
+        <div className="rounded-xl border border-gray-200 p-4 space-y-4">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Payment Details</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Total Amount</label>
+              <input type="text" readOnly tabIndex={-1}
+                value={`₱${premadeTotal.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`}
+                className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-gray-100 text-gray-900 font-semibold cursor-not-allowed" />
             </div>
+            <div {...fe.field('paymentAmount')}>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Amount Paid</label>
+              <div className="relative">
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">₱</span>
+                <input type="number" min="0" step="0.01" max={premadeTotal} value={paymentAmount}
+                  onChange={(e) => {
+                    const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                    setPaymentAmount(val === '' ? '' : (isNaN(val as number) ? '' : val as number));
+                  }}
+                  className="w-full pl-8 pr-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                  placeholder="0.00" />
+              </div>
+              <FieldError message={fe.errors.paymentAmount} />
+              <button type="button" onClick={() => setPaymentAmount(premadeTotal)} disabled={premadeTotal <= 0}
+                className="mt-1 text-xs font-medium text-[#011c72] hover:underline disabled:opacity-50">
+                Pay in full
+              </button>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Remaining Balance</label>
+              <input type="text" readOnly tabIndex={-1}
+                value={`₱${premadeRemaining.toLocaleString('en-PH', { minimumFractionDigits: 2 })}`}
+                className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-gray-100 text-gray-900 cursor-not-allowed" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Payment Status</label>
+              <div className="h-[42px] flex items-center">
+                <span className={`px-3 py-1 rounded-full text-sm font-semibold ${
+                  isPremadeFullPayment ? 'bg-green-100 text-green-700'
+                  : isPremadePartialPayment ? 'bg-amber-100 text-amber-800'
+                  : 'bg-gray-100 text-gray-600'}`}>
+                  {isPremadeFullPayment ? 'Fully Paid' : isPremadePartialPayment ? 'Partially Paid' : 'Unpaid'}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div {...fe.field('paymentMethod')}>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Payment Method {premadePaymentAmount > 0
+                ? <span className="text-red-500">*</span>
+                : <span className="font-normal text-gray-400">(needed only when something is paid)</span>}
+            </label>
+            <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}
+              className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
+              {!isAcceptedPaymentMethod(paymentMethod) && <option value="">Choose a payment method</option>}
+              {ACCEPTED_PAYMENT_METHODS.map((m) => (
+                <option key={m} value={m}>{PAYMENT_METHOD_LABELS[m]}</option>
+              ))}
+            </select>
+            <FieldError message={fe.errors.paymentMethod} />
+          </div>
+          {isPremadePartialPayment && (
+            <p className="text-xs text-gray-500">The remaining balance can be settled from the order detail page.</p>
           )}
-          {(paymentAmount === '' || premadePaymentAmount === 0) && (
-            <p className="text-xs text-gray-500 mt-2">Leave at ₱0 to record as unpaid.</p>
-          )}
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">Payment Method</label>
-          <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}
-            className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
-            <optgroup label="Cash">
-              <option value="cash">Cash</option>
-            </optgroup>
-            <optgroup label="E-Wallet">
-              <option value="gcash">GCash</option>
-              <option value="maya">Maya</option>
-            </optgroup>
-            <optgroup label="Bank Transfer">
-              <option value="bank_transfer">Bank Transfer</option>
-            </optgroup>
-            <optgroup label="Card">
-              <option value="credit_card">Credit Card</option>
-              <option value="debit_card">Debit Card</option>
-            </optgroup>
-            <optgroup label="Cheque">
-              <option value="check">Cheque</option>
-            </optgroup>
-          </select>
         </div>
 
         <div>
@@ -1171,14 +1396,14 @@ function NewJobOrderForm() {
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
       </svg>
     )},
-    { num: 2, label: 'Vehicle', icon: (
-      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0zM13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10l1 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1" />
-      </svg>
-    )},
-    { num: 3, label: 'Service', icon: (
+    { num: 2, label: 'Service', icon: (
       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+      </svg>
+    )},
+    { num: 3, label: 'Vehicle', icon: (
+      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0zM13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10l1 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1" />
       </svg>
     )},
     { num: 4, label: 'Materials', icon: (
@@ -1309,8 +1534,8 @@ function NewJobOrderForm() {
           </div>
         );
 
-      // ── Step 2: Vehicle ────────────────────────────────────────────────────
-      case 2:
+      // ── Step 3: Vehicle ────────────────────────────────────────────────────
+      case 3:
         return (
           <div className="space-y-6">
             <div>
@@ -1318,8 +1543,8 @@ function NewJobOrderForm() {
               <p className="text-sm text-gray-500 mt-1">Tell us about the vehicle</p>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Vehicle Make</label>
+              <div {...fe.field('vehicleMake')}>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Vehicle Make <span className="text-red-500">*</span></label>
                 <Combobox
                   value={vehicleMake}
                   onChange={(v) => {
@@ -1329,9 +1554,10 @@ function NewJobOrderForm() {
                   options={vehicleMakes}
                   placeholder="Search or type a make (e.g. Toyota)"
                 />
+                <FieldError message={fe.errors.vehicleMake} />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Vehicle Model</label>
+              <div {...fe.field('vehicleModel')}>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Vehicle Model <span className="text-red-500">*</span></label>
                 <Combobox
                   value={vehicleModel}
                   onChange={setVehicleModel}
@@ -1340,15 +1566,17 @@ function NewJobOrderForm() {
                   disabled={!vehicleMake.trim()}
                   placeholder={vehicleMake.trim() ? 'Search or type a model (e.g. Fortuner)' : 'Select a make first'}
                 />
+                <FieldError message={fe.errors.vehicleModel} />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Year</label>
+              <div {...fe.field('vehicleYear')}>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Year <span className="text-red-500">*</span></label>
                 <Combobox
                   value={vehicleYear}
                   onChange={setVehicleYear}
                   options={yearOptions}
                   placeholder="Search or type a year (e.g. 2023)"
                 />
+                <FieldError message={fe.errors.vehicleYear} />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Plate Number</label>
@@ -1359,14 +1587,17 @@ function NewJobOrderForm() {
           </div>
         );
 
-      // ── Step 3: Service ────────────────────────────────────────────────────
-      case 3:
+      // ── Step 2: Service ────────────────────────────────────────────────────
+      case 2:
         return (
           <div className="space-y-5">
             <div>
               <h3 className="text-xl font-bold text-gray-900">Select Services</h3>
               <p className="text-sm text-gray-500 mt-1">Choose one or more services needed</p>
               <FieldError message={fe.errors.services} />
+              {skipVehicle && (
+                <p className="mt-2 text-xs text-[#011c72]">Reupholstery only: the Vehicle step will be skipped.</p>
+              )}
             </div>
 
             <div className="grid grid-cols-1 gap-3" {...fe.field('services', true)}>
@@ -1387,10 +1618,12 @@ function NewJobOrderForm() {
                       <li>• All sides trim • With rebonded foam underlay</li>
                     </ul>
                     {flooring.selected && (
-                      <input type="text" value={flooring.material}
-                        onChange={(e) => { e.stopPropagation(); setFlooring({ ...flooring, material: e.target.value }); }}
-                        onClick={(e) => e.stopPropagation()}
-                        placeholder="Specify material" className={`mt-3 ${smallInputCls}`} />
+                      <div className="mt-3" onClick={(e) => e.stopPropagation()} {...fe.field('svc-flooring')}>
+                        <input type="text" value={flooring.material}
+                          onChange={(e) => { e.stopPropagation(); setFlooring({ ...flooring, material: e.target.value }); }}
+                          placeholder="Specify material *" className={smallInputCls} />
+                        <FieldError message={fe.errors['svc-flooring']} />
+                      </div>
                     )}
                   </div>
                 </div>
@@ -1416,12 +1649,15 @@ function NewJobOrderForm() {
                       <div className="mt-3 space-y-2" onClick={(e) => e.stopPropagation()}>
                         <div {...fe.field('reupholsteryItem')}>
                           <input type="text" value={reupholsteryItemType} onChange={(e) => setReupholsteryItemType(e.target.value)}
-                            placeholder="Item to reupholster (e.g. Sofa set, dining chair)" className={smallInputCls} />
+                            placeholder="Item to reupholster (e.g. Sofa set, dining chair) *" className={smallInputCls} />
                           <FieldError message={fe.errors.reupholsteryItem} />
                         </div>
-                        <input type="text" value={reupholstery.material}
-                          onChange={(e) => setReupholstery({ ...reupholstery, material: e.target.value })}
-                          placeholder="Specify material" className={smallInputCls} />
+                        <div {...fe.field('svc-reupholstery')}>
+                          <input type="text" value={reupholstery.material}
+                            onChange={(e) => setReupholstery({ ...reupholstery, material: e.target.value })}
+                            placeholder="Specify material *" className={smallInputCls} />
+                          <FieldError message={fe.errors['svc-reupholstery']} />
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1445,10 +1681,12 @@ function NewJobOrderForm() {
                       <li>• Includes all post and sunvisor</li>
                     </ul>
                     {ceiling.selected && (
-                      <input type="text" value={ceiling.material}
-                        onChange={(e) => { e.stopPropagation(); setCeiling({ ...ceiling, material: e.target.value }); }}
-                        onClick={(e) => e.stopPropagation()}
-                        placeholder="Specify material" className={`mt-3 ${smallInputCls}`} />
+                      <div className="mt-3" onClick={(e) => e.stopPropagation()} {...fe.field('svc-ceiling')}>
+                        <input type="text" value={ceiling.material}
+                          onChange={(e) => { e.stopPropagation(); setCeiling({ ...ceiling, material: e.target.value }); }}
+                          placeholder="Specify material *" className={smallInputCls} />
+                        <FieldError message={fe.errors['svc-ceiling']} />
+                      </div>
                     )}
                   </div>
                 </div>
@@ -1471,10 +1709,12 @@ function NewJobOrderForm() {
                       <li>• Note: SIDINGS clips not included (₱5.00 each)</li>
                     </ul>
                     {sidings.selected && (
-                      <input type="text" value={sidings.material}
-                        onChange={(e) => { e.stopPropagation(); setSidings({ ...sidings, material: e.target.value }); }}
-                        onClick={(e) => e.stopPropagation()}
-                        placeholder="Specify material" className={`mt-3 ${smallInputCls}`} />
+                      <div className="mt-3" onClick={(e) => e.stopPropagation()} {...fe.field('svc-sidings')}>
+                        <input type="text" value={sidings.material}
+                          onChange={(e) => { e.stopPropagation(); setSidings({ ...sidings, material: e.target.value }); }}
+                          placeholder="Specify material *" className={smallInputCls} />
+                        <FieldError message={fe.errors['svc-sidings']} />
+                      </div>
                     )}
                   </div>
                 </div>
@@ -1495,7 +1735,10 @@ function NewJobOrderForm() {
                     {seatCovers.selected && (
                       <div className="mt-3 grid grid-cols-2 gap-2" onClick={(e) => e.stopPropagation()}>
                         <input type="text" value={seatCovers.design} onChange={(e) => setSeatCovers({ ...seatCovers, design: e.target.value })} placeholder="Design" className={smallInputCls} />
-                        <input type="text" value={seatCovers.material} onChange={(e) => setSeatCovers({ ...seatCovers, material: e.target.value })} placeholder="Material" className={smallInputCls} />
+                        <div {...fe.field('svc-seatCovers')}>
+                          <input type="text" value={seatCovers.material} onChange={(e) => setSeatCovers({ ...seatCovers, material: e.target.value })} placeholder="Material *" className={smallInputCls} />
+                          <FieldError message={fe.errors['svc-seatCovers']} />
+                        </div>
                         <input type="text" value={seatCovers.pocket} onChange={(e) => setSeatCovers({ ...seatCovers, pocket: e.target.value })} placeholder="Pocket" className={smallInputCls} />
                         <input type="text" value={seatCovers.others} onChange={(e) => setSeatCovers({ ...seatCovers, others: e.target.value })} placeholder="Others" className={smallInputCls} />
                       </div>
@@ -1517,10 +1760,12 @@ function NewJobOrderForm() {
                       <span className="font-semibold text-gray-900">Other Services</span>
                     </div>
                     {otherServices.selected && (
-                      <input type="text" value={otherServices.description}
-                        onChange={(e) => { e.stopPropagation(); setOtherServices({ ...otherServices, description: e.target.value }); }}
-                        onClick={(e) => e.stopPropagation()}
-                        placeholder="Describe your service needs" className={`mt-3 ${smallInputCls}`} />
+                      <div className="mt-3" onClick={(e) => e.stopPropagation()} {...fe.field('svc-other')}>
+                        <input type="text" value={otherServices.description}
+                          onChange={(e) => { e.stopPropagation(); setOtherServices({ ...otherServices, description: e.target.value }); }}
+                          placeholder="Describe your service needs *" className={smallInputCls} />
+                        <FieldError message={fe.errors['svc-other']} />
+                      </div>
                     )}
                   </div>
                 </div>
@@ -1530,7 +1775,7 @@ function NewJobOrderForm() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Priority</label>
-                <select value={priority} onChange={(e) => setPriority(e.target.value)} className={inputCls}>
+                <select value={priority} onChange={(e) => setPriority(e.target.value as JobOrderPriority)} className={inputCls}>
                   <option value="low">Low</option>
                   <option value="normal">Normal</option>
                   <option value="high">High</option>
@@ -1538,7 +1783,7 @@ function NewJobOrderForm() {
                 </select>
               </div>
               <div {...fe.field('completionDate')}>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Estimated Completion Date</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Estimated Completion Date <span className="text-red-500">*</span></label>
                 {/* Completion can't be in the past (Manila date) */}
                 <input type="date" value={estimatedCompletionDate} min={manilaDateString()}
                   onChange={(e) => setEstimatedCompletionDate(e.target.value)} className={inputCls} />
@@ -1656,7 +1901,7 @@ function NewJobOrderForm() {
               <div className="flex items-center justify-between mb-3">
                 <div>
                   <p className="text-sm font-semibold text-gray-900">Materials &amp; Parts</p>
-                  <p className="text-xs text-gray-500">Add materials for cost tracking (optional)</p>
+                  <p className="text-xs text-gray-500">At least one material, each with a quantity and unit price</p>
                 </div>
                 <button type="button" onClick={addMaterial}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#dde6ff] text-[#011c72] rounded-lg text-sm font-medium hover:bg-[#c7d2f5] transition-colors">
@@ -1668,8 +1913,9 @@ function NewJobOrderForm() {
               </div>
 
               {materials.length === 0 ? (
-                <div className="text-center py-6 border-2 border-dashed border-gray-200 rounded-xl text-sm text-gray-400">
-                  No materials added yet. Click "Add Material" to start tracking costs.
+                <div {...fe.field('materialsList', true)}
+                  className={`text-center py-6 border-2 border-dashed rounded-xl text-sm ${fe.errors.materialsList ? 'border-red-300 text-red-600' : 'border-gray-200 text-gray-400'}`}>
+                  {fe.errors.materialsList || <>No materials added yet. Click &quot;Add Material&quot; to add what this job needs.</>}
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -1677,7 +1923,7 @@ function NewJobOrderForm() {
                   <div className="grid grid-cols-12 gap-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wide">
                     <div className="col-span-4">Source / Name</div>
                     <div className="col-span-3">Material</div>
-                    <div className="col-span-2 text-center">Qty</div>
+                    <div className="col-span-2 text-center">Qty (yd)</div>
                     <div className="col-span-2 text-right">Unit Price</div>
                     <div className="col-span-1"></div>
                   </div>
@@ -1694,14 +1940,14 @@ function NewJobOrderForm() {
                       </div>
                       <div className="col-span-3">
                         {m.materialSource === 'inventory' ? (
-                          <select value={m.materialId}
-                            onChange={(e) => updateMaterial(m.id, 'materialId', e.target.value ? Number(e.target.value) : '')}
-                            className="w-full px-2 py-1.5 rounded-md border border-gray-200 bg-white text-xs text-gray-900 focus:ring-1 focus:ring-[#011c72]">
-                            <option value="">Select material</option>
-                            {inventoryMaterials.map((inv) => (
-                              <option key={inv.id} value={inv.id}>{inv.materialType}</option>
-                            ))}
-                          </select>
+                          <MaterialPicker
+                            materials={inventoryMaterials}
+                            value={m.materialId ?? ''}
+                            onSelect={(id) => updateMaterial(m.id, 'materialId', id)}
+                            takenIds={new Set(materials.filter((x) => x.id !== m.id && x.materialId).map((x) => Number(x.materialId)))}
+                            onRefresh={reloadInventoryMaterials}
+                            invalid={!!fe.errors[`material-${m.id}`]}
+                          />
                         ) : (
                           <input type="text" value={m.name} onChange={(e) => updateMaterial(m.id, 'name', e.target.value)}
                             placeholder="Material name"
@@ -1760,15 +2006,15 @@ function NewJobOrderForm() {
               </div>
               <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
                 <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">
-                  {reupholstery.selected ? 'Item' : 'Vehicle'}
+                  {reupholsteryOnly ? 'Item' : 'Vehicle'}
                 </p>
                 <p className="font-semibold text-gray-900">
-                  {reupholstery.selected
+                  {reupholsteryOnly
                     ? (reupholsteryItemType.trim() || 'Reupholstery item')
                     : `${vehicleMake || '—'} ${vehicleModel || ''}`.trim()}
                 </p>
                 <p className="text-sm text-gray-500 mt-0.5">
-                  {reupholstery.selected ? 'Reupholstery' : `${vehicleYear || ''} ${vehiclePlate || ''}`.trim() || '—'}
+                  {reupholsteryOnly ? 'Reupholstery' : `${vehicleYear || ''} ${vehiclePlate || ''}`.trim() || '—'}
                 </p>
               </div>
             </div>
@@ -1866,9 +2112,9 @@ function NewJobOrderForm() {
             <div className="space-y-3">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Price for the Work <span className="text-xs font-normal text-gray-400">(VAT included, before discount)</span>
+                  Price for the Work <span className="text-red-500">*</span> <span className="text-xs font-normal text-gray-400">(VAT included, before discount)</span>
                 </label>
-                <div className="relative">
+                <div className="relative" {...fe.field('price')}>
                   <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">₱</span>
                   <input type="number" min="0" max={MAX_JOB_ORDER_PRICE} step="0.01"
                     value={estimatedTotal || ''}
@@ -1880,7 +2126,7 @@ function NewJobOrderForm() {
                     className="w-full pl-8 pr-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                     placeholder="0.00" />
                 </div>
-                <p className="text-xs text-gray-400 mt-1">Up to ₱99,999,999.99</p>
+                <FieldError message={fe.errors.price} />
               </div>
 
               {/* Discount (editable per-order; pre-filled from the customer's loyalty discount) */}
@@ -1893,7 +2139,7 @@ function NewJobOrderForm() {
                     </span>
                   )}
                 </label>
-                <div className="relative">
+                <div className="relative" {...fe.field('discount')}>
                   <input type="number" min="0" max="100" step="0.5"
                     value={orderDiscount}
                     onChange={(e) => setOrderDiscount(e.target.value)}
@@ -1901,6 +2147,7 @@ function NewJobOrderForm() {
                     placeholder="0" />
                   <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">%</span>
                 </div>
+                <FieldError message={fe.errors.discount} />
               </div>
 
               <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
@@ -1947,26 +2194,12 @@ function NewJobOrderForm() {
               )}
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Payment Method</label>
+            <div {...fe.field('paymentMethod')}>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Payment Method <span className="text-red-500">*</span></label>
               <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} className={inputCls}>
-                <optgroup label="Cash">
-                  <option value="cash">Cash</option>
-                </optgroup>
-                <optgroup label="E-Wallet">
-                  <option value="gcash">GCash</option>
-                  <option value="maya">Maya</option>
-                </optgroup>
-                <optgroup label="Bank Transfer">
-                  <option value="bank_transfer">Bank Transfer</option>
-                </optgroup>
-                <optgroup label="Card">
-                  <option value="credit_card">Credit Card</option>
-                  <option value="debit_card">Debit Card</option>
-                </optgroup>
-                <optgroup label="Cheque">
-                  <option value="check">Cheque</option>
-                </optgroup>
+                {ACCEPTED_PAYMENT_METHODS.map((m) => (
+                  <option key={m} value={m}>{PAYMENT_METHOD_LABELS[m]}</option>
+                ))}
               </select>
             </div>
 
@@ -2035,6 +2268,42 @@ function NewJobOrderForm() {
         </div>
         )}
 
+        {/* Order number: generated by default, or typed in. Fixed once the order exists. */}
+        <div className="mb-6 bg-white rounded-2xl shadow-sm border border-gray-200 p-5" {...fe.field('orderNumber')}>
+          <label htmlFor="order-number" className="block text-sm font-semibold text-gray-700 mb-2">
+            {orderType === 'premade' ? 'Sale Number' : 'Job Order Number'} <span className="text-red-500">*</span>
+          </label>
+          {editingDraftId ? (
+            <>
+              <p className="px-4 py-2.5 rounded-xl border border-gray-200 bg-gray-50 font-mono text-gray-900">{existingNumber || '—'}</p>
+              <p className="text-xs text-gray-400 mt-1">A draft keeps the number it was saved with.</p>
+            </>
+          ) : (
+            <>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input id="order-number" type="text" maxLength={50} autoComplete="off"
+                  value={numberMode === 'manual' ? typedNumber : previewNumber}
+                  onChange={(e) => { setNumberMode('manual'); setTypedNumber(e.target.value.replace(/\s/g, '')); fe.clear(); }}
+                  placeholder={numberKind === 'job' && !numberBranchId ? 'Choose the branch first, or type a number' : 'Type a number'}
+                  aria-describedby="order-number-help"
+                  className={`flex-1 min-w-0 font-mono ${inputCls}`} />
+                <button type="button" onClick={resetToGeneratedNumber} disabled={numberMode === 'auto' && !!previewNumber}
+                  title="Use the next number the system generates"
+                  className="shrink-0 px-4 py-2.5 rounded-xl border border-[#011c72] text-[#011c72] text-sm font-semibold hover:bg-[#eef1fb] disabled:opacity-40 disabled:cursor-not-allowed">
+                  {numberMode === 'manual' ? 'Reset to auto-generated' : 'Generate'}
+                </button>
+              </div>
+              <p id="order-number-help" className={`text-xs mt-1 ${numberMode === 'manual' && (numberCheck.message || fe.errors['orderNumber']) ? 'text-red-600' : 'text-gray-400'}`}>
+                {numberMode === 'auto'
+                  ? 'Generated automatically when you save (the next free number). Type over it to use your own.'
+                  : numberCheck.checking ? 'Checking…'
+                  : fe.errors['orderNumber'] || numberCheck.message
+                  || (typedNumber.trim() ? 'This number is free to use.' : 'Enter the number, or press Reset to auto-generated.')}
+              </p>
+            </>
+          )}
+        </div>
+
         {/* Step Indicator (Normal orders only) */}
         {orderType === 'normal' && (
           <div className="mb-6">
@@ -2042,7 +2311,9 @@ function NewJobOrderForm() {
               {STEPS.map((s, index) => (
                 <div key={s.num} className="flex items-start flex-1">
                   <div className="flex flex-col items-center">
-                    <button type="button" onClick={() => { if (s.num < step) { setError(''); fe.clear(); setStep(s.num); } }}
+                    <button type="button" disabled={s.num === 3 && skipVehicle}
+                      title={s.num === 3 && skipVehicle ? 'Skipped: reupholstery only' : undefined}
+                      onClick={() => { if (s.num < step && !(s.num === 3 && skipVehicle)) { setError(''); fe.clear(); setStep(s.num); } }}
                       className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold text-sm transition-all duration-200 ${
                         step > s.num ? 'bg-[#011c72] text-white shadow-md cursor-pointer'
                         : step === s.num ? 'bg-[#011c72] text-white shadow-lg ring-4 ring-amber-200'
@@ -2054,8 +2325,8 @@ function NewJobOrderForm() {
                         </svg>
                       ) : s.num}
                     </button>
-                    <span className={`mt-1.5 text-xs font-medium hidden sm:block ${step >= s.num ? 'text-[#011c72]' : 'text-gray-400'}`}>
-                      {s.label}
+                    <span className={`mt-1.5 text-xs font-medium hidden sm:block ${s.num === 3 && skipVehicle ? 'text-gray-400 line-through' : step >= s.num ? 'text-[#011c72]' : 'text-gray-400'}`}>
+                      {s.label}{s.num === 3 && skipVehicle ? ' (skipped)' : ''}
                     </span>
                   </div>
                   {index < STEPS.length - 1 && (
@@ -2076,7 +2347,7 @@ function NewJobOrderForm() {
             <p className="text-sm text-[#011c72]">
               {loadingDraft
                 ? 'Loading draft…'
-                : <>Editing a saved draft. <span className="font-semibold">Update Draft</span> saves your changes; confirming it from the Sales page turns it into a real job order.</>}
+                : <>Editing a saved draft. Fields may stay empty while it is a draft: <span className="font-semibold">Update Draft</span> saves it as it is. To make it a real job order, fill in every required field and press <span className="font-semibold">Confirm Job Order</span> on the last step.</>}
             </p>
           </div>
         )}
@@ -2091,7 +2362,7 @@ function NewJobOrderForm() {
           {/* Navigation Buttons */}
           {orderType === 'normal' ? (
             <div className="flex justify-between items-center gap-3">
-              <button type="button" onClick={() => { setError(''); fe.clear(); setStep(step - 1); }} disabled={step === 1}
+              <button type="button" onClick={goBack} disabled={step === 1}
                 className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors ${
                   step === 1 ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'
                 }`}>
@@ -2123,14 +2394,14 @@ function NewJobOrderForm() {
                   {loading ? (
                     <>
                       <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full"></div>
-                      Creating...
+                      {editingDraftId ? 'Confirming...' : 'Creating...'}
                     </>
                   ) : (
                     <>
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                       </svg>
-                      Create Job Order
+                      {editingDraftId ? 'Confirm Job Order' : 'Create Job Order'}
                     </>
                   )}
                 </button>

@@ -29,7 +29,7 @@ export default function DeliveryDetailPage() {
     setUpdating(true);
     try {
       await api.deliveries.updateStatus(delivery.id, newStatus);
-      setDelivery({ ...delivery, status: newStatus as any });
+      setDelivery({ ...delivery, status: newStatus as Delivery['status'] });
     } catch (err) {
       console.error(err);
     }

@@ -24,28 +24,26 @@ body {
   background-color: #fef2f2;
 }
 
-/* ── Receipt: hidden on screen, shown only when printing ── */
-#print-receipt {
+/* ── Invoice: hidden on screen, shown only when printing it ──
+   The invoice is rendered straight under <body>, and while it prints <html> has
+   .printing-invoice: everything else is taken out of the layout (display:none),
+   so the page can't push the invoice onto later sheets. Other pages that print
+   (reports, costing) are not affected. */
+#print-invoice {
   display: none !important;
 }
 
 @media print {
   @page { size: A4; margin: 15mm 18mm; }
 
-  /* Hide everything, then reveal only the receipt */
-  body * { visibility: hidden !important; }
-  #print-receipt,
-  #print-receipt * { visibility: visible !important; }
-
-  #print-receipt {
+  html.printing-invoice body > *:not(#print-invoice) { display: none !important; }
+  html.printing-invoice body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
+  html.printing-invoice #print-invoice {
     display: block !important;
-    position: absolute;
-    top: 0;
-    left: 0;
+    position: static !important;
     width: 100%;
-    font-family: Arial, Helvetica, sans-serif;
-    font-size: 10.5pt;
     color: #000;
     background: #fff;
   }
 }
+

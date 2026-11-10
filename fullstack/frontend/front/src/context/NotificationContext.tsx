@@ -53,9 +53,13 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 
   useEffect(() => {
     if (!canReceive) return;
-    refresh();
+    // First load right after mount (not inside the effect body itself), then every 30s
+    const first = setTimeout(refresh, 0);
     intervalRef.current = setInterval(refresh, 30_000);
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+    return () => {
+      clearTimeout(first);
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
   }, [canReceive, refresh]);
 
   const markRead = useCallback(async (id: number) => {

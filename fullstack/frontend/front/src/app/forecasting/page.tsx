@@ -20,8 +20,8 @@ export default function ForecastingPage() {
     try {
       const res = await api.forecasting.getInventoryForecast({ period });
       if (res.data) setData(res.data);
-    } catch (err: any) {
-      setError(err?.message || 'Failed to load forecast data.');
+    } catch (err) {
+      setError((err as Error)?.message || 'Failed to load forecast data.');
     } finally {
       setLoading(false);
     }
@@ -247,7 +247,7 @@ export default function ForecastingPage() {
                   </p>
                 </div>
                 <Link
-                  href="/inventory/purchase-orders/new"
+                  href="/purchase-orders/new"
                   className="inline-flex items-center px-3 py-1.5 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg text-sm font-medium transition-colors"
                 >
                   <svg className="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">

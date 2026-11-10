@@ -28,6 +28,9 @@ export interface User {
   phone?: string;
   /** Effective permissions (role defaults + grants − revokes), e.g. 'inventory.add' */
   permissions?: string[];
+  /** In the Users list: whether the signed-in user may manage this account (only roles below theirs) */
+  canManage?: boolean;
+  manageBlockedReason?: string | null;
 }
 
 export interface PermissionModule {
@@ -494,6 +497,8 @@ export interface PaymentRecord {
   createdAt: string;
 }
 
+export type PaymentSort = 'latest' | 'oldest' | 'amount_desc' | 'amount_asc';
+
 export interface PaymentSummary {
   totalRevenue: number;
   totalCollected: number;
@@ -587,12 +592,25 @@ export interface PremadeTransfer {
   resolvedAt?: string;
 }
 
+export interface PremadeRecipe {
+  materials: {
+    materialId: number; name: string; detail: string;
+    /** Used by the whole latest batch */ batchQuantity: number;
+    /** Per piece made; null when that batch's piece count wasn't recorded */ perPiece: number | null;
+    costPerUnit: number; stock: number; branchName: string | null; available: boolean;
+  }[];
+  basedOn: { date: string | null; pieces: number | null } | null;
+}
+
 export interface PremadeProductInput {
-  name: string;
+  /** Make more of this warehouse product (its quantity goes up) instead of adding a new one;
+   *  name, category and price are then kept from the product */
+  existingProductId?: number;
+  name?: string;
   quantity: number;
   unit?: string;
-  category: string;
-  price: number;
+  category?: string;
+  price?: number;
   /** Leave out to have the server work it out from the materials used */
   cost?: number;
   branchId: number;
@@ -771,7 +789,16 @@ export interface MyWork {
     hoursWorked?: number | null;
     pay?: number | null;
     endTime?: string | null;
+    waitingOn?: WaitingOn | null;
   }[];
+}
+
+/** Work on a job order goes in the order it was given out: the earlier task still to finish */
+export interface WaitingOn {
+  assignmentId: number;
+  workerName: string;
+  description?: string | null;
+  status: string;
 }
 
 export interface WorkerAssignment {
@@ -801,6 +828,8 @@ export interface WorkerAssignment {
   createdAt: string;
   isOverdue?: boolean;
   overdueByHours?: number;
+  /** The earlier unfinished task on the job order this one must wait for */
+  waitingOn?: WaitingOn | null;
 }
 
 export interface WorkerAvailabilityEntry {
@@ -815,7 +844,8 @@ export interface WorkerAvailabilityEntry {
 export interface VehicleInfo {
   make: string;
   model: string;
-  year: number;
+  /** Can be empty on a draft that has no vehicle year yet */
+  year: number | null;
   plateNumber: string;
   color?: string;
 }
@@ -852,6 +882,8 @@ export interface JobOrder {
   customerName: string;
   customerPhone: string;
   customerEmail: string;
+  /** Not sent for job orders today; shown as N/A when missing */
+  customerAddress?: string;
   branchId: number;
   branchName: string;
   description: string;
@@ -869,6 +901,11 @@ export interface JobOrder {
     specification?: string;
     cutterName?: string;
     sewerName?: string;
+    /** Each service's details, kept with the slip (e.g. the seat cover design) */
+    serviceDetails?: {
+      flooring?: string; reupholstery?: string; ceiling?: string; sidings?: string; other?: string;
+      seatCovers?: { design?: string; material?: string; pocket?: string; others?: string };
+    };
   } | null;
   estimatedCost: number;
   /** Planned lines plus any extra material issued for the order */
@@ -883,7 +920,9 @@ export interface JobOrder {
   vatInclusive?: boolean;
   /** VAT inside totalPrice, as worked out by the server */
   vatAmount?: number;
-  status: 'pending' | 'in_progress' | 'completed' | 'voided' | 'cancelled' | 'delivered';
+  /** 'draft' = saved but not confirmed yet (listed under Drafts, not counted) */
+  status: 'draft' | 'pending' | 'in_progress' | 'completed' | 'voided' | 'cancelled' | 'delivered';
+  notes?: string;
   paymentStatus: 'unpaid' | 'partial' | 'paid';
   downPayment: number;
   balance: number;
@@ -925,7 +964,23 @@ export interface PurchaseOrderItem {
   unit: string;
   unitPrice: number;
   totalPrice: number;
+  /** Index of the line on the PO (used when receiving) */
+  line: number;
+  receivedQuantity: number;
+  remainingQuantity: number;
 }
+
+/** One delivery received against a PO, or the closing of one whose rest won't come */
+export interface PurchaseOrderReceipt {
+  id: number | null;
+  kind: 'delivery' | 'closed';
+  receivedAt: string | null;
+  receivedByName: string | null;
+  notes: string | null;
+  items: { line: number; materialId?: number | null; name: string; quantity: number }[];
+}
+
+export type PurchaseOrderReceivingStatus = 'not_received' | 'partial' | 'complete' | 'closed_short';
 
 export interface PurchaseOrder {
   id: number;
@@ -934,7 +989,10 @@ export interface PurchaseOrder {
   supplierName: string;
   items: PurchaseOrderItem[];
   totalAmount: number;
-  status: 'pending' | 'approved' | 'received' | 'cancelled';
+  status: 'pending' | 'approved' | 'partially_received' | 'received' | 'cancelled';
+  /** Null while pending approval or cancelled */
+  receivingStatus: PurchaseOrderReceivingStatus | null;
+  receipts: PurchaseOrderReceipt[];
   expectedDelivery: string;
   createdAt: string;
   createdBy: number;
@@ -1155,6 +1213,10 @@ export interface Role {
   id: string;
   name: string;
   description: string;
+  /** Higher ranks manage lower ones: administrator 5 … seat maker / sewer 1 */
+  rank?: number;
+  /** Whether the signed-in user may give this role out */
+  assignable?: boolean;
 }
 
 // ============================================
@@ -1187,11 +1249,20 @@ export const getAuthToken = (): string | null => {
 // FETCH WRAPPER
 // ============================================
 
+/** The JSON body of an error response: a message, and sometimes a code or extra data
+ *  (e.g. `code: 'already_completed'`, `data`, `existingProduct`) a screen can act on. */
+export type ApiErrorBody = {
+  message?: string;
+  code?: string;
+  data?: unknown;
+  [key: string]: unknown;
+} | null;
+
 /** An error response from the API, carrying the HTTP status and the parsed body. */
 export class ApiError extends Error {
   status: number;
-  body: any;
-  constructor(message: string, status: number, body: any) {
+  body: ApiErrorBody;
+  constructor(message: string, status: number, body: ApiErrorBody) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
@@ -1269,6 +1340,12 @@ export interface Expense {
 
 export interface ExpenseList { expenses: Expense[]; total: number; categories: string[]; paymentMethods: string[] }
 
+/** The only ways customers can pay (and be refunded). Older records may still show
+ *  card, Maya or cheque payments: those keep their labels below but can't be chosen. */
+export const ACCEPTED_PAYMENT_METHODS = ['cash', 'gcash', 'bank_transfer'] as const;
+export const isAcceptedPaymentMethod = (m: string | null | undefined) =>
+  (ACCEPTED_PAYMENT_METHODS as readonly string[]).includes(m || '');
+
 /** How a payment method key reads on screen */
 export const PAYMENT_METHOD_LABELS: Record<string, string> = {
   cash: 'Cash', gcash: 'GCash', maya: 'Maya', bank_transfer: 'Bank Transfer', credit_card: 'Credit Card',
@@ -1344,6 +1421,39 @@ async function fetchApi<T>(
 // ============================================
 // API FUNCTIONS
 // ============================================
+
+/** Item History: one recorded stock movement of an inventory item */
+export type ItemHistoryKind = 'material' | 'premade';
+export interface ItemHistoryEvent {
+  key: string;
+  at: string | null;
+  type: string;
+  label: string;
+  /** Stock change: positive = in, negative = out, 0 = no stock change */
+  quantity: number;
+  usage?: 'custom' | 'premade';
+  reference?: string | null;
+  link?: { kind: 'job_order' | 'product_order' | 'purchase_order' | 'premade'; id: number } | null;
+  customerName?: string | null;
+  unitPrice?: number;
+  total?: number;
+  soldQuantity?: number;
+  status?: string | null;
+  paymentStatus?: string | null;
+  branchName?: string | null;
+  by?: string | null;
+  worker?: string | null;
+  notes?: string | null;
+}
+export interface ItemHistoryItem {
+  id: number; name: string; detail: string; code: string; stock: number;
+  branchId: number; branchName: string | null; isArchived: boolean; price?: number;
+}
+export interface ItemHistory {
+  item: { id: number; kind: ItemHistoryKind; name: string; stock: number; code: string; branchName: string | null; isArchived: boolean; price: number };
+  events: ItemHistoryEvent[];
+  limitations: string[];
+}
 
 export const api = {
   // Health check
@@ -1457,12 +1567,21 @@ export const api = {
       return fetchApi<FinishedGood[]>(`/api/inventory/finished-goods?${query}`);
     },
     
+    /** Materials the latest batch of a premade product used, per piece (to fill in a restock) */
+    getPremadeRecipe: (id: number) =>
+      fetchApi<PremadeRecipe>(`/api/inventory/finished-goods/${id}/recipe`),
     createFinishedGood: (item: PremadeProductInput) =>
       fetchApi<FinishedGood>('/api/inventory/finished-goods', {
         method: 'POST',
         body: JSON.stringify(item),
       }),
 
+    /** Correct stock by hand, with a reason (recorded in Item History and the Audit Trail) */
+    adjustStock: (data: { kind: 'material' | 'premade'; itemId: number; newQuantity: number; reason: string; notes?: string }) =>
+      fetchApi<{ oldQuantity: number; newQuantity: number }>('/api/inventory/stock-adjustments', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
     updateFinishedGood: (id: number, item: Partial<PremadeProductInput>) =>
       fetchApi<FinishedGood>(`/api/inventory/finished-goods/${id}`, {
         method: 'PUT',
@@ -1550,9 +1669,15 @@ export const api = {
   // PAYMENTS
   // ==================
   payments: {
-    getAll: (params?: { jobOrderId?: number }) => {
-      const q = params?.jobOrderId ? `?jobOrderId=${params.jobOrderId}` : '';
-      return fetchApi<PaymentRecord[]>(`/api/payments${q}`);
+    /** Dates are Philippine calendar days (YYYY-MM-DD), both inclusive; sort defaults to latest first */
+    getAll: (params?: { jobOrderId?: number; startDate?: string; endDate?: string; sort?: PaymentSort }) => {
+      const qs = new URLSearchParams();
+      if (params?.jobOrderId) qs.set('jobOrderId', String(params.jobOrderId));
+      if (params?.startDate) qs.set('startDate', params.startDate);
+      if (params?.endDate) qs.set('endDate', params.endDate);
+      if (params?.sort) qs.set('sort', params.sort);
+      const q = qs.toString();
+      return fetchApi<PaymentRecord[]>(`/api/payments${q ? `?${q}` : ''}`);
     },
     /** recordExcess: for non-cash payments over the balance, keep the extra as an excess payment */
     create: (data: { jobOrderId: number; amount: number; paymentMethod: string; referenceNumber?: string; notes?: string; recordExcess?: boolean }) =>
@@ -1622,11 +1747,13 @@ export const api = {
       description: string;
       vehicleInfo?: VehicleInfo;
       items: JobOrderItem[];
-      estimatedCompletion: string;
+      estimatedCompletion?: string; // a draft may not have one yet
       downPayment?: number;
       discountPercent?: number;
       notes?: string;
       isDraft?: boolean;
+      /** A number typed on the form; left out, the server generates the next one */
+      jobOrderNumber?: string;
     } & JobOrderPriceInput) =>
       fetchApi<JobOrder>('/api/sales/job-orders', {
         method: 'POST',
@@ -1693,8 +1820,12 @@ export const api = {
     approve: (id: number) =>
       fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/approve`, { method: 'POST' }),
     
-    receive: (id: number) =>
-      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/receive`, { method: 'POST' }),
+    /** Record what arrived; with no items, everything still outstanding is received */
+    receive: (id: number, data?: { items: { line: number; quantity: number }[]; notes?: string }) =>
+      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/receive`, { method: 'POST', body: JSON.stringify(data || {}) }),
+    /** The rest of a partly received PO won't come: stop waiting for it */
+    closeReceiving: (id: number, reason: string) =>
+      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/close-receiving`, { method: 'POST', body: JSON.stringify({ reason }) }),
   },
 
   // ==================
@@ -1769,6 +1900,13 @@ export const api = {
   // ==================
   // PRODUCT ORDERS (Premade Products)
   // ==================
+  /** Order numbers for the New Job Order form: a preview of the next one, and a check of a typed one */
+  orderNumbers: {
+    next: (kind: 'job' | 'premade', branchId?: number) =>
+      fetchApi<{ number: string }>(`/api/order-numbers/next?kind=${kind}${branchId ? `&branchId=${branchId}` : ''}`),
+    check: (kind: 'job' | 'premade', number: string) =>
+      fetchApi<{ available: boolean; message: string | null }>(`/api/order-numbers/check?kind=${kind}&number=${encodeURIComponent(number)}`),
+  },
   productOrders: {
     /** Staff record a premade product sale at a branch */
     create: (data: {
@@ -1780,6 +1918,10 @@ export const api = {
       branchId: number;
       notes?: string;
       paymentAmount?: number;
+      /** Needed only when paymentAmount is above 0: cash, gcash or bank_transfer */
+      paymentMethod?: string;
+      /** A number typed on the form; left out, the server generates the next PS- number */
+      orderNumber?: string;
     }) =>
       fetchApi<ProductOrder>('/api/product-orders', {
         method: 'POST',
@@ -1818,13 +1960,19 @@ export const api = {
       fetchApi<PremadeDraft>(`/api/premade-drafts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     remove: (id: number) => fetchApi<null>(`/api/premade-drafts/${id}`, { method: 'DELETE' }),
     /** Records the draft as a premade order. Stock is re-checked on the server; a 409 carries the flagged draft */
-    confirm: (id: number, data: { paymentAmount?: number; paymentMethod?: string }) =>
+    confirm: (id: number, data: { paymentAmount?: number; paymentMethod?: string; orderNumber?: string }) =>
       fetchApi<ProductOrder>(`/api/premade-drafts/${id}/confirm`, { method: 'POST', body: JSON.stringify(data) }),
   },
 
   // ==================
   // PRODUCT ORDER TRANSFERS
   // ==================
+  /** Read-only history of an inventory item's stock movements */
+  itemHistory: {
+    items: (kind: ItemHistoryKind) => fetchApi<ItemHistoryItem[]>(`/api/item-history/items?kind=${kind}`),
+    get: (kind: ItemHistoryKind, itemId: number) => fetchApi<ItemHistory>(`/api/item-history?kind=${kind}&itemId=${itemId}`),
+  },
+
   productOrderTransfers: {
     getMyRequests: () => fetchApi<ProductOrderTransfer[]>('/api/product-orders/my-transfer-requests'),
 
@@ -1968,7 +2116,11 @@ export const api = {
       }),
     
     /** A new password needs adminPassword (the signed-in administrator's own password) */
-    updateUser: (id: number, updates: Partial<User & { password?: string; adminPassword?: string }>) =>
+    /** What the server accepts: any of these (branchId null = no branch). A new password needs adminPassword. */
+    updateUser: (id: number, updates: {
+      email?: string; fullName?: string; role?: string; branchId?: number | null; branch?: string;
+      password?: string; adminPassword?: string;
+    }) =>
       fetchApi<User>(`/api/settings/users/${id}`, {
         method: 'PUT',
         body: JSON.stringify(updates),
@@ -2074,7 +2226,7 @@ export const api = {
       fetchApi<Record<string, CalendarAssignment[]>>(
         `/api/worker-assignments/calendar?month=${params.month}${params.workerId ? `&workerId=${params.workerId}` : ''}`
       ),
-    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string; scheduledDate?: string; assignmentType?: string; specialTaskTitle?: string }) =>
+    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string; scheduledDate?: string; assignmentType?: string; specialTaskTitle?: string; rework?: boolean; reworkReason?: string; another?: boolean }) =>
       fetchApi<{ assignment: WorkerAssignment }>('/api/worker-assignments', {
         method: 'POST',
         body: JSON.stringify(data),

@@ -51,8 +51,8 @@ export default function CustomerOrderDetailPage() {
       await api.customerOrders.updateStatus(order.id, newStatus);
       setSuccessMessage('Status updated successfully!');
       await loadOrder();
-    } catch (err: any) {
-      setError(err.message || 'Failed to update status');
+    } catch (err) {
+      setError((err as Error)?.message || 'Failed to update status');
     } finally {
       setUpdatingStatus(false);
     }

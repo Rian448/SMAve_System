@@ -5,13 +5,11 @@ import { useAuth } from '@/context/AuthContext';
 import { useNotifications } from '@/context/NotificationContext';
 import { api, TransferDashboardItem, TransferSummary } from '@/lib/api';
 import { formatDateTime } from '@/lib/dateUtils';
-import AuditTrailPanel from '@/components/AuditTrailPanel';
 import Link from 'next/link';
 import Paginated from '@/components/Paginated';
 
 // 'overdue' is applied client-side: the server has no overdue filter, only a flag per row.
 type StatusFilter = 'all' | 'pending' | 'transferred' | 'received' | 'overdue';
-type TrailView = 'items' | 'audit';
 
 export default function DeliveryPage() {
   // useSearchParams needs a Suspense boundary for this route to prerender.
@@ -51,16 +49,12 @@ function ItemTrailContent() {
 
   // Cross-branch staff act on other branches' transfers as an override
   const isAdmin = can('branches.all');
-  const canSeeAudit = can('reports.audit_trail');
-
   const canSee = !!user && can('item_trail.view');
 
-  // The audit log is administrator-only on the server, so supervisors only get the item trail.
-  const view: TrailView = searchParams.get('view') === 'audit' && canSeeAudit ? 'audit' : 'items';
-  const setView = (next: TrailView) => {
-    // Kept in the URL so a refresh or a shared link opens the same view.
-    router.replace(next === 'audit' ? '/delivery?view=audit' : '/delivery', { scroll: false });
-  };
+  // The Audit Trail moved to Settings: forward old ?view=audit links there
+  useEffect(() => {
+    if (searchParams.get('view') === 'audit') router.replace('/settings?tab=audit');
+  }, [searchParams, router]);
 
   const pinKey = user ? `itemTrailPins:${user.id}` : null;
 
@@ -86,7 +80,7 @@ function ItemTrailContent() {
   // `silent` is for the background refresh: it updates the list in place instead
   // of swapping it for a spinner, which used to wipe the view (and scroll) every minute.
   const load = useCallback(async (opts?: { silent?: boolean }) => {
-    if (!canSee || view !== 'items') { setLoading(false); return; }
+    if (!canSee) { setLoading(false); return; }
     if (!opts?.silent) setLoading(true);
     try {
       const serverStatus = statusFilter === 'all' || statusFilter === 'overdue' ? undefined : statusFilter;
@@ -103,7 +97,7 @@ function ItemTrailContent() {
     } finally {
       if (!opts?.silent) setLoading(false);
     }
-  }, [canSee, statusFilter, view]);
+  }, [canSee, statusFilter]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -112,10 +106,9 @@ function ItemTrailContent() {
 
   // Auto-refresh every 60s, quietly.
   useEffect(() => {
-    if (view !== 'items') return;
     const t = setInterval(() => load({ silent: true }), 60_000);
     return () => clearInterval(t);
-  }, [load, view]);
+  }, [load]);
 
   const flash = (msg: string, isError = false) => {
     if (isError) { setActionError(msg); setTimeout(() => setActionError(''), 5000); }
@@ -138,8 +131,8 @@ function ItemTrailContent() {
       else await api.productOrderTransfers.confirmReceipt(id);
       await load(); await refreshNotifs();
       flash(action === 'mark-sent' ? 'Marked as sent.' : 'Receipt confirmed.');
-    } catch (e: any) {
-      flash(e.message || 'Action failed', true);
+    } catch (e) {
+      flash((e as Error)?.message || 'Action failed', true);
     } finally { setSavingId(null); }
   };
 
@@ -148,13 +141,13 @@ function ItemTrailContent() {
     setBulkLoading(true); setActionError('');
     try {
       const res = await api.productOrderTransfers.bulkAction(action, [...selected]);
-      const { succeeded, failed } = (res as any).data;
+      const { succeeded, failed } = res.data ?? { succeeded: [], failed: [] };
       await load(); await refreshNotifs();
       setSelected(new Set());
       const msg = `${succeeded.length} succeeded${failed.length > 0 ? `, ${failed.length} failed` : ''}.`;
       flash(msg, failed.length > 0);
-    } catch (e: any) {
-      flash(e.message || 'Bulk action failed', true);
+    } catch (e) {
+      flash((e as Error)?.message || 'Bulk action failed', true);
     } finally { setBulkLoading(false); }
   };
 
@@ -201,28 +194,10 @@ function ItemTrailContent() {
         {/* Header */}
         <div className="mb-6 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">{view === 'audit' ? 'Audit Trail' : 'Item Trail'}</h1>
-            <p className="text-gray-500 mt-1 text-sm">
-              {view === 'audit'
-                ? 'Every recorded action in the system: who did what, and when'
-                : 'Track all premade product transfers between branches in real time'}
-            </p>
+            <h1 className="text-2xl font-bold text-gray-900">Item Trail</h1>
+            <p className="text-gray-500 mt-1 text-sm">Track all premade product transfers between branches in real time</p>
           </div>
-          {canSeeAudit && (
-            <div role="tablist" aria-label="Trail type" className="inline-flex p-1 bg-gray-100 rounded-xl self-start sm:self-auto">
-              {([['items', 'Item Trail'], ['audit', 'Audit Trail']] as const).map(([id, label]) => (
-                <button key={id} role="tab" aria-selected={view === id} onClick={() => setView(id)}
-                  className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
-                    view === id ? 'bg-white text-[#011c72] shadow-sm' : 'text-gray-600 hover:text-gray-900'
-                  }`}>
-                  {label}
-                </button>
-              ))}
-            </div>
-          )}
         </div>
-
-        {view === 'audit' ? <AuditTrailPanel /> : (<>
 
         {/* Alerts */}
         {actionError && (
@@ -322,7 +297,6 @@ function ItemTrailContent() {
           </div>
         )}
 
-
         {/* Transfer list */}
         {!canSee ? (
           <div className="p-10 text-center bg-white rounded-xl border border-gray-200 text-gray-400">
@@ -372,7 +346,6 @@ function ItemTrailContent() {
             </>)}</Paginated>
           </div>
         )}
-        </>)}
       </main>
     </div>
   );
