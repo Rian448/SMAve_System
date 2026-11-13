@@ -13,6 +13,8 @@ import MaterialPicker from '@/components/MaterialPicker';
 import PremadeItemPicker from '@/components/PremadeItemPicker';
 import { useVatRate } from '@/lib/useVatRate';
 import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
+import SeatRowsEditor from '@/components/SeatRowsEditor';
+import { loadSlipRows, toSavedSlipRows, type SlipRow } from '@/lib/slipRows';
 
 interface MaterialItem {
   id: string;
@@ -35,10 +37,6 @@ interface PremadeSelection {
   quantity: number;
 }
 
-interface SlipRow {
-  description: string;
-  hr: string;
-}
 
 const SERVICE_ICONS: Record<string, ReactElement> = {
   flooring: (
@@ -244,12 +242,8 @@ function NewJobOrderForm() {
   const [labor] = useState<LaborItem[]>([]);
 
   // Slip data (Job Order Slip fields from physical form)
-  const [slipRows, setSlipRows] = useState<SlipRow[]>([
-    { description: '', hr: '' },
-    { description: '', hr: '' },
-    { description: '', hr: '' },
-    { description: '', hr: '' },
-  ]);
+  // The four standard seat rows to start with; more can be added
+  const [slipRows, setSlipRows] = useState<SlipRow[]>(() => loadSlipRows([]));
   const [materialCenter, setMaterialCenter] = useState('');
   const [materialSides, setMaterialSides] = useState('');
   const [materialBack, setMaterialBack] = useState('');
@@ -273,6 +267,7 @@ function NewJobOrderForm() {
 
   // Payment
   const [paymentMethod, setPaymentMethod] = useState('cash');
+  const [downInput, setDownInput] = useState('');
   const [profitMargin, setProfitMargin] = useState(250);
   const [estimatedTotal, setEstimatedTotal] = useState(0);
   const [notes, setNotes] = useState('');
@@ -516,7 +511,9 @@ function NewJobOrderForm() {
     (sum, m) => sum + (Number(m.quantity) || 0) * (Number(m.unitPrice) || 0),
     0
   );
-  const suggestedPrice = materialTotal > 0 ? materialTotal * (profitMargin / 100) : 0;
+  // To the centavo: "Use This" copies it into the price field, which would otherwise
+  // show every decimal of the multiplication (e.g. 1234.5678901)
+  const suggestedPrice = materialTotal > 0 ? Math.round(materialTotal * (profitMargin / 100) * 100) / 100 : 0;
 
   // Per-order discount: clamp 0–100, derive the discounted total and savings.
   const orderDiscountPct = Math.min(Math.max(Number(orderDiscount) || 0, 0), 100);
@@ -527,6 +524,10 @@ function NewJobOrderForm() {
   const vatPct = vatOn ? vatRate : 0;
   const finalTotal = estimatedTotal > 0 ? jobOrderTotalFrom(estimatedTotal, orderDiscountPct) : 0;
   const vatAmount = vatBreakdown(finalTotal, vatPct).vat;
+  // The shop needs at least half paid before the work is confirmed (the server holds
+  // to it too). The customer may pay more, up to the full price; blank = the minimum.
+  const minDown = Math.round((finalTotal / 2) * 100) / 100;
+  const downAmount = downInput.trim() === '' ? minDown : Math.round(Number(downInput) * 100) / 100;
 
   // ── Steps: 1 Customer → 2 Service → 3 Vehicle → 4 Materials → 5 Review.
   // Reupholstery on its own is furniture, not a car: the Vehicle step is skipped.
@@ -596,6 +597,10 @@ function NewJobOrderForm() {
           : estimatedTotal > MAX_JOB_ORDER_PRICE && 'Price for the work must be less than ₱100,000,000.',
         discount: (!Number.isFinite(discount) || discount < 0 || discount > 100) && 'Discount must be between 0 and 100%.',
         paymentMethod: !isAcceptedPaymentMethod(paymentMethod) && 'Choose the payment method: Cash, GCash or Bank Transfer.',
+        downPayment: finalTotal > 0 && (
+          !Number.isFinite(downAmount) ? 'Enter the down payment as a number.'
+          : downAmount < minDown ? `The down payment must be at least 50% of the total (₱${minDown.toLocaleString('en-PH', { minimumFractionDigits: 2 })}).`
+          : downAmount > finalTotal && `The down payment can't be more than the total (₱${finalTotal.toLocaleString('en-PH', { minimumFractionDigits: 2 })}).`),
       };
     }
     return {};
@@ -619,7 +624,7 @@ function NewJobOrderForm() {
     other: otherServices.description,
   });
   const buildSlipData = () => ({
-    rows: slipRows,
+    rows: toSavedSlipRows(slipRows),
     materialCenter, materialSides, materialBack,
     dStitch, piping, pockets, logo, specification,
     ...(seesLaborCost ? { cutterName, sewerName } : {}),
@@ -699,9 +704,8 @@ function NewJobOrderForm() {
         // The slip and each service's details are kept on the draft's slip data
         const slip = d.slipData || {};
         const savedRows = slip.rows;
-        if (Array.isArray(savedRows) && savedRows.length) {
-          setSlipRows([0, 1, 2, 3].map((i) => ({ description: savedRows[i]?.description || '', hr: savedRows[i]?.hr || '' })));
-        }
+        // Every saved row, the added ones included (it used to keep only the first four)
+        if (Array.isArray(savedRows) && savedRows.length) setSlipRows(loadSlipRows(savedRows));
         setMaterialCenter(slip.materialCenter || ''); setMaterialSides(slip.materialSides || ''); setMaterialBack(slip.materialBack || '');
         setDStitch(slip.dStitch || ''); setPiping(slip.piping || ''); setPockets(slip.pockets || ''); setLogo(slip.logo || '');
         setSpecification(slip.specification || '');
@@ -1027,7 +1031,8 @@ function NewJobOrderForm() {
 
     const grossTotal = estimatedTotal > 0 ? estimatedTotal : materialTotal;
     const orderTotal = jobOrderTotalFrom(grossTotal, orderDiscountPct);
-    const finalDown = estimatedTotal > 0 ? Math.round((orderTotal / 2) * 100) / 100 : 0;
+    // Checked on the review step: at least half, at most the total
+    const finalDown = orderTotal > 0 ? downAmount : 0;
 
     try {
       const jobOrderData = {
@@ -1049,19 +1054,12 @@ function NewJobOrderForm() {
       };
 
       if (editingDraftId) {
-        // Confirm this draft in place (keeps its number, no duplicate left behind).
-        // Money goes through Payments, so the down payment is recorded after, as a new order's is.
+        // Confirm this draft in place (keeps its number, no duplicate left behind). The
+        // down payment is recorded in the same save, so the draft is never confirmed without it.
         const { downPayment: _down, paymentMethod: _method, ...updates } = jobOrderData;
-        await api.sales.updateJobOrder(editingDraftId, { ...updates, status: 'pending' });
-        if (finalDown > 0) {
-          try {
-            await api.payments.create({ jobOrderId: editingDraftId, amount: finalDown, paymentMethod, notes: 'Down payment' });
-          } catch (payErr) {
-            const why = payErr instanceof Error && payErr.message ? payErr.message : 'unknown error';
-            setError(`The job order was confirmed, but its down payment was not recorded (${why}). Record it from the job order's Payments panel.`);
-            return;
-          }
-        }
+        await api.sales.updateJobOrder(editingDraftId, {
+          ...updates, status: 'pending', confirmDeposit: { amount: finalDown, paymentMethod },
+        });
       } else {
         await api.sales.createJobOrder({ ...jobOrderData, ...(numberPayload ? { jobOrderNumber: numberPayload } : {}) });
       }
@@ -1286,7 +1284,7 @@ function NewJobOrderForm() {
 
           <div className="bg-[#eef1fb] border border-[#c7d2f5] rounded-xl p-4 flex justify-between items-center">
             <span className="text-sm font-medium text-[#011c72]">Order Total</span>
-            <span className="text-xl font-bold text-[#011c72]">₱{premadeTotal.toLocaleString()}</span>
+            <span className="text-xl font-bold text-[#011c72]">₱{premadeTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
           </div>
         </div>
       );
@@ -1310,7 +1308,7 @@ function NewJobOrderForm() {
           </div>
           <div className="flex justify-between items-center pt-2 border-t border-gray-200">
             <span className="font-semibold text-gray-900">Total Due</span>
-            <span className="text-lg font-bold text-[#011c72]">₱{premadeTotal.toLocaleString()}</span>
+            <span className="text-lg font-bold text-[#011c72]">₱{premadeTotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
           </div>
         </div>
 
@@ -1420,6 +1418,17 @@ function NewJobOrderForm() {
 
   const inputCls = 'w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent';
   const smallInputCls = 'w-full px-3 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent';
+  // A service's material is a description for the slip: pick a name from Inventory
+  // or type one. Only the text is kept -- it isn't a material line, so it adds no
+  // cost and takes nothing out of stock (that is done on the Materials step).
+  const serviceMaterialOptions = [...new Set(inventoryMaterials
+    .filter(m => !m.isArchived)
+    .map(m => [m.materialType, m.color, m.pattern].filter(Boolean).join(' - ').trim())
+    .filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const pickMaterial = (value: string, onChange: (v: string) => void, placeholder = 'Specify material *') => (
+    <Combobox value={value} onChange={onChange} options={serviceMaterialOptions} placeholder={placeholder}
+      className={smallInputCls} emptyLabel="Not in Inventory — keep typing to use your own" />
+  );
 
   const renderStep = () => {
     switch (step) {
@@ -1570,9 +1579,12 @@ function NewJobOrderForm() {
               </div>
               <div {...fe.field('vehicleYear')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Year <span className="text-red-500">*</span></label>
+                {/* Only digits can be typed (a 4-digit year) */}
                 <Combobox
                   value={vehicleYear}
-                  onChange={setVehicleYear}
+                  onChange={(v) => setVehicleYear(v.replace(/\D/g, '').slice(0, 4))}
+                  numeric
+                  maxLength={4}
                   options={yearOptions}
                   placeholder="Search or type a year (e.g. 2023)"
                 />
@@ -1619,9 +1631,7 @@ function NewJobOrderForm() {
                     </ul>
                     {flooring.selected && (
                       <div className="mt-3" onClick={(e) => e.stopPropagation()} {...fe.field('svc-flooring')}>
-                        <input type="text" value={flooring.material}
-                          onChange={(e) => { e.stopPropagation(); setFlooring({ ...flooring, material: e.target.value }); }}
-                          placeholder="Specify material *" className={smallInputCls} />
+                        {pickMaterial(flooring.material, v => setFlooring(f => ({ ...f, material: v })))}
                         <FieldError message={fe.errors['svc-flooring']} />
                       </div>
                     )}
@@ -1653,9 +1663,7 @@ function NewJobOrderForm() {
                           <FieldError message={fe.errors.reupholsteryItem} />
                         </div>
                         <div {...fe.field('svc-reupholstery')}>
-                          <input type="text" value={reupholstery.material}
-                            onChange={(e) => setReupholstery({ ...reupholstery, material: e.target.value })}
-                            placeholder="Specify material *" className={smallInputCls} />
+                          {pickMaterial(reupholstery.material, v => setReupholstery(r => ({ ...r, material: v })))}
                           <FieldError message={fe.errors['svc-reupholstery']} />
                         </div>
                       </div>
@@ -1682,9 +1690,7 @@ function NewJobOrderForm() {
                     </ul>
                     {ceiling.selected && (
                       <div className="mt-3" onClick={(e) => e.stopPropagation()} {...fe.field('svc-ceiling')}>
-                        <input type="text" value={ceiling.material}
-                          onChange={(e) => { e.stopPropagation(); setCeiling({ ...ceiling, material: e.target.value }); }}
-                          placeholder="Specify material *" className={smallInputCls} />
+                        {pickMaterial(ceiling.material, v => setCeiling(c => ({ ...c, material: v })))}
                         <FieldError message={fe.errors['svc-ceiling']} />
                       </div>
                     )}
@@ -1710,9 +1716,7 @@ function NewJobOrderForm() {
                     </ul>
                     {sidings.selected && (
                       <div className="mt-3" onClick={(e) => e.stopPropagation()} {...fe.field('svc-sidings')}>
-                        <input type="text" value={sidings.material}
-                          onChange={(e) => { e.stopPropagation(); setSidings({ ...sidings, material: e.target.value }); }}
-                          placeholder="Specify material *" className={smallInputCls} />
+                        {pickMaterial(sidings.material, v => setSidings(x => ({ ...x, material: v })))}
                         <FieldError message={fe.errors['svc-sidings']} />
                       </div>
                     )}
@@ -1736,7 +1740,7 @@ function NewJobOrderForm() {
                       <div className="mt-3 grid grid-cols-2 gap-2" onClick={(e) => e.stopPropagation()}>
                         <input type="text" value={seatCovers.design} onChange={(e) => setSeatCovers({ ...seatCovers, design: e.target.value })} placeholder="Design" className={smallInputCls} />
                         <div {...fe.field('svc-seatCovers')}>
-                          <input type="text" value={seatCovers.material} onChange={(e) => setSeatCovers({ ...seatCovers, material: e.target.value })} placeholder="Material *" className={smallInputCls} />
+                          {pickMaterial(seatCovers.material, v => setSeatCovers(x => ({ ...x, material: v })), 'Material *')}
                           <FieldError message={fe.errors['svc-seatCovers']} />
                         </div>
                         <input type="text" value={seatCovers.pocket} onChange={(e) => setSeatCovers({ ...seatCovers, pocket: e.target.value })} placeholder="Pocket" className={smallInputCls} />
@@ -1809,22 +1813,7 @@ function NewJobOrderForm() {
               {/* Row Descriptions */}
               <div>
                 <p className="text-sm font-medium text-gray-700 mb-3">Seat Row Descriptions</p>
-                <div className="space-y-2">
-                  {slipRows.map((row, i) => (
-                    <div key={i} className="flex items-center gap-3">
-                      <span className="text-xs font-semibold text-gray-500 w-14 shrink-0">{['1st', '2nd', '3rd', '4th'][i]} ROW</span>
-                      <input type="text" value={row.description}
-                        onChange={(e) => setSlipRows((prev) => prev.map((r, idx) => idx === i ? { ...r, description: e.target.value } : r))}
-                        placeholder="Description" className="flex-1 px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
-                      <div className="flex items-center gap-1 shrink-0">
-                        <span className="text-xs text-gray-500">HR</span>
-                        <input type="text" value={row.hr}
-                          onChange={(e) => setSlipRows((prev) => prev.map((r, idx) => idx === i ? { ...r, hr: e.target.value } : r))}
-                          placeholder="0" className="w-16 px-2 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 text-center focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                <SeatRowsEditor rows={slipRows} onChange={setSlipRows} />
               </div>
 
               {/* Material Descriptions */}
@@ -2056,7 +2045,7 @@ function NewJobOrderForm() {
                   {materials.map((m) => (
                     <div key={m.id} className="flex justify-between text-sm">
                       <span className="text-gray-700">{m.name || '(unnamed)'} × {m.quantity}</span>
-                      <span className="text-gray-900 font-medium">₱{((Number(m.quantity) || 0) * (Number(m.unitPrice) || 0)).toLocaleString()}</span>
+                      <span className="text-gray-900 font-medium">₱{((Number(m.quantity) || 0) * (Number(m.unitPrice) || 0)).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
                   ))}
                 </div>
@@ -2182,14 +2171,28 @@ function NewJobOrderForm() {
               )}
 
               {estimatedTotal > 0 && (
-                <div className="bg-[#eef1fb] border border-[#c7d2f5] rounded-xl p-4 flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-[#011c72]">Down Payment (50%)</p>
-                    <p className="text-xs text-[#011c72] mt-0.5">Half of the total</p>
+                <div {...fe.field('downPayment')} className="bg-[#eef1fb] border border-[#c7d2f5] rounded-xl p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <label htmlFor="down-payment" className="text-sm font-medium text-[#011c72]">Down Payment</label>
+                      <p className="text-xs text-[#011c72] mt-0.5">
+                        At least 50% (₱{minDown.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) before the work is confirmed. The rest can be paid in parts later.
+                      </p>
+                    </div>
+                    <div className="relative w-44">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">₱</span>
+                      <input id="down-payment" type="number" min={minDown} max={finalTotal} step="0.01"
+                        value={downInput} placeholder={minDown.toFixed(2)}
+                        onChange={(e) => setDownInput(e.target.value)}
+                        className="w-full pl-7 pr-3 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-right font-semibold focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                    </div>
                   </div>
-                  <span className="text-xl font-bold text-[#011c72]">
-                    ₱{(finalTotal / 2).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </span>
+                  {Number.isFinite(downAmount) && downAmount >= minDown && downAmount <= finalTotal && (
+                    <p className="text-xs text-gray-600 mt-2">
+                      Balance after this: ₱{Math.max(finalTotal - downAmount, 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </p>
+                  )}
+                  <FieldError message={fe.errors.downPayment} />
                 </div>
               )}
             </div>

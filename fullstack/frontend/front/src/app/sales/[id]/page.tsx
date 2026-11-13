@@ -14,7 +14,11 @@ import { useVatRate } from '@/lib/useVatRate';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import ExcessPayments from '@/components/ExcessPayments';
 import ExtraMaterialDialog from '@/components/ExtraMaterialDialog';
+import JobOrderDelivery from '@/components/JobOrderDelivery';
 import { useConfirm } from '@/components/ConfirmDialog';
+import { exactPeso } from '@/lib/format';
+import SeatRowsEditor from '@/components/SeatRowsEditor';
+import { loadSlipRows, toSavedSlipRows, type SlipRow } from '@/lib/slipRows';
 
 type EditableJobOrderItem = JobOrderItem & {
   materialSource?: 'inventory' | 'custom';
@@ -192,12 +196,7 @@ export default function JobOrderDetailPage() {
   }, [jobOrder]);
 
   // Slip editing state
-  const [slipRows, setSlipRows] = useState([
-    { description: '', hr: '' },
-    { description: '', hr: '' },
-    { description: '', hr: '' },
-    { description: '', hr: '' },
-  ]);
+  const [slipRows, setSlipRows] = useState<SlipRow[]>(() => loadSlipRows([]));
   const [slipCenter, setSlipCenter] = useState('');
   const [slipSides, setSlipSides] = useState('');
   const [slipBack, setSlipBack] = useState('');
@@ -214,14 +213,8 @@ export default function JobOrderDetailPage() {
   useEffect(() => {
     const sd = jobOrder?.slipData;
     if (!sd) return;
-    if (sd.rows) {
-      setSlipRows([
-        { description: sd.rows[0]?.description || '', hr: sd.rows[0]?.hr || '' },
-        { description: sd.rows[1]?.description || '', hr: sd.rows[1]?.hr || '' },
-        { description: sd.rows[2]?.description || '', hr: sd.rows[2]?.hr || '' },
-        { description: sd.rows[3]?.description || '', hr: sd.rows[3]?.hr || '' },
-      ]);
-    }
+    // Every saved row: keeping only four here, then saving, would delete the others
+    if (sd.rows) setSlipRows(loadSlipRows(sd.rows));
     setSlipCenter(sd.materialCenter || '');
     setSlipSides(sd.materialSides || '');
     setSlipBack(sd.materialBack || '');
@@ -244,7 +237,7 @@ export default function JobOrderDetailPage() {
           // Keeps what this user can't see (cutter/sewer are for those who manage labor)
           ...jobOrder.slipData,
           ...(seesLaborCost ? { cutterName: slipCutter, sewerName: slipSewer } : {}),
-          rows: slipRows,
+          rows: toSavedSlipRows(slipRows),
           materialCenter: slipCenter,
           materialSides: slipSides,
           materialBack: slipBack,
@@ -672,13 +665,7 @@ export default function JobOrderDetailPage() {
     }
   };
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-PH', {
-      style: 'currency',
-      currency: 'PHP',
-      minimumFractionDigits: 0
-    }).format(amount || 0);
-  };
+  const formatCurrency = (amount: number) => exactPeso(amount || 0);
 
   /** Prints on half-letter paper (5.5 x 8.5 in). The size is set only for this print,
    *  so other pages that print (reports, costing) keep the A4 default. */
@@ -1094,28 +1081,7 @@ export default function JobOrderDetailPage() {
           {/* DES: Row descriptions */}
           <div className="mb-5">
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">DES — Seat Row Descriptions</p>
-            <div className="space-y-2">
-              {slipRows.map((row, i) => (
-                <div key={i} className="flex items-center gap-3">
-                  <span className="text-xs font-semibold text-gray-500 w-14 shrink-0">{['1st', '2nd', '3rd', '4th'][i]} ROW</span>
-                  <input
-                    type="text"
-                    value={row.description}
-                    onChange={(e) => setSlipRows((prev) => prev.map((r, idx) => idx === i ? { ...r, description: e.target.value } : r))}
-                    placeholder="Description"
-                    className="flex-1 px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                  />
-                  <span className="text-xs text-gray-400 shrink-0">HR</span>
-                  <input
-                    type="text"
-                    value={row.hr}
-                    onChange={(e) => setSlipRows((prev) => prev.map((r, idx) => idx === i ? { ...r, hr: e.target.value } : r))}
-                    placeholder="0"
-                    className="w-16 px-2 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 text-center focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                  />
-                </div>
-              ))}
-            </div>
+            <SeatRowsEditor rows={slipRows} onChange={setSlipRows} />
           </div>
 
           {/* Material Descriptions */}
@@ -2196,6 +2162,9 @@ export default function JobOrderDetailPage() {
             </div>
           )}
         </div>
+
+        {/* ── Delivery (completed / delivered): schedule it or follow it ── */}
+        <JobOrderDelivery jobOrderId={jobOrder.id} jobOrderStatus={jobOrder.status} />
 
         {/* ── Job Financial Summary (completed / delivered only) ── */}
         {/* Includes what each worker was paid, so only for those who see labor costs */}

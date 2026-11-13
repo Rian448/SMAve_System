@@ -6,6 +6,7 @@ import { useNotifications } from '@/context/NotificationContext';
 import { formatDateTime } from '@/lib/dateUtils';
 import { useEffect, useRef, useState } from 'react';
 import { useConfirm } from './ConfirmDialog';
+import { homePath } from '@/lib/permissions';
 
 type NavItem = { name: string; path: string; icon: () => React.JSX.Element; perms?: string[] };
 type NavGroup = { name: string; icon: () => React.JSX.Element; items: NavItem[] };
@@ -20,11 +21,6 @@ interface NavigationProps {
   onMobileClose: () => void;
 }
 
-const HomeIcon = () => (
-  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-  </svg>
-);
 const DashboardIcon = () => (
   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
@@ -96,6 +92,11 @@ const SupplierIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0zM13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h1m8-1a1 1 0 01-1 1H9m4-1V8a1 1 0 011-1h2.586a1 1 0 01.707.293l3.414 3.414a1 1 0 01.293.707V16a1 1 0 01-1 1h-1m-6-1a1 1 0 001 1h1M5 17a2 2 0 104 0m-4 0a2 2 0 114 0m6 0a2 2 0 104 0m-4 0a2 2 0 114 0" />
   </svg>
 );
+const AuditIcon = () => (
+  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+  </svg>
+);
 const HistoryIcon = () => (
   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -133,6 +134,8 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
   const { confirm, confirmDialog } = useConfirm();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  // The account menu under the name and initial, top right
+  const [accountOpen, setAccountOpen] = useState(false);
   const [showArchive, setShowArchive] = useState(false);
   // Desktop: the category whose flyout is open, and where to draw it
   const [flyout, setFlyout] = useState<{ name: string; top: number; left: number } | null>(null);
@@ -175,16 +178,15 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
   if (pathname === '/login') return null;
   if (isLoading) return null;
 
-  // Unauthenticated: show minimal top bar
-  if (!isAuthenticated) {
+  // The website's own top bar: for visitors, and for signed-in staff who opened the
+  // website (from the logo). Staff get their profile bubble instead of Staff Login.
+  if (!isAuthenticated || pathname === '/') {
     if (mustSignIn) return null;
     const navLinks = [
       { label: 'Home',       href: '/#home' },
-      { label: 'Track Order', href: '/#track' },
       { label: 'About Us',   href: '/#about' },
       { label: 'Products & Services', href: '/#products' },
       { label: 'Promotions', href: '/#promotions' },
-      { label: 'Gallery',    href: '/#gallery' },
       { label: 'Branches',   href: '/#branches' },
       { label: 'Contact Us', href: '/#contact' },
     ];
@@ -217,12 +219,14 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
 
             {/* Right side: staff sign-in + hamburger */}
             <div className="ml-auto flex items-center gap-3">
+              {isAuthenticated ? <ProfileBubble /> : (
               <Link
                 href="/login"
                 className="px-4 py-2 rounded-md border border-gray-300 hover:border-[#011c72] text-gray-700 hover:text-[#011c72] text-xs font-semibold uppercase tracking-wide transition-colors"
               >
                 Staff Login
               </Link>
+              )}
               {/* Mobile hamburger */}
               <button
                 onClick={() => setMobileMenuOpen(o => !o)}
@@ -264,7 +268,6 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
 
   // Pages are grouped into categories that open a flyout. Each page needs any one of its permissions.
   const navEntries: NavEntry[] = [
-    { name: 'Website', path: '/', icon: HomeIcon },
     { name: 'Overview', icon: DashboardIcon, items: [
       { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, perms: ['dashboard.view'] },
       { name: 'Owner Dashboard', path: '/owner', icon: OwnerIcon, perms: ['owner.view'] },
@@ -294,9 +297,11 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     ] },
     { name: 'Analytics', icon: ReportsIcon, items: [
       { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, perms: ['forecasting.view'] },
-      { name: 'Reports', path: '/reports', icon: ReportsIcon, perms: ['reports.sales', 'reports.inventory', 'reports.settlement', 'reports.audit_trail'] },
+      { name: 'Reports', path: '/reports', icon: ReportsIcon, perms: ['reports.sales', 'reports.inventory', 'reports.settlement'] },
     ] },
-    { name: 'Settings', path: '/settings', icon: SettingsIcon, perms: ['settings.edit', 'users.manage', 'branches.manage', 'reports.audit_trail'] },
+    // Its own entry so the full log isn't buried under Settings
+    { name: 'Audit Trail', path: '/audit-trail', icon: AuditIcon, perms: ['reports.audit_trail'] },
+    { name: 'Settings', path: '/settings', icon: SettingsIcon, perms: ['settings.edit', 'users.manage', 'branches.manage'] },
   ];
 
   const allowed = (item: NavItem) => (item.perms ? can(...item.perms) : true);
@@ -366,6 +371,17 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     );
   };
 
+  // The page's name for the top bar: the menu item that matches best (/purchase-orders/receiving
+  // is "Receiving", not "Purchase Orders"; /sales/12 is "Sales")
+  const pageName = (() => {
+    if (pathname === '/profile') return 'My Account';
+    const items = visibleEntries.flatMap(e => ('items' in e ? e.items : [e]));
+    const match = items.filter(i => isActivePath(i.path)).sort((a, b) => b.path.length - a.path.length)[0];
+    return match?.name || 'Seatmakers Ave';
+  })();
+  const roleLabel = (user?.role || '').split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  const initial = user?.fullName?.charAt(0).toUpperCase() || '?';
+
   const handleLogout = async () => {
     const ok = await confirm({
       title: 'Log out?',
@@ -374,6 +390,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
       variant: 'warning',
     });
     if (!ok) return;
+    setAccountOpen(false);
     setIsLoggingOut(true);
     try {
       await logout();
@@ -385,29 +402,84 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
 
   return (
     <>
-    {/* Phones: top bar with the menu button (the sidebar opens as a drawer) */}
-    <header className="md:hidden fixed top-0 inset-x-0 h-14 z-30 bg-white border-b border-gray-200 shadow-sm flex items-center gap-2 px-3">
+    {/* Top bar, beside the sidebar: the page's name on the left; notifications and the
+        account menu on the right. Phones also get the menu button (the sidebar is a drawer). */}
+    <header className={`fixed top-0 right-0 left-0 h-14 md:h-16 z-30 bg-white border-b border-gray-200 flex items-center gap-2 px-3 md:px-6 transition-all duration-300 ${
+      collapsed ? 'md:left-16' : 'md:left-64'}`}>
       <button onClick={onMobileOpen} aria-label="Open menu" aria-expanded={mobileOpen}
-        className="p-2 -ml-1 rounded-lg text-gray-600 hover:text-[#011c72] hover:bg-gray-100 transition-colors">
+        className="md:hidden p-2 -ml-1 rounded-lg text-gray-600 hover:text-[#011c72] hover:bg-gray-100 transition-colors">
         <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
         </svg>
       </button>
-      <Link href="/" className="flex items-center gap-2 min-w-0 flex-1">
+      <Link href="/" className="md:hidden flex items-center gap-2 min-w-0">
         <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0">
           <LogoIcon />
         </div>
-        <span className="font-bold text-gray-900 text-sm truncate">Seatmakers Ave</span>
       </Link>
-      <button onClick={() => setNotifOpen(o => !o)} aria-label="Notifications"
-        className="relative p-2 rounded-lg text-gray-600 hover:text-[#011c72] hover:bg-gray-100 transition-colors">
-        <BellIcon />
-        {unreadCount > 0 && (
-          <span className="absolute top-1 right-1 min-w-[14px] h-3.5 px-0.5 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
-            {unreadCount > 9 ? '9+' : unreadCount}
-          </span>
-        )}
-      </button>
+      <span className="min-w-0 truncate px-3 md:px-4 py-1.5 rounded-xl border border-gray-200 bg-white text-sm font-bold text-gray-900 shadow-sm">
+        {pageName}
+      </span>
+
+      <div className="ml-auto flex items-center gap-2 shrink-0">
+        <button onClick={() => { setNotifOpen(o => !o); setAccountOpen(false); }} aria-label="Notifications" aria-expanded={notifOpen}
+          title="Notifications"
+          className={`relative w-10 h-10 rounded-xl border flex items-center justify-center transition-colors ${
+            notifOpen ? 'border-[#011c72] text-[#011c72] bg-[#eef1fb]' : 'border-gray-200 text-gray-600 hover:text-[#011c72] hover:border-gray-300'}`}>
+          <BellIcon />
+          {unreadCount > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center ring-2 ring-white">
+              {unreadCount > 9 ? '9+' : unreadCount}
+            </span>
+          )}
+        </button>
+        <span className="hidden sm:block w-px h-7 bg-gray-200 mx-1" aria-hidden="true" />
+        <div className="relative">
+          <button onClick={() => { setAccountOpen(o => !o); setNotifOpen(false); }} aria-haspopup="menu" aria-expanded={accountOpen}
+            className="flex items-center gap-2 rounded-xl pl-1 pr-1 sm:pl-2 py-1 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#011c72] transition-colors">
+            <span className="hidden sm:block max-w-40 truncate text-sm font-semibold text-gray-900">{user?.fullName}</span>
+            <span className="w-9 h-9 rounded-full bg-[#011c72] text-white text-sm font-bold flex items-center justify-center shrink-0">{initial}</span>
+            <svg className={`hidden sm:block w-4 h-4 text-gray-400 transition-transform ${accountOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {accountOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setAccountOpen(false)} aria-hidden="true" />
+              <div role="menu" className="absolute right-0 mt-2 w-72 max-w-[calc(100vw-1.5rem)] z-50 bg-white rounded-xl shadow-xl border border-gray-200 overflow-hidden">
+                <div className="flex items-center gap-3 px-4 py-4 border-b border-gray-100">
+                  <span className="w-12 h-12 rounded-full bg-[#011c72] text-white text-lg font-bold flex items-center justify-center shrink-0">{initial}</span>
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-gray-900 truncate">{user?.fullName}</p>
+                    {roleLabel && <p className="text-xs font-medium text-[#011c72]">{roleLabel}</p>}
+                    {user?.email && <p className="text-xs text-gray-500 truncate">{user.email}</p>}
+                  </div>
+                </div>
+                <Link href="/profile" role="menuitem" onClick={() => setAccountOpen(false)}
+                  className="flex items-center gap-3 px-4 py-3 text-sm font-semibold text-gray-800 hover:bg-gray-50 border-b border-gray-100">
+                  <span className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-700 shrink-0">
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                    </svg>
+                  </span>
+                  <span className="flex-1">My account</span>
+                  <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </Link>
+                <button type="button" role="menuitem" onClick={handleLogout} disabled={isLoggingOut}
+                  className="w-full flex items-center gap-3 px-4 py-3 text-sm font-semibold text-gray-800 hover:bg-red-50 hover:text-red-700 disabled:opacity-50">
+                  <span className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-700 shrink-0">
+                    <LogoutIcon />
+                  </span>
+                  {isLoggingOut ? 'Logging out…' : 'Log out'}
+                </button>
+                <p className="px-4 py-2.5 border-t border-gray-100 text-xs font-medium text-gray-400">Seatmakers Avenue</p>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
     </header>
     {mobileOpen && (
       <div className="md:hidden fixed inset-0 z-30 bg-black/40" onClick={onMobileClose} aria-hidden="true" />
@@ -449,47 +521,6 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
           </svg>
         </button>
       </div>
-
-      {/* Profile card: opens My Profile */}
-      {collapsed ? (
-        <div className="flex flex-col items-center gap-2 py-3 border-b border-gray-200 bg-[#011c72] shrink-0">
-          <Link href="/profile" title={`${user?.fullName} (My Profile)`}
-            className={`w-9 h-9 bg-white rounded-full flex items-center justify-center ring-2 transition ${pathname === '/profile' ? 'ring-[#4a6aff]' : 'ring-white/30 hover:ring-white'}`}>
-            <span className="text-[#011c72] text-sm font-bold">{user?.fullName?.charAt(0).toUpperCase()}</span>
-          </Link>
-          <button onClick={() => setNotifOpen(o => !o)} title="Notifications"
-            className="relative p-1.5 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors">
-            <BellIcon />
-            {unreadCount > 0 && (
-              <span className="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-red-500" />
-            )}
-          </button>
-        </div>
-      ) : (
-        <div className="flex items-start gap-2 px-4 py-4 border-b border-gray-200 bg-gradient-to-br from-[#011c72] to-[#1a3aa8] shrink-0">
-          <Link href="/profile" title="My Profile" className="group flex items-center gap-3 flex-1 min-w-0">
-            <div className={`w-12 h-12 bg-white rounded-full flex items-center justify-center shrink-0 ring-2 transition ${pathname === '/profile' ? 'ring-[#4a6aff]' : 'ring-white/30 group-hover:ring-white'}`}>
-              <span className="text-[#011c72] text-lg font-bold">{user?.fullName?.charAt(0).toUpperCase()}</span>
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-white truncate group-hover:underline">{user?.fullName}</p>
-              {user?.email && <p className="text-xs text-white/70 truncate">{user.email}</p>}
-              <span className="inline-block mt-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-white/15 text-white tracking-wide">
-                {user?.role?.replace('_', ' ').toUpperCase()}
-              </span>
-            </div>
-          </Link>
-          <button onClick={() => setNotifOpen(o => !o)} title="Notifications"
-            className="relative p-1.5 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors shrink-0">
-            <BellIcon />
-            {unreadCount > 0 && (
-              <span className="absolute top-0.5 right-0.5 min-w-[14px] h-3.5 px-0.5 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
-                {unreadCount > 9 ? '9+' : unreadCount}
-              </span>
-            )}
-          </button>
-        </div>
-      )}
 
       {/* Nav Items */}
       <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5">
@@ -574,21 +605,12 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
         </div>
       )}
 
-      {/* Logout */}
-      <div className="border-t border-gray-200 p-3 shrink-0">
-        <button onClick={handleLogout} disabled={isLoggingOut} title="Logout"
-          className={`w-full flex items-center justify-center gap-2 rounded-lg border border-red-200 text-red-600 text-sm font-semibold hover:bg-red-50 transition-colors disabled:opacity-50 ${collapsed ? 'p-2' : 'px-3 py-2'}`}>
-          <LogoutIcon />
-          {!collapsed && (isLoggingOut ? 'Logging out…' : 'Logout')}
-        </button>
-      </div>
 
       {/* Notification Panel */}
       {notifOpen && (
         <>
           <div className="fixed inset-0 z-30" onClick={() => { setNotifOpen(false); setShowArchive(false); }} />
-          <div className={`fixed top-16 md:top-20 inset-x-2 md:inset-x-auto z-40 md:w-80 bg-white rounded-xl shadow-xl border border-gray-200 overflow-hidden ${
-            collapsed ? 'md:left-[4.5rem]' : 'md:left-[16.5rem]'}`}>
+          <div className="fixed top-16 md:top-[4.5rem] inset-x-2 md:inset-x-auto md:right-6 z-40 md:w-96 bg-white rounded-xl shadow-xl border border-gray-200 overflow-hidden">
             <div className="px-4 pt-3 pb-2 border-b border-gray-100">
               <p className="text-sm font-bold text-gray-900">{showArchive ? 'Archived Notifications' : 'Notifications'}</p>
               <div className="flex items-center justify-between mt-1.5">
@@ -747,5 +769,63 @@ function TrashIcon() {
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
         d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
     </svg>
+  );
+}
+
+/** Signed-in staff on the website: their initial in a bubble, with a small menu
+ *  back to the system, to My Profile, or to log out. */
+function ProfileBubble() {
+  const { user, logout, can } = useAuth();
+  const router = useRouter();
+  const { confirm, confirmDialog } = useConfirm();
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  // A click anywhere else, or Escape, closes the menu
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { if (!boxRef.current?.contains(e.target as Node)) setOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey); };
+  }, [open]);
+
+  const signOut = async () => {
+    setOpen(false);
+    const ok = await confirm({
+      title: 'Log out?',
+      message: 'You will need to log in again to use your account.',
+      confirmLabel: 'Logout',
+      variant: 'warning',
+    });
+    if (!ok) return;
+    await logout();
+    router.push('/');
+  };
+
+  const item = 'block w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 hover:text-[#011c72] transition-colors';
+  return (
+    <div ref={boxRef} className="relative">
+      <button type="button" onClick={() => setOpen(o => !o)} aria-haspopup="menu" aria-expanded={open}
+        aria-label={`Account menu for ${user?.fullName || 'you'}`} title={user?.fullName}
+        className="w-10 h-10 rounded-full bg-[#011c72] text-white text-sm font-bold flex items-center justify-center ring-2 ring-transparent hover:ring-[#4a6aff] focus:outline-none focus-visible:ring-[#4a6aff] transition">
+        {user?.fullName?.charAt(0).toUpperCase() || '?'}
+      </button>
+      {open && (
+        <div role="menu" className="absolute right-0 mt-2 w-60 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden z-50">
+          <div className="px-4 py-3 border-b border-gray-100">
+            <p className="text-sm font-semibold text-gray-900 truncate">{user?.fullName}</p>
+            {user?.email && <p className="text-xs text-gray-500 truncate">{user.email}</p>}
+          </div>
+          <Link href={homePath(can)} role="menuitem" className={item} onClick={() => setOpen(false)}>Back to Dashboard</Link>
+          <Link href="/profile" role="menuitem" className={item} onClick={() => setOpen(false)}>My Profile</Link>
+          <button type="button" role="menuitem" onClick={signOut} className={`${item} text-red-600 hover:text-red-700 border-t border-gray-100`}>
+            Log out
+          </button>
+        </div>
+      )}
+      {confirmDialog}
+    </div>
   );
 }

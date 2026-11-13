@@ -1,5 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { homePath } from '@/lib/permissions';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import {
@@ -345,7 +346,7 @@ export default function WorkerDashboard() {
   useEffect(() => {
     if (!authLoading) {
       if (!user) router.push('/login');
-      else if (!can('workers.add', 'workers.edit', 'workers.delete')) router.push('/dashboard');
+      else if (!can('workers.add', 'workers.edit', 'workers.delete')) router.push(homePath(can));
       else { fetchWorkers(); fetchJobOrders(); fetchAssignments(); }
     }
   }, [user, authLoading]);

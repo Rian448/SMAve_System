@@ -6,7 +6,9 @@ import Link from 'next/link';
 import { api, PurchaseOrder } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import ReceivePurchaseOrderDialog from '@/components/ReceivePurchaseOrderDialog';
+import SupplierPayments from '@/components/SupplierPayments';
 import { poStatusInfo, isOpenForReceiving, poReceivingProgress } from '@/lib/purchaseOrderStatus';
+import { exactPeso } from '@/lib/format';
 
 const fmtQty = (n: number) => (Number(n) || 0).toLocaleString('en-PH', { maximumFractionDigits: 4 });
 
@@ -56,13 +58,7 @@ export default function PurchaseOrderDetailPage() {
     }
   };
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-PH', {
-      style: 'currency',
-      currency: 'PHP',
-      minimumFractionDigits: 0
-    }).format(amount);
-  };
+  const formatCurrency = (amount: number) => exactPeso(amount);
 
   if (loading) {
     return (
@@ -238,6 +234,11 @@ export default function PurchaseOrderDetailPage() {
                 </div>
               </div>
             </div>
+
+            {/* Paying the supplier (separate from receiving the goods) */}
+            {purchaseOrder.status !== 'cancelled' || purchaseOrder.payments.length > 0 ? (
+              <SupplierPayments po={purchaseOrder} onChange={setPurchaseOrder} />
+            ) : null}
 
             {/* Actions */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">

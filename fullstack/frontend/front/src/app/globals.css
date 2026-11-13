@@ -47,3 +47,40 @@ body {
   }
 }
 
+
+/* Wide tables: keep the last column (the row's buttons) in view while the rest
+   scrolls sideways, like the Costing table. Full-width rows (colspan) stay put. */
+.table-sticky-actions tr > th:last-child:not([colspan]),
+.table-sticky-actions tr > td:last-child:not([colspan]) {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  background-color: #fff;
+  box-shadow: -6px 0 6px -6px rgba(0, 0, 0, 0.15);
+}
+.table-sticky-actions thead tr > th:last-child:not([colspan]),
+.table-sticky-actions tbody tr:hover > td:last-child:not([colspan]) {
+  background-color: #f9fafb; /* gray-50, as the header and row hover */
+}
+
+/* Rows of summary cards: equal-width cards, and a row that isn't full sits in
+   the middle instead of hugging the left edge. Columns per row come from
+   --cols (phones), --cols-sm (>= 640px) and --cols-lg (>= 1024px). */
+.stat-cards {
+  --n: var(--cols, 2);
+  --gap: 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--gap);
+}
+.stat-cards > * {
+  flex: 0 0 calc((100% - (var(--n) - 1) * var(--gap)) / var(--n));
+  min-width: 0;
+}
+@media (min-width: 640px) {
+  .stat-cards { --n: var(--cols-sm, var(--cols, 3)); }
+}
+@media (min-width: 1024px) {
+  .stat-cards { --n: var(--cols-lg, var(--cols-sm, var(--cols, 4))); }
+}

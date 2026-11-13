@@ -2,6 +2,7 @@
 import { useEffect, useState, Fragment } from 'react';
 import { api, type Announcement } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
+import Paginated from '@/components/Paginated';
 import { useConfirm } from '@/components/ConfirmDialog';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import { formatDateTime, isMeaningfullyLater } from '@/lib/dateUtils';
@@ -270,11 +271,12 @@ export default function AnnouncementsPage() {
             )}
           </div>
         ) : (
+          <Paginated items={sortedItems} label="announcements" boxed>{rows => (
           <div className="space-y-4">
-            {sortedItems.map((a, idx) => {
+            {rows.map((a, idx) => {
               const style = PRIORITY_STYLES[a.priority] || PRIORITY_STYLES.info;
               const isEditing = editingId === a.id;
-              const showDivider = !a.isPinned && idx > 0 && sortedItems[idx - 1].isPinned;
+              const showDivider = !a.isPinned && idx > 0 && rows[idx - 1].isPinned;
 
               return (
                 <Fragment key={a.id}>
@@ -377,6 +379,7 @@ export default function AnnouncementsPage() {
               );
             })}
           </div>
+          )}</Paginated>
         )}
       </main>
       {confirmDialog}

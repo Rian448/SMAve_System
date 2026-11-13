@@ -3,8 +3,10 @@ import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { api, type Customer, type CustomerOrderSummary, type CustomerOnlineOrder, type ExcessPayment } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
+import Paginated from '@/components/Paginated';
 import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
 import ExcessPayments from '@/components/ExcessPayments';
+import { exactPeso } from '@/lib/format';
 
 const STATUS_COLORS: Record<string, string> = {
   pending: 'bg-yellow-100 text-yellow-800',
@@ -15,7 +17,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 const peso = (n: number) =>
-  new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(n || 0);
+  exactPeso(n || 0);
 
 export default function CustomerProfilePage() {
   const router = useRouter();
@@ -25,6 +27,7 @@ export default function CustomerProfilePage() {
   // Premade product orders are only viewable by administrators and supervisors
   const canOpenProductOrders = can('product_orders.view');
   const canManagePayments = can('payments.add');
+  const canEdit = can('customers.edit');
 
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [orders, setOrders] = useState<CustomerOrderSummary[]>([]);
@@ -151,10 +154,12 @@ export default function CustomerProfilePage() {
             </div>
             <div className="flex items-center gap-3">
               {saved && <span className="text-sm text-green-600 font-medium">Saved!</span>}
+              {canEdit && (
               <button onClick={handleSave} disabled={saving}
                 className="px-5 py-2 rounded-xl bg-[#011c72] text-white text-sm font-medium hover:bg-[#022494] transition-colors disabled:opacity-60">
                 {saving ? 'Saving…' : 'Save Changes'}
               </button>
+              )}
             </div>
           </div>
         </div>
@@ -177,7 +182,8 @@ export default function CustomerProfilePage() {
           ))}
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Read-only for accounts that may only view customers */}
+        <fieldset disabled={!canEdit} className="grid grid-cols-1 lg:grid-cols-2 gap-6 min-w-0 disabled:opacity-90">
           {/* Profile */}
           <div className="bg-white rounded-2xl border border-gray-200 p-6 space-y-4">
             <h2 className="font-semibold text-gray-900">Profile</h2>
@@ -258,7 +264,7 @@ export default function CustomerProfilePage() {
               )}
             </div>
           </div>
-        </div>
+        </fieldset>
 
         {/* Balance: unpaid orders and excess payments to return */}
         <div className="bg-white rounded-2xl border border-gray-200 p-6 space-y-5">
@@ -319,6 +325,7 @@ export default function CustomerProfilePage() {
           {orders.length === 0 ? (
             <p className="text-center text-gray-400 text-sm py-10">No orders yet.</p>
           ) : (
+            <Paginated items={orders} label="orders">{rows => (
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
@@ -330,7 +337,7 @@ export default function CustomerProfilePage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {orders.map((o) => (
+                {rows.map((o) => (
                   <tr key={o.id}
                     onClick={() => router.push(`/sales/${o.id}`)}
                     className="hover:bg-gray-50 cursor-pointer transition-colors">
@@ -351,6 +358,7 @@ export default function CustomerProfilePage() {
                 ))}
               </tbody>
             </table>
+            )}</Paginated>
           )}
         </div>
 
@@ -364,6 +372,7 @@ export default function CustomerProfilePage() {
             {onlineOrders.length === 0 ? (
               <p className="text-center text-gray-400 text-sm py-10">No online orders yet.</p>
             ) : (
+              <Paginated items={onlineOrders} label="orders">{rows => (
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
@@ -375,7 +384,7 @@ export default function CustomerProfilePage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {onlineOrders.map((o) => {
+                  {rows.map((o) => {
                     const href = o.type === 'custom' ? `/customer-orders/${o.id}`
                       : canOpenProductOrders ? `/product-orders/${o.id}` : null;
                     return (
@@ -400,6 +409,7 @@ export default function CustomerProfilePage() {
                   })}
                 </tbody>
               </table>
+              )}</Paginated>
             )}
           </div>
         )}

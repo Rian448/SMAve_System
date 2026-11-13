@@ -1,6 +1,9 @@
 ﻿'use client';
 import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { homePath } from '@/lib/permissions';
 import { useAuth } from '@/context/AuthContext';
+import { compactPeso, exactPeso } from '@/lib/format';
 import { api, DashboardStats, Alert, Activity, type DashboardPeriod } from '@/lib/api';
 import { formatDateTime as formatDate } from '@/lib/dateUtils';
 import Link from 'next/link';
@@ -16,6 +19,7 @@ const PERIOD_OPTIONS: { value: DashboardPeriod; label: string }[] = [
 
 export default function Dashboard() {
   const { user, isLoading: authLoading, can } = useAuth();
+  const router = useRouter();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [alerts, setAlerts] = useState<Array<Alert & { rowKey: string }>>([]);
   const [activities, setActivities] = useState<Array<Activity & { rowKey: string; user: string; action: string; details: string }>>([]);
@@ -37,6 +41,11 @@ export default function Dashboard() {
       if (r.data) setBranches(r.data.filter(b => b.isActive));
     }).catch(() => {});
   }, [isAdmin]);
+
+  // Owners have their own dashboard instead of this one
+  useEffect(() => {
+    if (!authLoading && user && homePath(can) === '/owner') router.replace('/owner');
+  }, [authLoading, user, can, router]);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -88,16 +97,6 @@ export default function Dashboard() {
       setLoading(false);
     }
   };
-
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-PH', {
-      style: 'currency',
-      currency: 'PHP',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0
-    }).format(amount);
-  };
-
 
   /**
    * Where an alert row should take you. Returns null when this user's role
@@ -236,7 +235,7 @@ export default function Dashboard() {
 
         {/* Stats Cards - For staff only */}
         {isStaff && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-6 mb-8">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 xl:gap-4 2xl:gap-6 mb-8 [&>*]:min-w-0">
           {/* Pending Orders */}
           <Link href="/sales" className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:border-[#011c72] hover:shadow-md transition-all block">
             <div className="flex items-center justify-between">
@@ -350,11 +349,13 @@ export default function Dashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-medium text-gray-500">Sales · {periodLabel}</p>
-                <p className="text-3xl font-bold text-emerald-600 mt-1">
-                  {formatCurrency(stats?.totalRevenue || 0)}
+                {/* The whole card is a link, so no eye button inside it: the exact amount shows on hover */}
+                <p className="text-3xl xl:text-xl 2xl:text-2xl font-bold text-emerald-600 mt-1 min-w-0 tabular-nums whitespace-nowrap"
+                  title={exactPeso(stats?.totalRevenue || 0)}>
+                  {compactPeso(stats?.totalRevenue || 0)}
                 </p>
                 <p className="text-xs text-gray-500 mt-1">
-                  Job orders {formatCurrency(stats?.jobOrderRevenue || 0)} · Premade {formatCurrency(stats?.premadeRevenue || 0)}
+                  Job orders {compactPeso(stats?.jobOrderRevenue || 0)} · Premade {compactPeso(stats?.premadeRevenue || 0)}
                   <span className="block text-gray-400">VAT excluded</span>
                 </p>
               </div>

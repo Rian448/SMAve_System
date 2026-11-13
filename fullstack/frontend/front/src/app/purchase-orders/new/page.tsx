@@ -48,6 +48,45 @@ export default function NewPurchaseOrderPage() {
       .catch(err => console.error(err));
   }, []);
 
+  // Items picked from the restock recommendations (Forecasting) arrive as
+  // ?restock=CODE:qty,CODE:qty. They fill the lines to review; nothing is saved yet.
+  const [restockNote, setRestockNote] = useState<{ added: number; missing: string[] } | null>(null);
+  useEffect(() => {
+    if (loadingMaterials) return;
+    const raw = new URLSearchParams(window.location.search).get('restock');
+    if (!raw) return;
+    const lines = new Map<number, POItem>();
+    const missing: string[] = [];
+    for (const part of raw.split(',')) {
+      const at = part.lastIndexOf(':');
+      const code = decodeURIComponent(part.slice(0, at));
+      const qty = Number(part.slice(at + 1));
+      // Only materials in Inventory can be ordered, once each
+      const m = materials.find(x => x.itemId === code && !x.isArchived);
+      if (!m || !(qty > 0)) { missing.push(code); continue; }
+      if (lines.has(m.id)) continue;
+      lines.set(m.id, {
+        material_id: String(m.id),
+        material_name: [m.materialType, m.color, m.pattern].filter(Boolean).join(' - '),
+        quantity: qty,
+        unit_cost: m.costPerUnit || m.unitPrice,
+        unit: 'yd',
+      });
+    }
+    if (lines.size) setItems([...lines.values()]);
+    // A purchase order is for one supplier: choose it when every item has the same one
+    const suppliers = new Set([...lines.keys()].map(id => materials.find(m => m.id === id)?.supplierId).filter(Boolean));
+    if (suppliers.size === 1) setSupplierId(String([...suppliers][0]));
+    setRestockNote({ added: lines.size, missing });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadingMaterials]);
+
+  // Lines whose material is normally bought from a different supplier than the one chosen
+  const otherSupplierItems = chosenSupplier ? items.filter(it => {
+    const m = materials.find(x => String(x.id) === it.material_id);
+    return m?.supplierId && m.supplierId !== chosenSupplier.id;
+  }) : [];
+
   const addItem = () => {
     setItems([...items, { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd' }]);
   };
@@ -88,12 +127,16 @@ export default function NewPurchaseOrderPage() {
     e.preventDefault();
     setError('');
     const anyMaterial = items.some(item => item.material_id);
+    // The same material twice: its quantity belongs on one line
+    const firstRow = new Map<string, number>();
+    items.forEach((item, index) => { if (item.material_id && !firstRow.has(item.material_id)) firstRow.set(item.material_id, index); });
     if (fe.show({
       'po-supplier': !chosenSupplier && 'Choose the supplier.',
       'po-date': !expectedDate && 'Choose the expected delivery date.',
       ...Object.fromEntries(items.flatMap((item, index) => [
-        [`po-material-${index}`, !item.material_id && (anyMaterial ? 'Select a material, or remove this row.'
-          : 'Add at least one material to the purchase order.')],
+        [`po-material-${index}`, !item.material_id ? (anyMaterial ? 'Select a material, or remove this row.'
+          : 'Add at least one material to the purchase order.')
+          : firstRow.get(item.material_id) !== index && 'This material is already on another line. Change the quantity there instead.'],
         [`po-qty-${index}`, !(item.quantity > 0) && 'More than 0.'],
       ])),
     })) return;
@@ -145,6 +188,18 @@ export default function NewPurchaseOrderPage() {
 
         {error && (
           <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>
+        )}
+        {restockNote && (
+          <div className="mb-6 p-4 bg-[#eef1fb] border border-[#c7d2f5] rounded-xl text-sm text-[#011c72] space-y-1">
+            <p>
+              <b>{restockNote.added} item{restockNote.added === 1 ? '' : 's'}</b> added from the restock recommendations with the suggested quantities.
+              Review the quantities and remove anything you don&apos;t need. Nothing is ordered until you create the purchase order,
+              and stock only goes up when it is received.
+            </p>
+            {restockNote.missing.length > 0 && (
+              <p className="text-amber-800">Not added (not in Inventory): {restockNote.missing.join(', ')}</p>
+            )}
+          </div>
         )}
         <form onSubmit={handleSubmit} noValidate>
           {/* Supplier Information */}
@@ -233,6 +288,12 @@ export default function NewPurchaseOrderPage() {
               <Link href="/inventory" className="text-[#011c72] font-medium hover:underline">Inventory</Link> first
               (it starts at 0 yd). Stock goes up only when this order is received.
             </p>
+            {otherSupplierItems.length > 0 && (
+              <p className="mb-4 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
+                Usually bought from another supplier: {otherSupplierItems.map(i => i.material_name).join(', ')}.
+                A purchase order is for one supplier — remove these and order them in a separate purchase order if needed.
+              </p>
+            )}
             {loadingMaterials ? (
               <div className="flex items-center justify-center py-8">
                 <div className="animate-spin w-6 h-6 border-2 border-[#011c72] border-t-transparent rounded-full"></div>
@@ -315,7 +376,7 @@ export default function NewPurchaseOrderPage() {
                           Total
                         </label>
                         <p className="py-2 text-sm font-medium text-gray-900">
-                          ₱{(item.quantity * item.unit_cost).toLocaleString()}
+                          ₱{(item.quantity * item.unit_cost).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </p>
                       </div>
                       <div className="col-span-2 md:col-span-1">
@@ -343,13 +404,13 @@ export default function NewPurchaseOrderPage() {
                   <div className="flex justify-between py-2">
                     <span className="text-sm text-gray-600">Subtotal</span>
                     <span className="text-sm font-medium text-gray-900">
-                      ₱{calculateTotal().toLocaleString()}
+                      ₱{calculateTotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </span>
                   </div>
                   <div className="flex justify-between py-2 border-t border-gray-200">
                     <span className="text-base font-medium text-gray-900">Total</span>
                     <span className="text-base font-bold text-[#011c72]">
-                      ₱{calculateTotal().toLocaleString()}
+                      ₱{calculateTotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </span>
                   </div>
                 </div>

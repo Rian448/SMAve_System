@@ -122,7 +122,7 @@ export default function CostingDetailPage() {
               <div className="min-w-0">
                 <p className="text-sm font-medium text-gray-500">Total Revenue <span className="text-xs font-normal text-gray-400">(excl. VAT)</span></p>
                 <p className="text-xl xl:text-2xl font-bold break-words text-gray-900 mt-1">
-                  ₱{costing.totalPrice.toLocaleString()}
+                  ₱{costing.totalPrice.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </p>
               </div>
               <div className="w-12 h-12 shrink-0 rounded-xl bg-green-100 flex items-center justify-center">
@@ -137,7 +137,7 @@ export default function CostingDetailPage() {
               <div className="min-w-0">
                 <p className="text-sm font-medium text-gray-500">Total Cost</p>
                 <p className="text-xl xl:text-2xl font-bold break-words text-gray-900 mt-1">
-                  ₱{totalCost.toLocaleString()}
+                  ₱{totalCost.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </p>
               </div>
               <div className="w-12 h-12 shrink-0 rounded-xl bg-red-100 flex items-center justify-center">
@@ -152,7 +152,7 @@ export default function CostingDetailPage() {
               <div className="min-w-0">
                 <p className="text-sm font-medium text-gray-500">Net Profit</p>
                 <p className={`text-xl xl:text-2xl font-bold break-words mt-1 ${profit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  ₱{profit.toLocaleString()}
+                  ₱{profit.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </p>
               </div>
               <div className="w-12 h-12 shrink-0 rounded-xl bg-[#dde6ff] flex items-center justify-center">
@@ -222,7 +222,7 @@ export default function CostingDetailPage() {
                   </div>
                 </div>
                 <div className="text-right shrink-0">
-                  <p className="text-sm font-bold text-gray-900">₱{costing.materialCost.toLocaleString()}</p>
+                  <p className="text-sm font-bold text-gray-900">₱{costing.materialCost.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                   <p className="text-xs text-gray-500">{share(costing.materialCost).toFixed(1)}%</p>
                 </div>
               </div>
@@ -235,7 +235,7 @@ export default function CostingDetailPage() {
                   </div>
                 </div>
                 <div className="text-right shrink-0">
-                  <p className="text-sm font-bold text-gray-900">₱{costing.laborCost.toLocaleString()}</p>
+                  <p className="text-sm font-bold text-gray-900">₱{costing.laborCost.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                   <p className="text-xs text-gray-500">{share(costing.laborCost).toFixed(1)}%</p>
                 </div>
               </div>
@@ -248,7 +248,7 @@ export default function CostingDetailPage() {
                   </div>
                 </div>
                 <div className="text-right shrink-0">
-                  <p className="text-sm font-bold text-gray-900">₱{costing.overheadCost.toLocaleString()}</p>
+                  <p className="text-sm font-bold text-gray-900">₱{costing.overheadCost.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                   <p className="text-xs text-gray-500">{share(costing.overheadCost).toFixed(1)}%</p>
                 </div>
               </div>
@@ -282,16 +282,16 @@ export default function CostingDetailPage() {
             <div className="space-y-4">
               <div className="flex items-center justify-between py-3 border-b border-gray-100 gap-3">
                 <span className="text-sm text-gray-500">Revenue</span>
-                <span className="text-sm font-medium text-gray-900">₱{costing.totalPrice.toLocaleString()}</span>
+                <span className="text-sm font-medium text-gray-900">₱{costing.totalPrice.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
               </div>
               <div className="flex items-center justify-between py-3 border-b border-gray-100 gap-3">
                 <span className="text-sm text-gray-500">Total Cost</span>
-                <span className="text-sm font-medium text-red-600">-₱{totalCost.toLocaleString()}</span>
+                <span className="text-sm font-medium text-red-600">-₱{totalCost.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
               </div>
               <div className="flex items-center justify-between py-3 border-b border-gray-100 gap-3">
                 <span className="text-sm font-medium text-gray-900">Gross Profit</span>
                 <span className={`text-sm font-bold ${profit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  ₱{profit.toLocaleString()}
+                  ₱{profit.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
               <div className="flex items-center justify-between py-3 gap-3">

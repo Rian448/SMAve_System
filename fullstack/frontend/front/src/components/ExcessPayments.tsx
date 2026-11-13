@@ -4,12 +4,13 @@ import Link from 'next/link';
 import { api, PAYMENT_METHOD_LABELS, ACCEPTED_PAYMENT_METHODS, type ExcessPayment, type CustomerOrderSummary } from '@/lib/api';
 import { formatDate } from '@/lib/dateUtils';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
+import { exactPeso } from '@/lib/format';
 
 // Money goes back the same ways it can come in
 const REFUND_METHODS = ACCEPTED_PAYMENT_METHODS;
 
 const peso = (n: number) =>
-  new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(n || 0);
+  exactPeso(n || 0);
 
 const STATUS_STYLE: Record<ExcessPayment['status'], { label: string; cls: string }> = {
   open: { label: 'To return', cls: 'bg-amber-100 text-amber-800' },

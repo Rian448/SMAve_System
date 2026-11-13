@@ -3,6 +3,8 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, setAuthToken, type User } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
+import { passwordProblem } from '@/lib/password';
+import PasswordChecklist from '@/components/PasswordChecklist';
 
 const inputCls = 'w-full px-3 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm disabled:bg-gray-50 disabled:text-gray-500';
 const labelCls = 'block text-sm font-medium text-gray-700 mb-1.5';
@@ -141,8 +143,9 @@ export default function ProfilePage() {
   const changePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setPasswordMsg({ kind: 'success', text: '' });
-    if (newPassword.length < 8) {
-      setPasswordMsg({ kind: 'error', text: 'New password must be at least 8 characters.' });
+    const weak = passwordProblem(newPassword);
+    if (weak) {
+      setPasswordMsg({ kind: 'error', text: weak });
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -298,8 +301,9 @@ export default function ProfilePage() {
                 <div>
                   <label htmlFor="newPassword" className={labelCls}>New Password</label>
                   <input id="newPassword" type={showPasswords ? 'text' : 'password'} value={newPassword} required
-                    autoComplete="new-password" placeholder="At least 8 characters"
+                    autoComplete="new-password" placeholder="Create a strong password" aria-describedby="new-password-rules"
                     onChange={(e) => setNewPassword(e.target.value)} className={inputCls} />
+                  {newPassword && <PasswordChecklist id="new-password-rules" password={newPassword} />}
                 </div>
                 <div>
                   <label htmlFor="confirmPassword" className={labelCls}>Confirm New Password</label>

@@ -5,8 +5,10 @@ import Link from 'next/link';
 import { api, PurchaseOrder } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import Paginated from '@/components/Paginated';
+import { PaymentStatusBadge } from '@/components/SupplierPayments';
 import ReceivePurchaseOrderDialog from '@/components/ReceivePurchaseOrderDialog';
 import { poStatusInfo, isOpenForReceiving } from '@/lib/purchaseOrderStatus';
+import { exactPeso } from '@/lib/format';
 
 export default function PurchaseOrdersPage() {
   const { can } = useAuth();
@@ -49,13 +51,7 @@ export default function PurchaseOrdersPage() {
     }
   };
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-PH', {
-      style: 'currency',
-      currency: 'PHP',
-      minimumFractionDigits: 0
-    }).format(amount);
-  };
+  const formatCurrency = (amount: number) => exactPeso(amount);
 
   const tabs = [
     { id: 'all' as const, name: 'All Orders', count: allOrders.length },
@@ -144,7 +140,7 @@ export default function PurchaseOrdersPage() {
           ) : (
             <Paginated items={purchaseOrders} label="purchase orders">{rows => (
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="w-full table-sticky-actions">
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">PO Number</th>
@@ -152,6 +148,7 @@ export default function PurchaseOrdersPage() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Amount</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Expected Delivery</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Payment</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created Date</th>
                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                   </tr>
@@ -180,6 +177,10 @@ export default function PurchaseOrdersPage() {
                         <span className={`px-3 py-1 text-xs font-medium rounded-full whitespace-nowrap ${poStatusInfo(po).className}`}>
                           {poStatusInfo(po).label}
                         </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {po.status === 'cancelled' && !po.payments?.length ? <span className="text-xs text-gray-400">—</span>
+                          : <PaymentStatusBadge status={po.paymentStatus} />}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                         {formatDate(po.createdAt)}
