@@ -2,10 +2,16 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api, Delivery } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 
 export default function DeliveryDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const { can, user } = useAuth();
+  // Correcting a finished delivery is for administrators (the server checks the same)
+  const isAdmin = user?.role === 'administrator';
+  // Only those who may move a delivery along see its status buttons
+  const canUpdateStatus = can('item_trail.update_status');
   const [delivery, setDelivery] = useState<Delivery | null>(null);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
@@ -24,14 +30,36 @@ export default function DeliveryDetailPage() {
     }
   }, [params.id]);
 
+  const [actionError, setActionError] = useState('');
+  // Administrators can undo "delivered" when it was marked by mistake (with a reason)
+  const [reopenReason, setReopenReason] = useState<string | null>(null);
+
   const updateStatus = async (newStatus: string) => {
     if (!delivery) return;
+    if (newStatus === 'cancelled' && !window.confirm('Cancel this delivery? A new one can be scheduled afterwards.')) return;
     setUpdating(true);
+    setActionError('');
     try {
-      await api.deliveries.updateStatus(delivery.id, newStatus);
-      setDelivery({ ...delivery, status: newStatus as Delivery['status'] });
+      // Show what was actually saved, not what was asked for
+      const res = await api.deliveries.updateStatus(delivery.id, newStatus);
+      if (res.data) setDelivery(res.data);
     } catch (err) {
-      console.error(err);
+      setActionError(err instanceof Error && err.message ? err.message : 'The status could not be changed.');
+    }
+    setUpdating(false);
+  };
+
+  const reopen = async () => {
+    if (!delivery || reopenReason === null) return;
+    if (!reopenReason.trim()) { setActionError('Say why the delivery is being corrected.'); return; }
+    setUpdating(true);
+    setActionError('');
+    try {
+      const res = await api.deliveries.reopen(delivery.id, reopenReason.trim());
+      if (res.data) setDelivery(res.data);
+      setReopenReason(null);
+    } catch (err) {
+      setActionError(err instanceof Error && err.message ? err.message : 'The delivery could not be corrected.');
     }
     setUpdating(false);
   };
@@ -181,7 +209,7 @@ export default function DeliveryDetailPage() {
 
           {/* Action Buttons */}
           <div className="mt-8 flex flex-wrap justify-center gap-2 sm:gap-4">
-            {delivery.status === 'scheduled' && (
+            {canUpdateStatus && delivery.status === 'scheduled' && (
               <button
                 onClick={() => updateStatus('in_transit')}
                 disabled={updating}
@@ -193,7 +221,7 @@ export default function DeliveryDetailPage() {
                 Start Transit
               </button>
             )}
-            {delivery.status === 'in_transit' && (
+            {canUpdateStatus && delivery.status === 'in_transit' && (
               <button
                 onClick={() => updateStatus('delivered')}
                 disabled={updating}
@@ -205,7 +233,38 @@ export default function DeliveryDetailPage() {
                 Mark Delivered
               </button>
             )}
+            {canUpdateStatus && (delivery.status === 'scheduled' || delivery.status === 'in_transit') && (
+              <button onClick={() => updateStatus('cancelled')} disabled={updating}
+                className="inline-flex items-center px-4 sm:px-6 py-2 border border-red-200 text-red-600 hover:bg-red-50 text-sm sm:text-base rounded-lg font-medium transition-colors disabled:opacity-50">
+                Cancel Delivery
+              </button>
+            )}
+            {isAdmin && delivery.status === 'delivered' && reopenReason === null && (
+              <button onClick={() => setReopenReason('')} disabled={updating}
+                className="inline-flex items-center px-4 py-2 border border-amber-300 text-amber-800 hover:bg-amber-50 text-sm rounded-lg font-medium transition-colors disabled:opacity-50">
+                Marked delivered by mistake?
+              </button>
+            )}
           </div>
+          {reopenReason !== null && (
+            <div className="mt-4 mx-auto max-w-lg rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm">
+              <p className="text-amber-900 mb-2">
+                This puts the delivery back to <b>in transit</b> and its job order back to <b>completed</b>. Stock and payments
+                don&apos;t change. The original delivery time and your reason are kept in the notes and the Audit Trail.
+              </p>
+              <input value={reopenReason} onChange={e => setReopenReason(e.target.value)} autoFocus
+                placeholder="Reason, e.g. marked delivered before the customer received it"
+                className="w-full px-3 py-2 rounded-lg border border-amber-300 bg-white text-gray-900" />
+              <div className="mt-2 flex justify-end gap-2">
+                <button onClick={() => { setReopenReason(null); setActionError(''); }} className="px-3 py-1.5 text-gray-600">Keep as delivered</button>
+                <button onClick={reopen} disabled={updating}
+                  className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-medium disabled:opacity-50">Correct delivery</button>
+              </div>
+            </div>
+          )}
+          {actionError && (
+            <p className="mt-4 text-center text-sm text-red-700">{actionError}</p>
+          )}
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

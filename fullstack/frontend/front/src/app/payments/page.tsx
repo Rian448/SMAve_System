@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { api, PaymentRecord, PaymentSummary, PaymentOverride, PaymentSort } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import Paginated from '@/components/Paginated';
-import Amount from '@/components/Amount';
+import Amount, { AmountDisplayProvider, AmountDisplayToggle } from '@/components/Amount';
 
 export default function PaymentsPage() {
   // useSearchParams needs a Suspense boundary for this route to prerender.
@@ -160,8 +160,8 @@ function PaymentsContent() {
 
         {/* Summary Cards */}
         {summary && (
-          <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 mb-8">
-            <div className="col-span-2 lg:col-span-1 xl:col-span-2 bg-white rounded-xl border border-gray-200 p-5 text-center min-w-0">
+          <div className="stat-cards mb-8" style={{ '--cols': 2, '--cols-sm': 3, '--cols-lg': 6 } as React.CSSProperties}>
+            <div className="bg-white rounded-xl border border-gray-200 p-5 text-center min-w-0">
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Total Revenue</p>
               <p className="text-xl sm:text-2xl font-bold text-gray-900 min-w-0"><Amount value={summary.totalRevenue} /></p>
             </div>
@@ -173,17 +173,17 @@ function PaymentsContent() {
               <p className="text-xs font-medium text-red-600 uppercase tracking-wide mb-1">Balance Due</p>
               <p className="text-xl sm:text-2xl font-bold text-red-700 min-w-0"><Amount value={summary.totalBalance} /></p>
             </div>
-            <div className="bg-green-50 rounded-xl border border-green-100 p-4 text-center">
+            <div className="bg-green-50 rounded-xl border border-green-100 p-5 text-center min-w-0">
               <p className="text-xs font-medium text-green-600 uppercase tracking-wide mb-1">Paid</p>
-              <p className="text-2xl font-bold text-green-700">{summary.paidCount}</p>
+              <p className="text-xl sm:text-2xl font-bold text-green-700 tabular-nums">{summary.paidCount.toLocaleString('en-PH')}</p>
             </div>
-            <div className="bg-yellow-50 rounded-xl border border-yellow-100 p-4 text-center">
+            <div className="bg-yellow-50 rounded-xl border border-yellow-100 p-5 text-center min-w-0">
               <p className="text-xs font-medium text-yellow-600 uppercase tracking-wide mb-1">Partial</p>
-              <p className="text-2xl font-bold text-yellow-700">{summary.partialCount}</p>
+              <p className="text-xl sm:text-2xl font-bold text-yellow-700 tabular-nums">{summary.partialCount.toLocaleString('en-PH')}</p>
             </div>
-            <div className="bg-red-50 rounded-xl border border-red-100 p-4 text-center">
+            <div className="bg-red-50 rounded-xl border border-red-100 p-5 text-center min-w-0">
               <p className="text-xs font-medium text-red-600 uppercase tracking-wide mb-1">Unpaid</p>
-              <p className="text-2xl font-bold text-red-700">{summary.unpaidCount}</p>
+              <p className="text-xl sm:text-2xl font-bold text-red-700 tabular-nums">{summary.unpaidCount.toLocaleString('en-PH')}</p>
             </div>
           </div>
         )}
@@ -213,7 +213,7 @@ function PaymentsContent() {
                         <span>Status: <span className="line-through text-gray-400">{o.currentPaymentStatus}</span> → <span className="font-semibold text-amber-700">{o.newPaymentStatus}</span></span>
                       )}
                       {o.newBalance != null && (
-                        <span>Balance: <Amount value={o.currentBalance || 0} className="line-through text-gray-400" /> → <Amount value={o.newBalance} className="font-semibold text-amber-700" /></span>
+                        <span>Balance: <Amount variant="record" value={o.currentBalance || 0} className="line-through text-gray-400" /> → <Amount variant="record" value={o.newBalance} className="font-semibold text-amber-700" /></span>
                       )}
                     </div>
                     {o.reason && <p className="text-xs text-gray-500 mt-1 italic">“{o.reason}”</p>}
@@ -324,13 +324,17 @@ function PaymentsContent() {
         </div>
 
         {/* Payment Records Table */}
+        <AmountDisplayProvider storageKey="payments">
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+          <div className="px-5 py-4 border-b border-gray-200 flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-base font-semibold text-gray-900">
               Payment Records
-              <span className="ml-2 text-sm font-normal text-gray-400">({filteredPayments.length})</span>
+              <span className="ml-2 text-sm font-normal text-gray-400">({filteredPayments.length.toLocaleString('en-PH')})</span>
             </h2>
-            {listLoading && <div className="w-4 h-4 border-2 border-[#011c72] border-t-transparent rounded-full animate-spin" aria-label="Updating" />}
+            <div className="flex items-center gap-3">
+              {listLoading && <div className="w-4 h-4 border-2 border-[#011c72] border-t-transparent rounded-full animate-spin" aria-label="Updating" />}
+              <AmountDisplayToggle />
+            </div>
           </div>
 
           {listError ? (
@@ -379,7 +383,7 @@ function PaymentsContent() {
                         {record.customerName || '—'}
                       </td>
                       <td className="px-5 py-3.5 text-sm font-semibold text-green-700 text-right whitespace-nowrap">
-                        <Amount value={record.amount} />
+                        <Amount variant="record" value={record.amount} />
                       </td>
                       <td className="px-5 py-3.5">
                         <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700 capitalize">
@@ -401,7 +405,7 @@ function PaymentsContent() {
                       Total Collected ({filteredPayments.length} record{filteredPayments.length !== 1 ? 's' : ''})
                     </td>
                     <td className="px-5 py-3 text-right text-sm font-bold text-green-700 whitespace-nowrap">
-                      <Amount value={filteredPayments.reduce((s, r) => s + r.amount, 0)} />
+                      <Amount variant="record" value={filteredPayments.reduce((s, r) => s + r.amount, 0)} />
                     </td>
                     <td colSpan={3}></td>
                   </tr>
@@ -411,6 +415,7 @@ function PaymentsContent() {
             )}</Paginated>
           )}
         </div>
+        </AmountDisplayProvider>
       </main>
     </div>
   );

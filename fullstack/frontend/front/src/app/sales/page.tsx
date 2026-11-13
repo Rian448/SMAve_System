@@ -183,6 +183,7 @@ export default function SalesPage() {
             <p className="text-gray-500 mt-1">Manage custom job orders and premade purchases</p>
           </div>
           <div className="mt-4 sm:mt-0 flex flex-col items-start sm:items-end gap-1">
+            {can('sales.add') && (
             <Link href="/sales/new"
               className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors">
               <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -190,7 +191,9 @@ export default function SalesPage() {
               </svg>
               New Job Order
             </Link>
-            {(drafts.length > 0 || premadeDrafts.length > 0) && (
+            )}
+            {/* Drafts are only worked on by those who create orders */}
+            {can('sales.add') && (drafts.length > 0 || premadeDrafts.length > 0) && (
               <button
                 onClick={() => {
                   // Open on whichever kind actually has drafts
@@ -296,7 +299,7 @@ export default function SalesPage() {
               ) : (
                 <Paginated items={filteredOrders} resetKey={[searchTerm, filter]} label="orders">{rows => (
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[760px]">
+                  <table className="w-full min-w-[760px] table-sticky-actions">
                     <thead className="bg-gray-50">
                       <tr>
                         {['Order #', 'Type', 'Customer', 'Vehicle', 'Branch', 'Amount', 'Date', 'Status', ''].map(h => (
@@ -392,7 +395,7 @@ export default function SalesPage() {
               ) : (
                 <Paginated items={filteredCustomJobOrders} resetKey={[searchTerm, filter]} label="orders">{rows => (
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[760px]">
+                  <table className="w-full min-w-[760px] table-sticky-actions">
                     <thead className="bg-gray-50">
                       <tr>
                         {['Order #', 'Type', 'Customer', 'Vehicle', 'Branch', 'Amount', 'Date', 'Status', ''].map(h => (
@@ -488,7 +491,7 @@ export default function SalesPage() {
               ) : (
                 <Paginated items={filteredPremadePurchaseOrders} resetKey={[searchTerm, filter]} label="orders">{rows => (
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[600px]">
+                  <table className="w-full min-w-[600px] table-sticky-actions">
                     <thead className="bg-gray-50">
                       <tr>
                         {['Order #', 'Customer', 'Branch', 'Amount', 'Date', 'Status', ''].map(h => (
@@ -584,7 +587,7 @@ export default function SalesPage() {
                           {d.customerName}{d.customerPhone ? ` · ${d.customerPhone}` : ''}{d.branchName ? ` · ${d.branchName}` : ''}
                         </p>
                         <p className="text-xs text-gray-500">
-                          {d.itemCount} item{d.itemCount !== 1 ? 's' : ''} · ₱{d.totalAmount.toLocaleString()} · saved {formatDate(d.updatedAt)}
+                          {d.itemCount} item{d.itemCount !== 1 ? 's' : ''} · ₱{d.totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · saved {formatDate(d.updatedAt)}
                         </p>
                       </div>
                       <span className={`shrink-0 px-2 py-0.5 rounded-full text-xs font-semibold ${d.isAvailable ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
@@ -646,10 +649,12 @@ export default function SalesPage() {
                         className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#011c72] text-white hover:bg-[#01268c]">
                         Confirm
                       </Link>
+                      {can('sales.delete') && (
                       <button onClick={() => deleteDraft(d.id)} disabled={draftBusyId === d.id}
                         className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-50 text-red-600 hover:bg-red-100 disabled:opacity-50">
                         Delete
                       </button>
+                      )}
                     </div>
                   </div>
                 ))}

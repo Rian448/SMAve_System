@@ -2,9 +2,10 @@
 import { useEffect, useState } from 'react';
 import { api, PRIORITY_RANK, PRIORITY_LABELS, type MyWork as MyWorkData } from '@/lib/api';
 import { formatDate, manilaDateString } from '@/lib/dateUtils';
+import { exactPeso } from '@/lib/format';
 
 const peso = (n: number) =>
-  new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(n || 0);
+  exactPeso(n || 0);
 
 type Task = NonNullable<MyWorkData['assignments']>[number];
 

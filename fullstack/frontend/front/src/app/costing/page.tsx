@@ -3,6 +3,8 @@ import { useState, useEffect } from 'react';
 import { api, JobOrderCost } from '@/lib/api';
 import Link from 'next/link';
 import Paginated from '@/components/Paginated';
+import Amount, { AmountDisplayProvider, AmountDisplayToggle } from '@/components/Amount';
+import { exactPeso } from '@/lib/format';
 
 export default function CostingPage() {
   const [costings, setCostings] = useState<JobOrderCost[]>([]);
@@ -24,13 +26,7 @@ export default function CostingPage() {
     }
   };
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-PH', {
-      style: 'currency',
-      currency: 'PHP',
-      minimumFractionDigits: 0
-    }).format(amount);
-  };
+  const formatCurrency = exactPeso;
 
   const costOf = (c: JobOrderCost) => c.materialsCost + c.laborCost + c.overheadCost;
   // Margin %; an unpriced order counts as 0% instead of NaN (which fell into no bucket)
@@ -53,6 +49,7 @@ export default function CostingPage() {
   const avgMargin = totalRevenue > 0 ? (totalProfit / totalRevenue * 100) : 0;
 
   return (
+    <AmountDisplayProvider storageKey="costing">
     <div className="min-h-screen bg-gray-50">
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
@@ -81,7 +78,7 @@ export default function CostingPage() {
               <div className="min-w-0">
                 <p className="text-sm font-medium text-gray-500">Total Revenue</p>
                 <p className="text-xl xl:text-2xl font-bold break-words text-gray-900 mt-1">
-                  {formatCurrency(totalRevenue)}
+                  <Amount value={totalRevenue} />
                 </p>
               </div>
               <div className="w-10 h-10 shrink-0 rounded-lg bg-green-100 flex items-center justify-center">
@@ -97,7 +94,7 @@ export default function CostingPage() {
               <div className="min-w-0">
                 <p className="text-sm font-medium text-gray-500">Total Costs</p>
                 <p className="text-xl xl:text-2xl font-bold break-words text-red-600 mt-1">
-                  {formatCurrency(totalCosts)}
+                  <Amount value={totalCosts} />
                 </p>
               </div>
               <div className="w-10 h-10 shrink-0 rounded-lg bg-red-100 flex items-center justify-center">
@@ -113,7 +110,7 @@ export default function CostingPage() {
               <div className="min-w-0">
                 <p className="text-sm font-medium text-gray-500">Net Profit</p>
                 <p className={`text-xl xl:text-2xl font-bold break-words mt-1 ${totalProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  {formatCurrency(totalProfit)}
+                  <Amount value={totalProfit} />
                 </p>
               </div>
               <div className={`w-10 h-10 shrink-0 rounded-lg flex items-center justify-center ${totalProfit >= 0 ? 'bg-green-100' : 'bg-red-100'}`}>
@@ -142,8 +139,8 @@ export default function CostingPage() {
         </div>
 
         {/* Search */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
-          <div className="relative max-w-md">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6 flex flex-wrap items-center justify-between gap-3">
+          <div className="relative w-full max-w-md">
             <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
             </svg>
@@ -155,6 +152,7 @@ export default function CostingPage() {
               className="w-full pl-10 pr-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
             />
           </div>
+          <span className="flex items-center gap-2 text-xs text-gray-500 print:hidden">Amounts <AmountDisplayToggle /></span>
         </div>
 
         {/* Costing Table */}
@@ -201,12 +199,12 @@ export default function CostingPage() {
                     <span className={marginBadge(margin)}>{margin}%</span>
                   </div>
                   <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                    <div className="min-w-0"><dt className="text-xs text-gray-500">Materials</dt><dd className="text-gray-700">{formatCurrency(costing.materialsCost)}{extra(costing)}</dd></div>
-                    <div className="min-w-0"><dt className="text-xs text-gray-500">Labor</dt><dd className="text-gray-700">{formatCurrency(costing.laborCost)}</dd></div>
-                    <div className="min-w-0"><dt className="text-xs text-gray-500">Other Expenses</dt><dd className="text-gray-700">{formatCurrency(costing.overheadCost)}</dd></div>
-                    <div className="min-w-0"><dt className="text-xs text-gray-500">Total Cost</dt><dd className="font-medium text-red-600">{formatCurrency(totalCost)}{variance(costing)}</dd></div>
-                    <div className="min-w-0"><dt className="text-xs text-gray-500">Revenue (excl. VAT)</dt><dd className="font-medium text-gray-900">{formatCurrency(costing.totalAmount)}</dd></div>
-                    <div className="min-w-0"><dt className="text-xs text-gray-500">Profit</dt><dd className={`font-medium ${profit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{formatCurrency(profit)}</dd></div>
+                    <div className="min-w-0"><dt className="text-xs text-gray-500">Materials</dt><dd className="text-gray-700"><Amount variant="record" value={costing.materialsCost} />{extra(costing)}</dd></div>
+                    <div className="min-w-0"><dt className="text-xs text-gray-500">Labor</dt><dd className="text-gray-700"><Amount variant="record" value={costing.laborCost} /></dd></div>
+                    <div className="min-w-0"><dt className="text-xs text-gray-500">Other Expenses</dt><dd className="text-gray-700"><Amount variant="record" value={costing.overheadCost} /></dd></div>
+                    <div className="min-w-0"><dt className="text-xs text-gray-500">Total Cost</dt><dd className="font-medium text-red-600"><Amount variant="record" value={totalCost} />{variance(costing)}</dd></div>
+                    <div className="min-w-0"><dt className="text-xs text-gray-500">Revenue (excl. VAT)</dt><dd className="font-medium text-gray-900"><Amount variant="record" value={costing.totalAmount} /></dd></div>
+                    <div className="min-w-0"><dt className="text-xs text-gray-500">Profit</dt><dd className={`font-medium ${profit >= 0 ? 'text-green-600' : 'text-red-600'}`}><Amount variant="record" value={profit} /></dd></div>
                   </dl>
                   <Link href={`/costing/${costing.id}`}
                     className="mt-3 flex w-full items-center justify-center rounded-lg border border-[#011c72] px-3 py-2 text-sm font-medium text-[#011c72] hover:bg-[#eef1fb]">
@@ -240,25 +238,25 @@ export default function CostingPage() {
                           <Link href={`/costing/${costing.id}`} className="text-sm font-medium text-[#011c72] hover:underline">{costing.jobOrderNumber}</Link>
                         </td>
                         <td className={`${td} text-sm text-gray-600`}>
-                          {formatCurrency(costing.materialsCost)}
+                          <Amount variant="record" value={costing.materialsCost} />
                           {extra(costing)}
                         </td>
                         <td className={`${td} text-sm text-gray-600`}>
-                          {formatCurrency(costing.laborCost)}
+                          <Amount variant="record" value={costing.laborCost} />
                         </td>
                         <td className={`${td} text-sm text-gray-600`}>
-                          {formatCurrency(costing.overheadCost)}
+                          <Amount variant="record" value={costing.overheadCost} />
                         </td>
                         <td className={`${td} text-sm font-medium text-red-600`}>
-                          {formatCurrency(totalCost)}
+                          <Amount variant="record" value={totalCost} />
                           {variance(costing)}
                         </td>
                         <td className={`${td} text-sm font-medium text-gray-900`}>
-                          {formatCurrency(costing.totalAmount)}
+                          <Amount variant="record" value={costing.totalAmount} />
                         </td>
                         <td className={td}>
                           <span className={`text-sm font-medium ${profit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                            {formatCurrency(profit)}
+                            <Amount variant="record" value={profit} />
                           </span>
                         </td>
                         <td className={td}>
@@ -379,6 +377,7 @@ export default function CostingPage() {
         </div>
       </main>
     </div>
+    </AmountDisplayProvider>
   );
 }
 

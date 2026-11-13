@@ -1,4 +1,5 @@
 'use client';
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, Expense, PAYMENT_METHOD_LABELS } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
@@ -6,25 +7,39 @@ import { formatDate, manilaDateString } from '@/lib/dateUtils';
 import { useConfirm } from './ConfirmDialog';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import Paginated from '@/components/Paginated';
+import Amount from '@/components/Amount';
 
 const peso = (n: number) => `₱${n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+// Money out, as on the Owner Overview's charts
+const EXPENSE_COLOR = '#eb6834';
+
 /**
- * Business cash outflows (payables): rent, power, supplies and so on. Staff log
- * what they spend for their branch; the owner reviews every branch. Stock bought
- * through purchase orders isn't logged here -- it reaches the books as cost of
- * goods sold when it is used.
+ * Business cash outflows (payables): rent, power, supplies and so on, logged by
+ * staff for their branch (the owner reviews every branch), plus supplier
+ * payments made from purchase orders. Those buy stock, so profit and loss counts
+ * their cost as cost of goods sold when the material is used.
+ *
+ * showPaymentBreakdown: also show the Expense Log (totals by payment method) as
+ * its own section, for the same dates and category as the list.
  */
-export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: boolean }) {
+export default function ExpenseTracker({ startOfYear = false, showPaymentBreakdown = false, initialStart, initialEnd }: {
+  startOfYear?: boolean; showPaymentBreakdown?: boolean;
+  /** Open on these dates (e.g. the Owner Overview's), instead of this month / this year */
+  initialStart?: string; initialEnd?: string;
+}) {
   const { user, can } = useAuth();
   const { confirm, confirmDialog } = useConfirm();
   const today = manilaDateString();
-  const [startDate, setStartDate] = useState(startOfYear ? `${today.slice(0, 4)}-01-01` : `${today.slice(0, 7)}-01`);
-  const [endDate, setEndDate] = useState(today);
+  const [startDate, setStartDate] = useState(initialStart || (startOfYear ? `${today.slice(0, 4)}-01-01` : `${today.slice(0, 7)}-01`));
+  const [endDate, setEndDate] = useState(initialEnd || today);
   const [category, setCategory] = useState('');
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [total, setTotal] = useState(0);
   const [categories, setCategories] = useState<string[]>([]);
+  // The filter also offers Supplier Payments (made from purchase orders, not logged here)
+  const [filterCategories, setFilterCategories] = useState<string[]>([]);
+  const [supplierTotal, setSupplierTotal] = useState(0);
   const [methods, setMethods] = useState<string[]>([]);
   const [branches, setBranches] = useState<{ id: number; name: string }[]>([]);
   const [loading, setLoading] = useState(true);
@@ -38,6 +53,9 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
   const [formError, setFormError] = useState('');
   const fe = useFieldErrors();
   const [saving, setSaving] = useState(false);
+  // With the payment breakdown on: which section is open (tabs)
+  const [view, setView] = useState<'entries' | 'log'>('entries');
+  const showEntries = !showPaymentBreakdown || view === 'entries';
 
   const load = useCallback(async () => {
     setLoading(true); setError('');
@@ -46,6 +64,8 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
       if (res.data) {
         setExpenses(res.data.expenses); setTotal(res.data.total);
         setCategories(res.data.categories); setMethods(res.data.paymentMethods);
+        setFilterCategories(res.data.filterCategories || res.data.categories);
+        setSupplierTotal(res.data.supplierPaymentsTotal || 0);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load expenses');
@@ -59,6 +79,13 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
     if (!canAdd || !managesAllBranches) return;
     api.settings.getBranches().then(r => setBranches((r.data || []).filter(b => b.isActive))).catch(() => {});
   }, [canAdd, managesAllBranches]);
+
+  // The Expense Log: the same entries, totalled by how they were paid
+  const byMethod = useMemo(() => {
+    const totals: Record<string, number> = {};
+    for (const e of expenses) totals[e.paymentMethod] = (totals[e.paymentMethod] || 0) + e.amount;
+    return Object.entries(totals).sort((a, b) => b[1] - a[1]);
+  }, [expenses]);
 
   const byCategory = useMemo(() => {
     const totals: Record<string, number> = {};
@@ -173,14 +200,21 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
           <label className="text-xs text-gray-500">Category
             <select value={category} onChange={e => setCategory(e.target.value)} className={`${input} mt-1`}>
               <option value="">All categories</option>
-              {categories.map(c => <option key={c} value={c}>{c}</option>)}
+              {filterCategories.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           </label>
           <div className="ml-auto text-right">
             <p className="text-xs text-gray-500">Total spent</p>
-            <p className="text-xl font-bold text-gray-900">{peso(total)}</p>
+            <p className="text-xl font-bold text-gray-900 min-w-0"><Amount value={total} /></p>
           </div>
         </div>
+
+        {supplierTotal > 0 && (
+          <p className="px-4 py-2.5 border-b border-gray-100 bg-amber-50 text-xs text-amber-900">
+            Includes {peso(supplierTotal)} in <b>Supplier Payments</b> for purchase orders. Those buy stock, so profit and loss
+            counts their cost as materials are used (cost of goods sold), not as operating expenses.
+          </p>
+        )}
 
         {byCategory.length > 1 && (
           <div className="px-4 py-3 border-b border-gray-100 flex flex-wrap gap-2">
@@ -192,8 +226,51 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
           </div>
         )}
 
+        {showPaymentBreakdown && (
+          <nav aria-label="Expense views" className="px-4 border-b border-gray-200 flex gap-1 overflow-x-auto">
+            {([['entries', 'Expense Entries', expenses.length], ['log', 'Expense Log', byMethod.length]] as const).map(([id, label, count]) => (
+              <button key={id} type="button" onClick={() => setView(id)} aria-current={view === id ? 'page' : undefined}
+                className={`px-4 py-3 text-sm font-medium border-b-2 -mb-px whitespace-nowrap transition-colors ${
+                  view === id ? 'border-[#011c72] text-[#011c72]' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+                {label}
+                {!loading && <span className="ml-1.5 text-xs text-gray-400">{count}</span>}
+              </button>
+            ))}
+          </nav>
+        )}
+
+        {showPaymentBreakdown && view === 'log' && (
+          <section aria-labelledby="expense-log-heading" className="px-4 py-4">
+            <div className="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+              <div>
+                <h3 id="expense-log-heading" className="text-base font-semibold text-gray-900">Expense Log</h3>
+                <p className="text-xs text-gray-500">By payment method · same dates and category as Expense Entries</p>
+              </div>
+              <span className="text-sm font-semibold text-gray-900 tabular-nums">{peso(total)}</span>
+            </div>
+            {loading ? <p className="text-sm text-gray-400 py-3">Loading…</p>
+              : byMethod.length === 0 ? <p className="text-sm text-gray-400 py-3 text-center">No expenses logged in this period.</p> : (
+              <ul className="space-y-3">
+                {byMethod.map(([method, amt]) => (
+                  <li key={method} title={`${PAYMENT_METHOD_LABELS[method] || method}: ${peso(amt)}`}>
+                    <div className="flex justify-between gap-3 text-xs mb-1">
+                      <span className="text-gray-700">{PAYMENT_METHOD_LABELS[method] || method}</span>
+                      <span className="font-medium text-gray-900 tabular-nums">
+                        {peso(amt)} <span className="text-gray-400 font-normal">· {total ? Math.round(amt / total * 100) : 0}%</span>
+                      </span>
+                    </div>
+                    <div className="h-2 rounded-full bg-gray-100">
+                      <div className="h-full rounded-full" style={{ width: `${(amt / (byMethod[0][1] || 1)) * 100}%`, background: EXPENSE_COLOR }} />
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+
         {error && <p className="m-4 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">{error}</p>}
-        {loading ? (
+        {showEntries && (loading ? (
           <p className="p-8 text-center text-sm text-gray-400">Loading expenses…</p>
         ) : expenses.length === 0 ? (
           <p className="p-8 text-center text-sm text-gray-400">No expenses in this period.</p>
@@ -219,7 +296,10 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
                     <td className="px-4 py-2.5 whitespace-nowrap text-gray-700">{formatDate(e.date)}</td>
                     <td className="px-4 py-2.5 whitespace-nowrap text-gray-700">{e.category}</td>
                     <td className="px-4 py-2.5 text-gray-900">
-                      {e.particulars}
+                      {e.purchaseOrderId
+                        ? <Link href={`/purchase-orders/${e.purchaseOrderId}`} className="text-[#011c72] hover:underline">{e.particulars}</Link>
+                        : e.particulars}
+                      {e.referenceNumber && <p className="text-xs text-gray-500 mt-0.5">Ref. {e.referenceNumber}</p>}
                       {e.notes && <p className="text-xs text-gray-500 mt-0.5">{e.notes}</p>}
                     </td>
                     <td className="px-4 py-2.5 whitespace-nowrap text-gray-600">{e.branchName || '—'}</td>
@@ -228,7 +308,12 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
                     <td className="px-4 py-2.5 whitespace-nowrap text-gray-500">{e.createdBy || '—'}</td>
                     {canDelete && (
                       <td className="px-4 py-2.5 text-right">
-                        <button type="button" onClick={() => remove(e)} className="text-xs font-medium text-red-600 hover:text-red-700">Delete</button>
+                        {/* A supplier payment is voided from its purchase order, so its balance stays right */}
+                        {e.purchaseOrderPaymentId ? (
+                          <span className="text-xs text-gray-400" title="Void it from its purchase order">From PO</span>
+                        ) : (
+                          <button type="button" onClick={() => remove(e)} className="text-xs font-medium text-red-600 hover:text-red-700">Delete</button>
+                        )}
                       </td>
                     )}
                   </tr>
@@ -237,7 +322,7 @@ export default function ExpenseTracker({ startOfYear = false }: { startOfYear?: 
             </table>
           </div>
           )}</Paginated>
-        )}
+        ))}
       </div>
       {confirmDialog}
     </div>

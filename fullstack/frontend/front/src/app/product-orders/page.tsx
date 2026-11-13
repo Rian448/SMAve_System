@@ -245,7 +245,7 @@ export default function ProductOrdersPage() {
 
                   <div className="text-right">
                     <p className="text-sm text-gray-500">Total</p>
-                    <p className="text-xl font-semibold text-[#011c72]">₱{order.totalAmount.toLocaleString()}</p>
+                    <p className="text-xl font-semibold text-[#011c72]">₱{order.totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                   </div>
                 </div>
 
@@ -260,7 +260,7 @@ export default function ProductOrdersPage() {
                           </span>
                         )}
                       </span>
-                      <span className="text-gray-600">₱{item.total.toLocaleString()}</span>
+                      <span className="text-gray-600">₱{item.total.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
                   ))}
                 </div>
@@ -287,10 +287,11 @@ export default function ProductOrdersPage() {
                 )}
 
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                  {/* Viewing accounts see the status but can't change it */}
                   <select
                     value={order.status}
                     onChange={(e) => updateOrder(order.id, { status: e.target.value as ProductOrder['status'] })}
-                    disabled={savingId === order.id}
+                    disabled={savingId === order.id || !can('product_orders.edit')}
                     className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
                   >
                     <option value="pending">Pending</option>
@@ -303,7 +304,7 @@ export default function ProductOrdersPage() {
                   <select
                     value={order.paymentStatus}
                     onChange={(e) => updateOrder(order.id, { paymentStatus: e.target.value as ProductOrder['paymentStatus'] })}
-                    disabled={savingId === order.id}
+                    disabled={savingId === order.id || !can('product_orders.payment')}
                     className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
                   >
                     <option value="unpaid">Unpaid</option>
@@ -311,6 +312,7 @@ export default function ProductOrdersPage() {
                     <option value="paid">Fully Paid</option>
                   </select>
 
+                  {can('product_orders.edit') && (
                   <button
                     onClick={() => updateOrder(order.id, { status: 'processing' })}
                     disabled={savingId === order.id || order.status === 'completed' || order.status === 'cancelled'}
@@ -318,6 +320,7 @@ export default function ProductOrdersPage() {
                   >
                     Confirm Order
                   </button>
+                  )}
 
                   <Link
                     href={`/product-orders/${order.id}`}
@@ -378,12 +381,12 @@ export default function ProductOrdersPage() {
                     {transfer.items.map((item, idx) => (
                       <div key={idx} className="flex justify-between text-sm">
                         <span className="text-gray-800">{item.quantity}x {item.name} <span className="text-gray-400">({item.sku})</span></span>
-                        <span className="text-gray-600">₱{item.total.toLocaleString()}</span>
+                        <span className="text-gray-600">₱{item.total.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                       </div>
                     ))}
                   </div>
 
-                  {transfer.status === 'pending' && (
+                  {transfer.status === 'pending' && can('product_orders.transfer') && (
                     <button
                       onClick={() => markTransferred(transfer.id)}
                       disabled={savingId === transfer.id}
@@ -444,11 +447,12 @@ export default function ProductOrdersPage() {
                     {transfer.items.map((item, idx) => (
                       <div key={idx} className="flex justify-between text-sm">
                         <span className="text-gray-800">{item.quantity}x {item.name} <span className="text-gray-400">({item.sku})</span></span>
-                        <span className="text-gray-600">₱{item.total.toLocaleString()}</span>
+                        <span className="text-gray-600">₱{item.total.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                       </div>
                     ))}
                   </div>
 
+                  {can('product_orders.transfer') && (
                   <button
                     onClick={() => confirmTransferReceipt(transfer.id)}
                     disabled={savingId === transfer.id}
@@ -456,6 +460,7 @@ export default function ProductOrdersPage() {
                   >
                     {savingId === transfer.id ? 'Processing…' : 'Confirm Receipt & Add to Inventory'}
                   </button>
+                  )}
                 </div>
               ))}
               </>)}</Paginated>

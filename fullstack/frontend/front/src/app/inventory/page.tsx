@@ -9,6 +9,7 @@ import { useConfirm } from '@/components/ConfirmDialog';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import Link from 'next/link';
 import Paginated from '@/components/Paginated';
+import { exactPeso } from '@/lib/format';
 
 type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'waste-log' | 'ai-predictions';
 
@@ -143,6 +144,8 @@ function InventoryContent() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const [uploadSuccess, setUploadSuccess] = useState('');
+  // Confirmation after waste is saved or undone (shown on the waste form)
+  const [wasteSuccess, setWasteSuccess] = useState('');
   const [predSearch, setPredSearch] = useState('');
   const [predUrgencyFilter, setPredUrgencyFilter] = useState<'all' | 'urgent' | 'soon' | 'ok'>('all');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -752,9 +755,15 @@ function InventoryContent() {
   const handleCreateWasteLog = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
+    setWasteSuccess('');
+    // Waste comes out of stock, so it can't be more than is on hand (the server checks too)
+    const wasteMaterial = rawMaterials.find(m => m.id === Number(newWaste.materialId));
+    const onHand = wasteMaterial ? Number(wasteMaterial.stockQuantity) || 0 : null;
+    const qty = Number(newWaste.quantity);
     if (fe.show({
       'waste-material': !newWaste.materialId && 'Select the material.',
-      'waste-quantity': !(Number(newWaste.quantity) > 0) && 'Enter how much was wasted.',
+      'waste-quantity': !(qty > 0) ? 'Enter how much was wasted.'
+        : onHand !== null && qty > onHand && `Only ${onHand} yd in stock. Waste can't be more than what is on hand.`,
       'waste-reason': !newWaste.reason.trim() && 'Give a reason.',
     })) return;
     setSaving(true);
@@ -767,8 +776,16 @@ function InventoryContent() {
         branchId: user?.branchId,
       });
       setNewWaste({ materialId: '', quantity: '', reason: '', notes: '' });
+      // Only after the server saved it
+      setWasteSuccess(`Waste saved: ${qty} yd of ${wasteMaterial
+        ? [wasteMaterial.materialType, wasteMaterial.color].filter(Boolean).join(' - ') : 'the material'} taken out of stock.`);
       await fetchInventory();
-    } catch (err) { setFormError((err as Error)?.message || 'Failed to log waste.'); }
+    } catch (err) {
+      const message = (err as Error)?.message || 'Failed to log waste.';
+      // Show a stock refusal under the quantity, where the user is looking, not at the top of the page
+      if (/in stock|on hand/i.test(message)) fe.show({ 'waste-quantity': message });
+      else setFormError(message);
+    }
     finally { setSaving(false); }
   };
 
@@ -787,8 +804,10 @@ function InventoryContent() {
     });
     if (!ok) return;
     setFormError('');
+    setWasteSuccess('');
     try {
       await api.inventory.undoWasteLog(l.id);
+      setWasteSuccess(`Waste entry undone: ${l.quantity} yd of ${l.materialName} is back in stock.`);
       await fetchInventory();
     } catch (err) {
       setFormError((err as Error)?.message || 'Could not undo the waste entry.');
@@ -839,7 +858,7 @@ function InventoryContent() {
   };
 
   const formatCurrency = (amount: number) =>
-    new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(amount);
+    exactPeso(amount);
 
   /** Reorder level: the material's own, else the one in Settings (same rule as the server) */
   const reorderLevel = (own?: number) => (own && own > 0 ? own : globalThreshold);
@@ -1017,7 +1036,7 @@ function InventoryContent() {
                 )}
               </div>
             )}
-            <Link
+            {can('purchase_orders.add') && <Link
               href="/purchase-orders/new"
               className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors"
             >
@@ -1025,7 +1044,7 @@ function InventoryContent() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
               </svg>
               New Purchase Order
-            </Link>
+            </Link>}
           </div>
         </div>
 
@@ -1112,6 +1131,7 @@ function InventoryContent() {
                           <p className="text-sm font-semibold text-orange-700">
                             {lowStockItems.length} item{lowStockItems.length > 1 ? 's' : ''} running low on stock
                           </p>
+                          {can('purchase_orders.add') && (
                           <Link
                             href="/purchase-orders/new"
                             className="flex-shrink-0 inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-xs font-medium transition-colors"
@@ -1121,6 +1141,7 @@ function InventoryContent() {
                             </svg>
                             Create Purchase Order
                           </Link>
+                          )}
                         </div>
                         <ul className="mt-1 space-y-0.5">
                           {lowStockItems.map(m => (
@@ -1139,7 +1160,7 @@ function InventoryContent() {
         )}
 
         {/* Add Material Form */}
-        {activeTab === 'raw-materials' && (
+        {activeTab === 'raw-materials' && can('inventory.add') && (
           <form onSubmit={handleCreateMaterial} noValidate className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Add Inventory Item</h2>
             <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
@@ -1501,7 +1522,8 @@ function InventoryContent() {
         })()}
 
         {/* AI Historical Upload */}
-        {activeTab === 'ai-predictions' && can('forecasting.view') && (
+        {/* Uploading or recomputing the AI data changes it, so it needs Manage AI data */}
+        {activeTab === 'ai-predictions' && can('forecasting.manage') && (
           <div className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
               <div>
@@ -1572,6 +1594,12 @@ function InventoryContent() {
         {activeTab === 'waste-log' && can('inventory.log_waste') && (
           <form onSubmit={handleCreateWasteLog} noValidate className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-1">Log Waste / Scrap</h2>
+            {wasteSuccess && (
+              <p role="status" className="mb-3 flex items-center justify-between gap-3 rounded-lg bg-green-50 border border-green-200 px-3 py-2 text-sm text-green-800">
+                <span>✓ {wasteSuccess}</span>
+                <button type="button" onClick={() => setWasteSuccess('')} aria-label="Dismiss" className="text-green-700 hover:text-green-900">×</button>
+              </p>
+            )}
             <p className="text-xs text-gray-500 mb-4">For waste not tied to a job order (damaged or spoiled stock). Extra material used on a job order is recorded on that job order&apos;s page so it counts in its cost.</p>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
               <div {...fe.field('waste-material')}>
@@ -1903,7 +1931,7 @@ function InventoryContent() {
                             <span className={`px-2 py-1 text-xs font-medium rounded-full ${status.class}`}>
                               {status.label}
                             </span>
-                            {canChangeMaterial(material) && (
+                            {can('inventory.edit') && canChangeMaterial(material) && (
                               <button
                                 onClick={() => startEditMaterial(material)}
                                 className="text-sm font-medium text-[#011c72] hover:text-[#011c72] transition-colors"
@@ -1955,7 +1983,9 @@ function InventoryContent() {
                   <ul className="space-y-2">
                     {rows.map((t) => {
                       const mine = user?.branchId === t.destinationBranchId;
-                      const canAct = canDistribute || can('branches.all') || (can('premade.receive') && mine);
+                      // The server needs premade.receive for both buttons; all-branch access only
+                      // widens which deliveries that covers (it doesn't grant the action itself)
+                      const canAct = can('premade.receive') && (mine || can('branches.all'));
                       return (
                         <li key={t.id}
                           className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3">
@@ -2021,7 +2051,7 @@ function InventoryContent() {
                 </div>
               ) : (
                 <Paginated items={filteredFinishedGoods} resetKey={[searchTerm, premadeBranchFilter]} label="products">{rows => (
-                <table className="w-full">
+                <table className="w-full table-sticky-actions">
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Product</th>
@@ -2114,12 +2144,14 @@ function InventoryContent() {
                               </div>
                             ) : (
                               <>
+                              {can('premade.edit') && (
                               <button
                                 onClick={() => startEditPremade(item)}
                                 className="text-[#011c72] hover:text-[#011c72] text-sm font-medium"
                               >
                                 Edit
                               </button>
+                              )}
                               {can('premade.adjust_stock') && (can('branches.all') || item.branchId === user?.branchId) && (
                                 <button
                                   onClick={() => openAdjust({ kind: 'premade', id: item.id, current: item.quantity, name: item.name,
@@ -2432,7 +2464,7 @@ function InventoryContent() {
                 </div>
               ) : (
                 <Paginated items={filteredWasteLogs} resetKey={wasteSearch} label="waste logs">{rows => (
-                <table className="w-full">
+                <table className={`w-full ${can("inventory.log_waste") ? "table-sticky-actions" : ""}`}>
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>

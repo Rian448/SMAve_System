@@ -13,6 +13,9 @@ export default function ProductOrderDetailPage() {
   const router = useRouter();
   const { user, can } = useAuth();
   const isAdmin = can('branches.all');
+  // The order's steps change it; viewing accounts (e.g. the owner) only follow along
+  const canEditOrder = can('product_orders.edit');
+  const canRecordPayment = can('product_orders.payment');
   const [order, setOrder] = useState<ProductOrder | null>(null);
   const [timeline, setTimeline] = useState<ProductOrderTimelineEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -356,13 +359,13 @@ export default function ProductOrderDetailPage() {
                       <span className="ml-2 text-xs text-orange-500">from {item.sourceBranchName}</span>
                     )}
                   </span>
-                  <span className="text-gray-600">₱{item.total.toLocaleString()}</span>
+                  <span className="text-gray-600">₱{item.total.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                 </div>
               ))}
             </div>
             <div className="mt-4 pt-3 border-t border-gray-200 flex justify-between">
               <span className="font-medium text-gray-800">Total Amount</span>
-              <span className="text-xl font-semibold text-[#011c72]">₱{order.totalAmount.toLocaleString()}</span>
+              <span className="text-xl font-semibold text-[#011c72]">₱{order.totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
             </div>
           </div>
 
@@ -388,7 +391,7 @@ export default function ProductOrderDetailPage() {
                     </div>
                   </div>
                 </div>
-                {order.status === 'pending' && (
+                {canEditOrder && order.status === 'pending' && (
                   <button
                     onClick={() => setShowInvoice(true)}
                     disabled={saveState === 'saving'}
@@ -424,7 +427,7 @@ export default function ProductOrderDetailPage() {
                       <p className="text-xs text-gray-500 mt-1">Record payment amount received</p>
                     </div>
                   </div>
-                  {order.status !== 'pending' && order.status !== 'completed' && !(order.amountPaid && order.amountPaid > 0) && (
+                  {canEditOrder && order.status !== 'pending' && order.status !== 'completed' && !(order.amountPaid && order.amountPaid > 0) && (
                     <button
                       onClick={() => updateOrder({ status: 'pending' })}
                       disabled={saveState === 'saving'}
@@ -459,7 +462,7 @@ export default function ProductOrderDetailPage() {
                       )}
                     </div>
 
-                    {order.paymentStatus !== 'paid' && (
+                    {canRecordPayment && order.paymentStatus !== 'paid' && (
                       <div className="space-y-2">
                         <label className="block text-xs font-medium text-gray-600">Record Payment</label>
                         <div className="relative">
@@ -531,7 +534,7 @@ export default function ProductOrderDetailPage() {
                     </div>
                   </div>
                 </div>
-                {order.paymentStatus === 'paid' && order.status !== 'completed' && (
+                {canEditOrder && order.paymentStatus === 'paid' && order.status !== 'completed' && (
                   <button
                     onClick={() => updateOrder({ status: 'completed' })}
                     disabled={saveState === 'saving'}
@@ -549,8 +552,8 @@ export default function ProductOrderDetailPage() {
               </div>
             </div>
 
-            {/* Cancel button - always available */}
-            {order.status !== 'completed' && order.status !== 'cancelled' && (
+            {/* Cancel button - for those who may change the order */}
+            {canEditOrder && order.status !== 'completed' && order.status !== 'cancelled' && (
               <button
                 onClick={() => updateOrder({ status: 'cancelled' })}
                 disabled={saveState === 'saving'}

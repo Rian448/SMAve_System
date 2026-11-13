@@ -1003,6 +1003,18 @@ export interface PurchaseOrder {
   receivedAt?: string;
   receivedBy?: number;
   receivedByName?: string | null;
+  /** Paying the supplier, apart from receiving the goods */
+  amountPaid: number;
+  balance: number;
+  paymentStatus: 'unpaid' | 'partial' | 'paid';
+  /** How each was paid isn't sent here: it shows in the Expense Log only */
+  payments: PurchaseOrderPayment[];
+}
+
+export interface PurchaseOrderPayment {
+  id: number; amount: number; paymentDate: string | null; referenceNumber: string | null; notes: string | null;
+  recordedByName: string | null; recordedAt: string | null;
+  voided: boolean; voidedAt: string | null; voidedByName: string | null; voidReason: string | null;
 }
 
 export interface DeliveryItem {
@@ -1111,11 +1123,14 @@ export interface SalesReport {
     totalRevenue: number;
     pendingRevenue: number;
     averageOrderValue: number;
+    /** VAT inside the earned job order and premade sales (not revenue) */
+    vatCollected?: number;
   };
   statusBreakdown: Array<{ status: string; count: number; value: number }>;
   dailySales: Array<{ date: string; orders: number; revenue: number }>;
   premadeSummary: {
     totalOrders: number;
+    completedOrders?: number;
     completedRevenue: number;
     pendingRevenue: number;
   };
@@ -1277,10 +1292,16 @@ export class ApiError extends Error {
 export interface MonthlyFinancials { month: string; sales: number; expenses: number; netIncome: number }
 export interface MethodAmount { method: string; amount: number }
 
+/** Owner Dashboard filters: a date range (Philippine dates) and optionally one branch */
+export interface OwnerFilters { startDate?: string; endDate?: string; branchId?: number | '' }
+
 export interface OwnerSummary {
-  period: { startDate: string; endDate: string };
-  ytd: { sales: number; totalExpenses: number; netIncome: number; profitMargin: number; grossProfit: number; vatCollected: number };
-  thisMonth: { sales: number; totalExpenses: number; netIncome: number };
+  period: { startDate: string; endDate: string; branchId: number | null };
+  totals: {
+    sales: number; grossReceipts: number; vatCollected: number; grossProfit: number; totalExpenses: number;
+    netIncome: number; profitMargin: number; orderCounts: { jobOrders: number; premadeOrders: number };
+  };
+  /** What customers owe today (not limited to the period) */
   receivables: number;
   monthly: MonthlyFinancials[];
   cashflowByMethod: { in: MethodAmount[]; out: MethodAmount[]; totalIn: number; totalOut: number };
@@ -1293,6 +1314,8 @@ export interface ProfitAndLoss {
   grossProfit: number;
   operatingExpenses: { byCategory: { category: string; amount: number }[]; total: number };
   totalExpenses: number; netIncome: number; profitMargin: number; vatCollected: number;
+  /** What customers paid for these sales: sales + VAT */
+  grossReceipts: number;
   orderCounts: { jobOrders: number; premadeOrders: number };
   monthly: MonthlyFinancials[];
 }
@@ -1308,7 +1331,7 @@ export interface JobCostingRow {
 
 export interface OwnerJobCosting {
   jobs: JobCostingRow[];
-  totals: { sellingPrice: number; materials: number; labor: number; otherCosts: number; grossMargin: number; marginPercent: number };
+  totals: { sellingPrice: number; materials: number; labor: number; otherCosts: number; grossMargin: number; marginPercent: number; vat?: number };
 }
 
 export interface ReceivableInvoice {
@@ -1326,7 +1349,10 @@ export interface OwnerReceivables {
 
 export interface OwnerInventory {
   materialsValue: number; premadeValue: number; totalValue: number;
-  cogsYtd: ProfitAndLoss['cogs'];
+  /** Cost of goods sold in the selected period */
+  cogs: ProfitAndLoss['cogs'];
+  /** Items whose stock or cost isn't a real number; valued at 0 until fixed */
+  invalidValues: string[];
   restock: { id: number; name: string; color: string | null; branchName: string | null; stock: number; threshold: number; status: 'out' | 'low' }[];
   outOfStock: number; lowStock: number;
   movements: { date: string | null; direction: 'in' | 'out'; item: string; quantity: number; reason: string; branchName: string | null }[];
@@ -1336,9 +1362,19 @@ export interface Expense {
   id: number; date: string; category: string; particulars: string; amount: number;
   paymentMethod: string; notes: string | null; branchId: number | null; branchName: string | null;
   createdBy: string | null; createdAt: string | null;
+  referenceNumber?: string | null;
+  /** Set when the entry is a supplier payment: changed or voided from its purchase order */
+  purchaseOrderPaymentId?: number | null;
+  purchaseOrderId?: number | null;
 }
 
-export interface ExpenseList { expenses: Expense[]; total: number; categories: string[]; paymentMethods: string[] }
+export interface ExpenseList {
+  expenses: Expense[]; total: number; categories: string[]; paymentMethods: string[];
+  /** Of the total, supplier payments for purchase orders (stock bought, not a running cost) */
+  supplierPaymentsTotal?: number;
+  /** Categories to filter by: the ones for logging, plus Supplier Payments */
+  filterCategories?: string[];
+}
 
 /** The only ways customers can pay (and be refunded). Older records may still show
  *  card, Maya or cheque payments: those keep their labels below but can't be chosen. */
@@ -1474,10 +1510,11 @@ export const api = {
   // AUTHENTICATION
   // ==================
   auth: {
-    login: (username: string, password: string) =>
+    /** identifier: the account's username or its email address */
+    login: (identifier: string, password: string) =>
       fetchApi<AuthResponse>('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ identifier: identifier.trim(), password }),
       }),
     
     logout: () =>
@@ -1760,7 +1797,10 @@ export const api = {
         body: JSON.stringify(order),
       }),
 
-    updateJobOrder: (id: number, updates: Partial<JobOrder> & JobOrderPriceInput) =>
+    /** confirmDeposit: only when confirming a draft; its down payment is recorded in the same save */
+    updateJobOrder: (id: number, updates: Partial<JobOrder> & JobOrderPriceInput & {
+      confirmDeposit?: { amount: number; paymentMethod: string };
+    }) =>
       fetchApi<JobOrder>(`/api/sales/job-orders/${id}`, {
         method: 'PUT',
         body: JSON.stringify(updates),
@@ -1826,16 +1866,22 @@ export const api = {
     /** The rest of a partly received PO won't come: stop waiting for it */
     closeReceiving: (id: number, reason: string) =>
       fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/close-receiving`, { method: 'POST', body: JSON.stringify({ reason }) }),
+    /** Pay the supplier (also makes the Expense Log entry) */
+    recordPayment: (id: number, data: { amount: number; paymentDate: string; paymentMethod: string; referenceNumber?: string; notes?: string }) =>
+      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/payments`, { method: 'POST', body: JSON.stringify(data) }),
+    voidPayment: (id: number, paymentId: number, reason: string) =>
+      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/payments/${paymentId}/void`, { method: 'POST', body: JSON.stringify({ reason }) }),
   },
 
   // ==================
   // DELIVERIES
   // ==================
   deliveries: {
-    getAll: (params?: { status?: string; type?: string }) => {
+    getAll: (params?: { status?: string; type?: string; jobOrderId?: number }) => {
       const query = new URLSearchParams();
       if (params?.status) query.append('status', params.status);
       if (params?.type) query.append('type', params.type);
+      if (params?.jobOrderId) query.append('jobOrderId', String(params.jobOrderId));
       return fetchApi<Delivery[]>(`/api/deliveries?${query}`);
     },
     
@@ -1869,6 +1915,13 @@ export const api = {
       fetchApi<Delivery>(`/api/deliveries/${id}/status`, {
         method: 'PUT',
         body: JSON.stringify({ status }),
+      }),
+
+    /** Administrators: undo a delivery marked delivered by mistake (back to in transit) */
+    reopen: (id: number, reason: string) =>
+      fetchApi<Delivery>(`/api/deliveries/${id}/reopen`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
       }),
     
   },
@@ -2064,14 +2117,19 @@ export const api = {
   // SETTINGS
   // ==================
   owner: {
-    summary: () => fetchApi<OwnerSummary>('/api/owner/summary'),
-    pnl: (p?: { startDate?: string; endDate?: string; branchId?: number | '' }) =>
+    summary: (p?: OwnerFilters) => fetchApi<OwnerSummary>(`/api/owner/summary${periodQuery(p)}`),
+    pnl: (p?: OwnerFilters) =>
       fetchApi<ProfitAndLoss>(`/api/owner/pnl${periodQuery(p)}`),
-    jobCosting: (p?: { startDate?: string; endDate?: string }) =>
+    jobCosting: (p?: OwnerFilters) =>
       fetchApi<OwnerJobCosting>(`/api/owner/job-costing${periodQuery(p)}`),
-    receivables: (status?: string) =>
-      fetchApi<OwnerReceivables>(`/api/owner/receivables${status ? `?status=${status}` : ''}`),
-    inventory: () => fetchApi<OwnerInventory>('/api/owner/inventory'),
+    receivables: (status?: string, branchId?: number | '') => {
+      const q = new URLSearchParams();
+      if (status) q.set('status', status);
+      if (branchId) q.set('branchId', String(branchId));
+      const s = q.toString();
+      return fetchApi<OwnerReceivables>(`/api/owner/receivables${s ? `?${s}` : ''}`);
+    },
+    inventory: (p?: OwnerFilters) => fetchApi<OwnerInventory>(`/api/owner/inventory${periodQuery(p)}`),
   },
 
   expenses: {

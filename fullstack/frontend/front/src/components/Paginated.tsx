@@ -89,8 +89,9 @@ function PageControls({ page, totalPages, from, to, total, size, label, boxed, o
   return (
     <nav aria-label="Pages" className={`flex flex-wrap items-center justify-between gap-3 px-4 py-3 bg-white ${
       boxed ? 'rounded-xl border border-gray-200 shadow-sm' : 'border-t border-gray-200'}`}>
-      <div className="flex items-center gap-3 text-sm text-gray-600">
-        <span>Showing <strong className="text-gray-900">{from}–{to}</strong> of <strong className="text-gray-900">{total}</strong> {label}</span>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-600">
+        <span>Showing <strong className="text-gray-900">{from}–{to}</strong> of <strong className="text-gray-900">{total.toLocaleString('en-PH')}</strong> {label}</span>
+        <span className="text-gray-500">Page <strong className="text-gray-900">{page}</strong> of <strong className="text-gray-900">{totalPages}</strong></span>
         <label className="flex items-center gap-1.5">
           <span className="text-gray-500">Per page</span>
           <select value={size} onChange={e => onSize(Number(e.target.value))}
@@ -99,7 +100,7 @@ function PageControls({ page, totalPages, from, to, total, size, label, boxed, o
           </select>
         </label>
       </div>
-      <div className="flex items-center gap-1">
+      <div className="flex flex-wrap items-center gap-1">
         <button type="button" onClick={() => onPage(page - 1)} disabled={page <= 1}
           className={`${btn} border-gray-200 bg-white text-gray-700 hover:bg-gray-50`}>Previous</button>
         {pageList(page, totalPages).map((p, i) => p === '…' ? (

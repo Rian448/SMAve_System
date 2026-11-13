@@ -33,11 +33,21 @@ const PAGE_PERMISSIONS: [string, string[]][] = [
   ['/delivery/new', ['item_trail.add']],
   ['/delivery', ['item_trail.view']],
   ['/item-history', ['inventory.view', 'premade.view']],
-  ['/reports', ['reports.sales', 'reports.inventory', 'reports.settlement', 'reports.audit_trail']],
-  ['/settings', ['settings.edit', 'users.manage', 'branches.manage', 'reports.audit_trail']],
+  ['/reports', ['reports.sales', 'reports.inventory', 'reports.settlement']],
+  ['/audit-trail', ['reports.audit_trail']],
+  ['/settings', ['settings.edit', 'users.manage', 'branches.manage']],
   ['/announcements', ['announcements.view']],
   ['/worker-dashboard', ['workers.add', 'workers.edit', 'workers.delete']],
 ];
+
+/**
+ * Where an account starts (after login, "Back to Dashboard", fallbacks): the
+ * Owner Dashboard for an account that has it but not the day-to-day Dashboard,
+ * otherwise the Dashboard.
+ */
+export function homePath(can: (...permissions: string[]) => boolean): string {
+  return can('owner.view') && !can('dashboard.view') ? '/owner' : '/dashboard';
+}
 
 /** Permissions that open this page, or null when it needs none. */
 export function pagePermissions(pathname: string): string[] | null {

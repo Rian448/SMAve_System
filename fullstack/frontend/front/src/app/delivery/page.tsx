@@ -7,6 +7,7 @@ import { api, TransferDashboardItem, TransferSummary } from '@/lib/api';
 import { formatDateTime } from '@/lib/dateUtils';
 import Link from 'next/link';
 import Paginated from '@/components/Paginated';
+import { JobOrderDeliveriesPanel } from '@/components/JobOrderDelivery';
 
 // 'overdue' is applied client-side: the server has no overdue filter, only a flag per row.
 type StatusFilter = 'all' | 'pending' | 'transferred' | 'received' | 'overdue';
@@ -50,10 +51,12 @@ function ItemTrailContent() {
   // Cross-branch staff act on other branches' transfers as an override
   const isAdmin = can('branches.all');
   const canSee = !!user && can('item_trail.view');
+  // Sending and receiving transfers needs the permission the server checks; viewing accounts only look
+  const canTransfer = can('product_orders.transfer');
 
   // The Audit Trail moved to Settings: forward old ?view=audit links there
   useEffect(() => {
-    if (searchParams.get('view') === 'audit') router.replace('/settings?tab=audit');
+    if (searchParams.get('view') === 'audit') router.replace('/audit-trail');
   }, [searchParams, router]);
 
   const pinKey = user ? `itemTrailPins:${user.id}` : null;
@@ -162,7 +165,7 @@ function ItemTrailContent() {
 
   const actionableIds = () => new Set(
     transfers
-      .filter(t => t.status === 'pending' || t.status === 'transferred')
+      .filter(t => canTransfer && (t.status === 'pending' || t.status === 'transferred'))
       .map(t => t.id)
   );
 
@@ -198,6 +201,9 @@ function ItemTrailContent() {
             <p className="text-gray-500 mt-1 text-sm">Track all premade product transfers between branches in real time</p>
           </div>
         </div>
+
+        {/* Deliveries of finished job orders (scheduled from the job order or here) */}
+        <JobOrderDeliveriesPanel />
 
         {/* Alerts */}
         {actionError && (
@@ -319,6 +325,7 @@ function ItemTrailContent() {
         ) : (
           <div className="space-y-1">
             {/* Select all row */}
+            {canTransfer && (
             <div className="flex items-center gap-2 px-2 pb-1">
               <input type="checkbox"
                 checked={selected.size > 0 && selected.size === actionableIds().size}
@@ -326,6 +333,7 @@ function ItemTrailContent() {
                 className="w-4 h-4 rounded border-gray-300 text-[#011c72] cursor-pointer" />
               <span className="text-xs text-gray-400">Select actionable</span>
             </div>
+            )}
 
             <Paginated items={sortedTransfers} resetKey={statusFilter} label="transfers" boxed>{rows => (<>
             {rows.map(t => (
@@ -340,6 +348,7 @@ function ItemTrailContent() {
                 onConfirm={transfer => triggerAction(transfer, 'confirm-receipt')}
                 savingId={savingId}
                 isAdmin={isAdmin}
+                canAct={canTransfer}
                 fmt={fmt}
               />
             ))}
@@ -384,12 +393,13 @@ interface TransferRowProps {
   onConfirm: (transfer: TransferDashboardItem) => void;
   savingId: number | null;
   isAdmin: boolean;
+  canAct: boolean;
   fmt: (iso?: string) => string;
 }
 
-function TransferRow({ transfer: t, selected, pinned, onTogglePin, onToggle, onMarkSent, onConfirm, savingId, isAdmin, fmt }: TransferRowProps) {
+function TransferRow({ transfer: t, selected, pinned, onTogglePin, onToggle, onMarkSent, onConfirm, savingId, isAdmin, canAct, fmt }: TransferRowProps) {
   const isSaving = savingId === t.id;
-  const isActionable = t.status === 'pending' || t.status === 'transferred';
+  const isActionable = canAct && (t.status === 'pending' || t.status === 'transferred');
   const total = t.items.reduce((s, i) => s + (i.total ?? i.unitPrice * i.quantity), 0);
 
   const agingLabel = t.agingHours < 1
@@ -444,7 +454,7 @@ function TransferRow({ transfer: t, selected, pinned, onTogglePin, onToggle, onM
               {!t.isOverdue && t.status !== 'received' && (
                 <span className="text-xs text-gray-400">{agingLabel}</span>
               )}
-              <span className="ml-auto text-sm font-bold text-gray-900">₱{total.toLocaleString()}</span>
+              <span className="ml-auto text-sm font-bold text-gray-900">₱{total.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
               <button onClick={() => onTogglePin(t.id)}
                 title={pinned ? 'Unpin' : 'Pin to top'}
                 aria-label={pinned ? 'Unpin transfer' : 'Pin transfer to top'}
@@ -522,13 +532,13 @@ function TransferRow({ transfer: t, selected, pinned, onTogglePin, onToggle, onM
             {/* Actions */}
             <div className="flex items-center gap-2 justify-end flex-wrap">
               {/* Admin override label */}
-              {isAdmin && t.status !== 'received' && (
+              {canAct && isAdmin && t.status !== 'received' && (
                 <span className="text-[10px] font-semibold text-amber-600 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
                   Admin — requires confirmation to act
                 </span>
               )}
 
-              {t.status === 'pending' && (
+              {canAct && t.status === 'pending' && (
                 <>
                   <button onClick={() => onMarkSent(t)} disabled={isSaving}
                     className={`px-4 py-1.5 rounded-lg text-sm font-semibold disabled:opacity-50 flex items-center gap-1.5 ${isAdmin ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
@@ -537,7 +547,7 @@ function TransferRow({ transfer: t, selected, pinned, onTogglePin, onToggle, onM
                   </button>
                 </>
               )}
-              {t.status === 'transferred' && (
+              {canAct && t.status === 'transferred' && (
                 <>
                   <button onClick={() => onConfirm(t)} disabled={isSaving}
                     className={`px-4 py-1.5 rounded-lg text-sm font-semibold disabled:opacity-50 flex items-center gap-1.5 ${isAdmin ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-green-600 text-white hover:bg-green-700'}`}>

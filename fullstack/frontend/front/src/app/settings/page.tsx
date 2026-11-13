@@ -8,9 +8,10 @@ import VatRateSetting from '@/components/VatRateSetting';
 import { formatDate } from '@/lib/dateUtils';
 import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
 import Paginated from '@/components/Paginated';
-import AuditTrailPanel from '@/components/AuditTrailPanel';
+import { passwordProblem } from '@/lib/password';
+import PasswordChecklist from '@/components/PasswordChecklist';
 
-type TabType = 'general' | 'users' | 'branches' | 'notifications' | 'audit';
+type TabType = 'general' | 'users' | 'branches' | 'notifications';
 
 // Roles not offered when adding a user: workers are managed in Worker Management
 const HIDDEN_ROLES = ['seat_maker', 'sewer'];
@@ -19,12 +20,11 @@ export default function SettingsPage() {
   const { user, can, checkAuth } = useAuth();
   const { confirm, confirmDialog } = useConfirm();
   const [activeTab, setActiveTab] = useState<TabType>('general');
-  // ?tab=audit opens the Audit Trail directly (old Item Trail links point here)
+  // The Audit Trail has its own page now; keep old ?tab=audit links working
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('tab') === 'audit' && can('reports.audit_trail')) {
-      setActiveTab('audit');
+    if (new URLSearchParams(window.location.search).get('tab') === 'audit') {
+      window.location.replace('/audit-trail');
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [saving, setSaving] = useState(false);
   
@@ -178,7 +178,7 @@ export default function SettingsPage() {
       'user-fullName': !userFormData.fullName.trim() && 'Enter the full name.',
       'user-email': !userFormData.email.trim() ? 'Enter an email address.' : emailProblem(userFormData.email),
       'user-password': !editingUser && !password ? 'Enter a password for the new user.'
-        : password && password.length < 8 && 'The password must be at least 8 characters.',
+        : password && passwordProblem(password),
       'user-adminPassword': changingPassword && !adminPassword && 'Enter your own password to confirm the password change.',
       'user-role': !userFormData.role && 'Choose a role.',
       'user-branch': !userFormData.branchId && 'Choose a branch.',
@@ -521,16 +521,9 @@ export default function SettingsPage() {
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
       </svg>
     )},
-    { id: 'audit' as TabType, name: 'Audit Trail', icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-      </svg>
-    )},
   ];
 
-  // The audit log is administrator-only on the server, so only show it to those allowed
-  const tabs = allTabs.filter(t =>
-    (t.id !== 'users' || can('users.manage')) && (t.id !== 'audit' || can('reports.audit_trail')));
+  const tabs = allTabs.filter(t => t.id !== 'users' || can('users.manage'));
 
   const renderContent = () => {
     switch (activeTab) {
@@ -645,7 +638,7 @@ export default function SettingsPage() {
               ) : (
                 <div className="overflow-x-auto">
               <Paginated items={filteredUsers} resetKey={roleFilter} label="users">{rows => (
-              <table className="w-full">
+              <table className="w-full table-sticky-actions">
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">User</th>
@@ -947,17 +940,6 @@ export default function SettingsPage() {
           </div>
         );
 
-      case 'audit':
-        return (
-          <div className="space-y-4">
-            <div>
-              <h3 className="text-lg font-semibold text-gray-900">Audit Trail</h3>
-              <p className="text-sm text-gray-500">Every recorded action in the system: who did what, and when</p>
-            </div>
-            <AuditTrailPanel />
-          </div>
-        );
-
       default:
         return null;
     }
@@ -1249,7 +1231,9 @@ export default function SettingsPage() {
                       value={userFormData.password}
                       onChange={(e) => setUserFormData({ ...userFormData, password: e.target.value })}
                       className="w-full px-4 py-2 pr-11 [&::-ms-reveal]:hidden rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                      placeholder={editingUser ? 'Leave blank to keep current password' : 'Enter password'}
+                      placeholder={editingUser ? 'Leave blank to keep current password' : 'Create a strong password'}
+                      autoComplete="new-password"
+                      aria-describedby="user-password-rules"
                     />
                     <button
                       type="button"
@@ -1270,6 +1254,10 @@ export default function SettingsPage() {
                       )}
                     </button>
                   </div>
+                  {/* Shown for a new account, or once a new password is being typed for an existing one */}
+                  {(!editingUser || userFormData.password) && (
+                    <PasswordChecklist id="user-password-rules" password={userFormData.password} />
+                  )}
                   <FieldError message={fe.errors['user-password']} />
                 </div>
 

@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from html import escape
 
 app = Flask(__name__)
@@ -345,6 +345,9 @@ class ProductOrder(db.Model):
     vat_percent = db.Column(db.Float, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # When the sale was completed (UTC). updated_at moves on every later edit, so
+    # it can't date the sale; older completed orders are backfilled from it once.
+    completed_at = db.Column(db.DateTime, nullable=True)
 
     branch = db.relationship('Branch', foreign_keys=[branch_id])
     pickup_branch = db.relationship('Branch', foreign_keys=[pickup_branch_id])
@@ -824,8 +827,12 @@ class WorkerAvailabilitySchedule(db.Model):
     __table_args__ = (db.UniqueConstraint('managed_worker_id', 'date', name='uq_worker_date'),)
 
 class Expense(db.Model):
-    """Money the business spends that isn't stock bought through purchase orders:
-    rent, power, wages paid outside job orders, supplies and so on."""
+    """Money the business pays out: rent, power, wages paid outside job orders,
+    supplies and so on, logged by hand -- and supplier payments for purchase
+    orders, made automatically (purchase_order_payment_id set). Those are stock
+    bought, not running costs: they show as money paid out, but stay out of the
+    operating expenses in profit and loss (the material's cost counts there as
+    cost of goods sold once it is used)."""
     __tablename__ = 'expenses'
     id = db.Column(db.Integer, primary_key=True)
     expense_date = db.Column(db.Date, nullable=False, index=True)
@@ -837,9 +844,35 @@ class Expense(db.Model):
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
     created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # Receipt / transfer / GCash reference, when there is one
+    reference_number = db.Column(db.String(100), nullable=True)
+    # Set on the entry made for a supplier payment (one entry per payment)
+    purchase_order_payment_id = db.Column(db.Integer, nullable=True, index=True)
 
     branch = db.relationship('Branch')
     creator = db.relationship('User', foreign_keys=[created_by])
+
+class PurchaseOrderPayment(db.Model):
+    """A payment made to the supplier for a purchase order (a PO may be paid in
+    parts). Each one has its Expense Log entry, which holds how it was paid.
+    A mistake is voided, never deleted, so the history stays."""
+    __tablename__ = 'purchase_order_payments'
+    id = db.Column(db.Integer, primary_key=True)
+    purchase_order_id = db.Column(db.Integer, db.ForeignKey('purchase_orders.id'), nullable=False, index=True)
+    amount = db.Column(db.Float, nullable=False)
+    payment_date = db.Column(db.Date, nullable=False)
+    payment_method = db.Column(db.String(30), nullable=False)
+    reference_number = db.Column(db.String(100), nullable=True)
+    notes = db.Column(db.Text, nullable=True)
+    expense_id = db.Column(db.Integer, nullable=True)
+    recorded_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    voided_at = db.Column(db.DateTime, nullable=True)
+    voided_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    void_reason = db.Column(db.Text, nullable=True)
+
+    recorder = db.relationship('User', foreign_keys=[recorded_by])
+    voider = db.relationship('User', foreign_keys=[voided_by])
 
 class AuditLog(db.Model):
     """Audit trail. Kept in the database — an in-memory list was wiped on every
@@ -996,7 +1029,7 @@ PERMISSION_MODULES = [
                                      ('adjust_stock', 'Adjust stock')]),
     ('suppliers', 'Suppliers', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit')]),
     ('purchase_orders', 'Purchase Orders', [('view', 'View'), ('add', 'Add'), ('approve', 'Approve'),
-                                            ('receive', 'Receive')]),
+                                            ('receive', 'Receive'), ('pay', 'Record supplier payments')]),
     ('product_orders', 'Product Orders', [('view', 'View'), ('edit', 'Edit'), ('payment', 'Record payments'),
                                           ('transfer', 'Transfers'), ('flag_spam', 'Flag spam')]),
     ('costing', 'Costing', [('view', 'View'), ('edit', 'Edit')]),
@@ -1023,7 +1056,7 @@ PERMISSIONS = {
 }
 
 _SUPERVISOR_EXCLUDED = {
-    'payments.approve_override', 'purchase_orders.approve', 'reports.audit_trail',
+    'payments.approve_override', 'purchase_orders.approve', 'purchase_orders.pay', 'reports.audit_trail',
     'workers.add', 'workers.edit', 'workers.delete', 'workers.delete_assignment',
     'catalog.manage', 'blacklist.manage', 'branches.manage', 'branches.all', 'users.manage',
     'owner.view', 'expenses.delete',
@@ -1049,9 +1082,10 @@ ROLE_DEFAULT_PERMISSIONS = {
         'expenses.view', 'expenses.add',
     }),
     # The owner reviews the results of the day-to-day work rather than doing it:
-    # every view, all branches, and the owner dashboard -- no editing
+    # every view, all branches, and the owner dashboard (instead of the day-to-day
+    # one) -- no editing
     'owner': frozenset({
-        'owner.view', 'dashboard.view', 'branches.all',
+        'owner.view', 'branches.all',
         'sales.view', 'custom_requests.view', 'customers.view', 'payments.view',
         'inventory.view', 'premade.view', 'suppliers.view', 'purchase_orders.view', 'product_orders.view',
         'costing.view', 'forecasting.view', 'item_trail.view', 'announcements.view', 'workers.view',
@@ -1444,6 +1478,12 @@ def run_migrations():
         "UPDATE branches SET deactivated_at = CURRENT_TIMESTAMP WHERE is_active = FALSE AND deactivated_at IS NULL",
         # Who confirmed a purchase order's delivery
         "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS received_by INTEGER REFERENCES users(id)",
+        # When a premade sale was completed; older ones take their last update
+        "ALTER TABLE product_orders ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP",
+        # Supplier payments (purchase_order_payments is created by create_all)
+        "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS reference_number VARCHAR(100)",
+        "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS purchase_order_payment_id INTEGER",
+        "UPDATE product_orders SET completed_at = updated_at WHERE status = 'completed' AND completed_at IS NULL",
     ]
     is_sqlite = db.engine.dialect.name == 'sqlite'
     for sql in migrations:
@@ -1458,9 +1498,29 @@ def run_migrations():
         except Exception:
             pass  # Column already exists or statement not supported on this DB
 
+def purge_obsolete_permission_overrides():
+    """Delete per-user grants and revokes of permissions that no longer exist
+    (e.g. appointments.view, from the retired Appointments module). They never
+    had any effect (effective_permissions skips them), but the permissions dialog
+    sent them back on save, where they were refused as unknown -- so the
+    affected accounts' permissions could not be changed at all."""
+    stale = UserPermissionOverride.query.filter(~UserPermissionOverride.permission.in_(list(PERMISSIONS))).all()
+    if not stale:
+        return
+    users = {o.user_id for o in stale}
+    for o in stale:
+        db.session.delete(o)
+    # The users' permission fingerprint changes: an open dialog must reload first
+    for user in User.query.filter(User.id.in_(users)).all():
+        bump_auth_version(user)
+    db.session.commit()
+    print(f"[permissions] removed {len(stale)} obsolete override(s): "
+          f"{', '.join(sorted({o.permission for o in stale}))}", flush=True)
+
 def init_db():
     db.create_all()
     run_migrations()
+    purge_obsolete_permission_overrides()
 
     # Seed roles
     for role in default_roles:
@@ -1680,8 +1740,21 @@ def finite_number(value, default=None):
     return number if math.isfinite(number) else None
 
 def money(amount):
-    """Round to the centavo, halves up (0.005 -> 0.01), as a float."""
-    return float(Decimal(str(amount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+    """Round to the centavo, halves up (0.005 -> 0.01), as a float.
+
+    A value that isn't a real number (NaN or Infinity, e.g. from a stock or cost
+    saved before inputs were validated) counts as 0 instead of failing the whole
+    response, and very large values are rounded with enough precision that
+    quantize doesn't overflow."""
+    try:
+        value = float(amount or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value):
+        return 0.0
+    with localcontext() as ctx:
+        ctx.prec = 60
+        return float(Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 def vat_percent_error(raw):
     """Error message if raw isn't a valid VAT rate, else None."""
@@ -1716,7 +1789,7 @@ def vat_breakdown(gross, vat_percent):
 
 MAX_FAILED_ATTEMPTS = 5
 # Same reply for an unknown username and a wrong password, so neither is revealed
-LOGIN_FAILED_MESSAGE = 'Incorrect username or password.'
+LOGIN_FAILED_MESSAGE = 'Incorrect username/email or password.'
 LOCKOUT_MINUTES = 15
 
 def hash_password(raw_password: str) -> str:
@@ -1927,16 +2000,41 @@ def can_see_delivery(user, d):
 # AUTHENTICATION ROUTES
 # ============================================
 
+def find_login_account(identifier):
+    """The active account a login name points at, or None.
+
+    Usernames can't contain "@" (USERNAME_PATTERN), so anything with one is an
+    email, matched ignoring capitals; anything else is a username, exactly as
+    before. If it could mean more than one account (e.g. two old records whose
+    emails differ only in capitals) nobody is signed in rather than guessing.
+    Deactivated accounts are never found, whichever identifier is used."""
+    if not identifier:
+        return None
+    if '@' in identifier:
+        matches = User.query.filter(db.func.lower(User.email) == identifier.lower(),
+                                    User.is_active.is_(True)).limit(2).all()
+    else:
+        matches = User.query.filter(User.username == identifier, User.is_active.is_(True)).limit(2).all()
+    if len(matches) != 1:
+        if len(matches) > 1:
+            print(f"[auth] login name matches {len(matches)} accounts; refused", flush=True)
+        return None
+    return matches[0]
+
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    username = data.get('username', '')
+    data = request.get_json(silent=True) or {}
+    # "Username or email" (older clients send it as `username`)
+    identifier = str(data.get('identifier') or data.get('username') or '').strip()
     raw_password = data.get('password', '')
+    if not isinstance(raw_password, str):
+        raw_password = ''
 
-    user = User.query.filter_by(username=username, is_active=True).first()
-
+    user = find_login_account(identifier)
+    # Same reply for an unknown name, an unknown email and an ambiguous one
     if not user:
         return jsonify({'status': 'error', 'message': LOGIN_FAILED_MESSAGE}), 401
+    username = user.username  # logs name the account, not what was typed
 
     # Check if account is locked
     now_utc = datetime.utcnow()
@@ -2028,7 +2126,31 @@ RESET_CODE_MAX_ATTEMPTS = 5
 RESET_CODE_RESEND_SECONDS = 60
 RESET_CODE_MAX_PER_HOUR = 5
 MIN_PASSWORD_LENGTH = 8
+# Generous, so long passphrases work, but bounded so hashing can't be abused
+MAX_PASSWORD_LENGTH = 256
 EMAIL_PATTERN = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+# What every new or changed password needs. Spaces and any language's letters are
+# allowed; the frontend (lib/password.ts) shows the same list as the user types.
+PASSWORD_RULES = (
+    (lambda p: len(p) >= MIN_PASSWORD_LENGTH, f'at least {MIN_PASSWORD_LENGTH} characters'),
+    (lambda p: any(c.isupper() for c in p), 'an uppercase letter'),
+    (lambda p: any(c.islower() for c in p), 'a lowercase letter'),
+    (lambda p: any(c in '0123456789' for c in p), 'a number'),
+    (lambda p: any(not c.isalnum() and not c.isspace() for c in p), 'a symbol (such as @ # $ % & !)'),
+)
+
+def password_error(password):
+    """Why this password can't be used, or None. Never echoes the password."""
+    if not isinstance(password, str) or not password:
+        return 'Enter a password.'
+    if len(password) > MAX_PASSWORD_LENGTH:
+        return f'Password must be at most {MAX_PASSWORD_LENGTH} characters.'
+    missing = [label for ok, label in PASSWORD_RULES if not ok(password)]
+    if not missing:
+        return None
+    listed = missing[0] if len(missing) == 1 else ', '.join(missing[:-1]) + ' and ' + missing[-1]
+    return f'Password needs {listed}.'
 
 def send_email(to_email, to_name, subject, text, html):
     """Send one email through Brevo. Returns True on success.
@@ -2130,9 +2252,9 @@ def reset_password():
     new_password = data.get('newPassword') or ''
     if not email or not code or not new_password:
         return jsonify({'status': 'error', 'message': 'Email, code and new password are required'}), 400
-    if len(new_password) < MIN_PASSWORD_LENGTH:
-        return jsonify({'status': 'error',
-                        'message': f'Password must be at least {MIN_PASSWORD_LENGTH} characters'}), 400
+    error = password_error(new_password)
+    if error:
+        return jsonify({'status': 'error', 'message': error, 'code': 'weak_password'}), 400
 
     invalid = jsonify({'status': 'error', 'message': 'This code is invalid or has expired. Request a new one.'}), 400
     user = _active_user_by_email(email)
@@ -2262,9 +2384,9 @@ def change_my_password():
     user = User.query.get(request.current_user['id'])
     data = request.get_json(silent=True) or {}
     new_password = data.get('newPassword') or ''
-    if len(new_password) < MIN_PASSWORD_LENGTH:
-        return jsonify({'status': 'error',
-                        'message': f'New password must be at least {MIN_PASSWORD_LENGTH} characters.'}), 400
+    error = password_error(new_password)
+    if error:
+        return jsonify({'status': 'error', 'message': error, 'code': 'weak_password'}), 400
     error = check_current_password(user, data.get('currentPassword'))
     if error:
         return error
@@ -5339,6 +5461,10 @@ def create_job_order():
         return jsonify({'status': 'error', 'message': 'Down payment must be a number'}), 400
     if down_payment < 0 or down_payment > total_price:
         return jsonify({'status': 'error', 'message': 'Down payment must be between ₱0 and the order total'}), 400
+    if not is_draft:
+        error = deposit_error(total_price, down_payment)
+        if error:
+            return jsonify({'status': 'error', 'message': error, 'code': 'deposit'}), 400
     if down_payment > 0 and data.get('paymentMethod', 'cash') not in ACCEPTED_PAYMENT_METHODS:
         return jsonify({'status': 'error', 'message': PAYMENT_METHOD_ERROR}), 400
     if down_payment > 0 and not has_perm(request.current_user, 'payments.add'):
@@ -5670,9 +5796,36 @@ def update_job_order(order_id):
         if incomplete:
             db.session.rollback()
             return jsonify({'status': 'error', 'message': f'This draft is not complete yet: {incomplete}. Edit the draft first.'}), 400
+        # Like a new order, it needs its deposit; it is recorded in this same save,
+        # so a draft is never confirmed without it
+        deposit = data.get('confirmDeposit') or {}
+        amount = finite_number(deposit.get('amount'), 0.0) if isinstance(deposit, dict) else None
+        total = money(order.total_price or 0)
+        if amount is None or amount < 0 or money(float(order.down_payment or 0) + amount) > total:
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': 'Down payment must be between ₱0 and the order total'}), 400
+        error = deposit_error(total, float(order.down_payment or 0) + amount)
+        if error:
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': error, 'code': 'deposit'}), 400
+        if amount > 0:
+            method = deposit.get('paymentMethod', 'cash')
+            if method not in ACCEPTED_PAYMENT_METHODS:
+                db.session.rollback()
+                return jsonify({'status': 'error', 'message': PAYMENT_METHOD_ERROR}), 400
+            if not has_perm(user, 'payments.add'):
+                db.session.rollback()
+                return jsonify({'status': 'error', 'message': 'You do not have permission to record payments'}), 403
+            db.session.add(PaymentRecord(job_order_id=order.id, amount=money(amount), payment_method=method,
+                                         notes='Down payment', recorded_by=user['id']))
+            order.down_payment = money(float(order.down_payment or 0) + amount)
+            refresh_job_order_balance(order)
 
-    if data.get('status') == 'completed' and prev_status != 'completed':
-        order.completed_at = datetime.now()
+    # The day the work was finished, as a Philippine date (the server runs on UTC,
+    # so datetime.now() put work finished before 8 AM on the day before). An order
+    # moved straight to delivered was finished then too.
+    if order.status in EARNED_STATUSES and (prev_status not in EARNED_STATUSES or not order.completed_at):
+        order.completed_at = manila_today()
 
     order.updated_at = datetime.now()
 
@@ -6090,6 +6243,22 @@ def costed_job_orders(user):
     return query
 
 
+# The shop needs at least half of a job order's price paid before the work is
+# confirmed, so a customer who backs out doesn't leave it out of pocket. More (up
+# to the full price) is fine; the rest can be paid in parts afterwards.
+MIN_DEPOSIT_PERCENT = 50
+
+def minimum_deposit(total_price):
+    return money(float(total_price or 0) * MIN_DEPOSIT_PERCENT / 100)
+
+def deposit_error(total_price, paid):
+    """Message if `paid` is below the deposit a confirmed job order needs, else None."""
+    needed = minimum_deposit(total_price)
+    if float(total_price or 0) > 0 and money(paid or 0) < needed:
+        return (f'A down payment of at least {MIN_DEPOSIT_PERCENT}% of the total (₱{needed:,.2f}) '
+                f'is needed before the job order is confirmed')
+    return None
+
 def revenue_ex_vat(order):
     """What the order earns us: its total less any VAT collected for the government."""
     return vat_breakdown(order.total_price, order.vat_percent)['net']
@@ -6413,7 +6582,133 @@ def purchase_order_to_dict(po):
         'receivedAt': day(po.received_at),
         'receivedBy': po.received_by,
         'receivedByName': people.get(po.received_by),
+        **purchase_order_payment_summary(po),
     }
+
+# ── Supplier payments ──────────────────────────────────────────────────────────
+# Paying the supplier is tracked apart from receiving the goods: a PO can be
+# received but unpaid, or paid before it all arrives.
+SUPPLIER_PAYMENTS_CATEGORY = 'Supplier Payments'
+PO_PAYABLE_STATUSES = ('approved', 'partially_received', 'received')
+
+def purchase_order_payment_summary(po, payments=None):
+    """Amount paid, balance, payment status and history of a PO. The mode of
+    payment is left out on purpose: it is shown in the Expense Log only."""
+    if payments is None:
+        payments = (PurchaseOrderPayment.query.filter_by(purchase_order_id=po.id)
+                    .order_by(PurchaseOrderPayment.payment_date.asc(), PurchaseOrderPayment.id.asc()).all())
+    total = money(po.total_amount or 0)
+    paid = money(sum(float(x.amount or 0) for x in payments if not x.voided_at))
+    balance = money(max(total - paid, 0))
+    status = 'unpaid' if paid <= 0 else 'paid' if balance <= 0 else 'partial'
+    return {
+        'amountPaid': paid, 'balance': balance, 'paymentStatus': status,
+        'payments': [{
+            'id': x.id, 'amount': money(x.amount), 'paymentDate': x.payment_date.isoformat() if x.payment_date else None,
+            'referenceNumber': x.reference_number, 'notes': x.notes,
+            'recordedByName': x.recorder.full_name if x.recorder else None,
+            'recordedAt': to_pht(x.created_at) if x.created_at else None,
+            'voided': bool(x.voided_at), 'voidedAt': to_pht(x.voided_at) if x.voided_at else None,
+            'voidedByName': x.voider.full_name if x.voider else None, 'voidReason': x.void_reason,
+        } for x in payments],
+    }
+
+def purchase_order_expense_branch(po):
+    """The branch a supplier payment is logged under: the PO's branch when it has
+    exactly one, else none (shown under All branches)."""
+    ids = purchase_order_branch_ids(po)
+    return next(iter(ids)) if len(ids) == 1 else None
+
+@app.route('/api/purchase-orders/<int:po_id>/payments', methods=['POST'])
+@require_auth
+@require_permission('purchase_orders.pay')
+def record_purchase_order_payment(po_id):
+    """Record a payment to the supplier. Body: {amount, paymentDate?, paymentMethod,
+    referenceNumber?, notes?}. Also makes its Expense Log entry, in the same save."""
+    user = request.current_user
+    # Row lock: two people paying at once can't both pay the same balance
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
+    if not po:
+        return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    if not can_see_purchase_order(user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
+    if po.status not in PO_PAYABLE_STATUSES:
+        message = ('Approve the purchase order before paying the supplier' if po.status == 'pending'
+                   else 'A cancelled purchase order cannot be paid')
+        return jsonify({'status': 'error', 'message': message}), 400
+    data = request.get_json(silent=True) or {}
+    amount = finite_number(data.get('amount'))
+    if amount is None or amount <= 0:
+        return jsonify({'status': 'error', 'message': 'Enter an amount above zero'}), 400
+    amount = money(amount)
+    summary = purchase_order_payment_summary(po)
+    if summary['balance'] <= 0:
+        return jsonify({'status': 'error', 'message': 'This purchase order is already fully paid'}), 400
+    if amount > summary['balance']:
+        return jsonify({'status': 'error', 'message': f"That is more than the balance of ₱{summary['balance']:,.2f}"}), 400
+    method = data.get('paymentMethod')
+    if method not in PAYMENT_METHODS:
+        return jsonify({'status': 'error', 'message': 'Choose how the supplier was paid'}), 400
+    try:
+        paid_on = datetime.strptime(str(data.get('paymentDate') or manila_today()), '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Enter a valid payment date'}), 400
+    if paid_on > manila_today():
+        return jsonify({'status': 'error', 'message': 'The payment date cannot be in the future'}), 400
+    reference = (str(data.get('referenceNumber') or '')).strip()[:100] or None
+    notes = (str(data.get('notes') or '')).strip() or None
+
+    payment = PurchaseOrderPayment(purchase_order_id=po.id, amount=amount, payment_date=paid_on,
+                                   payment_method=method, reference_number=reference, notes=notes,
+                                   recorded_by=user['id'])
+    db.session.add(payment)
+    db.session.flush()
+    expense = Expense(expense_date=paid_on, category=SUPPLIER_PAYMENTS_CATEGORY,
+                      particulars=f'{po.po_number} – {po.supplier_name}'[:255], amount=amount,
+                      payment_method=method, reference_number=reference, notes=notes,
+                      branch_id=purchase_order_expense_branch(po), created_by=user['id'],
+                      purchase_order_payment_id=payment.id)
+    db.session.add(expense)
+    db.session.flush()
+    payment.expense_id = expense.id
+    db.session.commit()
+    after = purchase_order_payment_summary(po)
+    log_action(user['id'], user['fullName'], 'PAYMENT', 'Purchase Orders',
+               f"Paid ₱{amount:,.2f} to {po.supplier_name} for {po.po_number} "
+               f"(balance ₱{after['balance']:,.2f}, {after['paymentStatus']})", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)}), 201
+
+@app.route('/api/purchase-orders/<int:po_id>/payments/<int:payment_id>/void', methods=['POST'])
+@require_auth
+@require_permission('purchase_orders.pay')
+def void_purchase_order_payment(po_id, payment_id):
+    """Undo a payment recorded by mistake (with a reason). The payment stays in the
+    history as voided; its Expense Log entry is removed, so neither the balance
+    nor the expenses count it. A corrected payment is then recorded again."""
+    user = request.current_user
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
+    if not po:
+        return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    if not can_see_purchase_order(user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
+    payment = PurchaseOrderPayment.query.filter_by(id=payment_id, purchase_order_id=po.id).with_for_update().first()
+    if not payment:
+        return jsonify({'status': 'error', 'message': 'Payment not found'}), 404
+    if payment.voided_at:
+        return jsonify({'status': 'error', 'message': 'This payment was already voided'}), 400
+    reason = (str((request.get_json(silent=True) or {}).get('reason') or '')).strip()
+    if not reason:
+        return jsonify({'status': 'error', 'message': 'Say why the payment is being voided'}), 400
+    payment.voided_at = datetime.utcnow()
+    payment.voided_by = user['id']
+    payment.void_reason = reason[:500]
+    Expense.query.filter_by(purchase_order_payment_id=payment.id).delete(synchronize_session=False)
+    payment.expense_id = None
+    db.session.commit()
+    log_action(user['id'], user['fullName'], 'VOID', 'Purchase Orders',
+               f"Voided ₱{float(payment.amount):,.2f} payment for {po.po_number}: {reason}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
 
 @app.route('/api/purchase-orders/<int:po_id>', methods=['GET'])
 @require_auth
@@ -6471,6 +6766,14 @@ def create_purchase_order():
         it['materialId'] = material.id
         it['name'] = ' - '.join(filter(None, [material.material_type, material.color, material.pattern]))
         it['unit'] = 'yd'
+    # One line per material: receiving goes by line, so a material listed twice could
+    # be counted against the wrong line
+    seen = set()
+    for it in items:
+        if it['materialId'] in seen:
+            return jsonify({'status': 'error', 'message': f"{it['name']} is on the order twice. "
+                            'Put the whole quantity on one line.'}), 400
+        seen.add(it['materialId'])
     error = purchase_order_materials_error(request.current_user, items)
     if error:
         return error
@@ -6643,6 +6946,8 @@ def get_deliveries():
         query = query.filter(Delivery.status == request.args['status'])
     if request.args.get('type'):
         query = query.filter(Delivery.type == request.args['type'])
+    if request.args.get('jobOrderId', type=int):
+        query = query.filter(Delivery.job_order_id == request.args.get('jobOrderId', type=int))
     deliveries_ = query.order_by(Delivery.created_at.desc()).all()
     return jsonify({'status': 'success', 'data': [delivery_to_dict(d) for d in deliveries_]})
 
@@ -6665,11 +6970,26 @@ def create_delivery():
     if not data.get('type') or not data.get('scheduledDate'):
         return jsonify({'status': 'error', 'message': 'Delivery type and date are required'}), 400
 
-    job_order = JobOrder.query.get(data['jobOrderId']) if data.get('jobOrderId') else None
+    job_order = JobOrder.query.filter_by(id=data['jobOrderId']).with_for_update().first() \
+        if data.get('jobOrderId') else None
+    if data.get('jobOrderId') and not job_order:
+        return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
     if job_order:
         error = branch_access_error(request.current_user, job_order.branch_id)
         if error:
             return error
+        # Only finished work goes out, and one delivery at a time (row lock above:
+        # a double-clicked Schedule can't make two)
+        if job_order.status != 'completed':
+            return jsonify({'status': 'error', 'message':
+                            f'Only a completed job order can be delivered ({job_order.job_order_id} is '
+                            f"{job_order.status.replace('_', ' ')})"}), 400
+        open_delivery = Delivery.query.filter(Delivery.job_order_id == job_order.id,
+                                              Delivery.status.in_(('scheduled', 'in_transit', 'delivered'))).first()
+        if open_delivery:
+            return jsonify({'status': 'error', 'code': 'delivery_exists', 'deliveryId': open_delivery.id,
+                            'message': f'{job_order.job_order_id} already has delivery {open_delivery.delivery_number} '
+                                       f"({open_delivery.status.replace('_', ' ')})"}), 400
     # Deliver from the branch that did the job, unless one is given
     from_branch_id = data.get('fromBranchId') or (job_order.branch_id if job_order else None) \
         or user_branch_id(request.current_user)
@@ -6736,6 +7056,39 @@ def update_delivery_status(delivery_id):
 
     log_action(user['id'], user['fullName'], 'UPDATE', 'Delivery', f"Updated delivery status: {d.delivery_number} to {new_status}", request.remote_addr or '0.0.0.0')
 
+    return jsonify({'status': 'success', 'data': delivery_to_dict(d)})
+
+@app.route('/api/deliveries/<int:delivery_id>/reopen', methods=['POST'])
+@require_auth
+@require_permission('item_trail.update_status')
+def reopen_delivery(delivery_id):
+    """Correct a delivery marked delivered by mistake (administrators only, with a
+    reason). It goes back to in transit and its job order back to completed. Nothing
+    else moves: the job's stock was used and its sale counted when it was completed.
+    The original delivery time and the reason are kept in the notes and the Audit Trail."""
+    user = request.current_user
+    if not is_administrator(user):
+        return jsonify({'status': 'error', 'message': 'Only an administrator can correct a finished delivery'}), 403
+    d = Delivery.query.filter_by(id=delivery_id).with_for_update().first()
+    if not d:
+        return jsonify({'status': 'error', 'message': 'Delivery not found'}), 404
+    if d.status != 'delivered':
+        return jsonify({'status': 'error', 'message': 'Only a delivered delivery can be reopened'}), 400
+    reason = ((request.get_json(silent=True) or {}).get('reason') or '').strip()
+    if not reason:
+        return jsonify({'status': 'error', 'message': 'Say why the delivery is being corrected'}), 400
+    when = to_pht(d.delivered_at) if d.delivered_at else 'unknown time'
+    note = f"[Reopened by {user['fullName']}: marked delivered at {when} by mistake. Reason: {reason}]"
+    d.notes = f"{d.notes}\n{note}" if d.notes else note
+    d.status = 'in_transit'
+    d.delivered_at = None
+    if d.job_order and d.job_order.status == 'delivered':
+        d.job_order.status = 'completed'
+        d.job_order.updated_at = datetime.utcnow()
+    db.session.commit()
+    log_action(user['id'], user['fullName'], 'UPDATE', 'Delivery',
+               f"Reopened delivery {d.delivery_number} (was delivered at {when}): {reason}",
+               request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': delivery_to_dict(d)})
 
 @app.route('/api/deliveries/<int:delivery_id>/receipt', methods=['GET'])
@@ -7842,6 +8195,8 @@ def update_product_order(order_id):
         if previous_status != incoming_status:
             updated_fields.append(f"status: {previous_status} -> {incoming_status}")
         order.status = incoming_status
+        if incoming_status == 'completed' and previous_status != 'completed':
+            order.completed_at = datetime.utcnow()
 
         # Deduct inventory only once when transitioning into completed.
         if previous_status != 'completed' and incoming_status == 'completed':
@@ -8810,130 +9165,101 @@ def get_sales_report():
     start_date, end_date, start_dt, end_dt, error = ph_report_period()
     if error:
         return error
-    branch_id = request.args.get('branchId')
+    # None = every branch; a branch-limited account only ever sees its own branch
+    if not all_branches(user):
+        scope = user_branch_id(user) or -1
+    elif request.args.get('branchId'):
+        try:
+            scope = int(request.args['branchId'])
+        except ValueError:
+            return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
+    else:
+        scope = None
+    start = datetime.strptime(start_date, '%Y-%m-%d').date()
+    end = datetime.strptime(end_date, '%Y-%m-%d').date()
 
-    # ── Job Orders ── (drafts are not real sales yet, so exclude them)
+    # Revenue: sales earned in the period, without VAT -- the same definition as
+    # the Owner Dashboard and the main Dashboard (earned_sales): a job order when
+    # its work was finished, a premade sale when it was completed
+    jobs, premade = earned_sales(start, end, scope)
+    total_revenue = money(sum(j['net'] for j in jobs))
+    premade_revenue = money(sum(p['net'] for p in premade))
+
+    # ── Orders placed in the period ── (drafts are not real sales yet)
     jo_query = JobOrder.query.filter(
         JobOrder.created_at >= start_dt,
         JobOrder.created_at <= end_dt,
         JobOrder.status != 'draft'
     )
-
-    user_branch = None
-    if not all_branches(user):
-        user_branch = Branch.query.get(user_branch_id(user)) if user_branch_id(user) else None
-        if user_branch:
-            jo_query = jo_query.filter(JobOrder.branch_id == user_branch.id)
-        else:
-            jo_query = jo_query.filter(False)
-    elif branch_id:
-        jo_query = jo_query.filter(JobOrder.branch_id == int(branch_id))
-
+    if scope is not None:
+        jo_query = jo_query.filter(JobOrder.branch_id == scope)
     orders = jo_query.all()
-
     total_orders = len(orders)
-    # Revenue excludes VAT (collected for the government); pending balances below stay as billed
-    total_revenue = sum(revenue_ex_vat(o) for o in orders if o.status in EARNED_STATUSES)
-    total_pending_revenue = sum(float(o.balance) for o in orders if o.payment_status != 'paid')
+    # Still to be paid on live orders (as billed, with VAT); cancelled and voided ones are owed nothing
+    total_pending_revenue = sum(float(o.balance or 0) for o in orders
+                                if o.payment_status != 'paid' and o.status not in ('cancelled', 'voided'))
 
     status_breakdown = {}
     daily_sales = {}
+    def day(bucket, d):
+        return bucket.setdefault(d, {'orders': 0, 'revenue': 0.0})
 
     for o in orders:
-        status = o.status
-        if status not in status_breakdown:
-            status_breakdown[status] = {'count': 0, 'value': 0}
-        status_breakdown[status]['count'] += 1
-        status_breakdown[status]['value'] += revenue_ex_vat(o)
+        entry = status_breakdown.setdefault(o.status, {'count': 0, 'value': 0})
+        entry['count'] += 1
+        entry['value'] += revenue_ex_vat(o)
+        if o.created_at:
+            day(daily_sales, (o.created_at + PH_OFFSET).strftime('%Y-%m-%d'))['orders'] += 1
+    for j in jobs:
+        day(daily_sales, j['date'].isoformat())['revenue'] += j['net']
 
-        date = (o.created_at + PH_OFFSET).strftime('%Y-%m-%d') if o.created_at else ''
-        if date:
-            if date not in daily_sales:
-                daily_sales[date] = {'orders': 0, 'revenue': 0}
-            daily_sales[date]['orders'] += 1
-            if o.status in EARNED_STATUSES:
-                daily_sales[date]['revenue'] += revenue_ex_vat(o)
-
-    # ── Premade Product Orders ──
-    # Each branch gets revenue credit for items where sourceBranchId == their branch.
-    # This covers both single-branch orders (all items attributed to one branch) and
-    # multi-branch orders (each branch credited for items they supplied).
-    all_product_orders = ProductOrder.query.filter(
+    # ── Premade sales ── each line belongs to the branch whose stock it came from
+    premade_placed = ProductOrder.query.filter(
         ProductOrder.created_at >= start_dt,
         ProductOrder.created_at <= end_dt
     ).all()
-
-    premade_revenue = 0.0
     premade_pending = 0.0
-    premade_orders_seen = set()
+    premade_orders = 0
     premade_daily = {}
-
-    for po in all_product_orders:
-        # Determine how much of this order is attributed to the current branch
-        if not all_branches(user):
-            if not user_branch:
-                continue
-            attributed_total = sum(
-                float(item.get('total', 0))
-                for item in (po.items or [])
-                if item.get('sourceBranchId') == user_branch.id
-            )
-        elif branch_id:
-            bid = int(branch_id)
-            attributed_total = sum(
-                float(item.get('total', 0))
-                for item in (po.items or [])
-                if item.get('sourceBranchId') == bid
-            )
-        else:
-            # Admin with no branch filter: full order value
-            attributed_total = float(po.total_amount or 0)
-
-        if attributed_total <= 0:
+    for po in premade_placed:
+        gross, _ = premade_sale_share(po, scope)
+        if gross <= 0:
             continue
-        # Revenue excludes the VAT inside product prices, like job orders and the
-        # Owner P&L (orders from before rates were saved used the standard 12%)
-        rate = po.vat_percent if po.vat_percent is not None else DEFAULT_VAT_PERCENT
-        attributed_net = vat_breakdown(attributed_total, rate)['net']
-
-        premade_orders_seen.add(po.id)
-        date = (po.created_at + PH_OFFSET).strftime('%Y-%m-%d') if po.created_at else ''
-        if date not in premade_daily:
-            premade_daily[date] = {'orders': 0, 'revenue': 0}
-        premade_daily[date]['orders'] += 1
-
-        if po.status == 'completed':
-            premade_revenue += attributed_net
-            if date:
-                premade_daily[date]['revenue'] += attributed_net
-        elif po.status not in ('cancelled',):
+        premade_orders += 1
+        if po.created_at:
+            day(premade_daily, (po.created_at + PH_OFFSET).strftime('%Y-%m-%d'))['orders'] += 1
+        if po.status not in ('completed', 'cancelled'):
             # pending / processing / ready all count as pending revenue
-            premade_pending += attributed_total
+            premade_pending += gross
+    for p in premade:
+        day(premade_daily, p['date'].isoformat())['revenue'] += p['net']
 
     report = {
         'period': {'startDate': start_date, 'endDate': end_date},
         'summary': {
             'totalOrders': total_orders,
-            'completedOrders': sum(1 for o in orders if o.status in EARNED_STATUSES),
+            'completedOrders': len(jobs),
             'totalRevenue': total_revenue,
-            'pendingRevenue': total_pending_revenue,
-            'averageOrderValue': round(total_revenue / total_orders, 2) if total_orders > 0 else 0
+            'pendingRevenue': money(total_pending_revenue),
+            'averageOrderValue': money(total_revenue / len(jobs)) if jobs else 0,
+            'vatCollected': money(sum(j['vat'] for j in jobs) + sum(p['vat'] for p in premade)),
         },
         'statusBreakdown': [
             {'status': k, 'count': v['count'], 'value': v['value']}
             for k, v in status_breakdown.items()
         ],
         'dailySales': [
-            {'date': k, 'orders': v['orders'], 'revenue': v['revenue']}
+            {'date': k, 'orders': v['orders'], 'revenue': money(v['revenue'])}
             for k, v in sorted(daily_sales.items())
         ],
         'premadeSummary': {
-            'totalOrders': len(premade_orders_seen),
-            'completedRevenue': round(premade_revenue, 2),
-            'pendingRevenue': round(premade_pending, 2),
+            'totalOrders': premade_orders,
+            'completedOrders': len(premade),
+            'completedRevenue': premade_revenue,
+            'pendingRevenue': money(premade_pending),
         },
         'premadeDailySales': [
-            {'date': k, 'orders': v['orders'], 'revenue': v['revenue']}
+            {'date': k, 'orders': v['orders'], 'revenue': money(v['revenue'])}
             for k, v in sorted(premade_daily.items())
         ],
     }
@@ -9135,7 +9461,7 @@ def parse_period():
         return None, None, (jsonify({'status': 'error', 'message': 'The start date is after the end date'}), 400)
     return start, end, None
 
-def expense_to_dict(e):
+def expense_to_dict(e, po_by_payment=None):
     return {
         'id': e.id,
         'date': e.expense_date.isoformat() if e.expense_date else None,
@@ -9148,6 +9474,10 @@ def expense_to_dict(e):
         'branchName': e.branch.name if e.branch else None,
         'createdBy': e.creator.full_name if e.creator else None,
         'createdAt': to_pht(e.created_at) if e.created_at else None,
+        'referenceNumber': e.reference_number,
+        # A supplier payment: changed or undone from its purchase order only
+        'purchaseOrderPaymentId': e.purchase_order_payment_id,
+        'purchaseOrderId': po_by_payment.get(e.purchase_order_payment_id) if po_by_payment else None,
     }
 
 def scoped_expenses(user):
@@ -9167,10 +9497,17 @@ def list_expenses():
     if request.args.get('category'):
         q = q.filter(Expense.category == request.args['category'])
     rows = q.order_by(Expense.expense_date.desc(), Expense.id.desc()).all()
+    pay_ids = [e.purchase_order_payment_id for e in rows if e.purchase_order_payment_id]
+    po_links = {pid: po_id for pid, po_id in db.session.query(PurchaseOrderPayment.id, PurchaseOrderPayment.purchase_order_id)
+                .filter(PurchaseOrderPayment.id.in_(pay_ids))} if pay_ids else {}
     return jsonify({'status': 'success', 'data': {
-        'expenses': [expense_to_dict(e) for e in rows],
+        'expenses': [expense_to_dict(e, po_links) for e in rows],
         'total': money(sum(float(e.amount or 0) for e in rows)),
+        # Of the total, stock bought through purchase orders (not a running cost)
+        'supplierPaymentsTotal': money(sum(float(e.amount or 0) for e in rows if e.purchase_order_payment_id)),
+        # Supplier payments are made from purchase orders, so they aren't offered when logging one
         'categories': EXPENSE_CATEGORIES,
+        'filterCategories': EXPENSE_CATEGORIES + [SUPPLIER_PAYMENTS_CATEGORY],
         'paymentMethods': PAYMENT_METHODS,
     }})
 
@@ -9225,6 +9562,9 @@ def delete_expense(expense_id):
     expense = scoped_expenses(user).filter(Expense.id == expense_id).first()
     if not expense:
         return jsonify({'status': 'error', 'message': 'Expense not found'}), 404
+    if expense.purchase_order_payment_id:
+        return jsonify({'status': 'error', 'message': 'This is a supplier payment. Void it from its purchase order, '
+                        'so the purchase order balance stays right.'}), 400
     label = f"₱{float(expense.amount):,.2f} ({expense.category}): {expense.particulars}"
     db.session.delete(expense)
     db.session.commit()
@@ -9233,10 +9573,16 @@ def delete_expense(expense_id):
 
 
 def job_order_finished_on(order):
-    """The day a job order's work was finished (older orders: the day created)."""
+    """The Philippine day a job order's work was finished (older orders: the day created)."""
     if order.completed_at:
-        return order.completed_at if not isinstance(order.completed_at, datetime) else order.completed_at.date()
+        return order.completed_at.date() if isinstance(order.completed_at, datetime) else order.completed_at
     return (order.created_at + PH_OFFSET).date() if order.created_at else None
+
+def product_order_completed_on(order):
+    """The Philippine day a premade sale was completed. updated_at is only a
+    fallback for rows the completed_at backfill hasn't reached."""
+    at = order.completed_at or order.updated_at or order.created_at
+    return (at + PH_OFFSET).date() if at else None
 
 def premade_unit_cost(item):
     """Cost per piece saved with the sale; older sales didn't save one, so they
@@ -9246,66 +9592,117 @@ def premade_unit_cost(item):
     product = PremadeProduct.query.get(item.get('productId')) if item.get('productId') else None
     return float(product.cost or 0) if product else 0.0
 
+def premade_line_branch(order, item):
+    """The branch a premade sale line belongs to: the one whose stock it came from.
+    New sales always sell the selling branch's own stock; older multi-branch
+    orders could draw lines from other branches."""
+    try:
+        return int(item.get('sourceBranchId') or order.branch_id or 0) or None
+    except (TypeError, ValueError):
+        return order.branch_id
+
+def premade_sale_share(order, branch_id=None):
+    """(amount the customer pays incl. VAT, production cost) of a premade sale:
+    the whole order, or only the lines that belong to one branch."""
+    if not branch_id:
+        lines, gross = order.items or [], float(order.total_amount or 0)
+    else:
+        lines = [it for it in (order.items or []) if premade_line_branch(order, it) == branch_id]
+        gross = sum(float(it['total']) if it.get('total') is not None
+                    else float(it.get('unitPrice') or 0) * float(it.get('quantity') or 0) for it in lines)
+    cost = sum(premade_unit_cost(it) * float(it.get('quantity') or 0) for it in lines)
+    return gross, cost
+
+def earned_sales(start, end, branch_id=None):
+    """Sales earned between two Philippine dates (inclusive), optionally for one
+    branch. The single definition behind the Owner Dashboard, the main Dashboard
+    and the Sales report, so they always agree:
+      job orders   earned on the day their work was finished (completed, or
+                   delivered); drafts, cancelled and voided orders never count
+      premade      earned on the day the sale was completed
+    Each entry carries the amount the customer pays (gross, incl. VAT), the VAT
+    inside it and the net sale."""
+    jobs = []
+    q = JobOrder.query.filter(JobOrder.status.in_(EARNED_STATUSES))
+    if branch_id:
+        q = q.filter(JobOrder.branch_id == branch_id)
+    for o in q.all():
+        d = job_order_finished_on(o)
+        if d and start <= d <= end:
+            split = vat_breakdown(o.total_price, o.vat_percent)
+            jobs.append({'order': o, 'date': d, 'gross': split['gross'], 'net': split['net'], 'vat': split['vat']})
+    premade = []
+    for o in ProductOrder.query.filter(ProductOrder.status == 'completed').all():
+        d = product_order_completed_on(o)
+        if not d or not (start <= d <= end):
+            continue
+        gross, cost = premade_sale_share(o, branch_id)
+        if branch_id and gross <= 0 and cost <= 0:
+            continue  # nothing in this order belongs to the branch
+        rate = o.vat_percent if o.vat_percent is not None else DEFAULT_VAT_PERCENT
+        split = vat_breakdown(gross, rate)
+        premade.append({'order': o, 'date': d, 'gross': split['gross'], 'net': split['net'],
+                        'vat': split['vat'], 'cost': cost})
+    return jobs, premade
+
 def owner_financials(start, end, branch_id=None):
     """Earned sales and their costs between two dates (inclusive), by month.
 
-    Sales are what finished orders earned, without the VAT inside them: job
-    orders when completed or delivered, premade orders when completed. Cost of
-    goods sold is each job's materials, labor and other job costs (the same
-    figures as Job Order Costing) plus the production cost of premade items
-    sold. Operating expenses are the logged expenses plus material written off
-    as waste."""
+    Sales are what finished orders earned, without the VAT inside them
+    (earned_sales). Cost of goods sold is each job's materials, labor and other
+    job costs (the same figures as Job Order Costing) plus the production cost of
+    premade items sold. Operating expenses are the logged expenses plus material
+    written off as waste.
+
+    With a branch, everything follows the branch that earned or spent it: a job
+    order's extra material counts against that job's branch even though it was
+    issued from the warehouse's stock."""
     months = {}
     def month(d):
         key = d.strftime('%Y-%m')
         return months.setdefault(key, {'month': key, 'sales': 0.0, 'cogs': 0.0, 'opex': 0.0})
 
-    jo_q = JobOrder.query.filter(JobOrder.status.in_(EARNED_STATUSES))
-    po_q = ProductOrder.query.filter(ProductOrder.status == 'completed')
-    ex_q = Expense.query.filter(Expense.expense_date >= start, Expense.expense_date <= end)
-    if branch_id:
-        jo_q, po_q = jo_q.filter(JobOrder.branch_id == branch_id), po_q.filter(ProductOrder.branch_id == branch_id)
-        ex_q = ex_q.filter(Expense.branch_id == branch_id)
-
     t = {'jobSales': 0.0, 'premadeSales': 0.0, 'materials': 0.0, 'labor': 0.0, 'jobOther': 0.0, 'premadeCost': 0.0,
-         'vatCollected': 0.0, 'jobOrders': 0, 'premadeOrders': 0}
-    earned = jo_q.all()
-    extras = extras_by_order([o.id for o in earned])
-    for o in earned:
-        d = job_order_finished_on(o)
-        if not d or not (start <= d <= end):
-            continue
+         'vatCollected': 0.0, 'grossReceipts': 0.0, 'jobOrders': 0, 'premadeOrders': 0}
+    jobs, premade = earned_sales(start, end, branch_id)
+    extras = extras_by_order([j['order'].id for j in jobs])
+    for j in jobs:
+        o = j['order']
         c = job_order_costing(o, extras.get(o.id, []))
         t['jobSales'] += c['revenue']
         t['materials'] += c['materials']; t['labor'] += c['labor']; t['jobOther'] += c['expenses']
-        t['vatCollected'] += vat_breakdown(o.total_price, o.vat_percent)['vat']
+        t['vatCollected'] += j['vat']; t['grossReceipts'] += j['gross']
         t['jobOrders'] += 1
-        m = month(d); m['sales'] += c['revenue']; m['cogs'] += c['totalCost']
-    for o in po_q.all():
-        d = ((o.updated_at or o.created_at) + PH_OFFSET).date()
-        if not (start <= d <= end):
-            continue
-        rate = o.vat_percent if o.vat_percent is not None else DEFAULT_VAT_PERCENT
-        split = vat_breakdown(o.total_amount, rate)
-        cost = sum(premade_unit_cost(it) * float(it.get('quantity') or 0) for it in (o.items or []))
-        t['premadeSales'] += split['net']; t['vatCollected'] += split['vat']; t['premadeCost'] += cost
+        m = month(j['date']); m['sales'] += c['revenue']; m['cogs'] += c['totalCost']
+    for p in premade:
+        t['premadeSales'] += p['net']; t['vatCollected'] += p['vat']; t['grossReceipts'] += p['gross']
+        t['premadeCost'] += p['cost']
         t['premadeOrders'] += 1
-        m = month(d); m['sales'] += split['net']; m['cogs'] += cost
+        m = month(p['date']); m['sales'] += p['net']; m['cogs'] += p['cost']
 
     by_category = {}
+    # Supplier payments buy stock: their cost counts as cost of goods sold when the
+    # material is used, so counting the payment here too would count it twice
+    ex_q = Expense.query.filter(Expense.expense_date >= start, Expense.expense_date <= end,
+                                Expense.purchase_order_payment_id.is_(None))
+    if branch_id:
+        ex_q = ex_q.filter(Expense.branch_id == branch_id)
     for e in ex_q.all():
         by_category[e.category] = by_category.get(e.category, 0.0) + float(e.amount or 0)
         month(e.expense_date)['opex'] += float(e.amount or 0)
-    waste_q = db.session.query(MaterialWasteLog, InventoryMaterial).join(
-        InventoryMaterial, InventoryMaterial.id == MaterialWasteLog.material_id)
-    if branch_id:
-        waste_q = waste_q.filter(MaterialWasteLog.branch_id == branch_id)
-    # Extra material issued for a finished job is part of that job's cost (above),
-    # in the period the job finished; only the rest is written off here as waste
-    finished_ids = {o.id for o in earned}
+
+    # Extra material issued for a finished job is part of that job's cost (above,
+    # in the period the job finished), whichever branch or period is being viewed;
+    # only the rest is written off here as waste
+    earned_ids = {i for (i,) in db.session.query(JobOrder.id).filter(JobOrder.status.in_(EARNED_STATUSES)).all()}
+    waste_q = (db.session.query(MaterialWasteLog, InventoryMaterial, JobOrder.branch_id)
+               .join(InventoryMaterial, InventoryMaterial.id == MaterialWasteLog.material_id)
+               .outerjoin(JobOrder, JobOrder.id == MaterialWasteLog.job_order_id))
     waste = 0.0
-    for w, mat in waste_q.all():
-        if w.job_order_id and w.job_order_id in finished_ids:
+    for w, mat, job_branch in waste_q.all():
+        if w.job_order_id and w.job_order_id in earned_ids:
+            continue
+        if branch_id and (job_branch or w.branch_id) != branch_id:
             continue
         d = ((w.created_at or datetime.utcnow()) + PH_OFFSET).date()
         if start <= d <= end:
@@ -9336,53 +9733,87 @@ def owner_financials(start, end, branch_id=None):
         'totalExpenses': money(cogs + opex),
         'netIncome': money(net),
         'profitMargin': round(net / sales * 100, 1) if sales else 0.0,
+        # What customers paid for those sales = sales + VAT; the VAT is owed to the government
+        'grossReceipts': money(t['grossReceipts']),
         'vatCollected': money(t['vatCollected']),
         'orderCounts': {'jobOrders': t['jobOrders'], 'premadeOrders': t['premadeOrders']},
         'monthly': monthly,
     }
 
-def money_by_method(start, end):
+def money_by_method(start, end, branch_id=None):
     """Cash actually received and spent between two dates, by mode of payment."""
     money_in, money_out = {}, {}
-    for p in PaymentRecord.query.all():
+    pay_q = (db.session.query(PaymentRecord).join(JobOrder, JobOrder.id == PaymentRecord.job_order_id)
+             .filter(JobOrder.status != 'draft'))
+    if branch_id:
+        pay_q = pay_q.filter(JobOrder.branch_id == branch_id)
+    for p in pay_q.all():
         d = ((p.created_at or datetime.utcnow()) + PH_OFFSET).date()
-        if start <= d <= end and p.job_order and p.job_order.status not in ('draft',):
+        if start <= d <= end:
             key = p.payment_method or 'cash'
             money_in[key] = money_in.get(key, 0.0) + float(p.amount or 0)
-    for o in ProductOrder.query.filter(ProductOrder.amount_paid > 0).all():
+    po_q = ProductOrder.query.filter(ProductOrder.amount_paid > 0)
+    if branch_id:
+        po_q = po_q.filter(ProductOrder.branch_id == branch_id)
+    for o in po_q.all():
         d = ((o.created_at or datetime.utcnow()) + PH_OFFSET).date()
         if start <= d <= end:
             # Premade orders don't record how they were paid
             money_in['not_recorded'] = money_in.get('not_recorded', 0.0) + float(o.amount_paid or 0)
-    for e in Expense.query.filter(Expense.expense_date >= start, Expense.expense_date <= end).all():
+    ex_q = Expense.query.filter(Expense.expense_date >= start, Expense.expense_date <= end)
+    if branch_id:
+        ex_q = ex_q.filter(Expense.branch_id == branch_id)
+    for e in ex_q.all():
         money_out[e.payment_method] = money_out.get(e.payment_method, 0.0) + float(e.amount or 0)
     as_list = lambda d: [{'method': k, 'amount': money(v)} for k, v in sorted(d.items(), key=lambda kv: -kv[1])]
     return {'in': as_list(money_in), 'out': as_list(money_out),
             'totalIn': money(sum(money_in.values())), 'totalOut': money(sum(money_out.values()))}
+
+def owner_branch_arg():
+    """?branchId= for the Owner Dashboard: (branch id or None for all, error response)."""
+    raw = request.args.get('branchId')
+    if not raw:
+        return None, None
+    try:
+        branch = Branch.query.get(int(raw))
+    except (TypeError, ValueError):
+        branch = None
+    if not branch:
+        return None, (jsonify({'status': 'error', 'message': 'Unknown branch'}), 400)
+    return branch.id, None
+
+def owner_filters():
+    """(start, end, branch id, error response) from ?startDate=&endDate=&branchId=."""
+    start, end, error = parse_period()
+    if error:
+        return None, None, None, error
+    branch_id, error = owner_branch_arg()
+    return start, end, branch_id, error
 
 @app.route('/api/owner/summary', methods=['GET'])
 @require_auth
 @require_permission('owner.view')
 @require_permission('branches.all')
 def owner_summary():
-    """Executive dashboard: this year so far."""
-    today = manila_today()
-    start = today.replace(month=1, day=1)
-    f = owner_financials(start, today)
-    cash = money_by_method(start, today)
-    month_start = today.replace(day=1)
-    this_month = owner_financials(month_start, today)
-    receivable = sum(max(float(o.total_price or 0) - float(o.down_payment or 0), 0) for o in
-                     JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided'))).all()) + \
-        sum(max(float(o.total_amount or 0) - float(o.amount_paid or 0), 0) for o in
-            ProductOrder.query.filter(ProductOrder.status != 'cancelled').all())
+    """Overview for a period (default: this year so far), all branches or one."""
+    start, end, branch_id, error = owner_filters()
+    if error:
+        return error
+    f = owner_financials(start, end, branch_id)
+    jo_q = JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided')))
+    po_q = ProductOrder.query.filter(ProductOrder.status != 'cancelled')
+    if branch_id:
+        jo_q, po_q = jo_q.filter(JobOrder.branch_id == branch_id), po_q.filter(ProductOrder.branch_id == branch_id)
+    # What customers owe today (not limited to the period), as on the Receivables tab
+    receivable = sum(max(float(o.total_price or 0) - float(o.down_payment or 0), 0) for o in jo_q.all()) + \
+        sum(max(float(o.total_amount or 0) - float(o.amount_paid or 0), 0) for o in po_q.all())
     return jsonify({'status': 'success', 'data': {
-        'period': {'startDate': start.isoformat(), 'endDate': today.isoformat()},
-        'ytd': {k: f[k] for k in ('sales', 'totalExpenses', 'netIncome', 'profitMargin', 'grossProfit', 'vatCollected')},
-        'thisMonth': {k: this_month[k] for k in ('sales', 'totalExpenses', 'netIncome')},
+        'period': {'startDate': start.isoformat(), 'endDate': end.isoformat(), 'branchId': branch_id},
+        'totals': {k: f[k] for k in ('sales', 'grossReceipts', 'vatCollected', 'grossProfit', 'totalExpenses',
+                                     'netIncome', 'profitMargin', 'orderCounts')},
         'receivables': money(receivable),
         'monthly': f['monthly'],
-        'cashflowByMethod': cash,
+        'cashflowByMethod': money_by_method(start, end, branch_id),
     }})
 
 @app.route('/api/owner/pnl', methods=['GET'])
@@ -9390,10 +9821,9 @@ def owner_summary():
 @require_permission('owner.view')
 @require_permission('branches.all')
 def owner_pnl():
-    start, end, error = parse_period()
+    start, end, branch_id, error = owner_filters()
     if error:
         return error
-    branch_id = request.args.get('branchId', type=int)
     data = owner_financials(start, end, branch_id)
     data['period'] = {'startDate': start.isoformat(), 'endDate': end.isoformat(), 'branchId': branch_id}
     return jsonify({'status': 'success', 'data': data})
@@ -9404,16 +9834,14 @@ def owner_pnl():
 @require_permission('branches.all')
 def owner_job_costing():
     """Every finished job order in the period with its margin, least profitable first."""
-    start, end, error = parse_period()
+    start, end, branch_id, error = owner_filters()
     if error:
         return error
     rows = []
-    earned = JobOrder.query.filter(JobOrder.status.in_(EARNED_STATUSES)).all()
-    extras = extras_by_order([o.id for o in earned])
-    for o in earned:
-        d = job_order_finished_on(o)
-        if not d or not (start <= d <= end):
-            continue
+    jobs, _ = earned_sales(start, end, branch_id)
+    extras = extras_by_order([j['order'].id for j in jobs])
+    for j in jobs:
+        o, d = j['order'], j['date']
         c = job_order_costing(o, extras.get(o.id, []))
         lines = []
         for it in o.items or []:
@@ -9430,12 +9858,11 @@ def owner_job_costing():
             lines.append({'name': f"Extra: {w.material.material_type if w.material else 'material'} ({w.reason})",
                           'category': 'material', 'quantity': float(w.quantity or 0), 'unitCost': unit,
                           'cost': money(float(w.quantity or 0) * unit), 'extra': True})
-        split = vat_breakdown(o.total_price, o.vat_percent)
         rows.append({
             'id': o.id, 'jobOrderId': o.job_order_id, 'customerName': o.customer_name,
             'description': o.description, 'branchName': o.branch.name if o.branch else None,
             'finishedOn': d.isoformat(), 'status': o.status,
-            'customerPrice': split['gross'], 'vat': split['vat'], 'sellingPrice': c['revenue'],
+            'customerPrice': j['gross'], 'vat': j['vat'], 'sellingPrice': c['revenue'],
             'materials': c['materials'], 'labor': c['labor'], 'otherCosts': c['expenses'],
             'estimatedCost': c['estimatedCost'], 'actualCost': c['totalCost'],
             'extraMaterials': c['extraMaterials'],
@@ -9449,6 +9876,7 @@ def owner_job_costing():
         'totals': {'sellingPrice': money(total_sell), 'materials': money(sum(r['materials'] for r in rows)),
                    'labor': money(sum(r['labor'] for r in rows)), 'otherCosts': money(sum(r['otherCosts'] for r in rows)),
                    'grossMargin': money(total_margin),
+                   'vat': money(sum(r['vat'] for r in rows)),
                    'marginPercent': round(total_margin / total_sell * 100, 1) if total_sell else 0.0},
     }})
 
@@ -9458,8 +9886,15 @@ def owner_job_costing():
 @require_permission('branches.all')
 def owner_receivables():
     """Every customer invoice (job orders and premade orders) with what is still owed."""
+    branch_id, error = owner_branch_arg()
+    if error:
+        return error
+    jo_q = JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided')))
+    po_q = ProductOrder.query.filter(ProductOrder.status != 'cancelled')
+    if branch_id:
+        jo_q, po_q = jo_q.filter(JobOrder.branch_id == branch_id), po_q.filter(ProductOrder.branch_id == branch_id)
     invoices = []
-    for o in JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided'))).all():
+    for o in jo_q.all():
         total, paid = float(o.total_price or 0), float(o.down_payment or 0)
         invoices.append({
             'type': 'job_order', 'id': o.id, 'reference': o.job_order_id, 'customerName': o.customer_name,
@@ -9473,7 +9908,7 @@ def owner_receivables():
                           'recordedBy': p.recorder.full_name if p.recorder else None}
                          for p in sorted(o.payment_records, key=lambda p: p.created_at or datetime.min)],
         })
-    for o in ProductOrder.query.filter(ProductOrder.status != 'cancelled').all():
+    for o in po_q.all():
         total, paid = float(o.total_amount or 0), float(o.amount_paid or 0)
         rate = o.vat_percent if o.vat_percent is not None else DEFAULT_VAT_PERCENT
         invoices.append({
@@ -9503,52 +9938,88 @@ def owner_receivables():
 @require_permission('owner.view')
 @require_permission('branches.all')
 def owner_inventory():
-    """Where capital sits in stock, what was used up, and what needs restocking."""
-    today = manila_today()
+    """Where capital sits in stock (today), what was used up in the period, and what
+    needs restocking; all branches or one."""
+    from sqlalchemy.orm import joinedload
+    start, end, branch_id, error = owner_filters()
+    if error:
+        return error
+    # A stock or cost saved before inputs were validated may not be a real number
+    # (NaN / Infinity). It is valued at 0 and counted, so it can be found and fixed
+    # instead of failing the whole tab.
+    invalid = []
+    def num(value, label):
+        n = finite_number(value, 0.0)
+        if n is None:
+            invalid.append(label)
+            return 0.0
+        return n
+
     global_threshold = global_low_stock_threshold()
-    materials = InventoryMaterial.query.filter(InventoryMaterial.is_archived.is_(False)).all()
+    mat_q = InventoryMaterial.query.options(joinedload(InventoryMaterial.branch)).filter(InventoryMaterial.is_archived.is_(False))
+    if branch_id:
+        mat_q = mat_q.filter(InventoryMaterial.branch_id == branch_id)
     restock, materials_value = [], 0.0
-    for m in materials:
-        unit_cost = float(m.cost_per_unit or 0) or float(m.unit_price or 0)
-        stock = float(m.stock_quantity or 0)
+    for m in mat_q.all():
+        label = f"{m.material_type}{f' ({m.color})' if m.color else ''}"
+        stock = num(m.stock_quantity, label)
+        unit_cost = num(m.cost_per_unit, label) or num(m.unit_price, label)
         materials_value += max(stock, 0) * unit_cost
-        threshold = effective_reorder_level(m, global_threshold)
-        state = low_stock_state(m, global_threshold)
+        state = low_stock_state(m, global_threshold) if math.isfinite(stock) else None
         if state:
             restock.append({'id': m.id, 'name': m.material_type, 'color': m.color, 'branchName': m.branch.name if m.branch else None,
-                            'stock': stock, 'threshold': threshold, 'status': state})
-    premade = PremadeProduct.query.filter(PremadeProduct.is_archived.is_(False)).all()
-    premade_value = sum(max(float(p.quantity or 0), 0) * float(p.cost or 0) for p in premade)
+                            'stock': stock, 'threshold': num(effective_reorder_level(m, global_threshold), label), 'status': state})
+    premade_q = PremadeProduct.query.filter(PremadeProduct.is_archived.is_(False))
+    if branch_id:
+        premade_q = premade_q.filter(PremadeProduct.branch_id == branch_id)
+    premade_value = 0.0
+    for p in premade_q.all():
+        premade_value += max(num(p.quantity, p.name), 0) * num(p.cost, p.name)
 
     movements = []
-    for log in MaterialUsageLog.query.order_by(MaterialUsageLog.created_at.desc()).limit(40).all():
-        movements.append({'date': to_pht(log.created_at) if log.created_at else None, 'direction': 'out' if log.quantity_used >= 0 else 'in',
-                          'item': log.material.material_type if log.material else '', 'quantity': abs(float(log.quantity_used)),
+    usage_q = MaterialUsageLog.query.options(joinedload(MaterialUsageLog.material), joinedload(MaterialUsageLog.branch))
+    waste_q = MaterialWasteLog.query.options(joinedload(MaterialWasteLog.material), joinedload(MaterialWasteLog.branch))
+    if branch_id:
+        usage_q = usage_q.filter(MaterialUsageLog.branch_id == branch_id)
+        waste_q = waste_q.filter(MaterialWasteLog.branch_id == branch_id)
+    for log in usage_q.order_by(MaterialUsageLog.created_at.desc()).limit(40).all():
+        qty = num(log.quantity_used, 'stock movement')
+        movements.append({'date': to_pht(log.created_at) if log.created_at else None, 'direction': 'out' if qty >= 0 else 'in',
+                          'item': log.material.material_type if log.material else '', 'quantity': abs(qty),
                           'reason': log.notes or log.used_in_reference, 'branchName': log.branch.name if log.branch else None})
-    for w in MaterialWasteLog.query.order_by(MaterialWasteLog.created_at.desc()).limit(20).all():
+    for w in waste_q.order_by(MaterialWasteLog.created_at.desc()).limit(20).all():
         movements.append({'date': to_pht(w.created_at) if w.created_at else None, 'direction': 'out',
-                          'item': w.material.material_type if w.material else '', 'quantity': float(w.quantity),
+                          'item': w.material.material_type if w.material else '', 'quantity': num(w.quantity, 'waste entry'),
                           'reason': f'Waste: {w.reason}', 'branchName': w.branch.name if w.branch else None})
     recent_pos = (PurchaseOrder.query.filter(PurchaseOrder.status.in_(('partially_received', 'received')))
                   .order_by(PurchaseOrder.created_at.desc()).limit(40).all())
-    for po in recent_pos:
-        for receipt in purchase_order_receipts(po):
-            for it in receipt['items']:
-                movements.append({'date': to_pht(receipt['at']) if receipt['at'] else None, 'direction': 'in',
-                                  'item': it.get('name') or '', 'quantity': float(it.get('quantity') or 0),
-                                  'reason': f'Received {po.po_number} from {po.supplier_name}', 'branchName': None})
+    receipts = [(po, r) for po in recent_pos for r in purchase_order_receipts(po)]
+    # A delivery goes into the stock of the material it was ordered for
+    mat_ids = {it.get('materialId') for _, r in receipts for it in r['items'] if it.get('materialId')}
+    mat_branch = {m.id: m.branch for m in InventoryMaterial.query.options(joinedload(InventoryMaterial.branch))
+                  .filter(InventoryMaterial.id.in_(mat_ids)).all()} if mat_ids else {}
+    for po, receipt in receipts:
+        for it in receipt['items']:
+            branch = mat_branch.get(it.get('materialId'))
+            if branch_id and (not branch or branch.id != branch_id):
+                continue
+            movements.append({'date': to_pht(receipt['at']) if receipt['at'] else None, 'direction': 'in',
+                              'item': it.get('name') or '', 'quantity': num(it.get('quantity'), 'PO delivery'),
+                              'reason': f'Received {po.po_number} from {po.supplier_name}',
+                              'branchName': branch.name if branch else None})
     movements.sort(key=lambda m: m['date'] or '', reverse=True)
 
-    cogs = owner_financials(today.replace(month=1, day=1), today)['cogs']
+    cogs = owner_financials(start, end, branch_id)['cogs']
     restock.sort(key=lambda r: (r['status'] != 'out', r['name']))
     return jsonify({'status': 'success', 'data': {
         'materialsValue': money(materials_value), 'premadeValue': money(premade_value),
         'totalValue': money(materials_value + premade_value),
-        'cogsYtd': cogs,
+        'cogs': cogs,
         'restock': restock,
         'outOfStock': sum(1 for r in restock if r['status'] == 'out'),
         'lowStock': sum(1 for r in restock if r['status'] == 'low'),
         'movements': movements[:50],
+        'invalidValues': sorted(set(invalid))[:20],
     }})
 
 @app.route('/api/reports/audit-trail', methods=['GET'])
@@ -9615,9 +10086,9 @@ def create_user():
     required = ['username', 'password', 'email', 'fullName', 'role']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
-    if not isinstance(data['password'], str) or len(data['password']) < MIN_PASSWORD_LENGTH:
-        return jsonify({'status': 'error',
-                        'message': f'Password must be at least {MIN_PASSWORD_LENGTH} characters'}), 400
+    error = password_error(data['password'])
+    if error:
+        return jsonify({'status': 'error', 'message': error, 'code': 'weak_password'}), 400
     
     # The same rule My Profile applies: no spaces or other characters
     data['username'] = str(data['username'] or '').strip()
@@ -9627,7 +10098,12 @@ def create_user():
     if User.query.filter(db.func.lower(User.username) == data['username'].lower()).first():
         return jsonify({'status': 'error', 'message': 'Username already exists'}), 400
     
-    if User.query.filter_by(email=data['email']).first():
+    # The email also signs in, so it must be valid and belong to one account only
+    # (compared ignoring capitals, as login does)
+    data['email'] = str(data['email'] or '').strip()
+    if not EMAIL_PATTERN.match(data['email']):
+        return jsonify({'status': 'error', 'message': 'Enter a valid email address'}), 400
+    if _email_taken(data['email'], None):
         return jsonify({'status': 'error', 'message': 'Email already exists'}), 400
     
     role = Role.query.filter_by(key=data['role']).first()
@@ -9710,9 +10186,9 @@ def update_user(user_id):
     # before anything else changes, since a wrong guess is saved (lockout count).
     resetting_password = bool(data.get('password'))
     if resetting_password:
-        if len(data['password']) < MIN_PASSWORD_LENGTH:
-            return jsonify({'status': 'error',
-                            'message': f'New password must be at least {MIN_PASSWORD_LENGTH} characters.'}), 400
+        error = password_error(data['password'])
+        if error:
+            return jsonify({'status': 'error', 'message': error, 'code': 'weak_password'}), 400
         admin = User.query.get(request.current_user['id'])
         error = check_current_password(admin, data.get('adminPassword'))
         if error:
@@ -9726,7 +10202,14 @@ def update_user(user_id):
     old_role_key = user.role.key if user.role else None
     
     if 'email' in data:
-        user.email = data['email']
+        new_email = str(data['email'] or '').strip()
+        if not EMAIL_PATTERN.match(new_email):
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': 'Enter a valid email address'}), 400
+        if _email_taken(new_email, user.id):
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': 'That email is already used by another account.'}), 400
+        user.email = new_email
     if 'fullName' in data:
         user.full_name = data['fullName']
     if 'branchId' in data:
@@ -9978,8 +10461,10 @@ def user_permissions_payload(user, actor):
         'userId': user.id,
         'role': role_key,
         'roleDefaults': sorted(ROLE_DEFAULT_PERMISSIONS.get(role_key, ())),
-        'grants': sorted(o.permission for o in overrides if o.effect == 'grant'),
-        'revokes': sorted(o.permission for o in overrides if o.effect == 'revoke'),
+        # Only permissions that still exist: an obsolete one has no effect and would
+        # be refused when the dialog sends it back
+        'grants': sorted(o.permission for o in overrides if o.effect == 'grant' and o.permission in PERMISSIONS),
+        'revokes': sorted(o.permission for o in overrides if o.effect == 'revoke' and o.permission in PERMISSIONS),
         'effective': sorted(effective_permissions(user.id, role_key, overrides)),
         'version': permissions_version(role_key, overrides),
         'editable': read_only_reason is None,
@@ -10047,6 +10532,10 @@ def set_user_permissions(user_id):
     if not isinstance(grants, list) or not isinstance(revokes, list):
         return jsonify({'status': 'error', 'message': 'grants and revokes must be lists'}), 400
     grants, revokes = {str(g) for g in grants}, {str(r) for r in revokes}
+    # An obsolete permission this user already had stored (from a retired module)
+    # is dropped on save rather than refused; anything else unknown is an error
+    obsolete = {o.permission for o in current if o.permission not in PERMISSIONS}
+    grants, revokes = grants - obsolete, revokes - obsolete
     unknown = (grants | revokes) - set(PERMISSIONS)
     if unknown:
         return jsonify({'status': 'error', 'message': f"Unknown permission(s): {', '.join(sorted(unknown))}"}), 400
@@ -11258,105 +11747,6 @@ def set_worker_availability():
 # ============================================
 # HEALTH CHECK
 # ============================================
-
-# ============================================
-# PUBLIC ORDER TRACKING (no account needed)
-# ============================================
-# A customer enters the number on their receipt and sees only where the order
-# is: no names, prices, items, materials, contact or staff details. Wrong
-# numbers count toward a per-visitor limit, to slow down guessing.
-
-TRACK_MAX_FAILURES = 10                 # wrong lookups allowed per visitor...
-TRACK_WINDOW_SECONDS = 15 * 60          # ...in this many seconds
-_track_failures = {}                    # visitor -> [failure timestamps] (per worker)
-
-TRACK_NOT_FOUND = ("We couldn't find an order with that number. "
-                   "Check your receipt, or contact the branch that took your order.")
-
-JOB_ORDER_TRACK_STATUS = {
-    'pending': ('received', 'Order received'),
-    'in_progress': ('in_progress', 'Being worked on'),
-    'completed': ('ready', 'Completed - ready for pickup'),
-    'delivered': ('done', 'Delivered'),
-    'cancelled': ('cancelled', 'Cancelled'),
-    'voided': ('cancelled', 'Cancelled'),
-}
-PRODUCT_ORDER_TRACK_STATUS = {
-    'pending': ('received', 'Order received'),
-    'processing': ('in_progress', 'Being prepared'),
-    'ready': ('ready', 'Ready for pickup'),
-    'completed': ('done', 'Picked up / completed'),
-    'cancelled': ('cancelled', 'Cancelled'),
-}
-PAYMENT_TRACK_LABELS = {'paid': 'Fully paid', 'partial': 'Partly paid', 'unpaid': 'Not yet paid'}
-
-def _visitor_key():
-    """The visitor's address. Behind Render's proxy remote_addr is the proxy, so
-    the first X-Forwarded-For entry (the client) is used when present."""
-    forwarded = request.headers.get('X-Forwarded-For', '')
-    return (forwarded.split(',')[0].strip() if forwarded else '') or request.remote_addr or 'unknown'
-
-def _recent_track_failures(key, now):
-    recent = [t for t in _track_failures.get(key, []) if now - t < TRACK_WINDOW_SECONDS]
-    if recent:
-        _track_failures[key] = recent
-    else:
-        _track_failures.pop(key, None)
-    if len(_track_failures) > 5000:  # keep the table small
-        for k in [k for k, v in _track_failures.items() if not v or now - v[-1] >= TRACK_WINDOW_SECONDS]:
-            _track_failures.pop(k, None)
-    return recent
-
-@app.route('/api/track-order', methods=['POST'])
-def track_order():
-    now = time.time()
-    key = _visitor_key()
-    if len(_recent_track_failures(key, now)) >= TRACK_MAX_FAILURES:
-        return jsonify({'status': 'error',
-                        'message': 'Too many attempts. Please wait 15 minutes, or contact the branch.'}), 429
-
-    data = request.get_json(silent=True) or {}
-    reference = str(data.get('reference') or '').strip().upper()
-    if not reference or len(reference) > 50:
-        return jsonify({'status': 'error', 'message': 'Enter your order number.'}), 400
-
-    result = None
-    job = JobOrder.query.filter(db.func.upper(JobOrder.job_order_id) == reference).first()
-    # Drafts are not orders yet, so they can't be tracked
-    if job and job.status != 'draft':
-        key_status, label = JOB_ORDER_TRACK_STATUS.get(job.status, ('received', job.status.replace('_', ' ').title()))
-        result = {
-            'reference': job.job_order_id, 'kind': 'job_order', 'kindLabel': 'Job order',
-            'description': job.description or '',
-            'status': key_status, 'statusLabel': label,
-            'branchName': job.branch.name if job.branch else None,
-            'branchPhone': job.branch.phone if job.branch else None,
-            'recordedOn': (job.created_at + PH_OFFSET).strftime('%Y-%m-%d') if job.created_at else None,
-            'estimatedCompletion': job.estimated_completion.isoformat() if job.estimated_completion else None,
-            'completedOn': job.completed_at.isoformat() if job.completed_at else None,
-            'paymentStatus': PAYMENT_TRACK_LABELS.get(job.payment_status, job.payment_status),
-        }
-    if result is None:
-        order = ProductOrder.query.filter(db.func.upper(ProductOrder.order_number) == reference).first()
-        if order:
-            key_status, label = PRODUCT_ORDER_TRACK_STATUS.get(order.status, ('received', order.status.title()))
-            count = sum(int(it.get('quantity') or 0) for it in (order.items or []))
-            result = {
-                'reference': order.order_number, 'kind': 'product_order', 'kindLabel': 'Premade order',
-                'description': f"{count} premade item{'s' if count != 1 else ''}",
-                'status': key_status, 'statusLabel': label,
-                'branchName': order.branch.name if order.branch else None,
-                'branchPhone': order.branch.phone if order.branch else None,
-                'recordedOn': (order.created_at + PH_OFFSET).strftime('%Y-%m-%d') if order.created_at else None,
-                'estimatedCompletion': None,
-                'completedOn': None,
-                'paymentStatus': PAYMENT_TRACK_LABELS.get(order.payment_status, order.payment_status),
-            }
-
-    if result is None:
-        _track_failures.setdefault(key, []).append(now)
-        return jsonify({'status': 'error', 'message': TRACK_NOT_FOUND}), 404
-    return jsonify({'status': 'success', 'data': result})
 
 @app.route('/api/health', methods=['GET'])
 def health_check():

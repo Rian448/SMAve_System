@@ -5,9 +5,10 @@ import { api, type Customer } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
 import Paginated from '@/components/Paginated';
+import { exactPeso } from '@/lib/format';
 
 const peso = (n: number) =>
-  new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(n || 0);
+  exactPeso(n || 0);
 
 export default function CustomersPage() {
   const router = useRouter();
