@@ -1,8 +1,9 @@
 ﻿'use client';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { api, RawMaterial, Supplier } from '@/lib/api';
-import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
+import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 
 interface POItem {
   material_id: string;
@@ -22,17 +23,18 @@ export default function NewPurchaseOrderPage() {
   const [savedSuppliers, setSavedSuppliers] = useState<Supplier[]>([]);
   
   // Form state
-  const [supplier, setSupplier] = useState('');
-  const [supplierContact, setSupplierContact] = useState('');
-  const [supplierEmail, setSupplierEmail] = useState('');
+  // A saved supplier only (add new ones under Suppliers first); its contact details come with it
+  const [supplierId, setSupplierId] = useState('');
+  const chosenSupplier = savedSuppliers.find(s => String(s.id) === supplierId);
   const [expectedDate, setExpectedDate] = useState('');
   const [notes, setNotes] = useState('');
   const [items, setItems] = useState<POItem[]>([
-    { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'pcs' }
+    { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd' }
   ]);
 
   useEffect(() => {
-    api.inventory.getRawMaterials()
+    // Shops order their own stock and the warehouse's (which supplies them)
+    api.inventory.getRawMaterials({ includeWarehouse: true })
       .then(response => {
         setMaterials(response.data || []);
         setLoadingMaterials(false);
@@ -46,8 +48,47 @@ export default function NewPurchaseOrderPage() {
       .catch(err => console.error(err));
   }, []);
 
+  // Items picked from the restock recommendations (Forecasting) arrive as
+  // ?restock=CODE:qty,CODE:qty. They fill the lines to review; nothing is saved yet.
+  const [restockNote, setRestockNote] = useState<{ added: number; missing: string[] } | null>(null);
+  useEffect(() => {
+    if (loadingMaterials) return;
+    const raw = new URLSearchParams(window.location.search).get('restock');
+    if (!raw) return;
+    const lines = new Map<number, POItem>();
+    const missing: string[] = [];
+    for (const part of raw.split(',')) {
+      const at = part.lastIndexOf(':');
+      const code = decodeURIComponent(part.slice(0, at));
+      const qty = Number(part.slice(at + 1));
+      // Only materials in Inventory can be ordered, once each
+      const m = materials.find(x => x.itemId === code && !x.isArchived);
+      if (!m || !(qty > 0)) { missing.push(code); continue; }
+      if (lines.has(m.id)) continue;
+      lines.set(m.id, {
+        material_id: String(m.id),
+        material_name: [m.materialType, m.color, m.pattern].filter(Boolean).join(' - '),
+        quantity: qty,
+        unit_cost: m.costPerUnit || m.unitPrice,
+        unit: 'yd',
+      });
+    }
+    if (lines.size) setItems([...lines.values()]);
+    // A purchase order is for one supplier: choose it when every item has the same one
+    const suppliers = new Set([...lines.keys()].map(id => materials.find(m => m.id === id)?.supplierId).filter(Boolean));
+    if (suppliers.size === 1) setSupplierId(String([...suppliers][0]));
+    setRestockNote({ added: lines.size, missing });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadingMaterials]);
+
+  // Lines whose material is normally bought from a different supplier than the one chosen
+  const otherSupplierItems = chosenSupplier ? items.filter(it => {
+    const m = materials.find(x => String(x.id) === it.material_id);
+    return m?.supplierId && m.supplierId !== chosenSupplier.id;
+  }) : [];
+
   const addItem = () => {
-    setItems([...items, { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'pcs' }]);
+    setItems([...items, { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd' }]);
   };
 
   const removeItem = (index: number) => {
@@ -59,7 +100,8 @@ export default function NewPurchaseOrderPage() {
   const updateItem = (index: number, field: keyof POItem, value: string | number) => {
     const newItems = [...items];
     if (field === 'material_id') {
-      const material = materials.find(m => m.id === value);
+      // The dropdown gives the id as text
+      const material = materials.find(m => String(m.id) === String(value));
       if (material) {
         const label = [material.materialType, material.color, material.pattern].filter(Boolean).join(' - ');
         newItems[index] = {
@@ -68,7 +110,7 @@ export default function NewPurchaseOrderPage() {
           material_name: label,
           // A purchase order pays the supplier's cost, not our selling price
           unit_cost: material.costPerUnit || material.unitPrice,
-          unit: 'unit'
+          unit: 'yd'
         };
       }
     } else {
@@ -85,21 +127,25 @@ export default function NewPurchaseOrderPage() {
     e.preventDefault();
     setError('');
     const anyMaterial = items.some(item => item.material_id);
+    // The same material twice: its quantity belongs on one line
+    const firstRow = new Map<string, number>();
+    items.forEach((item, index) => { if (item.material_id && !firstRow.has(item.material_id)) firstRow.set(item.material_id, index); });
     if (fe.show({
-      'po-supplier': !supplier.trim() && 'Choose a saved supplier or type the supplier name.',
-      'po-email': emailProblem(supplierEmail),
+      'po-supplier': !chosenSupplier && 'Choose the supplier.',
       'po-date': !expectedDate && 'Choose the expected delivery date.',
       ...Object.fromEntries(items.flatMap((item, index) => [
-        [`po-material-${index}`, !item.material_id && (anyMaterial ? 'Select a material, or remove this row.'
-          : 'Add at least one material to the purchase order.')],
-        [`po-qty-${index}`, !(item.quantity >= 1) && 'At least 1.'],
+        [`po-material-${index}`, !item.material_id ? (anyMaterial ? 'Select a material, or remove this row.'
+          : 'Add at least one material to the purchase order.')
+          : firstRow.get(item.material_id) !== index && 'This material is already on another line. Change the quantity there instead.'],
+        [`po-qty-${index}`, !(item.quantity > 0) && 'More than 0.'],
       ])),
     })) return;
     setLoading(true);
 
     try {
       const purchaseOrder = {
-        supplierName: supplier,
+        supplierName: chosenSupplier!.name,
+        supplierId: chosenSupplier!.id,
         items: items.filter(item => item.material_id).map(item => ({
           materialId: Number(item.material_id),
           name: item.material_name,
@@ -111,7 +157,7 @@ export default function NewPurchaseOrderPage() {
       };
 
       await api.purchaseOrders.create(purchaseOrder);
-      router.push('/inventory?tab=purchase-orders');
+      router.push('/purchase-orders');
     } catch (err) {
       console.error(err);
       setError(err instanceof Error && err.message ? err.message : 'Failed to create the purchase order.');
@@ -126,13 +172,13 @@ export default function NewPurchaseOrderPage() {
         {/* Header */}
         <div className="mb-8">
           <button
-            onClick={() => router.push('/inventory')}
+            onClick={() => router.push('/purchase-orders')}
             className="flex items-center text-gray-600 hover:text-[#011c72] mb-2"
           >
             <svg className="w-5 h-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
-            Back to Inventory
+            Back to Purchase Orders
           </button>
           <h1 className="text-2xl font-bold text-gray-900">New Purchase Order</h1>
           <p className="text-gray-500 mt-1">
@@ -142,6 +188,18 @@ export default function NewPurchaseOrderPage() {
 
         {error && (
           <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>
+        )}
+        {restockNote && (
+          <div className="mb-6 p-4 bg-[#eef1fb] border border-[#c7d2f5] rounded-xl text-sm text-[#011c72] space-y-1">
+            <p>
+              <b>{restockNote.added} item{restockNote.added === 1 ? '' : 's'}</b> added from the restock recommendations with the suggested quantities.
+              Review the quantities and remove anything you don&apos;t need. Nothing is ordered until you create the purchase order,
+              and stock only goes up when it is received.
+            </p>
+            {restockNote.missing.length > 0 && (
+              <p className="text-amber-800">Not added (not in Inventory): {restockNote.missing.join(', ')}</p>
+            )}
+          </div>
         )}
         <form onSubmit={handleSubmit} noValidate>
           {/* Supplier Information */}
@@ -155,60 +213,38 @@ export default function NewPurchaseOrderPage() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="md:col-span-2" {...fe.field('po-supplier')}>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Supplier Name *
+                <label htmlFor="po-supplier" className="block text-sm font-medium text-gray-700 mb-2">
+                  Supplier *
                 </label>
                 <select
-                  value={supplier}
-                  onChange={(e) => {
-                    const selected = savedSuppliers.find((s: Supplier) => s.name === e.target.value);
-                    setSupplier(e.target.value);
-                    if (selected) {
-                      setSupplierContact(selected.phone || '');
-                      setSupplierEmail(selected.email || '');
-                    }
-                  }}
+                  id="po-supplier"
+                  value={supplierId}
+                  onChange={(e) => setSupplierId(e.target.value)}
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
+                  required
                 >
-                  <option value="">Select a saved supplier (optional)</option>
+                  <option value="">Select a supplier</option>
                   {savedSuppliers.map((s: Supplier) => (
-                    <option key={s.id} value={s.name}>{s.name}</option>
+                    <option key={s.id} value={String(s.id)}>{s.name}</option>
                   ))}
                 </select>
-                <input
-                  type="text"
-                  value={supplier}
-                  onChange={(e) => setSupplier(e.target.value)}
-                  placeholder="Or type supplier name manually"
-                  className="mt-2 w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                  required
-                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Not in the list? Add the supplier under{' '}
+                  <Link href="/suppliers" className="text-[#011c72] font-medium hover:underline">Suppliers</Link> first.
+                </p>
                 <FieldError message={fe.errors['po-supplier']} />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Contact Number
-                </label>
-                <input
-                  type="tel"
-                  value={supplierContact}
-                  onChange={(e) => setSupplierContact(e.target.value)}
-                  placeholder="(02) 8XXX-XXXX"
-                  className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                />
+                <p className="block text-sm font-medium text-gray-700 mb-2">Contact Number</p>
+                <p className="px-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-700 min-h-10.5">
+                  {chosenSupplier?.phone || <span className="text-gray-400">—</span>}
+                </p>
               </div>
-              <div {...fe.field('po-email')}>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Email Address
-                </label>
-                <input
-                  type="email"
-                  value={supplierEmail}
-                  onChange={(e) => setSupplierEmail(e.target.value)}
-                  placeholder="supplier@email.com"
-                  className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                />
-                <FieldError message={fe.errors['po-email']} />
+              <div>
+                <p className="block text-sm font-medium text-gray-700 mb-2">Email Address</p>
+                <p className="px-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-700 min-h-10.5 break-all">
+                  {chosenSupplier?.email || <span className="text-gray-400">—</span>}
+                </p>
               </div>
               <div {...fe.field('po-date')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -247,6 +283,17 @@ export default function NewPurchaseOrderPage() {
               </button>
             </div>
 
+            <p className="-mt-2 mb-4 text-xs text-gray-500">
+              Only materials already in Inventory can be ordered. For a new material, add it in{' '}
+              <Link href="/inventory" className="text-[#011c72] font-medium hover:underline">Inventory</Link> first
+              (it starts at 0 yd). Stock goes up only when this order is received.
+            </p>
+            {otherSupplierItems.length > 0 && (
+              <p className="mb-4 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
+                Usually bought from another supplier: {otherSupplierItems.map(i => i.material_name).join(', ')}.
+                A purchase order is for one supplier — remove these and order them in a separate purchase order if needed.
+              </p>
+            )}
             {loadingMaterials ? (
               <div className="flex items-center justify-center py-8">
                 <div className="animate-spin w-6 h-6 border-2 border-[#011c72] border-t-transparent rounded-full"></div>
@@ -267,21 +314,30 @@ export default function NewPurchaseOrderPage() {
                           required
                         >
                           <option value="">Select material</option>
-                          {materials.map(m => (
-                            <option key={m.id} value={m.id.toString()}>
-                              {m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} in stock)
-                            </option>
-                          ))}
+                          {/* Only materials registered in Inventory; the chosen supplier's own listed first */}
+                          {(chosenSupplier
+                            ? [['From ' + chosenSupplier.name, materials.filter(m => m.supplierId === chosenSupplier.id)],
+                               ['Other materials', materials.filter(m => m.supplierId !== chosenSupplier.id)]] as const
+                            : [['', materials]] as const
+                          ).filter(([, list]) => list.length > 0).map(([label, list]) => {
+                            const opts = list.map(m => (
+                              <option key={m.id} value={m.id.toString()}>
+                                {m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} yd in stock)
+                              </option>
+                            ));
+                            return label ? <optgroup key={label} label={label}>{opts}</optgroup> : opts;
+                          })}
                         </select>
                         <FieldError message={fe.errors[`po-material-${index}`]} />
                       </div>
                       <div className="col-span-4 md:col-span-2" {...fe.field(`po-qty-${index}`)}>
                         <label className="block text-xs font-medium text-gray-500 mb-1">
-                          Quantity
+                          Quantity (yd)
                         </label>
                         <input
                           type="number"
-                          min="1"
+                          min="0.01"
+                          step="0.01"
                           value={item.quantity}
                           onChange={(e) => updateItem(index, 'quantity', Number(e.target.value))}
                           className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
@@ -320,7 +376,7 @@ export default function NewPurchaseOrderPage() {
                           Total
                         </label>
                         <p className="py-2 text-sm font-medium text-gray-900">
-                          ₱{(item.quantity * item.unit_cost).toLocaleString()}
+                          ₱{(item.quantity * item.unit_cost).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </p>
                       </div>
                       <div className="col-span-2 md:col-span-1">
@@ -348,13 +404,13 @@ export default function NewPurchaseOrderPage() {
                   <div className="flex justify-between py-2">
                     <span className="text-sm text-gray-600">Subtotal</span>
                     <span className="text-sm font-medium text-gray-900">
-                      ₱{calculateTotal().toLocaleString()}
+                      ₱{calculateTotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </span>
                   </div>
                   <div className="flex justify-between py-2 border-t border-gray-200">
                     <span className="text-base font-medium text-gray-900">Total</span>
                     <span className="text-base font-bold text-[#011c72]">
-                      ₱{calculateTotal().toLocaleString()}
+                      ₱{calculateTotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </span>
                   </div>
                 </div>
@@ -378,7 +434,7 @@ export default function NewPurchaseOrderPage() {
           <div className="flex items-center justify-end gap-4">
             <button
               type="button"
-              onClick={() => router.push('/inventory')}
+              onClick={() => router.push('/purchase-orders')}
               className="px-6 py-2 border border-gray-200 text-gray-700 rounded-lg font-medium hover:bg-gray-50 transition-colors"
             >
               Cancel

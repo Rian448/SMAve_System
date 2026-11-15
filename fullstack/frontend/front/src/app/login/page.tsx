@@ -1,10 +1,13 @@
 ﻿'use client';
 import { useState, useEffect } from 'react';
+import { homePath } from '@/lib/permissions';
 import { useAuth } from '@/context/AuthContext';
 import { setAuthToken } from '@/lib/api';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
+import { passwordProblem } from '@/lib/password';
+import PasswordChecklist from '@/components/PasswordChecklist';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
@@ -68,7 +71,7 @@ export default function LoginPage() {
         if (data.lockedOut) {
           setLockoutSeconds(data.retryAfterSeconds || 900);
         }
-        setError(data.message || 'Incorrect username or password.');
+        setError(data.message || 'Incorrect username/email or password.');
         return;
       }
 
@@ -77,7 +80,8 @@ export default function LoginPage() {
       await checkAuth();
       // The owner starts on the business summary; everyone else on the dashboard
       // (Worker Management is admin-only, so worker accounts land there too)
-      router.push(data.data.user?.role === 'owner' ? '/owner' : '/dashboard');
+      const granted: string[] = data.data.user?.permissions || [];
+      router.push(homePath((...wanted) => wanted.some(p => granted.includes(p))));
     } catch {
       setError('Connection error. Please try again.');
     } finally {
@@ -138,8 +142,8 @@ export default function LoginPage() {
     setRecoveryError('');
     if (fe.show({
       'reset-code': recoveryCode.length !== 6 && 'Enter the 6-digit code from the email.',
-      'reset-password': newPassword.length < 8 && 'Password must be at least 8 characters.',
-      'reset-confirm': newPassword.length >= 8 && newPassword !== confirmPassword && 'Passwords do not match.',
+      'reset-password': passwordProblem(newPassword),
+      'reset-confirm': !passwordProblem(newPassword) && newPassword !== confirmPassword && 'Passwords do not match.',
     })) return;
     setRecoveryLoading(true);
     try {
@@ -225,7 +229,7 @@ export default function LoginPage() {
               <form onSubmit={handleSubmit} className="space-y-5">
                 <div>
                   <label htmlFor="username" className="block text-sm font-medium text-gray-700 mb-1">
-                    Username
+                    Username or Email
                   </label>
                   <input
                     id="username"
@@ -234,7 +238,11 @@ export default function LoginPage() {
                     onChange={(e) => setUsername(e.target.value)}
                     disabled={lockoutSeconds > 0}
                     className="w-full px-4 py-3 rounded-xl border border-gray-300 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                    placeholder="Enter your username"
+                    placeholder="Your username or email address"
+                    autoComplete="username"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                     required
                   />
                 </div>
@@ -391,9 +399,11 @@ export default function LoginPage() {
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
                       className="w-full px-4 py-3 rounded-xl border border-gray-300 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent transition-all"
-                      placeholder="At least 8 characters"
+                      placeholder="Create a strong password"
+                      aria-describedby="reset-password-rules"
                       required
                     />
+                    <PasswordChecklist id="reset-password-rules" password={newPassword} />
                     <FieldError message={fe.errors['reset-password']} />
                   </div>
 

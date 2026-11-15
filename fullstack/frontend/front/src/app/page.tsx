@@ -17,11 +17,6 @@ interface CatalogItem {
   sortOrder: number;
 }
 
-// Gallery filters, matching CATALOG_CATEGORIES on the server (less Promotions); used until the catalog loads
-const DEFAULT_CATEGORIES = ['Automotive', 'Sofas', 'Chairs', 'Commercial', 'Custom Projects'];
-// Tiles shown at first, and added by each "See More" click
-const GALLERY_PAGE = 8;
-
 interface EditState {
   title: string;
   description: string;
@@ -157,7 +152,7 @@ function CatalogCard({
   );
 }
 
-// Shown in the Promotions section instead of the gallery (see CATALOG_CATEGORIES on the server)
+// The website only shows promotions now (the project gallery was removed)
 const PROMOTIONS = 'Promotions';
 
 // Contact details used across the page
@@ -188,7 +183,7 @@ const faqs = [
   { q: 'Do you offer installation?', a: 'Yes! Our skilled team handles professional installation at any of our branches.' },
   { q: 'Can I bring my own design?', a: 'Absolutely. Visit a branch or message us with reference photos or sketches — we will do our best to match your vision.' },
   { q: 'What types of vehicles do you cover?', a: 'We work with all types — cars, SUVs, vans, jeeps, and more. Bring your vehicle details when you visit or message us.' },
-  { q: 'How do I get a price or follow up on my order?', a: 'For a price, message us on Facebook, call us, or visit any branch. To check on an order, use Track Your Order above with the number on your receipt.' },
+  { q: 'How do I get a price or follow up on my order?', a: 'For a price, message us on Facebook, call us, or visit any branch. To check on an order, call or message the branch where you placed it.' },
 ];
 
 function SectionHeading({ kicker, title, subtitle }: { kicker: string; title: string; subtitle?: string }) {
@@ -251,133 +246,6 @@ function AddItemForm({ categories, initialCategory, heading, onAdd, onCancel }: 
   );
 }
 
-interface TrackedOrder {
-  reference: string;
-  kind: 'job_order' | 'product_order';
-  kindLabel: string;
-  description: string;
-  status: 'received' | 'in_progress' | 'ready' | 'done' | 'cancelled';
-  statusLabel: string;
-  branchName: string | null;
-  branchPhone: string | null;
-  recordedOn: string | null;
-  estimatedCompletion: string | null;
-  completedOn: string | null;
-  paymentStatus: string;
-}
-
-const TRACK_STEPS: { key: TrackedOrder['status']; label: string }[] = [
-  { key: 'received', label: 'Received' },
-  { key: 'in_progress', label: 'In progress' },
-  { key: 'ready', label: 'Ready' },
-  { key: 'done', label: 'Done' },
-];
-
-function formatTrackDate(iso: string | null) {
-  if (!iso) return null;
-  const d = new Date(`${iso.slice(0, 10)}T00:00:00`);
-  return isNaN(d.getTime()) ? iso : d.toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' });
-}
-
-/** Look up an order by its receipt number. Read-only: shows status only. */
-function TrackOrder() {
-  const [reference, setReference] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [order, setOrder] = useState<TrackedOrder | null>(null);
-
-  async function lookUp(e: React.FormEvent) {
-    e.preventDefault();
-    if (!reference.trim()) { setError('Enter your order number.'); return; }
-    setBusy(true); setError(''); setOrder(null);
-    try {
-      const res = await fetch(`${API_BASE}/api/track-order`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reference: reference.trim() }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.status === 'success') setOrder(data.data);
-      else setError(data.message || 'Something went wrong. Please try again.');
-    } catch {
-      setError('Could not reach the server. Please try again in a moment.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const stepIndex = order ? TRACK_STEPS.findIndex(s => s.key === order.status) : -1;
-  const inputCls = 'w-full rounded-lg border border-gray-300 bg-white px-4 py-3 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#011c72] focus:border-transparent';
-
-  return (
-    <div className="max-w-2xl mx-auto">
-      <form onSubmit={lookUp} className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3 sm:items-end">
-        <label className="block">
-          <span className="block text-xs font-semibold text-gray-600 mb-1.5">Order number</span>
-          <input className={inputCls} value={reference} onChange={e => setReference(e.target.value)}
-            placeholder="e.g. JO-BA-2026-0001" autoComplete="off" maxLength={50} />
-        </label>
-        <button type="submit" disabled={busy}
-          className="px-6 py-3 rounded-lg bg-[#011c72] hover:bg-[#01268c] text-white text-sm font-semibold transition-colors disabled:opacity-60">
-          {busy ? 'Checking…' : 'Track'}
-        </button>
-        <p className="sm:col-span-2 text-xs text-gray-400">
-          Your order number is on the receipt or job order slip you received at the branch.
-        </p>
-      </form>
-
-      {error && (
-        <p role="alert" className="mt-4 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">{error}</p>
-      )}
-
-      {order && (
-        <div className="mt-5 bg-white rounded-xl border border-gray-200 shadow-sm p-6" aria-live="polite">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">{order.kindLabel}</p>
-              <p className="text-lg font-bold text-gray-900 break-all">{order.reference}</p>
-              {order.description && <p className="text-sm text-gray-500 mt-0.5">{order.description}</p>}
-            </div>
-            <span className={`shrink-0 px-3 py-1 rounded-full text-sm font-semibold ${
-              order.status === 'cancelled' ? 'bg-red-100 text-red-700'
-                : order.status === 'ready' || order.status === 'done' ? 'bg-green-100 text-green-700'
-                : 'bg-[#eef2ff] text-[#011c72]'}`}>
-              {order.statusLabel}
-            </span>
-          </div>
-
-          {order.status !== 'cancelled' && (
-            <ol className="mt-6 grid grid-cols-4 gap-1">
-              {TRACK_STEPS.map((s, i) => (
-                <li key={s.key} className="flex flex-col items-center text-center">
-                  <span className={`h-1.5 w-full rounded-full ${i <= stepIndex ? 'bg-[#011c72]' : 'bg-gray-200'}`} />
-                  <span className={`mt-2 text-[11px] sm:text-xs ${i <= stepIndex ? 'font-semibold text-[#011c72]' : 'text-gray-400'}`}>{s.label}</span>
-                </li>
-              ))}
-            </ol>
-          )}
-
-          <dl className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
-            {order.branchName && (<div><dt className="text-gray-400">Branch</dt><dd className="text-gray-900 font-medium">{order.branchName}</dd></div>)}
-            {order.recordedOn && (<div><dt className="text-gray-400">Recorded on</dt><dd className="text-gray-900 font-medium">{formatTrackDate(order.recordedOn)}</dd></div>)}
-            {order.estimatedCompletion && order.status !== 'done' && order.status !== 'cancelled' && (
-              <div><dt className="text-gray-400">Expected completion</dt><dd className="text-gray-900 font-medium">{formatTrackDate(order.estimatedCompletion)}</dd></div>
-            )}
-            {order.completedOn && (<div><dt className="text-gray-400">Completed on</dt><dd className="text-gray-900 font-medium">{formatTrackDate(order.completedOn)}</dd></div>)}
-            <div><dt className="text-gray-400">Payment</dt><dd className="text-gray-900 font-medium">{order.paymentStatus}</dd></div>
-          </dl>
-
-          <p className="mt-5 text-xs text-gray-500">
-            Questions about this order? Contact {order.branchName || 'the branch'}
-            {order.branchPhone ? <> at <a className="text-[#011c72] hover:underline" href={`tel:${order.branchPhone.replace(/[^0-9+]/g, '')}`}>{order.branchPhone}</a></> : ''}
-            {' '}or message us on Facebook.
-          </p>
-        </div>
-      )}
-    </div>
-  );
-}
-
 /** The public website: information about the business only. Nothing here orders, books or reserves. */
 export default function LandingPage() {
   const { can } = useAuth();
@@ -386,16 +254,15 @@ export default function LandingPage() {
 
   const [items, setItems] = useState<CatalogItem[]>([]);
   const [loading, setLoading] = useState(true);
-  // Which section's "add" form is open (gallery or promotions)
-  const [addingIn, setAddingIn] = useState<'gallery' | 'promotions' | null>(null);
+  // Whether the "add promotion" form is open
+  const [addingIn, setAddingIn] = useState<'promotions' | null>(null);
   const [heroTitle, setHeroTitle] = useState('Crafted for Comfort. Built to Last.');
   const [heroDesc, setHeroDesc] = useState('Premium seat covers, upholstery and interior work for vehicles and furniture — made to fit, built to last.');
   const [editingHero, setEditingHero] = useState(false);
   const [heroForm, setHeroForm] = useState({ title: heroTitle, desc: heroDesc });
   const [openFaq, setOpenFaq] = useState<number | null>(null);
-  const [categories, setCategories] = useState<string[]>([...DEFAULT_CATEGORIES, PROMOTIONS]);
-  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
-  const [visibleCount, setVisibleCount] = useState(GALLERY_PAGE);
+  // Only promotions are added or edited here
+  const categories = [PROMOTIONS];
   const [branchList, setBranchList] = useState<PublicBranch[]>([]);
   const [branchesLoading, setBranchesLoading] = useState(true);
 
@@ -410,7 +277,6 @@ export default function LandingPage() {
       const data = await res.json();
       if (data.status === 'success') {
         setItems(data.data);
-        if (Array.isArray(data.categories)) setCategories(data.categories);
       }
     } catch {
       // silently fail — catalog just shows empty
@@ -492,9 +358,6 @@ export default function LandingPage() {
   }
 
   const promotions = items.filter(i => i.category === PROMOTIONS);
-  const galleryItems = items.filter(i => i.category !== PROMOTIONS);
-  const galleryCategories = categories.filter(c => c !== PROMOTIONS);
-  const shownGallery = categoryFilter ? galleryItems.filter(i => i.category === categoryFilter) : galleryItems;
 
   const cardProps = { isAdmin, categories, onSave: handleSave, onDelete: handleDelete, onImageUpload: handleImageUpload };
   const addButtonCls = 'mt-6 inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-[#011c72] hover:bg-[#01268c] text-white text-sm font-semibold transition-colors shadow-md';
@@ -546,10 +409,10 @@ export default function LandingPage() {
               <p className="text-gray-300 text-lg leading-relaxed mb-10 max-w-2xl mx-auto">{heroDesc}</p>
               <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
                 <a
-                  href="#gallery"
+                  href="#products"
                   className="inline-flex items-center justify-center px-8 py-4 rounded-md bg-[#011c72] hover:bg-[#01268c] text-white font-semibold text-sm uppercase tracking-wide transition-colors shadow-lg"
                 >
-                  See Our Work
+                  Our Services
                 </a>
                 <a
                   href="#contact"
@@ -565,15 +428,6 @@ export default function LandingPage() {
               )}
             </>
           )}
-        </div>
-      </section>
-
-      {/* ── Track Your Order ── */}
-      <section id="track" className="scroll-mt-16 py-16 bg-gray-50 border-b border-gray-100">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <SectionHeading kicker="Already ordered?" title="Track Your Order"
-            subtitle="Enter your order number to see where your order is." />
-          <TrackOrder />
         </div>
       </section>
 
@@ -674,85 +528,6 @@ export default function LandingPage() {
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-5">
               {promotions.map(item => <CatalogCard key={item.id} item={item} {...cardProps} />)}
             </div>
-          )}
-        </div>
-      </section>
-
-      {/* ── Gallery ── */}
-      <section id="gallery" className="scroll-mt-16 py-20 bg-gray-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="text-center mb-10">
-            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-[#4a6aff] mb-3">Our Work</p>
-            <h2 className="text-3xl sm:text-4xl font-bold text-gray-900">
-              Project <span className="text-[#011c72]">Gallery</span>
-            </h2>
-            <p className="text-gray-500 mt-4 text-base max-w-xl mx-auto leading-relaxed">
-              Completed projects and available designs showcasing our craftsmanship and attention to detail.
-            </p>
-            {isAdmin && addingIn !== 'gallery' && (
-              <button onClick={() => setAddingIn('gallery')} className={addButtonCls}>
-                {plusIcon}
-                Add Item
-              </button>
-            )}
-          </div>
-
-          {addingIn === 'gallery' && isAdmin && (
-            <AddItemForm categories={categories} initialCategory={galleryCategories[0] || DEFAULT_CATEGORIES[0]}
-              heading="New Gallery Item" onAdd={handleAddItem} onCancel={() => setAddingIn(null)} />
-          )}
-
-          {/* Category filters */}
-          <div className="flex flex-wrap justify-center gap-2 sm:gap-3 mb-10">
-            {[null, ...galleryCategories].map(c => {
-              const active = categoryFilter === c;
-              return (
-                <button
-                  key={c ?? 'all'}
-                  onClick={() => { setCategoryFilter(c); setVisibleCount(GALLERY_PAGE); }}
-                  className={`px-4 sm:px-5 py-2 rounded-full text-sm font-semibold border transition-colors ${
-                    active
-                      ? 'bg-[#011c72] border-[#011c72] text-white shadow-sm'
-                      : 'bg-white border-gray-300 text-gray-700 hover:border-[#011c72] hover:text-[#011c72]'
-                  }`}
-                >
-                  {c ?? 'All'}
-                </button>
-              );
-            })}
-          </div>
-
-          {loading ? (
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-5">
-              {[...Array(GALLERY_PAGE)].map((_, i) => (
-                <div key={i} className="aspect-square rounded-xl bg-gray-100 animate-pulse" />
-              ))}
-            </div>
-          ) : shownGallery.length === 0 ? (
-            <div className="text-center py-20 text-gray-300">
-              <svg className="w-14 h-14 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-              <p className="text-lg font-medium text-gray-400">
-                {categoryFilter ? `No ${categoryFilter.toLowerCase()} projects yet.` : 'No gallery items yet.'}
-              </p>
-              {isAdmin && <p className="text-sm mt-1 text-gray-400">Click &ldquo;Add Item&rdquo; to get started.</p>}
-            </div>
-          ) : (
-            <>
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-5">
-                {shownGallery.slice(0, visibleCount).map(item => <CatalogCard key={item.id} item={item} {...cardProps} />)}
-              </div>
-              {shownGallery.length > visibleCount && (
-                <div className="text-center mt-10">
-                  <button
-                    onClick={() => setVisibleCount(n => n + GALLERY_PAGE)}
-                    className="inline-flex items-center gap-2 px-7 py-3 rounded-md bg-[#011c72] hover:bg-[#01268c] text-white text-sm font-semibold shadow-md transition-colors"
-                  >
-                    See More Projects
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" /></svg>
-                  </button>
-                </div>
-              )}
-            </>
           )}
         </div>
       </section>
@@ -888,10 +663,8 @@ export default function LandingPage() {
               <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-5">Quick Links</p>
               <ul className="space-y-3">
                 {[
-                  { label: 'Track Your Order', href: '#track' },
                   { label: 'Products & Services', href: '#products' },
                   { label: 'Promotions', href: '#promotions' },
-                  { label: 'Gallery', href: '#gallery' },
                   { label: 'Branches', href: '#branches' },
                 ].map(link => (
                   <li key={link.label}>

@@ -62,7 +62,7 @@ export default function ChatBubble() {
     if (!user || !allowed) return;
     try {
       const res = await api.chat.list(sinceParam ?? undefined);
-      const msgs: ChatMessage[] = (res as any).data ?? res ?? [];
+      const msgs: ChatMessage[] = res.data ?? [];
       if (!Array.isArray(msgs) || msgs.length === 0) return;
 
       if (sinceParam) {
@@ -121,7 +121,7 @@ export default function ChatBubble() {
     setInput('');
     try {
       const res = await api.chat.send(text);
-      const msg: ChatMessage = (res as any).data ?? res;
+      const msg = res.data;
       if (msg?.id) {
         setMessages(prev => [...prev, msg]);
         latestTs.current = msg.createdAt;

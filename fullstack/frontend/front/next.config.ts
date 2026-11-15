@@ -13,6 +13,9 @@ const nextConfig: NextConfig = {
       { source: "/my-orders/:path*", destination: "/#contact", permanent: false },
       { source: "/register", destination: "/#contact", permanent: false },
       { source: "/appointments/:path*", destination: "/dashboard", permanent: false },
+      // Purchase Orders and Suppliers moved out of Inventory into their own pages
+      { source: "/inventory/purchase-orders", destination: "/purchase-orders", permanent: true },
+      { source: "/inventory/purchase-orders/:path*", destination: "/purchase-orders/:path*", permanent: true },
     ];
   },
 };

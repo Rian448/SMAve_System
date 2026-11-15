@@ -22,12 +22,15 @@ export interface User {
   branch: string;
   branchId?: number;
   branchName?: string;
-  /** Based at the warehouse: picks the branch each job order is for */
+  /** Based at the warehouse (administrators only); grants no extra access */
   atWarehouse?: boolean;
   isActive?: boolean;
   phone?: string;
   /** Effective permissions (role defaults + grants − revokes), e.g. 'inventory.add' */
   permissions?: string[];
+  /** In the Users list: whether the signed-in user may manage this account (only roles below theirs) */
+  canManage?: boolean;
+  manageBlockedReason?: string | null;
 }
 
 export interface PermissionModule {
@@ -440,7 +443,17 @@ export interface AIPrediction {
   dataSource: 'xlsx' | 'hybrid' | 'live';
   dataPoints: number;
   hasCurrentInventory: boolean;
+  /** Forecasting method that tested best for this material (missing on predictions made before it existed) */
+  method?: 'moving_average' | 'croston_sba' | 'exp_smoothing' | 'prophet';
+  /** Its error on held-back weeks (WAPE %), and the plain moving average's; null with too little history */
+  errorPercent?: number | null;
+  baselineErrorPercent?: number | null;
 }
+
+export const FORECAST_METHOD_LABELS: Record<NonNullable<AIPrediction['method']>, string> = {
+  moving_average: 'Moving average', croston_sba: 'Croston (bursty use)',
+  exp_smoothing: 'Exponential smoothing', prophet: 'Prophet',
+};
 
 export interface AIStatus {
   status: 'idle' | 'computing' | 'done' | 'error';
@@ -466,6 +479,8 @@ export interface InventoryForecastData {
   hasPredictions: boolean;
   predictionStatus: string;
   period: string;
+  /** Overall tested error of the forecasts (WAPE %) and of a plain moving average */
+  forecastAccuracy?: { testedItems: number; errorPercent: number | null; baselineErrorPercent: number | null };
 }
 
 export interface PaymentRecord {
@@ -481,6 +496,8 @@ export interface PaymentRecord {
   recordedByName?: string;
   createdAt: string;
 }
+
+export type PaymentSort = 'latest' | 'oldest' | 'amount_desc' | 'amount_asc';
 
 export interface PaymentSummary {
   totalRevenue: number;
@@ -575,12 +592,25 @@ export interface PremadeTransfer {
   resolvedAt?: string;
 }
 
+export interface PremadeRecipe {
+  materials: {
+    materialId: number; name: string; detail: string;
+    /** Used by the whole latest batch */ batchQuantity: number;
+    /** Per piece made; null when that batch's piece count wasn't recorded */ perPiece: number | null;
+    costPerUnit: number; stock: number; branchName: string | null; available: boolean;
+  }[];
+  basedOn: { date: string | null; pieces: number | null } | null;
+}
+
 export interface PremadeProductInput {
-  name: string;
+  /** Make more of this warehouse product (its quantity goes up) instead of adding a new one;
+   *  name, category and price are then kept from the product */
+  existingProductId?: number;
+  name?: string;
   quantity: number;
   unit?: string;
-  category: string;
-  price: number;
+  category?: string;
+  price?: number;
   /** Leave out to have the server work it out from the materials used */
   cost?: number;
   branchId: number;
@@ -759,7 +789,16 @@ export interface MyWork {
     hoursWorked?: number | null;
     pay?: number | null;
     endTime?: string | null;
+    waitingOn?: WaitingOn | null;
   }[];
+}
+
+/** Work on a job order goes in the order it was given out: the earlier task still to finish */
+export interface WaitingOn {
+  assignmentId: number;
+  workerName: string;
+  description?: string | null;
+  status: string;
 }
 
 export interface WorkerAssignment {
@@ -789,6 +828,8 @@ export interface WorkerAssignment {
   createdAt: string;
   isOverdue?: boolean;
   overdueByHours?: number;
+  /** The earlier unfinished task on the job order this one must wait for */
+  waitingOn?: WaitingOn | null;
 }
 
 export interface WorkerAvailabilityEntry {
@@ -803,7 +844,8 @@ export interface WorkerAvailabilityEntry {
 export interface VehicleInfo {
   make: string;
   model: string;
-  year: number;
+  /** Can be empty on a draft that has no vehicle year yet */
+  year: number | null;
   plateNumber: string;
   color?: string;
 }
@@ -840,6 +882,8 @@ export interface JobOrder {
   customerName: string;
   customerPhone: string;
   customerEmail: string;
+  /** Not sent for job orders today; shown as N/A when missing */
+  customerAddress?: string;
   branchId: number;
   branchName: string;
   description: string;
@@ -857,6 +901,11 @@ export interface JobOrder {
     specification?: string;
     cutterName?: string;
     sewerName?: string;
+    /** Each service's details, kept with the slip (e.g. the seat cover design) */
+    serviceDetails?: {
+      flooring?: string; reupholstery?: string; ceiling?: string; sidings?: string; other?: string;
+      seatCovers?: { design?: string; material?: string; pocket?: string; others?: string };
+    };
   } | null;
   estimatedCost: number;
   /** Planned lines plus any extra material issued for the order */
@@ -871,7 +920,9 @@ export interface JobOrder {
   vatInclusive?: boolean;
   /** VAT inside totalPrice, as worked out by the server */
   vatAmount?: number;
-  status: 'pending' | 'in_progress' | 'completed' | 'voided' | 'cancelled' | 'delivered';
+  /** 'draft' = saved but not confirmed yet (listed under Drafts, not counted) */
+  status: 'draft' | 'pending' | 'in_progress' | 'completed' | 'voided' | 'cancelled' | 'delivered';
+  notes?: string;
   paymentStatus: 'unpaid' | 'partial' | 'paid';
   downPayment: number;
   balance: number;
@@ -913,7 +964,23 @@ export interface PurchaseOrderItem {
   unit: string;
   unitPrice: number;
   totalPrice: number;
+  /** Index of the line on the PO (used when receiving) */
+  line: number;
+  receivedQuantity: number;
+  remainingQuantity: number;
 }
+
+/** One delivery received against a PO, or the closing of one whose rest won't come */
+export interface PurchaseOrderReceipt {
+  id: number | null;
+  kind: 'delivery' | 'closed';
+  receivedAt: string | null;
+  receivedByName: string | null;
+  notes: string | null;
+  items: { line: number; materialId?: number | null; name: string; quantity: number }[];
+}
+
+export type PurchaseOrderReceivingStatus = 'not_received' | 'partial' | 'complete' | 'closed_short';
 
 export interface PurchaseOrder {
   id: number;
@@ -922,12 +989,32 @@ export interface PurchaseOrder {
   supplierName: string;
   items: PurchaseOrderItem[];
   totalAmount: number;
-  status: 'pending' | 'approved' | 'received' | 'cancelled';
+  status: 'pending' | 'approved' | 'partially_received' | 'received' | 'cancelled';
+  /** Null while pending approval or cancelled */
+  receivingStatus: PurchaseOrderReceivingStatus | null;
+  receipts: PurchaseOrderReceipt[];
   expectedDelivery: string;
   createdAt: string;
   createdBy: number;
+  createdByName?: string | null;
   approvedAt?: string;
   approvedBy?: number;
+  approvedByName?: string | null;
+  receivedAt?: string;
+  receivedBy?: number;
+  receivedByName?: string | null;
+  /** Paying the supplier, apart from receiving the goods */
+  amountPaid: number;
+  balance: number;
+  paymentStatus: 'unpaid' | 'partial' | 'paid';
+  /** How each was paid isn't sent here: it shows in the Expense Log only */
+  payments: PurchaseOrderPayment[];
+}
+
+export interface PurchaseOrderPayment {
+  id: number; amount: number; paymentDate: string | null; referenceNumber: string | null; notes: string | null;
+  recordedByName: string | null; recordedAt: string | null;
+  voided: boolean; voidedAt: string | null; voidedByName: string | null; voidReason: string | null;
 }
 
 export interface DeliveryItem {
@@ -1036,11 +1123,14 @@ export interface SalesReport {
     totalRevenue: number;
     pendingRevenue: number;
     averageOrderValue: number;
+    /** VAT inside the earned job order and premade sales (not revenue) */
+    vatCollected?: number;
   };
   statusBreakdown: Array<{ status: string; count: number; value: number }>;
   dailySales: Array<{ date: string; orders: number; revenue: number }>;
   premadeSummary: {
     totalOrders: number;
+    completedOrders?: number;
     completedRevenue: number;
     pendingRevenue: number;
   };
@@ -1138,6 +1228,10 @@ export interface Role {
   id: string;
   name: string;
   description: string;
+  /** Higher ranks manage lower ones: administrator 5 … seat maker / sewer 1 */
+  rank?: number;
+  /** Whether the signed-in user may give this role out */
+  assignable?: boolean;
 }
 
 // ============================================
@@ -1170,11 +1264,20 @@ export const getAuthToken = (): string | null => {
 // FETCH WRAPPER
 // ============================================
 
+/** The JSON body of an error response: a message, and sometimes a code or extra data
+ *  (e.g. `code: 'already_completed'`, `data`, `existingProduct`) a screen can act on. */
+export type ApiErrorBody = {
+  message?: string;
+  code?: string;
+  data?: unknown;
+  [key: string]: unknown;
+} | null;
+
 /** An error response from the API, carrying the HTTP status and the parsed body. */
 export class ApiError extends Error {
   status: number;
-  body: any;
-  constructor(message: string, status: number, body: any) {
+  body: ApiErrorBody;
+  constructor(message: string, status: number, body: ApiErrorBody) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
@@ -1189,10 +1292,16 @@ export class ApiError extends Error {
 export interface MonthlyFinancials { month: string; sales: number; expenses: number; netIncome: number }
 export interface MethodAmount { method: string; amount: number }
 
+/** Owner Dashboard filters: a date range (Philippine dates) and optionally one branch */
+export interface OwnerFilters { startDate?: string; endDate?: string; branchId?: number | '' }
+
 export interface OwnerSummary {
-  period: { startDate: string; endDate: string };
-  ytd: { sales: number; totalExpenses: number; netIncome: number; profitMargin: number; grossProfit: number; vatCollected: number };
-  thisMonth: { sales: number; totalExpenses: number; netIncome: number };
+  period: { startDate: string; endDate: string; branchId: number | null };
+  totals: {
+    sales: number; grossReceipts: number; vatCollected: number; grossProfit: number; totalExpenses: number;
+    netIncome: number; profitMargin: number; orderCounts: { jobOrders: number; premadeOrders: number };
+  };
+  /** What customers owe today (not limited to the period) */
   receivables: number;
   monthly: MonthlyFinancials[];
   cashflowByMethod: { in: MethodAmount[]; out: MethodAmount[]; totalIn: number; totalOut: number };
@@ -1205,6 +1314,8 @@ export interface ProfitAndLoss {
   grossProfit: number;
   operatingExpenses: { byCategory: { category: string; amount: number }[]; total: number };
   totalExpenses: number; netIncome: number; profitMargin: number; vatCollected: number;
+  /** What customers paid for these sales: sales + VAT */
+  grossReceipts: number;
   orderCounts: { jobOrders: number; premadeOrders: number };
   monthly: MonthlyFinancials[];
 }
@@ -1220,7 +1331,7 @@ export interface JobCostingRow {
 
 export interface OwnerJobCosting {
   jobs: JobCostingRow[];
-  totals: { sellingPrice: number; materials: number; labor: number; otherCosts: number; grossMargin: number; marginPercent: number };
+  totals: { sellingPrice: number; materials: number; labor: number; otherCosts: number; grossMargin: number; marginPercent: number; vat?: number };
 }
 
 export interface ReceivableInvoice {
@@ -1238,7 +1349,10 @@ export interface OwnerReceivables {
 
 export interface OwnerInventory {
   materialsValue: number; premadeValue: number; totalValue: number;
-  cogsYtd: ProfitAndLoss['cogs'];
+  /** Cost of goods sold in the selected period */
+  cogs: ProfitAndLoss['cogs'];
+  /** Items whose stock or cost isn't a real number; valued at 0 until fixed */
+  invalidValues: string[];
   restock: { id: number; name: string; color: string | null; branchName: string | null; stock: number; threshold: number; status: 'out' | 'low' }[];
   outOfStock: number; lowStock: number;
   movements: { date: string | null; direction: 'in' | 'out'; item: string; quantity: number; reason: string; branchName: string | null }[];
@@ -1248,9 +1362,25 @@ export interface Expense {
   id: number; date: string; category: string; particulars: string; amount: number;
   paymentMethod: string; notes: string | null; branchId: number | null; branchName: string | null;
   createdBy: string | null; createdAt: string | null;
+  referenceNumber?: string | null;
+  /** Set when the entry is a supplier payment: changed or voided from its purchase order */
+  purchaseOrderPaymentId?: number | null;
+  purchaseOrderId?: number | null;
 }
 
-export interface ExpenseList { expenses: Expense[]; total: number; categories: string[]; paymentMethods: string[] }
+export interface ExpenseList {
+  expenses: Expense[]; total: number; categories: string[]; paymentMethods: string[];
+  /** Of the total, supplier payments for purchase orders (stock bought, not a running cost) */
+  supplierPaymentsTotal?: number;
+  /** Categories to filter by: the ones for logging, plus Supplier Payments */
+  filterCategories?: string[];
+}
+
+/** The only ways customers can pay (and be refunded). Older records may still show
+ *  card, Maya or cheque payments: those keep their labels below but can't be chosen. */
+export const ACCEPTED_PAYMENT_METHODS = ['cash', 'gcash', 'bank_transfer'] as const;
+export const isAcceptedPaymentMethod = (m: string | null | undefined) =>
+  (ACCEPTED_PAYMENT_METHODS as readonly string[]).includes(m || '');
 
 /** How a payment method key reads on screen */
 export const PAYMENT_METHOD_LABELS: Record<string, string> = {
@@ -1288,7 +1418,13 @@ async function fetchApi<T>(
       ...options,
     });
 
-    const data = await response.json();
+    // A crashed request comes back as an HTML error page, not JSON: say so plainly
+    // instead of surfacing the browser's "SyntaxError: Unexpected token '<'"
+    const data = await response.json().catch(() => null);
+    if (data === null) {
+      throw new ApiError(`The server could not complete this request (error ${response.status}). Please try again.`,
+        response.status, null);
+    }
 
     // Handle 401 Unauthorized - clear token and redirect to login
     if (response.status === 401) {
@@ -1322,6 +1458,39 @@ async function fetchApi<T>(
 // API FUNCTIONS
 // ============================================
 
+/** Item History: one recorded stock movement of an inventory item */
+export type ItemHistoryKind = 'material' | 'premade';
+export interface ItemHistoryEvent {
+  key: string;
+  at: string | null;
+  type: string;
+  label: string;
+  /** Stock change: positive = in, negative = out, 0 = no stock change */
+  quantity: number;
+  usage?: 'custom' | 'premade';
+  reference?: string | null;
+  link?: { kind: 'job_order' | 'product_order' | 'purchase_order' | 'premade'; id: number } | null;
+  customerName?: string | null;
+  unitPrice?: number;
+  total?: number;
+  soldQuantity?: number;
+  status?: string | null;
+  paymentStatus?: string | null;
+  branchName?: string | null;
+  by?: string | null;
+  worker?: string | null;
+  notes?: string | null;
+}
+export interface ItemHistoryItem {
+  id: number; name: string; detail: string; code: string; stock: number;
+  branchId: number; branchName: string | null; isArchived: boolean; price?: number;
+}
+export interface ItemHistory {
+  item: { id: number; kind: ItemHistoryKind; name: string; stock: number; code: string; branchName: string | null; isArchived: boolean; price: number };
+  events: ItemHistoryEvent[];
+  limitations: string[];
+}
+
 export const api = {
   // Health check
   healthCheck: () => fetchApi<null>('/api/health'),
@@ -1341,10 +1510,11 @@ export const api = {
   // AUTHENTICATION
   // ==================
   auth: {
-    login: (username: string, password: string) =>
+    /** identifier: the account's username or its email address */
+    login: (identifier: string, password: string) =>
       fetchApi<AuthResponse>('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ identifier: identifier.trim(), password }),
       }),
     
     logout: () =>
@@ -1434,12 +1604,21 @@ export const api = {
       return fetchApi<FinishedGood[]>(`/api/inventory/finished-goods?${query}`);
     },
     
+    /** Materials the latest batch of a premade product used, per piece (to fill in a restock) */
+    getPremadeRecipe: (id: number) =>
+      fetchApi<PremadeRecipe>(`/api/inventory/finished-goods/${id}/recipe`),
     createFinishedGood: (item: PremadeProductInput) =>
       fetchApi<FinishedGood>('/api/inventory/finished-goods', {
         method: 'POST',
         body: JSON.stringify(item),
       }),
 
+    /** Correct stock by hand, with a reason (recorded in Item History and the Audit Trail) */
+    adjustStock: (data: { kind: 'material' | 'premade'; itemId: number; newQuantity: number; reason: string; notes?: string }) =>
+      fetchApi<{ oldQuantity: number; newQuantity: number }>('/api/inventory/stock-adjustments', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
     updateFinishedGood: (id: number, item: Partial<PremadeProductInput>) =>
       fetchApi<FinishedGood>(`/api/inventory/finished-goods/${id}`, {
         method: 'PUT',
@@ -1527,9 +1706,15 @@ export const api = {
   // PAYMENTS
   // ==================
   payments: {
-    getAll: (params?: { jobOrderId?: number }) => {
-      const q = params?.jobOrderId ? `?jobOrderId=${params.jobOrderId}` : '';
-      return fetchApi<PaymentRecord[]>(`/api/payments${q}`);
+    /** Dates are Philippine calendar days (YYYY-MM-DD), both inclusive; sort defaults to latest first */
+    getAll: (params?: { jobOrderId?: number; startDate?: string; endDate?: string; sort?: PaymentSort }) => {
+      const qs = new URLSearchParams();
+      if (params?.jobOrderId) qs.set('jobOrderId', String(params.jobOrderId));
+      if (params?.startDate) qs.set('startDate', params.startDate);
+      if (params?.endDate) qs.set('endDate', params.endDate);
+      if (params?.sort) qs.set('sort', params.sort);
+      const q = qs.toString();
+      return fetchApi<PaymentRecord[]>(`/api/payments${q ? `?${q}` : ''}`);
     },
     /** recordExcess: for non-cash payments over the balance, keep the extra as an excess payment */
     create: (data: { jobOrderId: number; amount: number; paymentMethod: string; referenceNumber?: string; notes?: string; recordExcess?: boolean }) =>
@@ -1599,18 +1784,23 @@ export const api = {
       description: string;
       vehicleInfo?: VehicleInfo;
       items: JobOrderItem[];
-      estimatedCompletion: string;
+      estimatedCompletion?: string; // a draft may not have one yet
       downPayment?: number;
       discountPercent?: number;
       notes?: string;
       isDraft?: boolean;
+      /** A number typed on the form; left out, the server generates the next one */
+      jobOrderNumber?: string;
     } & JobOrderPriceInput) =>
       fetchApi<JobOrder>('/api/sales/job-orders', {
         method: 'POST',
         body: JSON.stringify(order),
       }),
 
-    updateJobOrder: (id: number, updates: Partial<JobOrder> & JobOrderPriceInput) =>
+    /** confirmDeposit: only when confirming a draft; its down payment is recorded in the same save */
+    updateJobOrder: (id: number, updates: Partial<JobOrder> & JobOrderPriceInput & {
+      confirmDeposit?: { amount: number; paymentMethod: string };
+    }) =>
       fetchApi<JobOrder>(`/api/sales/job-orders/${id}`, {
         method: 'PUT',
         body: JSON.stringify(updates),
@@ -1670,18 +1860,28 @@ export const api = {
     approve: (id: number) =>
       fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/approve`, { method: 'POST' }),
     
-    receive: (id: number) =>
-      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/receive`, { method: 'POST' }),
+    /** Record what arrived; with no items, everything still outstanding is received */
+    receive: (id: number, data?: { items: { line: number; quantity: number }[]; notes?: string }) =>
+      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/receive`, { method: 'POST', body: JSON.stringify(data || {}) }),
+    /** The rest of a partly received PO won't come: stop waiting for it */
+    closeReceiving: (id: number, reason: string) =>
+      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/close-receiving`, { method: 'POST', body: JSON.stringify({ reason }) }),
+    /** Pay the supplier (also makes the Expense Log entry) */
+    recordPayment: (id: number, data: { amount: number; paymentDate: string; paymentMethod: string; referenceNumber?: string; notes?: string }) =>
+      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/payments`, { method: 'POST', body: JSON.stringify(data) }),
+    voidPayment: (id: number, paymentId: number, reason: string) =>
+      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/payments/${paymentId}/void`, { method: 'POST', body: JSON.stringify({ reason }) }),
   },
 
   // ==================
   // DELIVERIES
   // ==================
   deliveries: {
-    getAll: (params?: { status?: string; type?: string }) => {
+    getAll: (params?: { status?: string; type?: string; jobOrderId?: number }) => {
       const query = new URLSearchParams();
       if (params?.status) query.append('status', params.status);
       if (params?.type) query.append('type', params.type);
+      if (params?.jobOrderId) query.append('jobOrderId', String(params.jobOrderId));
       return fetchApi<Delivery[]>(`/api/deliveries?${query}`);
     },
     
@@ -1716,6 +1916,13 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify({ status }),
       }),
+
+    /** Administrators: undo a delivery marked delivered by mistake (back to in transit) */
+    reopen: (id: number, reason: string) =>
+      fetchApi<Delivery>(`/api/deliveries/${id}/reopen`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      }),
     
   },
 
@@ -1746,6 +1953,13 @@ export const api = {
   // ==================
   // PRODUCT ORDERS (Premade Products)
   // ==================
+  /** Order numbers for the New Job Order form: a preview of the next one, and a check of a typed one */
+  orderNumbers: {
+    next: (kind: 'job' | 'premade', branchId?: number) =>
+      fetchApi<{ number: string }>(`/api/order-numbers/next?kind=${kind}${branchId ? `&branchId=${branchId}` : ''}`),
+    check: (kind: 'job' | 'premade', number: string) =>
+      fetchApi<{ available: boolean; message: string | null }>(`/api/order-numbers/check?kind=${kind}&number=${encodeURIComponent(number)}`),
+  },
   productOrders: {
     /** Staff record a premade product sale at a branch */
     create: (data: {
@@ -1757,6 +1971,10 @@ export const api = {
       branchId: number;
       notes?: string;
       paymentAmount?: number;
+      /** Needed only when paymentAmount is above 0: cash, gcash or bank_transfer */
+      paymentMethod?: string;
+      /** A number typed on the form; left out, the server generates the next PS- number */
+      orderNumber?: string;
     }) =>
       fetchApi<ProductOrder>('/api/product-orders', {
         method: 'POST',
@@ -1795,13 +2013,19 @@ export const api = {
       fetchApi<PremadeDraft>(`/api/premade-drafts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     remove: (id: number) => fetchApi<null>(`/api/premade-drafts/${id}`, { method: 'DELETE' }),
     /** Records the draft as a premade order. Stock is re-checked on the server; a 409 carries the flagged draft */
-    confirm: (id: number, data: { paymentAmount?: number; paymentMethod?: string }) =>
+    confirm: (id: number, data: { paymentAmount?: number; paymentMethod?: string; orderNumber?: string }) =>
       fetchApi<ProductOrder>(`/api/premade-drafts/${id}/confirm`, { method: 'POST', body: JSON.stringify(data) }),
   },
 
   // ==================
   // PRODUCT ORDER TRANSFERS
   // ==================
+  /** Read-only history of an inventory item's stock movements */
+  itemHistory: {
+    items: (kind: ItemHistoryKind) => fetchApi<ItemHistoryItem[]>(`/api/item-history/items?kind=${kind}`),
+    get: (kind: ItemHistoryKind, itemId: number) => fetchApi<ItemHistory>(`/api/item-history?kind=${kind}&itemId=${itemId}`),
+  },
+
   productOrderTransfers: {
     getMyRequests: () => fetchApi<ProductOrderTransfer[]>('/api/product-orders/my-transfer-requests'),
 
@@ -1893,14 +2117,19 @@ export const api = {
   // SETTINGS
   // ==================
   owner: {
-    summary: () => fetchApi<OwnerSummary>('/api/owner/summary'),
-    pnl: (p?: { startDate?: string; endDate?: string; branchId?: number | '' }) =>
+    summary: (p?: OwnerFilters) => fetchApi<OwnerSummary>(`/api/owner/summary${periodQuery(p)}`),
+    pnl: (p?: OwnerFilters) =>
       fetchApi<ProfitAndLoss>(`/api/owner/pnl${periodQuery(p)}`),
-    jobCosting: (p?: { startDate?: string; endDate?: string }) =>
+    jobCosting: (p?: OwnerFilters) =>
       fetchApi<OwnerJobCosting>(`/api/owner/job-costing${periodQuery(p)}`),
-    receivables: (status?: string) =>
-      fetchApi<OwnerReceivables>(`/api/owner/receivables${status ? `?status=${status}` : ''}`),
-    inventory: () => fetchApi<OwnerInventory>('/api/owner/inventory'),
+    receivables: (status?: string, branchId?: number | '') => {
+      const q = new URLSearchParams();
+      if (status) q.set('status', status);
+      if (branchId) q.set('branchId', String(branchId));
+      const s = q.toString();
+      return fetchApi<OwnerReceivables>(`/api/owner/receivables${s ? `?${s}` : ''}`);
+    },
+    inventory: (p?: OwnerFilters) => fetchApi<OwnerInventory>(`/api/owner/inventory${periodQuery(p)}`),
   },
 
   expenses: {
@@ -1945,7 +2174,11 @@ export const api = {
       }),
     
     /** A new password needs adminPassword (the signed-in administrator's own password) */
-    updateUser: (id: number, updates: Partial<User & { password?: string; adminPassword?: string }>) =>
+    /** What the server accepts: any of these (branchId null = no branch). A new password needs adminPassword. */
+    updateUser: (id: number, updates: {
+      email?: string; fullName?: string; role?: string; branchId?: number | null; branch?: string;
+      password?: string; adminPassword?: string;
+    }) =>
       fetchApi<User>(`/api/settings/users/${id}`, {
         method: 'PUT',
         body: JSON.stringify(updates),
@@ -2051,7 +2284,7 @@ export const api = {
       fetchApi<Record<string, CalendarAssignment[]>>(
         `/api/worker-assignments/calendar?month=${params.month}${params.workerId ? `&workerId=${params.workerId}` : ''}`
       ),
-    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string; scheduledDate?: string; assignmentType?: string; specialTaskTitle?: string }) =>
+    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string; scheduledDate?: string; assignmentType?: string; specialTaskTitle?: string; rework?: boolean; reworkReason?: string; another?: boolean }) =>
       fetchApi<{ assignment: WorkerAssignment }>('/api/worker-assignments', {
         method: 'POST',
         body: JSON.stringify(data),

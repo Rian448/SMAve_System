@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, type AuditLog } from '@/lib/api';
 import { formatDateTime, manilaDateString, parseServerTimestamp } from '@/lib/dateUtils';
+import Paginated from '@/components/Paginated';
 
 type RangePreset = 'today' | 'week' | 'month' | 'quarter' | 'year';
 
@@ -127,11 +128,12 @@ export default function AuditTrailPanel() {
             </button>
           ))}
           <div className="flex items-center gap-1.5">
-            <input type="date" value={customStart} max={customEnd || undefined}
+            {/* A log only covers the past: no dates after today (Manila) */}
+            <input type="date" value={customStart} max={customEnd || manilaDateString()}
               onChange={e => setCustomStart(e.target.value)} aria-label="From date"
               className="px-2 py-1.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 text-sm" />
             <span className="text-gray-400 text-sm">to</span>
-            <input type="date" value={customEnd} min={customStart || undefined}
+            <input type="date" value={customEnd} min={customStart || undefined} max={manilaDateString()}
               onChange={e => setCustomEnd(e.target.value)} aria-label="To date"
               className="px-2 py-1.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 text-sm" />
           </div>
@@ -185,6 +187,7 @@ export default function AuditTrailPanel() {
             {logs.length === 0 ? 'No audit entries for this period.' : 'No entries match these filters.'}
           </p>
         ) : (
+          <Paginated items={visible} resetKey={[search, moduleFilter]} label="log entries">{rows => (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
@@ -198,7 +201,7 @@ export default function AuditTrailPanel() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {visible.map(log => (
+                {rows.map(log => (
                   <tr key={log.id} className="hover:bg-gray-50 transition-colors align-top">
                     <td className="px-5 py-3 whitespace-nowrap text-gray-500">
                       {parseServerTimestamp(log.timestamp) ? formatDateTime(log.timestamp) : (log.timestamp || '—')}
@@ -220,6 +223,7 @@ export default function AuditTrailPanel() {
               </tbody>
             </table>
           </div>
+          )}</Paginated>
         )}
       </div>
     </div>
