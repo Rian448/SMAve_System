@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { api, JobOrder, CustomerOrder, ProductOrder, PremadeDraft } from '@/lib/api';
@@ -27,6 +27,8 @@ export default function SalesPage() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState('');
+  // Branch filter: only for users who see every branch (admin)
+  const [branchFilter, setBranchFilter] = useState<string>('all');
 
   // The Premade Sales and Pickup Queue tabs were removed: premade sales are listed under
   // Premade Purchase, and cross-branch pickup transfers are no longer made (old ones
@@ -42,6 +44,7 @@ export default function SalesPage() {
   const [draftKind, setDraftKind] = useState<'custom' | 'premade'>('custom');
 
   const canSeePremadeFeatures = !!user && can('product_orders.view');
+  const canFilterBranch = !!user && can('branches.all');
 
   const fetchOrders = useCallback(async () => {
     try {
@@ -156,7 +159,11 @@ export default function SalesPage() {
     return 0;
   };
 
+  const branchOf = (order: UnifiedOrder) => order.branchName || 'N/A';
+  const branchOptions = Array.from(new Set(orders.map(branchOf))).sort((a, b) => a.localeCompare(b));
+
   const filteredOrders = orders.filter(order => {
+    if (canFilterBranch && branchFilter !== 'all' && branchOf(order) !== branchFilter) return false;
     if (filter !== 'all' && order.displayStatus !== filter &&
       !(filter === 'in_progress' && order.displayStatus === 'processing')) return false;
     if (searchTerm) {
@@ -168,6 +175,14 @@ export default function SalesPage() {
     }
     return true;
   });
+
+  const branchSelect = canFilterBranch && branchOptions.length > 1 ? (
+    <select value={branchFilter} onChange={e => setBranchFilter(e.target.value)} aria-label="Filter by branch"
+      className={`px-3 py-2 rounded-lg border text-sm font-medium focus:ring-2 focus:ring-[#011c72] focus:border-transparent ${branchFilter !== 'all' ? 'border-[#011c72] bg-[#eef1fb] text-[#011c72]' : 'border-gray-200 bg-gray-50 text-gray-700'}`}>
+      <option value="all">All Branches</option>
+      {branchOptions.map(b => <option key={b} value={b}>{b}</option>)}
+    </select>
+  ) : null;
 
   const filteredCustomJobOrders = filteredOrders.filter(o => o.orderType === 'job' || o.orderType === 'customer');
   const filteredPremadePurchaseOrders = filteredOrders.filter(o => o.orderType === 'product');
@@ -271,6 +286,7 @@ export default function SalesPage() {
                     onChange={e => setSearchTerm(e.target.value)}
                     className="w-full pl-10 pr-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
                 </div>
+                {branchSelect}
                 <div className="flex gap-2 flex-wrap">
                   {['all', 'pending', 'in_progress', 'completed', 'cancelled'].map(status => (
                     <button key={status} onClick={() => setFilter(status)}
@@ -297,7 +313,7 @@ export default function SalesPage() {
                   <p className="text-gray-500">Create a new job order to get started.</p>
                 </div>
               ) : (
-                <Paginated items={filteredOrders} resetKey={[searchTerm, filter]} label="orders">{rows => (
+                <Paginated items={filteredOrders} resetKey={[searchTerm, filter, branchFilter]} label="orders">{rows => (
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[760px] table-sticky-actions">
                     <thead className="bg-gray-50">
@@ -368,6 +384,7 @@ export default function SalesPage() {
                     onChange={e => setSearchTerm(e.target.value)}
                     className="w-full pl-10 pr-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
                 </div>
+                {branchSelect}
                 <div className="flex gap-2 flex-wrap">
                   {['all', 'pending', 'in_progress', 'completed', 'cancelled'].map(status => (
                     <button key={status} onClick={() => setFilter(status)}
@@ -393,7 +410,7 @@ export default function SalesPage() {
                   <p className="text-gray-500">Create a new job order to get started.</p>
                 </div>
               ) : (
-                <Paginated items={filteredCustomJobOrders} resetKey={[searchTerm, filter]} label="orders">{rows => (
+                <Paginated items={filteredCustomJobOrders} resetKey={[searchTerm, filter, branchFilter]} label="orders">{rows => (
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[760px] table-sticky-actions">
                     <thead className="bg-gray-50">
@@ -464,6 +481,7 @@ export default function SalesPage() {
                     onChange={e => setSearchTerm(e.target.value)}
                     className="w-full pl-10 pr-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
                 </div>
+                {branchSelect}
                 <div className="flex gap-2 flex-wrap">
                   {['all', 'pending', 'in_progress', 'completed', 'cancelled'].map(status => (
                     <button key={status} onClick={() => setFilter(status)}
@@ -489,7 +507,7 @@ export default function SalesPage() {
                   <p className="text-gray-500">No customers have purchased premade products yet.</p>
                 </div>
               ) : (
-                <Paginated items={filteredPremadePurchaseOrders} resetKey={[searchTerm, filter]} label="orders">{rows => (
+                <Paginated items={filteredPremadePurchaseOrders} resetKey={[searchTerm, filter, branchFilter]} label="orders">{rows => (
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[600px] table-sticky-actions">
                     <thead className="bg-gray-50">

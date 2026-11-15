@@ -6,8 +6,10 @@ import { useAuth } from '@/context/AuthContext';
 import { useConfirm } from '@/components/ConfirmDialog';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import Paginated from '@/components/Paginated';
+import { PaymentTermPicker, TermValue, termValueError, termExplanation } from '@/components/PaymentTerms';
 
 const EMPTY_FORM = { name: '', contactPerson: '', phone: '', email: '', address: '', materialsSupplied: '', notes: '' };
+const NO_TERM: TermValue = { term: '', days: null };
 
 /**
  * Suppliers used to be a tab inside Inventory. The records and API are the same
@@ -31,6 +33,9 @@ export default function SuppliersPage() {
   const [newSupplier, setNewSupplier] = useState(EMPTY_FORM);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editSupplier, setEditSupplier] = useState(EMPTY_FORM);
+  // Default payment term, copied onto each new purchase order for the supplier
+  const [newTerm, setNewTerm] = useState<TermValue>(NO_TERM);
+  const [editTerm, setEditTerm] = useState<TermValue>(NO_TERM);
 
   const load = useCallback(async () => {
     try {
@@ -49,11 +54,15 @@ export default function SuppliersPage() {
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
-    if (fe.show({ 'supplier-name': !newSupplier.name.trim() && 'Enter the supplier name.' })) return;
+    if (fe.show({
+      'supplier-name': !newSupplier.name.trim() && 'Enter the supplier name.',
+      'supplier-term': termValueError(newTerm),
+    })) return;
     setSaving(true);
     try {
-      await api.inventory.createSupplier(newSupplier);
+      await api.inventory.createSupplier({ ...newSupplier, paymentTerm: newTerm.term || null, paymentTermDays: newTerm.days });
       setNewSupplier(EMPTY_FORM);
+      setNewTerm(NO_TERM);
       await load();
     } catch (err) { setFormError((err instanceof Error && err.message) || 'Failed to add supplier.'); }
     finally { setSaving(false); }
@@ -65,14 +74,17 @@ export default function SuppliersPage() {
       name: s.name, contactPerson: s.contactPerson || '', phone: s.phone || '', email: s.email || '',
       address: s.address || '', materialsSupplied: s.materialsSupplied || '', notes: s.notes || '',
     });
+    setEditTerm({ term: s.paymentTerm || '', days: s.paymentTermDays ?? null });
   };
 
   const handleSave = async (id: number) => {
     setFormError('');
     if (!editSupplier.name.trim()) { setFormError('Enter the supplier name.'); return; }
+    const termError = termValueError(editTerm);
+    if (termError) { setFormError(termError); return; }
     setSaving(true);
     try {
-      await api.inventory.updateSupplier(id, editSupplier);
+      await api.inventory.updateSupplier(id, { ...editSupplier, paymentTerm: editTerm.term || null, paymentTermDays: editTerm.days });
       setEditingId(null);
       await load();
     } catch (err) { setFormError((err instanceof Error && err.message) || 'Failed to update supplier.'); }
@@ -139,6 +151,14 @@ export default function SuppliersPage() {
               <input type="text" value={newSupplier.address} onChange={e => setNewSupplier(p => ({ ...p, address: e.target.value }))} placeholder="Address" className={input} />
               <input type="text" value={newSupplier.materialsSupplied} onChange={e => setNewSupplier(p => ({ ...p, materialsSupplied: e.target.value }))} placeholder="Materials Supplied" className={input} />
               <input type="text" value={newSupplier.notes} onChange={e => setNewSupplier(p => ({ ...p, notes: e.target.value }))} placeholder="Notes" className={`md:col-span-3 ${input}`} />
+              <div className="md:col-span-3" {...fe.field('supplier-term')}>
+                <label htmlFor="supplier-term" className="block text-sm font-medium text-gray-700 mb-1">Payment Terms</label>
+                <PaymentTermPicker id="supplier-term" value={newTerm} onChange={setNewTerm} className="max-w-md" />
+                <p className="mt-1 text-xs text-gray-500">
+                  {termExplanation(newTerm.term, newTerm.days)} New purchase orders for this supplier start with this term; it can be changed per order.
+                </p>
+                <FieldError message={fe.errors['supplier-term']} />
+              </div>
             </div>
             <div className="mt-4">
               <button type="submit" disabled={saving} className="inline-flex items-center px-4 py-2 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg font-medium transition-colors disabled:opacity-60">
@@ -183,6 +203,7 @@ export default function SuppliersPage() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Contact</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone / Email</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Materials</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Payment Terms</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                     {canEdit && <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>}
                   </tr>
@@ -230,6 +251,13 @@ export default function SuppliersPage() {
                             <input type="text" value={editSupplier.materialsSupplied} onChange={e => setEditSupplier(p => ({ ...p, materialsSupplied: e.target.value }))} placeholder="Materials" className={`w-36 ${cellInput}`} />
                           ) : (
                             <span className="text-sm text-gray-600 truncate max-w-35 block">{s.materialsSupplied || '—'}</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {editing ? (
+                            <PaymentTermPicker compact value={editTerm} onChange={setEditTerm} />
+                          ) : (
+                            <span className={`text-sm ${s.paymentTermLabel ? 'text-gray-700' : 'text-gray-400'}`}>{s.paymentTermLabel || 'No term'}</span>
                           )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">

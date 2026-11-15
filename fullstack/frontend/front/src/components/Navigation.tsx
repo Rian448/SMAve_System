@@ -6,7 +6,6 @@ import { useNotifications } from '@/context/NotificationContext';
 import { formatDateTime } from '@/lib/dateUtils';
 import { useEffect, useRef, useState } from 'react';
 import { useConfirm } from './ConfirmDialog';
-import { homePath } from '@/lib/permissions';
 
 type NavItem = { name: string; path: string; icon: () => React.JSX.Element; perms?: string[] };
 type NavGroup = { name: string; icon: () => React.JSX.Element; items: NavItem[] };
@@ -20,7 +19,6 @@ interface NavigationProps {
   onMobileOpen: () => void;
   onMobileClose: () => void;
 }
-
 const DashboardIcon = () => (
   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
@@ -132,7 +130,6 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
   const { notifications, unreadCount, markRead, markAllRead, archived, loadArchived, archive, restore, remove } = useNotifications();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const { confirm, confirmDialog } = useConfirm();
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   // The account menu under the name and initial, top right
   const [accountOpen, setAccountOpen] = useState(false);
@@ -166,7 +163,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
 
   useEffect(() => () => { if (flyoutCloseTimer.current) clearTimeout(flyoutCloseTimer.current); }, []);
 
-  // The promotional website and the staff sign-in are the only pages open to visitors
+  // The front page (which forwards to sign-in) and the sign-in page are open to visitors
   const publicRoutes = ['/', '/login'];
   const mustSignIn = !isLoading && !isAuthenticated && !publicRoutes.includes(pathname);
 
@@ -175,96 +172,11 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     if (mustSignIn) router.push('/login');
   }, [mustSignIn, router]);
 
-  if (pathname === '/login') return null;
+  if (pathname === '/login' || pathname === '/') return null;
   if (isLoading) return null;
 
-  // The website's own top bar: for visitors, and for signed-in staff who opened the
-  // website (from the logo). Staff get their profile bubble instead of Staff Login.
-  if (!isAuthenticated || pathname === '/') {
-    if (mustSignIn) return null;
-    const navLinks = [
-      { label: 'Home',       href: '/#home' },
-      { label: 'About Us',   href: '/#about' },
-      { label: 'Products & Services', href: '/#products' },
-      { label: 'Promotions', href: '/#promotions' },
-      { label: 'Branches',   href: '/#branches' },
-      { label: 'Contact Us', href: '/#contact' },
-    ];
-
-    return (
-      <nav className="fixed top-0 left-0 right-0 bg-white border-b border-gray-200 z-50 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center h-16 gap-4">
-
-            {/* Logo */}
-            <Link href="/#home" className="flex items-center gap-2.5 flex-shrink-0">
-              <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center">
-                <LogoIcon />
-              </div>
-              <span className="font-bold text-gray-900 text-sm tracking-wide hidden sm:block">Seatmakers Avenue</span>
-            </Link>
-
-            {/* Desktop nav links */}
-            <div className="hidden lg:flex items-center gap-1 ml-6 flex-1">
-              {navLinks.map(link => (
-                <a
-                  key={link.label}
-                  href={link.href}
-                  className="px-3 py-2 text-sm font-medium text-gray-600 hover:text-[#011c72] hover:bg-gray-50 rounded-md transition-colors"
-                >
-                  {link.label}
-                </a>
-              ))}
-            </div>
-
-            {/* Right side: staff sign-in + hamburger */}
-            <div className="ml-auto flex items-center gap-3">
-              {isAuthenticated ? <ProfileBubble /> : (
-              <Link
-                href="/login"
-                className="px-4 py-2 rounded-md border border-gray-300 hover:border-[#011c72] text-gray-700 hover:text-[#011c72] text-xs font-semibold uppercase tracking-wide transition-colors"
-              >
-                Staff Login
-              </Link>
-              )}
-              {/* Mobile hamburger */}
-              <button
-                onClick={() => setMobileMenuOpen(o => !o)}
-                className="lg:hidden p-2 rounded-md text-gray-600 hover:text-[#011c72] hover:bg-gray-50 transition-colors"
-                aria-label="Toggle menu"
-              >
-                {mobileMenuOpen ? (
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                ) : (
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                  </svg>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Mobile dropdown */}
-        {mobileMenuOpen && (
-          <div className="lg:hidden border-t border-gray-100 bg-white px-4 py-3 space-y-1">
-            {navLinks.map(link => (
-              <a
-                key={link.label}
-                href={link.href}
-                onClick={() => setMobileMenuOpen(false)}
-                className="block px-3 py-2.5 text-sm font-medium text-gray-600 hover:text-[#011c72] hover:bg-gray-50 rounded-md transition-colors"
-              >
-                {link.label}
-              </a>
-            ))}
-          </div>
-        )}
-      </nav>
-    );
-  }
+  // Signed-out visitors only ever see the sign-in page (the front page forwards there)
+  if (!isAuthenticated) return null;
 
   // Pages are grouped into categories that open a flyout. Each page needs any one of its permissions.
   const navEntries: NavEntry[] = [
@@ -394,7 +306,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     setIsLoggingOut(true);
     try {
       await logout();
-      router.push('/');
+      router.push('/login');
     } finally {
       setIsLoggingOut(false);
     }
@@ -491,7 +403,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     >
       {/* Header */}
       <div className={`flex items-center h-16 px-3 border-b border-gray-200 shrink-0 ${collapsed ? 'justify-center' : 'gap-2'}`}>
-        <Link href="/" title="Go to main website" className={`flex items-center gap-2 min-w-0 ${collapsed ? '' : 'flex-1'}`}>
+        <Link href="/" title="Home" className={`flex items-center gap-2 min-w-0 ${collapsed ? '' : 'flex-1'}`}>
           <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0">
             <LogoIcon />
           </div>
@@ -721,8 +633,12 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
  */
 function notificationHref(type: string, data: unknown,
   can: (...permissions: string[]) => boolean): string | null {
-  const d = (data || {}) as { orderId?: number; jobOrderId?: number };
+  const d = (data || {}) as { orderId?: number; jobOrderId?: number; purchaseOrderId?: number };
   switch (type) {
+    case 'po_due_soon':
+    case 'po_overdue':
+      // Supplier payment reminders open the purchase order, where it is paid
+      return d.purchaseOrderId && can('purchase_orders.view') ? `/purchase-orders/${d.purchaseOrderId}` : null;
     case 'transfer_request':
     case 'transfer_dispatched':
     case 'order_cancelled':
@@ -769,63 +685,5 @@ function TrashIcon() {
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
         d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
     </svg>
-  );
-}
-
-/** Signed-in staff on the website: their initial in a bubble, with a small menu
- *  back to the system, to My Profile, or to log out. */
-function ProfileBubble() {
-  const { user, logout, can } = useAuth();
-  const router = useRouter();
-  const { confirm, confirmDialog } = useConfirm();
-  const [open, setOpen] = useState(false);
-  const boxRef = useRef<HTMLDivElement>(null);
-
-  // A click anywhere else, or Escape, closes the menu
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => { if (!boxRef.current?.contains(e.target as Node)) setOpen(false); };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', onDown);
-    window.addEventListener('keydown', onKey);
-    return () => { document.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey); };
-  }, [open]);
-
-  const signOut = async () => {
-    setOpen(false);
-    const ok = await confirm({
-      title: 'Log out?',
-      message: 'You will need to log in again to use your account.',
-      confirmLabel: 'Logout',
-      variant: 'warning',
-    });
-    if (!ok) return;
-    await logout();
-    router.push('/');
-  };
-
-  const item = 'block w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 hover:text-[#011c72] transition-colors';
-  return (
-    <div ref={boxRef} className="relative">
-      <button type="button" onClick={() => setOpen(o => !o)} aria-haspopup="menu" aria-expanded={open}
-        aria-label={`Account menu for ${user?.fullName || 'you'}`} title={user?.fullName}
-        className="w-10 h-10 rounded-full bg-[#011c72] text-white text-sm font-bold flex items-center justify-center ring-2 ring-transparent hover:ring-[#4a6aff] focus:outline-none focus-visible:ring-[#4a6aff] transition">
-        {user?.fullName?.charAt(0).toUpperCase() || '?'}
-      </button>
-      {open && (
-        <div role="menu" className="absolute right-0 mt-2 w-60 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden z-50">
-          <div className="px-4 py-3 border-b border-gray-100">
-            <p className="text-sm font-semibold text-gray-900 truncate">{user?.fullName}</p>
-            {user?.email && <p className="text-xs text-gray-500 truncate">{user.email}</p>}
-          </div>
-          <Link href={homePath(can)} role="menuitem" className={item} onClick={() => setOpen(false)}>Back to Dashboard</Link>
-          <Link href="/profile" role="menuitem" className={item} onClick={() => setOpen(false)}>My Profile</Link>
-          <button type="button" role="menuitem" onClick={signOut} className={`${item} text-red-600 hover:text-red-700 border-t border-gray-100`}>
-            Log out
-          </button>
-        </div>
-      )}
-      {confirmDialog}
-    </div>
   );
 }

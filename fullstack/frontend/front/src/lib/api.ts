@@ -401,7 +401,20 @@ export interface Supplier {
   notes?: string;
   isActive: boolean;
   createdAt: string;
+  /** Default payment term for this supplier's purchase orders; null = none agreed */
+  paymentTerm?: PaymentTerm | null;
+  paymentTermDays?: number | null;
+  paymentTermLabel?: string | null;
 }
+
+/** When a supplier must be paid: Cash in Advance (on approval), COD (on delivery)
+ *  or Net N days (N days after the first delivery) */
+export type PaymentTerm = 'advance' | 'cod' | 'net';
+
+/** Where a PO stands against its payment term (null: no term, or cancelled) */
+export type PurchaseOrderTermStatus = 'awaiting' | 'not_due' | 'due_soon' | 'overdue' | 'paid' | 'paid_late';
+
+export interface PaymentTermOptions { netDays: number[]; reminderDays: number; maxDays: number }
 
 export interface MaterialWasteLog {
   id: number;
@@ -1009,6 +1022,15 @@ export interface PurchaseOrder {
   paymentStatus: 'unpaid' | 'partial' | 'paid';
   /** How each was paid isn't sent here: it shows in the Expense Log only */
   payments: PurchaseOrderPayment[];
+  /** Payment term (copied from the supplier when made, may be changed) */
+  paymentTerm: PaymentTerm | null;
+  paymentTermDays: number | null;
+  paymentTermLabel: string | null;
+  /** YYYY-MM-DD; null until the term's starting point (approval / first delivery) */
+  dueDate: string | null;
+  termStatus: PurchaseOrderTermStatus | null;
+  /** Negative when overdue; null when there's no due date or it's paid */
+  daysUntilDue: number | null;
 }
 
 export interface PurchaseOrderPayment {
@@ -1303,6 +1325,8 @@ export interface OwnerSummary {
   };
   /** What customers owe today (not limited to the period) */
   receivables: number;
+  /** What is still owed to suppliers today */
+  payables: { total: number; dueSoon: number; overdue: number; count: number; dueSoonCount: number; overdueCount: number };
   monthly: MonthlyFinancials[];
   cashflowByMethod: { in: MethodAmount[]; out: MethodAmount[]; totalIn: number; totalOut: number };
 }
@@ -1851,6 +1875,9 @@ export const api = {
       supplierId?: number;
       items: Array<{ materialId?: number; name: string; quantity: number; unit: string; unitPrice: number }>;
       expectedDelivery: string;
+      /** Left out: the supplier's default. '' = no term */
+      paymentTerm?: PaymentTerm | '';
+      paymentTermDays?: number | null;
     }) =>
       fetchApi<PurchaseOrder>('/api/purchase-orders', {
         method: 'POST',
@@ -1871,6 +1898,13 @@ export const api = {
       fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/payments`, { method: 'POST', body: JSON.stringify(data) }),
     voidPayment: (id: number, paymentId: number, reason: string) =>
       fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/payments/${paymentId}/void`, { method: 'POST', body: JSON.stringify({ reason }) }),
+    /** Change this PO's payment term ('' = no term) */
+    setPaymentTerm: (id: number, paymentTerm: PaymentTerm | '', paymentTermDays?: number | null) =>
+      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/payment-term`, {
+        method: 'PUT', body: JSON.stringify({ paymentTerm, paymentTermDays: paymentTermDays ?? null }),
+      }),
+    /** The Net day options and reminder lead time set in Settings */
+    paymentTermOptions: () => fetchApi<PaymentTermOptions>('/api/payment-terms'),
   },
 
   // ==================
@@ -2133,10 +2167,11 @@ export const api = {
   },
 
   expenses: {
-    list: (p?: { startDate?: string; endDate?: string; category?: string }) => {
+    list: (p?: { startDate?: string; endDate?: string; category?: string; branchId?: number }) => {
       const q = periodQuery(p);
       const cat = p?.category ? `${q ? '&' : '?'}category=${encodeURIComponent(p.category)}` : '';
-      return fetchApi<ExpenseList>(`/api/expenses${q}${cat}`);
+      const br = p?.branchId ? `${q || cat ? '&' : '?'}branchId=${p.branchId}` : '';
+      return fetchApi<ExpenseList>(`/api/expenses${q}${cat}${br}`);
     },
     create: (data: { date: string; category: string; particulars: string; amount: number; paymentMethod: string; notes?: string; branchId?: number }) =>
       fetchApi<Expense>('/api/expenses', { method: 'POST', body: JSON.stringify(data) }),

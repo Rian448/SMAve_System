@@ -17,11 +17,10 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
   const mobileOpen = drawerPath === pathname;
   const setMobileOpen = (open: boolean) => setDrawerPath(open ? pathname : null);
 
-  const authlessPages = ['/login'];
-  // The website keeps its own top bar even for signed-in staff (no sidebar there)
+  // The sign-in page, and the front page (which only forwards to sign-in or home)
+  const authlessPages = ['/login', '/'];
   const onWebsite = pathname === '/';
-  const showSidebar = isAuthenticated && !isLoading && !authlessPages.includes(pathname) && !onWebsite;
-  const showPublicTopNav = !isLoading && !authlessPages.includes(pathname) && (!isAuthenticated || onWebsite);
+  const showSidebar = isAuthenticated && !isLoading && !authlessPages.includes(pathname);
 
   // A signed-in user opening a page their permissions don't cover (e.g. from an old link)
   const required = pagePermissions(pathname);
@@ -33,12 +32,12 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
         mobileOpen={mobileOpen} onMobileOpen={() => setMobileOpen(true)} onMobileClose={() => setMobileOpen(false)} />
       <div
         className={`flex-1 min-w-0 transition-all duration-300 ${
-          showSidebar ? `pt-14 md:pt-16 ${collapsed ? 'md:ml-16' : 'md:ml-64'}` : showPublicTopNav ? 'pt-16' : ''
+          showSidebar ? `pt-14 md:pt-16 ${collapsed ? 'md:ml-16' : 'md:ml-64'}` : ''
         }`}
       >
         {denied ? <AccessDenied /> : children}
       </div>
-      {/* Staff chat stays in the system; the website has its own Messenger button */}
+      {/* Staff chat: not on the sign-in redirect */}
       {!onWebsite && <ChatBubble />}
     </div>
   );

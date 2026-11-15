@@ -5,6 +5,7 @@ import { api, Branch, User as UserType, Role } from '@/lib/api';
 import { useConfirm } from '@/components/ConfirmDialog';
 import PermissionsDialog from '@/components/PermissionsDialog';
 import VatRateSetting from '@/components/VatRateSetting';
+import PaymentTermsSetting from '@/components/PaymentTermsSetting';
 import { formatDate } from '@/lib/dateUtils';
 import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
 import Paginated from '@/components/Paginated';
@@ -531,6 +532,7 @@ export default function SettingsPage() {
         return (
           <div className="space-y-6">
             <VatRateSetting canEdit={can('settings.edit')} />
+            <PaymentTermsSetting canEdit={can('settings.edit')} />
             <div>
               <h3 className="text-lg font-semibold text-gray-900 mb-4">Company Information</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

@@ -7,6 +7,7 @@ import { api, PurchaseOrder } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import ReceivePurchaseOrderDialog from '@/components/ReceivePurchaseOrderDialog';
 import SupplierPayments from '@/components/SupplierPayments';
+import { PurchaseOrderTermCard } from '@/components/PaymentTerms';
 import { poStatusInfo, isOpenForReceiving, poReceivingProgress } from '@/lib/purchaseOrderStatus';
 import { exactPeso } from '@/lib/format';
 
@@ -234,6 +235,12 @@ export default function PurchaseOrderDetailPage() {
                 </div>
               </div>
             </div>
+
+            {/* When the supplier must be paid; changeable while pending by those who raise POs, later by approvers */}
+            {purchaseOrder.status !== 'cancelled' && (
+              <PurchaseOrderTermCard po={purchaseOrder} onChange={setPurchaseOrder}
+                canChange={can('purchase_orders.approve') || (purchaseOrder.status === 'pending' && can('purchase_orders.add'))} />
+            )}
 
             {/* Paying the supplier (separate from receiving the goods) */}
             {purchaseOrder.status !== 'cancelled' || purchaseOrder.payments.length > 0 ? (

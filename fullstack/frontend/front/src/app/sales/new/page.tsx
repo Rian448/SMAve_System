@@ -12,7 +12,7 @@ import Combobox from '@/components/Combobox';
 import MaterialPicker from '@/components/MaterialPicker';
 import PremadeItemPicker from '@/components/PremadeItemPicker';
 import { useVatRate } from '@/lib/useVatRate';
-import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
+import { useFieldErrors, FieldError, emailProblem, phoneProblem, cleanPhoneInput, PHONE_DIGITS } from '@/lib/useFieldErrors';
 import SeatRowsEditor from '@/components/SeatRowsEditor';
 import { loadSlipRows, toSavedSlipRows, type SlipRow } from '@/lib/slipRows';
 
@@ -37,6 +37,11 @@ interface PremadeSelection {
   quantity: number;
 }
 
+
+/** Down payment before a job order is confirmed: 50% unless set otherwise, never under 30%
+ *  (the server's MIN_DEPOSIT_PERCENT) */
+const DEFAULT_DOWN_PERCENT = 50;
+const MIN_DOWN_PERCENT = 30;
 
 const SERVICE_ICONS: Record<string, ReactElement> = {
   flooring: (
@@ -487,6 +492,7 @@ function NewJobOrderForm() {
     return {
       customerName: !customerName.trim() && 'Customer name is required.',
       customerEmail: emailProblem(customerEmail) || false,
+      customerPhone: phoneProblem(customerPhone) || false,
       premadeItems: !hasItems ? 'Please select at least one premade item.'
         : premadeHasStockIssue && (forConfirm && editingPremadeDraftId
           ? 'Some items are out of stock or short. Edit the draft, remove them, or wait for stock.'
@@ -524,10 +530,14 @@ function NewJobOrderForm() {
   const vatPct = vatOn ? vatRate : 0;
   const finalTotal = estimatedTotal > 0 ? jobOrderTotalFrom(estimatedTotal, orderDiscountPct) : 0;
   const vatAmount = vatBreakdown(finalTotal, vatPct).vat;
-  // The shop needs at least half paid before the work is confirmed (the server holds
-  // to it too). The customer may pay more, up to the full price; blank = the minimum.
-  const minDown = Math.round((finalTotal / 2) * 100) / 100;
-  const downAmount = downInput.trim() === '' ? minDown : Math.round(Number(downInput) * 100) / 100;
+  // The shop needs at least 30% paid before the work is confirmed (the server holds
+  // to it too). The default is 50%; the customer may pay anything from 30% up to the
+  // full price, set as an amount or a percentage. Blank = the default.
+  const pctOf = (pct: number) => Math.round(finalTotal * pct) / 100;
+  const minDown = pctOf(MIN_DOWN_PERCENT);
+  const defaultDown = pctOf(DEFAULT_DOWN_PERCENT);
+  const downAmount = downInput.trim() === '' ? defaultDown : Math.round(Number(downInput) * 100) / 100;
+  const downPercent = finalTotal > 0 && Number.isFinite(downAmount) ? (downAmount / finalTotal) * 100 : 0;
 
   // ── Steps: 1 Customer → 2 Service → 3 Vehicle → 4 Materials → 5 Review.
   // Reupholstery on its own is furniture, not a car: the Vehicle step is skipped.
@@ -544,6 +554,7 @@ function NewJobOrderForm() {
       orderBranch: choosesBranch && !orderBranchValid && 'Choose which branch this job order is for.',
       customerName: !customerName.trim() && 'Customer name is required.',
       customerEmail: emailProblem(customerEmail) || false,
+      customerPhone: phoneProblem(customerPhone) || false,
     };
     if (n === 2) {
       const anyService = flooring.selected || reupholstery.selected || ceiling.selected ||
@@ -599,7 +610,7 @@ function NewJobOrderForm() {
         paymentMethod: !isAcceptedPaymentMethod(paymentMethod) && 'Choose the payment method: Cash, GCash or Bank Transfer.',
         downPayment: finalTotal > 0 && (
           !Number.isFinite(downAmount) ? 'Enter the down payment as a number.'
-          : downAmount < minDown ? `The down payment must be at least 50% of the total (₱${minDown.toLocaleString('en-PH', { minimumFractionDigits: 2 })}).`
+          : downAmount < minDown ? `The down payment must be at least ${MIN_DOWN_PERCENT}% of the total (₱${minDown.toLocaleString('en-PH', { minimumFractionDigits: 2 })}).`
           : downAmount > finalTotal && `The down payment can't be more than the total (₱${finalTotal.toLocaleString('en-PH', { minimumFractionDigits: 2 })}).`),
       };
     }
@@ -757,6 +768,7 @@ function NewJobOrderForm() {
       orderBranch: choosesBranch && !orderBranchValid && 'Choose which branch this job order is for.',
       customerName: !customerName.trim() && 'Enter a customer name to save a draft.',
       customerEmail: emailProblem(customerEmail),
+      customerPhone: phoneProblem(customerPhone),
     };
     if (Object.values(draftProblems).some(Boolean)) { setStep(1); fe.show(draftProblems); return; }
     if (!editingDraftId && orderNumberBlocked()) return;
@@ -1031,7 +1043,7 @@ function NewJobOrderForm() {
 
     const grossTotal = estimatedTotal > 0 ? estimatedTotal : materialTotal;
     const orderTotal = jobOrderTotalFrom(grossTotal, orderDiscountPct);
-    // Checked on the review step: at least half, at most the total
+    // Checked on the review step: at least 30%, at most the total
     const finalDown = orderTotal > 0 ? downAmount : 0;
 
     try {
@@ -1094,6 +1106,7 @@ function NewJobOrderForm() {
     const draftProblems = {
       customerName: !customerName.trim() && 'Enter the customer name to save a draft.',
       customerEmail: emailProblem(customerEmail),
+      customerPhone: phoneProblem(customerPhone),
       premadeItems: !branchId && 'Select at least one product so the draft knows which branch it sells from.',
     };
     if (!branchId || Object.values(draftProblems).some(Boolean)) { setPremadeStep(1); fe.show(draftProblems); return; }
@@ -1148,9 +1161,11 @@ function NewJobOrderForm() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Phone Number <span className="font-normal text-gray-400">(optional)</span></label>
-                <input type="tel" value={customerPhone} onChange={(e) => { setCustomerPhone(e.target.value); unlinkCustomer(); }}
+                <input type="tel" inputMode="numeric" maxLength={PHONE_DIGITS} value={customerPhone}
+                  onChange={(e) => { setCustomerPhone(cleanPhoneInput(e.target.value)); unlinkCustomer(); }}
                   className="w-full px-4 py-2.5 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                  placeholder="09XX XXX XXXX" />
+                  placeholder="09XXXXXXXXX" />
+                <FieldError message={fe.errors.customerPhone} />
               </div>
               <div {...fe.field('customerEmail')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
@@ -1495,9 +1510,10 @@ function NewJobOrderForm() {
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Phone Number <span className="font-normal text-gray-400">(optional)</span>
                 </label>
-                <input type="tel" value={customerPhone}
-                  onChange={(e) => { setCustomerPhone(e.target.value); unlinkCustomer(); }}
-                  className={inputCls} placeholder="09XX XXX XXXX" />
+                <input type="tel" inputMode="numeric" maxLength={PHONE_DIGITS} value={customerPhone}
+                  onChange={(e) => { setCustomerPhone(cleanPhoneInput(e.target.value)); unlinkCustomer(); }}
+                  className={inputCls} placeholder="09XXXXXXXXX" />
+                <FieldError message={fe.errors.customerPhone} />
               </div>
               <div {...fe.field('customerEmail')}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
@@ -2176,16 +2192,40 @@ function NewJobOrderForm() {
                     <div>
                       <label htmlFor="down-payment" className="text-sm font-medium text-[#011c72]">Down Payment</label>
                       <p className="text-xs text-[#011c72] mt-0.5">
-                        At least 50% (₱{minDown.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) before the work is confirmed. The rest can be paid in parts later.
+                        {DEFAULT_DOWN_PERCENT}% by default. At least {MIN_DOWN_PERCENT}% (₱{minDown.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) before the work is confirmed. The rest can be paid in parts later.
                       </p>
                     </div>
-                    <div className="relative w-44">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">₱</span>
-                      <input id="down-payment" type="number" min={minDown} max={finalTotal} step="0.01"
-                        value={downInput} placeholder={minDown.toFixed(2)}
-                        onChange={(e) => setDownInput(e.target.value)}
-                        className="w-full pl-7 pr-3 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-right font-semibold focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                    <div className="flex items-center gap-2">
+                      {/* Percentage of the total: typing here sets the amount */}
+                      <div className="relative w-24">
+                        <input aria-label="Down payment percentage" type="number" min={MIN_DOWN_PERCENT} max={100} step="1"
+                          value={downInput.trim() === '' ? DEFAULT_DOWN_PERCENT : Math.round(downPercent * 100) / 100}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setDownInput(v === '' ? '' : String(pctOf(Math.min(Number(v), 100))));
+                          }}
+                          className="w-full pl-3 pr-7 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-right font-semibold focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">%</span>
+                      </div>
+                      <div className="relative w-44">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">₱</span>
+                        <input id="down-payment" type="number" min={minDown} max={finalTotal} step="0.01"
+                          value={downInput} placeholder={defaultDown.toFixed(2)}
+                          onChange={(e) => setDownInput(e.target.value)}
+                          className="w-full pl-7 pr-3 py-2 rounded-lg border border-[#c7d2f5] bg-white text-gray-900 text-right font-semibold focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                      </div>
                     </div>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 mt-3">
+                    {[30, 50, 100].map(p => {
+                      const active = Math.abs(downAmount - pctOf(p)) < 0.005;
+                      return (
+                        <button key={p} type="button" onClick={() => setDownInput(p === DEFAULT_DOWN_PERCENT ? '' : String(pctOf(p)))}
+                          className={`px-3 py-1 rounded-full text-xs font-semibold transition-colors ${active ? 'bg-[#011c72] text-white' : 'bg-white text-[#011c72] border border-[#c7d2f5] hover:bg-[#dde3f7]'}`}>
+                          {p === 100 ? 'Full (100%)' : `${p}%`}
+                        </button>
+                      );
+                    })}
                   </div>
                   {Number.isFinite(downAmount) && downAmount >= minDown && downAmount <= finalTotal && (
                     <p className="text-xs text-gray-600 mt-2">
