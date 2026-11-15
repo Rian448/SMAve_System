@@ -94,6 +94,25 @@ export function emailProblem(email: string) {
   return v && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ? 'Enter a valid email address, e.g. name@example.com.' : '';
 }
 
+/** A Philippine mobile number is 11 digits: 09XX XXX XXXX */
+export const PHONE_DIGITS = 11;
+
+/** What a phone box accepts as it is typed: digits only, never more than 11 */
+export function cleanPhoneInput(value: string) {
+  return value.replace(/\D/g, '').slice(0, PHONE_DIGITS);
+}
+
+/** The message for an optional phone box: blank is fine, otherwise 11 digits starting with 09.
+ *  Spaces or dashes in a saved number (e.g. a linked customer's) are ignored; +63 counts as 0. */
+export function phoneProblem(phone: string) {
+  const raw = phone.trim();
+  if (!raw) return '';
+  // Letters or other symbols: not a phone number
+  let d = /[^\d\s\-().+]/.test(raw) ? '' : raw.replace(/\D/g, '');
+  if (d.startsWith('63') && d.length === 12) d = `0${d.slice(2)}`;
+  return /^09\d{9}$/.test(d) ? '' : 'Enter an 11-digit mobile number starting with 09, e.g. 0917 123 4567.';
+}
+
 /** The message under a field. Renders nothing when there is no message. */
 export function FieldError({ message, className = '' }: { message?: string; className?: string }) {
   if (!message) return null;

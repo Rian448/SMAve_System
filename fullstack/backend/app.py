@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, has_request_context
 from flask_cors import CORS
 from datetime import date as date_cls, datetime, timedelta
 from functools import wraps
@@ -593,6 +593,10 @@ class Supplier(db.Model):
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Default payment term for this supplier's purchase orders (see PAYMENT_TERMS);
+    # each PO copies it and may change it. NULL = no term agreed.
+    payment_term = db.Column(db.String(20), nullable=True)
+    payment_term_days = db.Column(db.Integer, nullable=True)
 
 class VehicleMake(db.Model):
     """Reference table of vehicle makes/brands (e.g. Toyota, Honda).
@@ -903,6 +907,13 @@ class PurchaseOrder(db.Model):
     approved_at = db.Column(db.DateTime, nullable=True)
     received_at = db.Column(db.DateTime, nullable=True)
     received_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    # When the supplier must be paid (see purchase_order_due_date). Copied from the
+    # supplier's default when the PO is made; NULL = no term (older POs).
+    payment_term = db.Column(db.String(20), nullable=True)
+    payment_term_days = db.Column(db.Integer, nullable=True)
+    # The due date each reminder was last sent for, so it goes out once per due date
+    due_soon_notified_for = db.Column(db.Date, nullable=True)
+    overdue_notified_for = db.Column(db.Date, nullable=True)
 
 class PurchaseOrderReceipt(db.Model):
     """One delivery received against a purchase order (a PO may arrive in several),
@@ -1484,6 +1495,14 @@ def run_migrations():
         "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS reference_number VARCHAR(100)",
         "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS purchase_order_payment_id INTEGER",
         "UPDATE product_orders SET completed_at = updated_at WHERE status = 'completed' AND completed_at IS NULL",
+        # Payment terms: a default per supplier, copied onto each purchase order,
+        # and which due-date reminders a PO has had. Existing rows stay NULL (no term).
+        "ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS payment_term VARCHAR(20)",
+        "ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS payment_term_days INTEGER",
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS payment_term VARCHAR(20)",
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS payment_term_days INTEGER",
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS due_soon_notified_for DATE",
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS overdue_notified_for DATE",
     ]
     is_sqlite = db.engine.dialect.name == 'sqlite'
     for sql in migrations:
@@ -4048,6 +4067,9 @@ def supplier_to_dict(s):
         'notes': s.notes,
         'isActive': s.is_active,
         'createdAt': s.created_at.strftime('%Y-%m-%d') if s.created_at else None,
+        'paymentTerm': s.payment_term,
+        'paymentTermDays': s.payment_term_days,
+        'paymentTermLabel': payment_term_label(s.payment_term, s.payment_term_days),
     }
 
 @app.route('/api/inventory/suppliers', methods=['GET'])
@@ -4068,7 +4090,12 @@ def create_supplier():
     data = request.get_json()
     if not data.get('name', '').strip():
         return jsonify({'status': 'error', 'message': 'Supplier name is required'}), 400
+    term, term_days, term_error = parse_payment_term(data)
+    if term_error:
+        return jsonify({'status': 'error', 'message': term_error}), 400
     supplier = Supplier(
+        payment_term=term,
+        payment_term_days=term_days,
         name=data['name'].strip(),
         contact_person=data.get('contactPerson', '').strip() or None,
         phone=data.get('phone', '').strip() or None,
@@ -4098,8 +4125,20 @@ def update_supplier(supplier_id):
     if 'materialsSupplied' in data: supplier.materials_supplied = data['materialsSupplied'].strip() or None
     if 'notes' in data: supplier.notes = data['notes'].strip() or None
     if 'isActive' in data: supplier.is_active = bool(data['isActive'])
+    term_note = ''
+    if 'paymentTerm' in data:
+        term, term_days, term_error = parse_payment_term(data)
+        if term_error:
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': term_error}), 400
+        before = payment_term_label(supplier.payment_term, supplier.payment_term_days) or 'no term'
+        supplier.payment_term, supplier.payment_term_days = term, term_days
+        after = payment_term_label(term, term_days) or 'no term'
+        if before != after:
+            # Existing purchase orders keep the term they were made with
+            term_note = f" (default payment term {before} → {after})"
     db.session.commit()
-    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated supplier: {supplier.name}", request.remote_addr or '0.0.0.0')
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated supplier: {supplier.name}{term_note}", request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': supplier_to_dict(supplier)})
 
 # ============================================
@@ -5418,6 +5457,9 @@ def create_job_order():
         return jsonify({'status': 'error', 'message': 'Customer name is required to save a draft'}), 400
     if is_draft and not data.get('branchId'):
         return jsonify({'status': 'error', 'message': 'Branch is required to save a draft'}), 400
+    phone_error = customer_phone_error(data.get('customerPhone'))
+    if phone_error:
+        return jsonify({'status': 'error', 'message': phone_error}), 400
 
     # Look up branch from database
     branch_db = Branch.query.get(data['branchId'])
@@ -5698,6 +5740,9 @@ def update_job_order(order_id):
                 return jsonify({'status': 'error', 'message': 'Customer name cannot be empty'}), 400
             order.customer_name = name
         if 'customerPhone' in data:
+            phone_error = customer_phone_error(data.get('customerPhone'))
+            if phone_error:
+                return jsonify({'status': 'error', 'message': phone_error}), 400
             order.customer_phone = (data.get('customerPhone') or '').strip()
         if 'customerEmail' in data:
             order.customer_email = (data.get('customerEmail') or '').strip()
@@ -6243,10 +6288,26 @@ def costed_job_orders(user):
     return query
 
 
-# The shop needs at least half of a job order's price paid before the work is
-# confirmed, so a customer who backs out doesn't leave it out of pocket. More (up
-# to the full price) is fine; the rest can be paid in parts afterwards.
-MIN_DEPOSIT_PERCENT = 50
+# The shop needs at least 30% of a job order's price paid before the work is
+# confirmed, so a customer who backs out doesn't leave it out of pocket. The form
+# suggests 50%; more (up to the full price) is fine, and the rest can be paid in
+# parts afterwards.
+MIN_DEPOSIT_PERCENT = 30
+
+def customer_phone_error(phone):
+    """Message if an (optional) customer phone isn't an 11-digit PH mobile number
+    (09XX XXX XXXX), else None. Spaces and dashes are ignored; +63 counts as 0."""
+    raw = str(phone or '').strip()
+    if not raw:
+        return None
+    digits = re.sub(r'\D', '', raw)
+    if re.search(r'[^\d\s\-().+]', raw):
+        digits = ''  # letters or other symbols: not a phone number
+    if digits.startswith('63') and len(digits) == 12:
+        digits = '0' + digits[2:]
+    if not re.fullmatch(r'09\d{9}', digits):
+        return 'Enter an 11-digit mobile number starting with 09, e.g. 0917 123 4567'
+    return None
 
 def minimum_deposit(total_price):
     return money(float(total_price or 0) * MIN_DEPOSIT_PERCENT / 100)
@@ -6557,6 +6618,7 @@ def purchase_order_to_dict(po):
         User.id.in_([i for i in (po.created_by, po.approved_by, po.received_by) if i]))}
     receipts = purchase_order_receipts(po)
     received = purchase_order_received_by_line(po, receipts)
+    payment_summary = purchase_order_payment_summary(po)
     return {
         'id': po.id,
         'poNumber': po.po_number,
@@ -6582,7 +6644,8 @@ def purchase_order_to_dict(po):
         'receivedAt': day(po.received_at),
         'receivedBy': po.received_by,
         'receivedByName': people.get(po.received_by),
-        **purchase_order_payment_summary(po),
+        **payment_summary,
+        **purchase_order_term_info(po, payment_summary, receipts),
     }
 
 # ── Supplier payments ──────────────────────────────────────────────────────────
@@ -6618,6 +6681,276 @@ def purchase_order_expense_branch(po):
     exactly one, else none (shown under All branches)."""
     ids = purchase_order_branch_ids(po)
     return next(iter(ids)) if len(ids) == 1 else None
+
+# ── Payment terms ──────────────────────────────────────────────────────────────
+# How long the shop has to pay a supplier. Each supplier has a default; a PO
+# copies it when made and may be given another. The term only sets the due date
+# and the reminders: payments are still recorded (and reach the Expense Log) on
+# the day they are made, and receiving stock never waits on payment.
+#   advance  Cash in Advance  due when the PO is approved (pay before it ships)
+#   cod      Cash on Delivery due the day the first delivery is received
+#   net      Net N days       due N days after the first delivery
+PAYMENT_TERMS = ('advance', 'cod', 'net')
+MAX_TERM_DAYS = 365
+DEFAULT_TERM_PRESETS = (7, 15, 30, 60)    # Net options offered in the forms (Settings can change)
+DEFAULT_DUE_REMINDER_DAYS = 3             # "due soon" this many days before (Settings can change)
+MAX_DUE_REMINDER_DAYS = 60
+
+def payment_term_label(term, days):
+    if term == 'advance':
+        return 'Cash in Advance'
+    if term == 'cod':
+        return 'COD (Cash on Delivery)'
+    if term == 'net' and days:
+        return f"Net {int(days)} day{'' if int(days) == 1 else 's'}"
+    return None
+
+def parse_payment_term(data):
+    """(term, days, error) from {paymentTerm, paymentTermDays}. A blank term means
+    no term; Net needs 1-365 days."""
+    term = str(data.get('paymentTerm') or '').strip().lower()
+    if not term:
+        return None, None, None
+    if term not in PAYMENT_TERMS:
+        return None, None, 'Choose a payment term: Cash in Advance, COD or Net days'
+    if term != 'net':
+        return term, None, None
+    raw = data.get('paymentTermDays')
+    try:
+        days = int(str(raw).strip())
+        if str(raw).strip() != str(days):  # 30.5, "30 days"
+            raise ValueError
+    except (TypeError, ValueError):
+        return None, None, 'Enter the number of days for a Net term as a whole number'
+    if not 1 <= days <= MAX_TERM_DAYS:
+        return None, None, f'A Net term must be from 1 to {MAX_TERM_DAYS} days'
+    return term, days, None
+
+def _int_setting(key, default, low, high):
+    row = SystemSetting.query.filter_by(key=key).first()
+    try:
+        value = int(str(row.value).strip()) if row and str(row.value).strip() else default
+    except ValueError:
+        return default
+    return value if low <= value <= high else default
+
+def due_reminder_days():
+    """Days before the due date a PO counts as due soon (cached for the request)."""
+    in_request = has_request_context()
+    cached = getattr(request, '_due_reminder_days', None) if in_request else None
+    if cached is not None:
+        return cached
+    value = _int_setting('po_due_reminder_days', DEFAULT_DUE_REMINDER_DAYS, 0, MAX_DUE_REMINDER_DAYS)
+    if in_request:
+        request._due_reminder_days = value
+    return value
+
+def payment_term_presets():
+    row = SystemSetting.query.filter_by(key='po_term_presets').first()
+    if row and str(row.value).strip():
+        try:
+            days = sorted({int(x) for x in str(row.value).split(',') if x.strip()})
+            if days and all(1 <= d <= MAX_TERM_DAYS for d in days):
+                return days
+        except ValueError:
+            pass
+    return list(DEFAULT_TERM_PRESETS)
+
+def term_presets_error(value):
+    """Message if a po_term_presets value isn't a list of 1-365 day counts, else None."""
+    parts = [x.strip() for x in str(value).split(',') if x.strip()]
+    if not parts:
+        return 'Add at least one Net term, e.g. 7, 15, 30, 60'
+    if not all(re.fullmatch(r'\d{1,3}', x) and 1 <= int(x) <= MAX_TERM_DAYS for x in parts):
+        return f'Net terms must be whole numbers of days from 1 to {MAX_TERM_DAYS}, separated by commas'
+    if len(parts) > 12:
+        return 'Keep the list to 12 Net terms or fewer'
+    return None
+
+def manila_date_of(dt):
+    """The Philippine calendar date of a stored (UTC) datetime."""
+    return (dt + PH_OFFSET).date() if dt else None
+
+def purchase_order_due_date(po, receipts=None):
+    """When the supplier must be paid, or None: no term, cancelled, or the event
+    the term counts from (approval / first delivery) hasn't happened yet."""
+    if not po.payment_term or po.status in ('pending', 'cancelled'):
+        return None
+    if po.payment_term == 'advance':
+        return manila_date_of(po.approved_at)
+    deliveries = [r for r in (receipts if receipts is not None else purchase_order_receipts(po))
+                  if r['kind'] == 'delivery' and r['at']]
+    if not deliveries:
+        return None
+    first = manila_date_of(min(r['at'] for r in deliveries))
+    return first + timedelta(days=int(po.payment_term_days or 0) if po.payment_term == 'net' else 0)
+
+def purchase_order_term_info(po, summary, receipts=None, today=None):
+    """Term, due date and where the PO stands against it:
+    awaiting (due date not known yet) | not_due | due_soon | overdue | paid | paid_late,
+    or None for a PO with no term or that was cancelled."""
+    due = purchase_order_due_date(po, receipts)
+    status, days_left = None, None
+    if po.payment_term and po.status != 'cancelled':
+        today = today or manila_today()
+        if summary['balance'] <= 0:
+            paid_on = [p['paymentDate'] for p in summary['payments'] if not p['voided'] and p['paymentDate']]
+            status = 'paid_late' if due and paid_on and max(paid_on) > due.isoformat() else 'paid'
+        elif not due:
+            status = 'awaiting'
+        else:
+            days_left = (due - today).days
+            status = ('overdue' if days_left < 0
+                      else 'due_soon' if days_left <= due_reminder_days() else 'not_due')
+    return {
+        'paymentTerm': po.payment_term,
+        'paymentTermDays': po.payment_term_days,
+        'paymentTermLabel': payment_term_label(po.payment_term, po.payment_term_days),
+        'dueDate': due.isoformat() if due else None,
+        'termStatus': status,
+        'daysUntilDue': days_left,
+    }
+
+@app.route('/api/payment-terms', methods=['GET'])
+@require_auth
+@require_staff
+def get_payment_term_options():
+    """What the supplier and purchase order forms offer, and the reminder lead time."""
+    return jsonify({'status': 'success', 'data': {
+        'netDays': payment_term_presets(),
+        'reminderDays': due_reminder_days(),
+        'maxDays': MAX_TERM_DAYS,
+    }})
+
+@app.route('/api/purchase-orders/<int:po_id>/payment-term', methods=['PUT'])
+@require_auth
+@require_permission('purchase_orders.add', 'purchase_orders.approve')
+def update_purchase_order_payment_term(po_id):
+    """Change one PO's term (body: {paymentTerm, paymentTermDays}). Whoever raises
+    POs may set it while the PO awaits approval; afterwards only approvers can."""
+    user = request.current_user
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
+    if not po:
+        return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    if not can_see_purchase_order(user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
+    if po.status == 'cancelled':
+        return jsonify({'status': 'error', 'message': 'A cancelled purchase order has no payment term'}), 400
+    if po.status != 'pending' and not has_perm(user, 'purchase_orders.approve'):
+        return jsonify({'status': 'error', 'message': 'Only those who approve purchase orders can change the term once approved'}), 403
+    term, days, error = parse_payment_term(request.get_json(silent=True) or {})
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 400
+    before = payment_term_label(po.payment_term, po.payment_term_days) or 'no term'
+    po.payment_term, po.payment_term_days = term, days
+    after = payment_term_label(term, days) or 'no term'
+    # A new due date gets its own reminders
+    po.due_soon_notified_for = None
+    po.overdue_notified_for = None
+    db.session.commit()
+    if before != after:
+        log_action(user['id'], user['fullName'], 'UPDATE', 'Purchase Orders',
+                   f"Changed payment term of {po.po_number} from {before} to {after}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
+
+# ── Due-date reminders ─────────────────────────────────────────────────────────
+# There is no background worker, so reminders are checked when staff load their
+# notifications (the bell asks every 30 seconds), at most every few minutes per
+# server process. Each PO gets one "due soon" and one "overdue" notice per due
+# date (the *_notified_for columns), even with several server processes.
+PO_REMINDER_CHECK_SECONDS = 600
+_po_reminders_checked_at = None
+
+def payables_recipients(branch_ids):
+    """Active staff who pay suppliers or review the business's finances, at one of
+    these branches or with access to every branch."""
+    staff = (User.query.join(Role, User.role_id == Role.id)
+             .filter(Role.key != 'customer', User.is_active == True).all())
+    overrides = {}
+    for o in UserPermissionOverride.query.filter(
+            UserPermissionOverride.user_id.in_([u.id for u in staff] or [-1])).all():
+        overrides.setdefault(o.user_id, []).append(o)
+    people = []
+    for u in staff:
+        perms = effective_permissions(u.id, u.role.key, overrides.get(u.id, []))
+        # The owner is told even without access to Purchase Orders (the notice then
+        # just doesn't open the PO); the payables total is on their dashboard
+        if not ({'purchase_orders.pay', 'owner.view'} & perms):
+            continue
+        if 'branches.all' in perms or u.branch_id in branch_ids:
+            people.append(u)
+    return people
+
+def send_po_due_reminders(force=False, today=None):
+    """Notify about POs that are due soon or overdue and not fully paid. Returns
+    how many notices went out (each PO counts once per notice, not per person)."""
+    global _po_reminders_checked_at
+    now = datetime.utcnow()
+    if not force and _po_reminders_checked_at and (now - _po_reminders_checked_at).total_seconds() < PO_REMINDER_CHECK_SECONDS:
+        return 0
+    _po_reminders_checked_at = now
+    today = today or manila_today()
+    lead = due_reminder_days()
+    sent = 0
+    candidates = (PurchaseOrder.query.filter(PurchaseOrder.payment_term.isnot(None),
+                                             PurchaseOrder.status.in_(PO_PAYABLE_STATUSES)).all())
+    for candidate in candidates:
+        summary = purchase_order_payment_summary(candidate)
+        due = purchase_order_due_date(candidate)
+        if summary['balance'] <= 0 or not due:
+            continue
+        days_left = (due - today).days
+        kind = 'po_overdue' if days_left < 0 else 'po_due_soon' if days_left <= lead else None
+        if not kind:
+            continue
+        flag = 'overdue_notified_for' if kind == 'po_overdue' else 'due_soon_notified_for'
+        if getattr(candidate, flag) == due:
+            continue
+        # Lock and look again: another server process may have just sent it
+        po = PurchaseOrder.query.filter_by(id=candidate.id).with_for_update().populate_existing().first()
+        if not po or getattr(po, flag) == due:
+            db.session.rollback()
+            continue
+        when = due.strftime('%b %d, %Y').replace(' 0', ' ')
+        balance = f"₱{summary['balance']:,.2f}"
+        if kind == 'po_overdue':
+            late = -days_left
+            title = f'Supplier payment overdue: {po.po_number}'
+            message = (f"{balance} to {po.supplier_name} was due {when} "
+                       f"({late} day{'s' if late != 1 else ''} ago).")
+        else:
+            title = f'Supplier payment due soon: {po.po_number}'
+            message = (f"{balance} to {po.supplier_name} is due "
+                       f"{'today' if days_left == 0 else 'tomorrow' if days_left == 1 else f'in {days_left} days'} ({when}).")
+        for person in payables_recipients(purchase_order_branch_ids(po)):
+            db.session.add(Notification(user_id=person.id, type=kind, title=title, message=message,
+                                        data={'purchaseOrderId': po.id, 'dueDate': due.isoformat()}))
+        setattr(po, flag, due)
+        db.session.commit()
+        sent += 1
+    return sent
+
+def purchase_order_payables(branch_id=None, today=None):
+    """What is still owed to suppliers today, for the owner dashboard: every
+    approved or received PO with a balance (with or without a term)."""
+    today = today or manila_today()
+    totals = {'total': 0.0, 'dueSoon': 0.0, 'overdue': 0.0, 'count': 0, 'dueSoonCount': 0, 'overdueCount': 0}
+    for po in PurchaseOrder.query.filter(PurchaseOrder.status.in_(PO_PAYABLE_STATUSES)).all():
+        if branch_id and branch_id not in purchase_order_branch_ids(po):
+            continue
+        summary = purchase_order_payment_summary(po)
+        if summary['balance'] <= 0:
+            continue
+        status = purchase_order_term_info(po, summary, today=today)['termStatus']
+        totals['total'] += summary['balance']
+        totals['count'] += 1
+        if status == 'overdue':
+            totals['overdue'] += summary['balance']
+            totals['overdueCount'] += 1
+        elif status == 'due_soon':
+            totals['dueSoon'] += summary['balance']
+            totals['dueSoonCount'] += 1
+    return {k: (money(v) if isinstance(v, float) else v) for k, v in totals.items()}
 
 @app.route('/api/purchase-orders/<int:po_id>/payments', methods=['POST'])
 @require_auth
@@ -6778,10 +7111,20 @@ def create_purchase_order():
     if error:
         return error
 
+    # The supplier's default term unless one was chosen for this PO (blank = none)
+    if 'paymentTerm' in data:
+        term, term_days, term_error = parse_payment_term(data)
+        if term_error:
+            return jsonify({'status': 'error', 'message': term_error}), 400
+    else:
+        term, term_days = supplier.payment_term, supplier.payment_term_days
+
     po = PurchaseOrder(
         po_number=generate_po_number(),
         supplier_id=supplier.id,
         supplier_name=supplier.name,
+        payment_term=term,
+        payment_term_days=term_days,
         items=items,
         total_amount=round(sum(it['quantity'] * it['unitPrice'] for it in items), 2),
         status='pending',
@@ -7649,6 +7992,8 @@ def build_premade_sale(staff, data):
     required = ['customerName', 'items', 'branchId']
     if not all(f in data for f in required) or not str(data['customerName'] or '').strip():
         return fail('Customer name, branch and items are required')
+    if customer_phone_error(data.get('customerPhone')):
+        return fail(customer_phone_error(data.get('customerPhone')))
     if not data['items']:
         return fail('At least one item is required')
 
@@ -7896,6 +8241,8 @@ def apply_premade_draft_fields(draft, data, staff):
         if not name:
             return 'Customer name is required to save a draft'
         draft.customer_name = name[:255]
+    if 'customerPhone' in data and customer_phone_error(data.get('customerPhone')):
+        return customer_phone_error(data.get('customerPhone'))
     for key, attr, size in (('customerPhone', 'customer_phone', 50), ('customerEmail', 'customer_email', 255),
                             ('customerAddress', 'customer_address', 255), ('paymentMethod', 'payment_method', 30)):
         if key in data:
@@ -8354,6 +8701,13 @@ def my_notifications_query(archived=False):
 @app.route('/api/notifications', methods=['GET'])
 @require_auth
 def get_notifications():
+    # Supplier payment reminders are made here (throttled): there is no background worker.
+    # A failure must never stop the bell from loading.
+    try:
+        send_po_due_reminders()
+    except Exception as exc:  # pragma: no cover - logged, not raised
+        db.session.rollback()
+        app.logger.warning('PO due reminders failed: %s', exc)
     limit = min(int(request.args.get('limit', 30)), 100)
     archived = request.args.get('archived') in ('1', 'true')
     notifs = (my_notifications_query(archived)
@@ -9496,6 +9850,10 @@ def list_expenses():
     q = scoped_expenses(request.current_user).filter(Expense.expense_date >= start, Expense.expense_date <= end)
     if request.args.get('category'):
         q = q.filter(Expense.category == request.args['category'])
+    # Users who see every branch can narrow the list to one (others are already scoped to theirs)
+    branch_filter = request.args.get('branchId', type=int)
+    if branch_filter and all_branches(request.current_user):
+        q = q.filter(Expense.branch_id == branch_filter)
     rows = q.order_by(Expense.expense_date.desc(), Expense.id.desc()).all()
     pay_ids = [e.purchase_order_payment_id for e in rows if e.purchase_order_payment_id]
     po_links = {pid: po_id for pid, po_id in db.session.query(PurchaseOrderPayment.id, PurchaseOrderPayment.purchase_order_id)
@@ -9812,6 +10170,8 @@ def owner_summary():
         'totals': {k: f[k] for k in ('sales', 'grossReceipts', 'vatCollected', 'grossProfit', 'totalExpenses',
                                      'netIncome', 'profitMargin', 'orderCounts')},
         'receivables': money(receivable),
+        # What the shop still owes suppliers today, and how much of it is due soon / overdue
+        'payables': purchase_order_payables(branch_id),
         'monthly': f['monthly'],
         'cashflowByMethod': money_by_method(start, end, branch_id),
     }})
@@ -10962,6 +11322,15 @@ def update_system_setting(key):
             return jsonify({'status': 'error', 'message': error}), 400
         # '12.00' -> '12'; plain digits, since normalize() alone turns 10 into '1E+1'
         value = format(Decimal(value).normalize(), 'f') if Decimal(value) != 0 else '0'
+    elif key == 'po_term_presets':
+        error = term_presets_error(value)
+        if error:
+            return jsonify({'status': 'error', 'message': error}), 400
+        value = ','.join(str(d) for d in sorted({int(x) for x in value.split(',') if x.strip()}))
+    elif key == 'po_due_reminder_days':
+        if not re.fullmatch(r'\d{1,2}', value) or int(value) > MAX_DUE_REMINDER_DAYS:
+            return jsonify({'status': 'error', 'message': f'Enter a whole number of days from 0 to {MAX_DUE_REMINDER_DAYS}'}), 400
+        value = str(int(value))
     setting = SystemSetting.query.filter_by(key=key).first()
     if not setting:
         setting = SystemSetting(key=key, value=value)

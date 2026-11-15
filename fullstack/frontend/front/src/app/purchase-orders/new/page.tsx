@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, RawMaterial, Supplier } from '@/lib/api';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
+import { PaymentTermPicker, TermValue, termValueError, termExplanation, termLabel } from '@/components/PaymentTerms';
 
 interface POItem {
   material_id: string;
@@ -27,6 +28,13 @@ export default function NewPurchaseOrderPage() {
   const [supplierId, setSupplierId] = useState('');
   const chosenSupplier = savedSuppliers.find(s => String(s.id) === supplierId);
   const [expectedDate, setExpectedDate] = useState('');
+  // Starts as the supplier's default term; may be changed for this order only
+  const [term, setTerm] = useState<TermValue>({ term: '', days: null });
+  useEffect(() => {
+    setTerm({ term: chosenSupplier?.paymentTerm || '', days: chosenSupplier?.paymentTermDays ?? null });
+  }, [chosenSupplier?.id, chosenSupplier?.paymentTerm, chosenSupplier?.paymentTermDays]);
+  const supplierTerm: TermValue = { term: chosenSupplier?.paymentTerm || '', days: chosenSupplier?.paymentTermDays ?? null };
+  const termChanged = !!chosenSupplier && (term.term !== supplierTerm.term || (term.term === 'net' && term.days !== supplierTerm.days));
   const [notes, setNotes] = useState('');
   const [items, setItems] = useState<POItem[]>([
     { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd' }
@@ -133,6 +141,7 @@ export default function NewPurchaseOrderPage() {
     if (fe.show({
       'po-supplier': !chosenSupplier && 'Choose the supplier.',
       'po-date': !expectedDate && 'Choose the expected delivery date.',
+      'po-term': termValueError(term),
       ...Object.fromEntries(items.flatMap((item, index) => [
         [`po-material-${index}`, !item.material_id ? (anyMaterial ? 'Select a material, or remove this row.'
           : 'Add at least one material to the purchase order.')
@@ -153,7 +162,9 @@ export default function NewPurchaseOrderPage() {
           unit: item.unit,
           unitPrice: item.unit_cost
         })),
-        expectedDelivery: expectedDate
+        expectedDelivery: expectedDate,
+        paymentTerm: term.term,
+        paymentTermDays: term.term === 'net' ? term.days : null,
       };
 
       await api.purchaseOrders.create(purchaseOrder);
@@ -258,6 +269,15 @@ export default function NewPurchaseOrderPage() {
                   required
                 />
                 <FieldError message={fe.errors['po-date']} />
+              </div>
+              <div {...fe.field('po-term')}>
+                <label htmlFor="po-term" className="block text-sm font-medium text-gray-700 mb-2">Payment Terms</label>
+                <PaymentTermPicker id="po-term" value={term} onChange={setTerm} disabled={!chosenSupplier} />
+                <p className="mt-1 text-xs text-gray-500">
+                  {!chosenSupplier ? 'Choose the supplier first: its usual term is filled in.'
+                    : <>{termExplanation(term.term, term.days)}{termChanged && <> Supplier&apos;s usual term: {termLabel(supplierTerm.term, supplierTerm.days)}.</>}</>}
+                </p>
+                <FieldError message={fe.errors['po-term']} />
               </div>
             </div>
           </div>

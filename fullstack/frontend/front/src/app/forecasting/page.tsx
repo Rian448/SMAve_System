@@ -127,9 +127,9 @@ export default function ForecastingPage() {
             <div>
               <p className="text-sm font-medium text-[#011c72]">No AI predictions available yet</p>
               <p className="text-xs text-[#011c72] mt-1">
-                Upload your historical XLSX data in the{' '}
-                <Link href="/inventory" className="underline font-medium">Inventory → AI Predictions</Link>{' '}
-                tab to enable forecasting.
+                Use Recompute in the{' '}
+                <Link href="/inventory?tab=ai-predictions" className="underline font-medium">Inventory → AI Predictions</Link>{' '}
+                tab to generate them.
                 {data.predictionStatus === 'computing' && ' Predictions are currently computing...'}
               </p>
             </div>
@@ -410,7 +410,7 @@ export default function ForecastingPage() {
                     {data.topConsuming && ` Your highest-consuming material is ${data.topConsuming.materialType} at ${data.topConsuming.avgDailyUsage} units/day.`}
                   </p>
                 ) : (
-                  <p className="text-amber-100 text-sm">Upload historical data in the Inventory AI Predictions tab to get personalized insights.</p>
+                  <p className="text-amber-100 text-sm">Use Recompute in the Inventory AI Predictions tab to get personalized insights.</p>
                 )}
               </div>
 
@@ -452,7 +452,7 @@ export default function ForecastingPage() {
                     </svg>
                     {data.hasPredictions
                       ? `AI predictions based on ${data.totalPredictedItems} tracked materials`
-                      : 'Upload historical data to unlock AI-based recommendations'}
+                      : 'Use Recompute in Inventory AI Predictions to unlock AI-based recommendations'}
                   </li>
                 </ul>
               </div>

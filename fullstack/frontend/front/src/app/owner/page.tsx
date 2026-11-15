@@ -1,6 +1,8 @@
 'use client';
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import Link from 'next/link';
+import { useAuth } from '@/context/AuthContext';
 import {
   api, OwnerSummary, ProfitAndLoss, OwnerJobCosting, JobCostingRow, OwnerReceivables, ReceivableInvoice,
   OwnerInventory, MonthlyFinancials, MethodAmount, PAYMENT_METHOD_LABELS,
@@ -101,7 +103,7 @@ function OwnerDashboard() {
         {tab === 'pnl' && <ProfitLoss filters={filters} />}
         {tab === 'receivables' && <Receivables filters={filters} />}
         {/* Opens on the Overview's dates, so its total matches the "paid out" figure there */}
-        {tab === 'expenses' && <ExpenseTracker showPaymentBreakdown initialStart={filters.start} initialEnd={filters.end} />}
+        {tab === 'expenses' && <ExpenseTracker showPaymentBreakdown initialStart={filters.start} initialEnd={filters.end} initialBranchId={filters.branchId} />}
         {tab === 'inventory' && <InventoryOversight filters={filters} />}
       </main>
     </div>
@@ -274,6 +276,7 @@ function VatBreakdown({ grossReceipts, vat, sales, compact }: {
 // ─────────────────────────── 1. Overview ───────────────────────────
 
 function Overview({ filters, onOpen }: { filters: Filters; onOpen: (t: Tab) => void }) {
+  const { can } = useAuth();
   const { data, error, loading } = useLoad<OwnerSummary>(
     () => api.owner.summary(query(filters)), [filters.start, filters.end, filters.branchId]);
   if (!data || loading) return <State loading={loading} error={error} />;
@@ -303,6 +306,36 @@ function Overview({ filters, onOpen }: { filters: Filters; onOpen: (t: Tab) => v
           className="text-sm font-medium text-[#011c72] hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-[#011c72] rounded">
           View receivables →
         </button>
+      </div>
+
+      {/* Owed to suppliers: unpaid balances of approved / received purchase orders. Not an
+          expense until it is paid (payments reach the Expense Log on the day they're made). */}
+      <div className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border px-5 py-4 ${
+        data.payables.overdueCount > 0 ? 'bg-red-50 border-red-200' : data.payables.dueSoonCount > 0 ? 'bg-amber-50 border-amber-200' : 'bg-white border-gray-200'}`}>
+        <div className="min-w-0">
+          <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Accounts Payable</p>
+          <p className="mt-1 text-xl sm:text-2xl font-bold text-gray-900 tabular-nums"><Amount value={data.payables.total} /></p>
+          <p className="mt-0.5 text-xs text-gray-500">
+            Still owed to suppliers as of today · {data.payables.count} purchase order{data.payables.count === 1 ? '' : 's'} · {filters.branchId ? 'this branch' : 'all branches'}
+          </p>
+          {(data.payables.overdueCount > 0 || data.payables.dueSoonCount > 0) && (
+            <p className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+              {data.payables.overdueCount > 0 && (
+                <span className="font-semibold text-red-700">Overdue: {peso(data.payables.overdue)} ({data.payables.overdueCount})</span>
+              )}
+              {data.payables.dueSoonCount > 0 && (
+                <span className="font-semibold text-amber-800">Due soon: {peso(data.payables.dueSoon)} ({data.payables.dueSoonCount})</span>
+              )}
+            </p>
+          )}
+        </div>
+        {/* Only for those who may open Purchase Orders (an admin can turn that off for the owner) */}
+        {can('purchase_orders.view') && (
+          <Link href="/purchase-orders?tab=due"
+            className="text-sm font-medium text-[#011c72] hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-[#011c72] rounded">
+            View due payments →
+          </Link>
+        )}
       </div>
 
       <CashflowChart monthly={data.monthly} start={data.period.startDate} end={data.period.endDate} />
