@@ -12886,6 +12886,16 @@ def list_worker_assignments():
         })
     return jsonify({'status': 'success', 'data': {'assignments': result}})
 
+def mark_job_order_started(order):
+    """A pending job order given to a worker is being worked on: In Progress.
+    Returns True if its status changed (the caller commits)."""
+    if order is None or order.status != 'pending':
+        return False
+    order.status = 'in_progress'
+    order.updated_at = datetime.utcnow()
+    return True
+
+
 @app.route('/api/worker-assignments', methods=['POST'])
 @require_auth
 @require_permission('workers.assign')
@@ -12995,6 +13005,8 @@ def create_worker_assignment():
             existing.scheduled_date = scheduled_date
             existing.updated_at = datetime.utcnow()
             db.session.commit()
+        if mark_job_order_started(order):
+            db.session.commit()
         return jsonify({
             'status': 'success',
             'data': {
@@ -13027,7 +13039,12 @@ def create_worker_assignment():
     db.session.flush()
     if order:
         add_labor_line_for_assignment(order, assignment)
+    started = mark_job_order_started(order)
     db.session.commit()
+    if started:
+        log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Sales',
+                   f"{order.job_order_id} moved to In Progress: assigned to {worker.name}",
+                   request.remote_addr or '0.0.0.0')
     return jsonify({
         'status': 'success',
         'data': {
@@ -13070,6 +13087,21 @@ def update_worker_assignment(assignment_id):
                    f"{blocker.description or 'their part'} first.")
             return jsonify({'status': 'error', 'error': msg, 'message': msg, 'code': 'waiting_on_earlier',
                             'data': waiting_on_dict(blocker)}), 400
+
+    # A worker works on one task at a time: another can't start while one is in progress
+    if new_status == 'in_progress' and assignment.status != 'in_progress':
+        busy = (WorkerAssignment.query.filter(WorkerAssignment.worker_id == assignment.worker_id,
+                                              WorkerAssignment.status == 'in_progress',
+                                              WorkerAssignment.id != assignment.id)
+                .order_by(WorkerAssignment.start_time).first())
+        if busy:
+            who = assignment.worker.name if assignment.worker else 'This worker'
+            task = busy.special_task_title if busy.assignment_type == 'special_task' else busy.job_order_ref
+            msg = (f"{who} is already working on {task} ({busy.description or 'a task'}). "
+                   f"Mark that one complete before starting another.")
+            return jsonify({'status': 'error', 'error': msg, 'message': msg, 'code': 'worker_busy',
+                            'data': {'assignmentId': busy.id, 'jobOrderRef': busy.job_order_ref,
+                                     'description': busy.description}}), 409
 
     # Move a task that hasn't started to another worker
     if data.get('workerId') and finite_number(data['workerId']) and int(data['workerId']) != assignment.worker_id:
