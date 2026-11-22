@@ -153,6 +153,10 @@ function InventoryContent() {
   const [predUrgencyFilter, setPredUrgencyFilter] = useState<'all' | 'urgent' | 'soon' | 'ok'>('all');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [aiAlertDismissed, setAiAlertDismissed] = useState(false);
+  // Suggestions picked to order: each material's supplier and unit come from Inventory
+  const [predMaterials, setPredMaterials] = useState<RawMaterial[]>([]);
+  const [predSuppliers, setPredSuppliers] = useState<Supplier[]>([]);
+  const [predPicked, setPredPicked] = useState<Set<string>>(new Set());
 
   const [branches, setBranches] = useState<{ id: number; name: string; isWarehouse: boolean; isActive: boolean }[]>([]);
   const [newPremade, setNewPremade] = useState({
@@ -318,6 +322,13 @@ function InventoryContent() {
         .catch(() => {});
     }
   }, [newPremade.branchId, activeTab, can]);
+
+  // AI Predictions: each material's supplier and unit, to show and to order from
+  useEffect(() => {
+    if (activeTab !== 'ai-predictions') return;
+    api.inventory.getRawMaterials({ includeWarehouse: true }).then(res => setPredMaterials(res.data || [])).catch(() => {});
+    api.inventory.getSuppliers().then(res => setPredSuppliers(res.data || [])).catch(() => {});
+  }, [activeTab]);
 
   const fetchInventory = async () => {
     setLoading(true);
@@ -2424,6 +2435,33 @@ function InventoryContent() {
                 const urgent = aiStatus.predictions.filter(p => p.daysUntilStockout <= 7).length;
                 const soon = aiStatus.predictions.filter(p => p.daysUntilStockout > 7 && p.daysUntilStockout <= 30).length;
 
+                // Ordering: each suggestion's material in Inventory gives its supplier, unit and cost
+                const matByItem = new Map(predMaterials.filter(m => m.itemId && !m.isArchived).map(m => [m.itemId as string, m]));
+                const unitOf = (itemId: string) => {
+                  const m = matByItem.get(itemId);
+                  return m?.isConsumable ? (m.unit || 'pcs') : 'yd';
+                };
+                const supplierOf = (itemId: string) =>
+                  predSuppliers.find(s => s.id === matByItem.get(itemId)?.supplierId)?.name;
+                const canOrder = can('purchase_orders.add');
+                const orderable = (p: typeof aiStatus.predictions[number]) =>
+                  canOrder && p.hasCurrentInventory && p.suggestedRestockQty > 0 && matByItem.has(p.itemId);
+                const orderQty = (p: typeof aiStatus.predictions[number]) =>
+                  unitOf(p.itemId) === 'yd' ? Math.ceil(p.suggestedRestockQty * 100) / 100 : Math.ceil(p.suggestedRestockQty);
+                const pickedPreds = aiStatus.predictions.filter(p => predPicked.has(p.itemId) && orderable(p));
+                const pickedSuppliers = new Set(pickedPreds.map(p => supplierOf(p.itemId) || '—')).size;
+                /** Open New Purchase Order with these items; it splits them into one order per supplier */
+                const orderPreds = (list: typeof aiStatus.predictions) => {
+                  const lines = list.map(p => `${encodeURIComponent(p.itemId)}:${orderQty(p)}`);
+                  if (lines.length) router.push(`/purchase-orders/new?restock=${lines.join(',')}`);
+                };
+                const togglePred = (itemId: string) => setPredPicked(prev => {
+                  const next = new Set(prev);
+                  if (next.has(itemId)) next.delete(itemId); else next.add(itemId);
+                  return next;
+                });
+                const needSoon = aiStatus.predictions.filter(p => orderable(p) && p.daysUntilStockout <= 30);
+
                 return (
                   <div>
                     {/* Summary bar */}
@@ -2456,6 +2494,29 @@ function InventoryContent() {
                           <option value="ok">OK (&gt;30 days)</option>
                         </select>
                       </div>
+                      {canOrder && (
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <button type="button" onClick={() => setPredPicked(new Set(needSoon.map(p => p.itemId)))}
+                            disabled={needSoon.length === 0}
+                            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-100 disabled:opacity-40">
+                            Select urgent &amp; soon ({needSoon.length})
+                          </button>
+                          {pickedPreds.length > 0 && (
+                            <button type="button" onClick={() => setPredPicked(new Set())}
+                              className="px-3 py-1.5 text-xs font-medium rounded-lg text-gray-500 hover:bg-gray-100">
+                              Clear
+                            </button>
+                          )}
+                          <button type="button" onClick={() => orderPreds(pickedPreds)} disabled={pickedPreds.length === 0}
+                            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#011c72] text-white hover:bg-[#022a9e] disabled:opacity-40">
+                            Create purchase order{pickedPreds.length > 0 && ` (${pickedPreds.length} item${pickedPreds.length === 1 ? '' : 's'}`}
+                            {pickedPreds.length > 0 && (pickedSuppliers > 1 ? `, ${pickedSuppliers} suppliers)` : ')')}
+                          </button>
+                          {pickedSuppliers > 1 && (
+                            <span className="text-xs text-gray-500">One purchase order is made per supplier.</span>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     {/* Predictions table */}
@@ -2464,6 +2525,7 @@ function InventoryContent() {
                       <table className="w-full">
                         <thead className="bg-gray-50">
                           <tr>
+                            {canOrder && <th className="pl-4 py-3 w-8"><span className="sr-only">Pick to order</span></th>}
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Item</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Current Stock</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Avg Daily Use</th>
@@ -2494,13 +2556,21 @@ function InventoryContent() {
                             };
                             return (
                               <tr key={p.itemId} className={`hover:bg-gray-50 transition-colors ${isUrgent ? 'bg-red-50/30' : ''}`}>
+                                {canOrder && (
+                                  <td className="pl-4 py-3 align-top">
+                                    <input type="checkbox" checked={predPicked.has(p.itemId)} disabled={!orderable(p)}
+                                      onChange={() => togglePred(p.itemId)} aria-label={`Order ${p.itemId}`}
+                                      className="mt-1 w-4 h-4 rounded border-gray-300 text-[#011c72] focus:ring-[#011c72] disabled:opacity-30" />
+                                  </td>
+                                )}
                                 <td className="px-4 py-3">
                                   <div className="text-sm font-semibold text-gray-900">{p.itemId}</div>
                                   <div className="text-xs text-gray-500">{p.materialType}{p.color ? ` · ${p.color}` : ''}{p.pattern ? ` · ${p.pattern}` : ''}</div>
+                                  {supplierOf(p.itemId) && <div className="text-xs text-[#011c72] mt-0.5">Supplier: {supplierOf(p.itemId)}</div>}
                                   {!p.hasCurrentInventory && <span className="text-xs text-orange-500">Not in current inventory</span>}
                                 </td>
-                                <td className="px-4 py-3 text-sm text-gray-700">{p.currentStock} yd</td>
-                                <td className="px-4 py-3 text-sm text-gray-700">{p.avgDailyUsage} yd/day</td>
+                                <td className="px-4 py-3 text-sm text-gray-700">{p.currentStock} {unitOf(p.itemId)}</td>
+                                <td className="px-4 py-3 text-sm text-gray-700">{p.avgDailyUsage} {unitOf(p.itemId)}/day</td>
                                 <td className="px-4 py-3">
                                   <span className={`text-sm ${daysClass}`}>
                                     {p.daysUntilStockout >= 9999 ? '—' : `${p.daysUntilStockout} days`}
@@ -2517,7 +2587,15 @@ function InventoryContent() {
                                     </div>
                                   ) : <span className="text-sm text-gray-400">—</span>}
                                 </td>
-                                <td className="px-4 py-3 text-sm font-medium text-gray-900">{p.suggestedRestockQty} yd</td>
+                                <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                                  {orderQty(p)} {unitOf(p.itemId)}
+                                  {orderable(p) && (
+                                    <button type="button" onClick={() => orderPreds([p])}
+                                      className="block mt-1 text-xs font-semibold text-[#011c72] hover:underline">
+                                      Order
+                                    </button>
+                                  )}
+                                </td>
                                 <td className="px-4 py-3">
                                   <div className="flex flex-col gap-1">
                                     <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${srcColors[p.dataSource]}`}>
@@ -2540,7 +2618,7 @@ function InventoryContent() {
                           })}
                           {filtered.length === 0 && (
                             <tr>
-                              <td colSpan={7} className="px-4 py-10 text-center text-sm text-gray-500">No predictions match your filters.</td>
+                              <td colSpan={canOrder ? 8 : 7} className="px-4 py-10 text-center text-sm text-gray-500">No predictions match your filters.</td>
                             </tr>
                           )}
                         </tbody>

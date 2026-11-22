@@ -16,6 +16,7 @@ import { formatDate } from '@/lib/dateUtils';
 import ExtraMaterialDialog from '@/components/ExtraMaterialDialog';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import Paginated from '@/components/Paginated';
+import WorkerWorkSummary from '@/components/WorkerWorkSummary';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const WORK_TYPES = ['Seat Maker', 'Sewer', 'Upholstery', 'Installer', 'Cutter', 'Finisher', 'Other'];
@@ -532,6 +533,8 @@ export default function WorkerDashboard() {
   const [extraFor, setExtraFor] = useState<WorkerAssignment | null>(null);
   const [workerExtras, setWorkerExtras] = useState<MaterialWasteLog[]>([]);
   const [openExtrasFor, setOpenExtrasFor] = useState<number | null>(null);
+  // The worker whose finished work and pay (day / week / month) is open
+  const [summaryFor, setSummaryFor] = useState<ManagedWorker | null>(null);
   const [loading, setLoading]       = useState(true);
   const [loadingJO, setLoadingJO]   = useState(false);
 
@@ -1289,7 +1292,7 @@ export default function WorkerDashboard() {
                     const extrasValue = wExtras.reduce((s, x) => s + (x.value || 0), 0);
                     return (
                       <div key={w.id}>
-                      <div className="flex items-center justify-between px-5 py-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
                         <div className="flex items-center gap-4">
                           <div className="w-10 h-10 rounded-full bg-[#011c72]/10 text-[#011c72] flex items-center justify-center font-bold">
                             {w.name.charAt(0)}
@@ -1305,7 +1308,11 @@ export default function WorkerDashboard() {
                             </p>
                           </div>
                         </div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center justify-end gap-2">
+                          <button onClick={() => setSummaryFor(w)}
+                            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#011c72] text-white hover:bg-[#022a9e]">
+                            Work &amp; Pay
+                          </button>
                           <button onClick={() => setOpenExtrasFor(openExtrasFor === w.id ? null : w.id)}
                             className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-100">
                             Materials ({wExtras.length}) {openExtrasFor === w.id ? '▲' : '▼'}
@@ -1992,6 +1999,28 @@ export default function WorkerDashboard() {
       })()}
 
       {/* ── Add/Edit Worker Modal ───────────────────────────────────────────── */}
+      {summaryFor && (
+        <div className="fixed inset-0 bg-black/50 flex items-start sm:items-center justify-center p-2 sm:p-4 z-50" onClick={() => setSummaryFor(null)}>
+          <div role="dialog" aria-modal="true" aria-labelledby="work-summary-title"
+            className="bg-gray-50 rounded-2xl shadow-2xl w-full max-w-3xl max-h-[95vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-gray-200 bg-white rounded-t-2xl flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h2 id="work-summary-title" className="text-lg font-semibold text-gray-900 truncate">{summaryFor.name}: work &amp; pay</h2>
+                <p className="text-xs text-gray-500">
+                  {summaryFor.workType}
+                  {summaryFor.ratePerHour != null && <> · {fc(summaryFor.ratePerHour)}{rateLabelFor(summaryFor.payMode || 'per_hour')}</>}
+                </p>
+              </div>
+              <button onClick={() => setSummaryFor(null)} aria-label="Close"
+                className="w-9 h-9 rounded-lg text-gray-500 hover:bg-gray-100 text-xl leading-none">×</button>
+            </div>
+            <div className="p-4 sm:p-5 overflow-y-auto">
+              <WorkerWorkSummary workerId={summaryFor.id} />
+            </div>
+          </div>
+        </div>
+      )}
+
       {showWorkerModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={() => setShowWorkerModal(false)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
