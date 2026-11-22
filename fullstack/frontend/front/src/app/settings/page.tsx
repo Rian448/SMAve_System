@@ -6,13 +6,14 @@ import { useConfirm } from '@/components/ConfirmDialog';
 import PermissionsDialog from '@/components/PermissionsDialog';
 import VatRateSetting from '@/components/VatRateSetting';
 import PaymentTermsSetting from '@/components/PaymentTermsSetting';
+import AppearanceSetting from '@/components/AppearanceSetting';
 import { formatDate } from '@/lib/dateUtils';
 import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
 import Paginated from '@/components/Paginated';
 import { passwordProblem } from '@/lib/password';
 import PasswordChecklist from '@/components/PasswordChecklist';
 
-type TabType = 'general' | 'users' | 'branches' | 'notifications';
+type TabType = 'general' | 'users' | 'branches' | 'notifications' | 'appearance';
 
 // Roles not offered when adding a user: workers are managed in Worker Management
 const HIDDEN_ROLES = ['seat_maker', 'sewer'];
@@ -517,6 +518,11 @@ export default function SettingsPage() {
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
       </svg>
     )},
+    { id: 'appearance' as TabType, name: 'Appearance', icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+      </svg>
+    )},
     { id: 'notifications' as TabType, name: 'Notifications', icon: (
       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
@@ -528,6 +534,8 @@ export default function SettingsPage() {
 
   const renderContent = () => {
     switch (activeTab) {
+      case 'appearance':
+        return <AppearanceSetting canEdit={can('settings.edit')} />;
       case 'general':
         return (
           <div className="space-y-6">
@@ -607,6 +615,7 @@ export default function SettingsPage() {
                     className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   >
                     <option value="all">All Users</option>
+                    <option value="owner">Owner</option>
                     <option value="administrator">Administrator</option>
                     <option value="supervisor">Supervisor</option>
                     <option value="sales_manager">Sales Manager</option>

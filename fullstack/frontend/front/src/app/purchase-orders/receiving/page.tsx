@@ -5,6 +5,7 @@ import { api, type PurchaseOrder } from '@/lib/api';
 import { formatDate, formatDateTime, manilaDateString } from '@/lib/dateUtils';
 import { poStatusInfo, poReceivingProgress } from '@/lib/purchaseOrderStatus';
 import ReceivePurchaseOrderDialog from '@/components/ReceivePurchaseOrderDialog';
+import ReturnToSupplierDialog from '@/components/ReturnToSupplierDialog';
 import Paginated from '@/components/Paginated';
 
 const fmtQty = (n: number) => (Number(n) || 0).toLocaleString('en-PH', { maximumFractionDigits: 4 });
@@ -21,6 +22,8 @@ export default function ReceivingPage() {
   const [filter, setFilter] = useState<'all' | 'not_received' | 'partial'>('all');
   const [search, setSearch] = useState('');
   const [receiving, setReceiving] = useState<PurchaseOrder | null>(null);
+  // Return to Supplier, opened from the receive window
+  const [returning, setReturning] = useState<PurchaseOrder | null>(null);
   const [notice, setNotice] = useState('');
 
   const load = useCallback(async () => {
@@ -172,11 +175,16 @@ export default function ReceivingPage() {
 
       {receiving && (
         <ReceivePurchaseOrderDialog po={receiving} onClose={() => setReceiving(null)}
+          onReturn={() => { setReturning(receiving); setReceiving(null); }}
           onSaved={(po) => {
             setReceiving(null);
             setNotice(`${po.poNumber}: ${poStatusInfo(po).label}.`);
             load();
           }} />
+      )}
+      {returning && (
+        <ReturnToSupplierDialog po={returning} onClose={() => setReturning(null)}
+          onSaved={() => { setReturning(null); load(); }} />
       )}
     </div>
   );

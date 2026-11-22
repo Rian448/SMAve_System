@@ -7,6 +7,7 @@ import { useAuth } from '@/context/AuthContext';
 import Paginated from '@/components/Paginated';
 import { PaymentStatusBadge } from '@/components/SupplierPayments';
 import ReceivePurchaseOrderDialog from '@/components/ReceivePurchaseOrderDialog';
+import ReturnToSupplierDialog from '@/components/ReturnToSupplierDialog';
 import { poStatusInfo, isOpenForReceiving } from '@/lib/purchaseOrderStatus';
 import { exactPeso } from '@/lib/format';
 import { TermStatusBadge, dueText, isDueOrOverdue } from '@/components/PaymentTerms';
@@ -19,6 +20,8 @@ export default function PurchaseOrdersPage() {
   const canCreate = can('purchase_orders.add');
   const canReceive = can('purchase_orders.receive');
   const [receiving, setReceiving] = useState<PurchaseOrder | null>(null);
+  // Return to Supplier, opened from the receive window
+  const [returning, setReturning] = useState<PurchaseOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<POTab>('all');
   // ?tab=due (e.g. from the Owner Dashboard's payables) opens that tab
@@ -255,7 +258,12 @@ export default function PurchaseOrdersPage() {
       </main>
       {receiving && (
         <ReceivePurchaseOrderDialog po={receiving} onClose={() => setReceiving(null)}
+          onReturn={() => { setReturning(receiving); setReceiving(null); }}
           onSaved={() => { setReceiving(null); fetchPurchaseOrders(); }} />
+      )}
+      {returning && (
+        <ReturnToSupplierDialog po={returning} onClose={() => setReturning(null)}
+          onSaved={() => { setReturning(null); fetchPurchaseOrders(); }} />
       )}
     </div>
   );

@@ -6,8 +6,11 @@ import { useAuth } from '@/context/AuthContext';
 import {
   api, type ManagedWorker, type WorkerAssignment, type WorkerAvailabilityEntry, type JobOrder,
   type JobOrderPriority, PRIORITY_RANK, PRIORITY_LABELS, type MaterialWasteLog, type CalendarAssignment,
-  type LinkableWorkerAccount, ApiError,
+  type LinkableWorkerAccount, ApiError, type RawMaterial,
 } from '@/lib/api';
+import MaterialPicker, { materialLabel } from '@/components/MaterialPicker';
+import LengthInput from '@/components/LengthInput';
+import { formatLength, formatMaterialQty } from '@/lib/length';
 import { useConfirm } from '@/components/ConfirmDialog';
 import { formatDate } from '@/lib/dateUtils';
 import ExtraMaterialDialog from '@/components/ExtraMaterialDialog';
@@ -121,13 +124,18 @@ type CompletionTarget = {
   assignment: WorkerAssignment;
   jobOrder: JobOrder | null;
 };
+type MaterialCut = { line?: number; materialId: number; cut: number; used: number; reason?: string };
+/** Suggested reasons for material added on top of the job order's (same as the Extra material form) */
+const EXTRA_REASONS = ['Actually needed', 'Cutting mistake', 'Wrong measurement', 'Sewing error', 'Defective material', 'Rework requested'];
+type ConsumableUse = { materialId: number; kind: 'full' | 'partial'; quantity?: number };
 
 function CompletionModal({
   target, onClose, onConfirm,
 }: {
   target: CompletionTarget;
   onClose: () => void;
-  onConfirm: (hoursWorked: number, unitsWorked: number, payOverride: number | null, materialsUsed: object[]) => void;
+  onConfirm: (hoursWorked: number, unitsWorked: number, payOverride: number | null, materialsUsed: object[],
+    materialCuts: MaterialCut[], consumables: ConsumableUse[]) => Promise<boolean>;
 }) {
   const { assignment } = target;
   const mode = assignment.payMode || 'per_hour';
@@ -144,26 +152,173 @@ function CompletionModal({
     ? (parseFloat(overridePay) || 0)
     : computePay(mode, rate, qtyNum || 1);
 
-  // Extra material this worker needed on this job (the planned materials belong to
-  // the job order and leave stock when it is completed)
-  const [extras, setExtras] = useState<MaterialWasteLog[] | null>(assignment.jobOrderDbId ? null : []);
-  const [addingExtra, setAddingExtra] = useState(false);
-  const loadExtras = useCallback(() => {
+  // Extra material issued earlier for this worker on this job (before cuts were
+  // recorded here); shown for reference
+  const [extras, setExtras] = useState<MaterialWasteLog[]>([]);
+  useEffect(() => {
     if (!assignment.jobOrderDbId) return;
     api.managedWorkers.extraMaterials({ workerId: assignment.workerId, jobOrderId: assignment.jobOrderDbId })
-      .then(res => setExtras(res.data || []))
+      .then(res => setExtras((res.data || []).filter(x => x.reason !== 'Cutting excess')))
       .catch(() => setExtras([]));
   }, [assignment.workerId, assignment.jobOrderDbId]);
-  useEffect(() => { loadExtras(); }, [loadExtras]);
-  const materials = (extras || []).map(x => ({ name: x.materialName || 'Material', qty: x.quantity, reason: x.reason }));
 
   const qtyLabel = mode === 'per_hour' ? 'Hours worked' : mode === 'per_day' ? 'Days worked' : 'Pieces / projects';
 
+  // Materials cut for the job: one row per job order material (its material filled
+  // in), plus any the worker adds. The whole cut leaves stock; what was used is
+  // material usage, the rest cutting excess in the waste log.
+  type CutRow = {
+    key: string; line: number | null; lineName: string; planned: number | null; linked: boolean;
+    options: RawMaterial[]; materialId: number | ''; cut: number; used: number;
+    /** Cut by other tasks on this job order already */
+    alreadyCut: number;
+    /** Why an added material was needed (rows the worker adds) */
+    reason: string;
+  };
+  type ConsumableRow = { key: string; materialId: number | ''; kind: 'full' | 'partial'; quantity: string };
+  const [rows, setRows] = useState<CutRow[] | null>(assignment.assignmentType === 'special_task' ? [] : null);
+  const [notInInventory, setNotInInventory] = useState<string[]>([]);
+  const [extraOptions, setExtraOptions] = useState<RawMaterial[]>([]);
+  const [consumableOptions, setConsumableOptions] = useState<RawMaterial[]>([]);
+  const [consumables, setConsumables] = useState<ConsumableRow[]>([]);
+  const rowSeq = useRef(0);
+  useEffect(() => {
+    if (assignment.assignmentType === 'special_task') return;
+    api.workerAssignments.cutMaterials(assignment.id)
+      .then((res) => {
+        const d = res.data;
+        setRows((d?.materials || []).map((l) => ({
+          key: `line-${l.line}`, line: l.line, lineName: l.lineName, planned: l.plannedQuantity, linked: l.linked,
+          // Starts at the planned amount still left to cut (others on the job may have
+          // cut some), all of it used; staff change it to what really happened
+          options: l.options, materialId: l.options[0]?.id ?? '', reason: '', alreadyCut: l.alreadyCut || 0,
+          cut: Math.max(0, Math.round((l.plannedQuantity - (l.alreadyCut || 0)) * 1e6) / 1e6),
+          used: Math.max(0, Math.round((l.plannedQuantity - (l.alreadyCut || 0)) * 1e6) / 1e6),
+        })));
+        setNotInInventory(d?.notInInventory || []);
+        setExtraOptions(d?.extraMaterials || []);
+        setConsumableOptions(d?.consumables || []);
+      })
+      .catch(() => setRows([]));
+  }, [assignment.id, assignment.assignmentType]);
+  const updateRow = (key: string, patch: Partial<CutRow>) =>
+    setRows((prev) => (prev || []).map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  const addRow = () => {
+    rowSeq.current += 1;
+    setRows((prev) => [...(prev || []), {
+      key: `extra-${rowSeq.current}`, line: null, lineName: '', planned: null, linked: false,
+      options: extraOptions, materialId: '', cut: 0, used: 0, reason: '', alreadyCut: 0,
+    }]);
+  };
+  const removeRow = (key: string) => setRows((prev) => (prev || []).filter((r) => r.key !== key));
+  const addConsumable = () => {
+    rowSeq.current += 1;
+    setConsumables((prev) => [...prev, { key: `con-${rowSeq.current}`, materialId: '', kind: 'full', quantity: '1' }]);
+  };
+  const updateConsumable = (key: string, patch: Partial<ConsumableRow>) =>
+    setConsumables((prev) => prev.map((c) => (c.key === key ? { ...c, ...patch } : c)));
+
+  const rowProblems = Object.fromEntries((rows || []).map((r) => [`cut-${r.key}`,
+    (r.cut > 0 || r.used > 0 || r.line === null) && (
+      !r.materialId ? 'Choose the material.'
+      : r.line === null && !(r.cut > 0) ? 'Enter how much was cut, or remove this row.'
+      : r.line === null && !r.reason.trim() ? 'Give the reason it was needed.'
+      : r.used > r.cut + 1e-9 && 'Used can\'t be more than what was cut.')]));
+  const consumableProblems = Object.fromEntries(consumables.map((c) => {
+    const opt = consumableOptions.find((o) => o.id === c.materialId);
+    const n = Number(c.quantity);
+    return [`con-${c.key}`, !c.materialId ? 'Choose the consumable.'
+      : c.kind === 'full' && !(n > 0) ? 'Enter how many were used up.'
+      : c.kind === 'full' && opt && n > opt.stockQuantity + 1e-9 && `Only ${formatMaterialQty(opt.stockQuantity, opt)} in stock.`];
+  }));
+
   const confirm = async () => {
-    if (fe.show({ 'complete-qty': (!qty || qtyNum <= 0) && `Enter ${qtyLabel.toLowerCase()}.` })) return;
+    if (fe.show({ 'complete-qty': (!qty || qtyNum <= 0) && `Enter ${qtyLabel.toLowerCase()}.`, ...rowProblems, ...consumableProblems })) return;
     setSaving(true);
     const hours = mode === 'per_hour' ? qtyNum : (qtyNum * (mode === 'per_day' ? 8 : 1));
-    onConfirm(hours, qtyNum, override ? computedPay : null, materials);
+    const materialCuts: MaterialCut[] = (rows || [])
+      .filter((r) => r.materialId && (r.cut > 0 || r.used > 0))
+      .map((r) => ({ ...(r.line !== null ? { line: r.line } : { reason: r.reason.trim() }),
+        materialId: Number(r.materialId), cut: r.cut, used: r.used }));
+    const consumableUses = consumables.filter((c) => c.materialId).map((c) => ({
+      materialId: Number(c.materialId), kind: c.kind, ...(c.kind === 'full' ? { quantity: Number(c.quantity) } : {}),
+    }));
+    const nameOf = (id: number, list: RawMaterial[]) => {
+      const m = list.find((o) => o.id === id);
+      return m ? [m.materialType, m.color, m.pattern].filter(Boolean).join(' - ') : 'Material';
+    };
+    const snapshot = [
+      ...materialCuts.map((c) => ({ name: nameOf(c.materialId, (rows || []).flatMap((r) => r.options)), qty: c.used, cut: c.cut, unit: 'yd',
+        ...(c.reason ? { reason: c.reason } : {}) })),
+      ...consumableUses.map((c) => ({ name: nameOf(c.materialId, consumableOptions), qty: c.quantity ?? 0,
+        unit: consumableOptions.find((o) => o.id === c.materialId)?.unit || 'pcs', reason: c.kind === 'full' ? 'Fully used' : 'Partially used' })),
+      ...extras.map((x) => ({ name: x.materialName || 'Material', qty: x.quantity, reason: x.reason })),
+    ];
+    const ok = await onConfirm(hours, qtyNum, override ? computedPay : null, snapshot, materialCuts, consumableUses);
+    if (!ok) setSaving(false);
+  };
+
+  const lineRows = (rows || []).filter((r) => r.line !== null);
+  const addedRows = (rows || []).filter((r) => r.line === null);
+
+  const renderCutRow = (r: CutRow) => {
+    const chosen = r.options.find((o) => o.id === r.materialId);
+    const excess = Math.max(0, r.cut - r.used);
+    const isExtra = r.line === null;
+    return (
+      <li key={r.key} className="px-4 py-3 space-y-2" {...fe.field(`cut-${r.key}`)}>
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-sm font-medium text-gray-800">
+            {isExtra ? (chosen ? materialLabel(chosen) : 'Material') : r.linked && chosen ? materialLabel(chosen) : r.lineName}
+            {r.planned !== null && <span className="text-xs text-gray-400 font-normal"> · planned {formatLength(r.planned)}</span>}
+            {r.alreadyCut > 0 && <span className="text-xs text-gray-400 font-normal"> · {formatLength(r.alreadyCut)} already cut by others</span>}          </p>
+          {isExtra && (
+            <button type="button" onClick={() => removeRow(r.key)}
+              className="text-xs text-red-600 hover:underline shrink-0">Remove</button>
+          )}
+        </div>
+        {(!r.linked || r.options.length > 1) && (
+          <div>
+            <p className="text-[11px] font-medium text-gray-500 mb-0.5">Material</p>
+            <MaterialPicker materials={r.options} value={r.materialId}
+              onSelect={(id) => updateRow(r.key, { materialId: id })}
+              takenIds={isExtra ? new Set((rows || []).filter((x) => x.key !== r.key && x.materialId).map((x) => Number(x.materialId))) : undefined}
+              invalid={!!fe.errors[`cut-${r.key}`] && !r.materialId} />
+          </div>
+        )}
+        {chosen && (
+          <p className="text-[11px] text-gray-500">
+            {formatLength(chosen.stockQuantity)} in stock{chosen.branchName ? ` · ${chosen.branchName}` : ''}
+          </p>
+        )}
+        {isExtra && (
+          <div>
+            <p className="text-[11px] font-medium text-gray-500 mb-0.5">Reason it was needed *</p>
+            <input type="text" list="cut-extra-reasons" maxLength={200} value={r.reason}
+              onChange={(e) => updateRow(r.key, { reason: e.target.value })}
+              placeholder="e.g. Cutting mistake"
+              className={`w-full px-2 py-1.5 rounded-lg border bg-white text-sm text-gray-900 ${
+                fe.errors[`cut-${r.key}`] && !r.reason.trim() ? 'border-red-400' : 'border-[#c7d2f5]'}`} />
+          </div>
+        )}
+        <div>
+          <p className="text-[11px] font-medium text-gray-500 mb-0.5">Cut from stock</p>
+          <LengthInput compact value={r.cut} ariaLabel="Cut from stock" onChange={(y) => updateRow(r.key, { cut: y })} />
+        </div>
+        <div>
+          <p className="text-[11px] font-medium text-gray-500 mb-0.5">Actually used</p>
+          <LengthInput compact value={r.used} ariaLabel="Actually used" invalid={r.used > r.cut + 1e-9}
+            onChange={(y) => updateRow(r.key, { used: y })} />
+        </div>
+        {r.cut > 0 && (
+          <p className="text-xs text-gray-600">
+            Leaves stock: <b>{formatLength(r.cut)}</b> · used <b>{formatLength(Math.min(r.used, r.cut))}</b>
+            {excess > 0 && <> · <span className="text-amber-700">excess to waste <b>{formatLength(excess)}</b></span></>}
+          </p>
+        )}
+        <FieldError message={fe.errors[`cut-${r.key}`]} />
+      </li>
+    );
   };
 
   return (
@@ -219,39 +374,129 @@ function CompletionModal({
             )}
           </div>
 
-          {/* Extra materials this worker needed */}
-          {assignment.jobOrderDbId && (
+          {/* Materials cut for this job: the job order's own materials */}
+          {rows === null && (
+            <p className="text-xs text-gray-400 text-center">Loading materials…</p>
+          )}
+          {rows !== null && assignment.assignmentType !== 'special_task' && (
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+              <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-200">
+                <p className="text-xs font-semibold text-gray-600">Materials cut by {assignment.workerName}</p>
+                <p className="text-[11px] text-gray-500 mt-0.5">
+                  The whole amount cut leaves stock. What was actually used is recorded as material usage; the rest goes
+                  to the waste log as cutting excess. Leave blank what they didn&apos;t cut.
+                </p>
+              </div>
+              {notInInventory.length > 0 && (
+                <p className="text-xs text-amber-700 bg-amber-50 border-b border-amber-200 px-4 py-2">
+                  Not in Inventory, so nothing to take from stock: {notInInventory.join(', ')}.
+                </p>
+              )}
+              {lineRows.length === 0 ? (
+                <p className="text-xs text-gray-500 px-4 py-3">No materials on this job order.</p>
+              ) : (
+                <ul className="divide-y divide-gray-100">{lineRows.map(renderCutRow)}</ul>
+              )}
+            </div>
+          )}
+
+          {/* Consumables used on this job */}
+          {rows !== null && assignment.assignmentType !== 'special_task' && (
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+              <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-200">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold text-gray-600">Consumables used</p>
+                  {consumableOptions.length > 0 && (
+                    <button type="button" onClick={addConsumable}
+                      className="text-xs font-medium text-[#011c72] hover:underline shrink-0">+ Add consumable</button>
+                  )}
+                </div>
+                <p className="text-[11px] text-gray-500 mt-0.5">
+                  Glue, thread, staples… <b>Fully used</b> takes them out of stock; <b>Partially used</b> only records that one was opened.
+                </p>
+              </div>
+              {consumableOptions.length === 0 ? (
+                <p className="text-xs text-gray-500 px-4 py-3">
+                  No consumables in Inventory yet. Mark items like glue or thread as <b>Consumable</b> in Inventory (Edit),
+                  or tick Consumable on a purchase order line.
+                </p>
+              ) : consumables.length === 0 ? (
+                <p className="text-xs text-gray-500 px-4 py-3">None. Use + Add consumable for anything used up or opened on this job.</p>
+              ) : (
+                <ul className="divide-y divide-gray-100">
+                  {consumables.map((c) => {
+                    const opt = consumableOptions.find((o) => o.id === c.materialId);
+                    return (
+                      <li key={c.key} className="px-4 py-3 space-y-2" {...fe.field(`con-${c.key}`)}>
+                        <div className="flex items-center gap-2">
+                          <select value={c.materialId} aria-label="Consumable"
+                            onChange={(e) => updateConsumable(c.key, { materialId: e.target.value ? Number(e.target.value) : '' })}
+                            className="flex-1 min-w-0 px-2 py-1.5 rounded-lg border border-[#c7d2f5] bg-white text-sm text-gray-900">
+                            <option value="">Choose the consumable…</option>
+                            {consumableOptions.map((o) => (
+                              <option key={o.id} value={o.id}>{materialLabel(o)} — {formatMaterialQty(o.stockQuantity, o)} in stock</option>
+                            ))}
+                          </select>
+                          <button type="button" onClick={() => setConsumables((prev) => prev.filter((x) => x.key !== c.key))}
+                            className="text-xs text-red-600 hover:underline shrink-0">Remove</button>
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs">
+                            {(['full', 'partial'] as const).map((k) => (
+                              <button key={k} type="button" onClick={() => updateConsumable(c.key, { kind: k })}
+                                className={`px-3 py-1.5 ${c.kind === k ? 'bg-[#011c72] text-white' : 'bg-white text-gray-600'}`}>
+                                {k === 'full' ? 'Fully used' : 'Partially used'}
+                              </button>
+                            ))}
+                          </div>
+                          {c.kind === 'full' ? (
+                            <label className="flex items-center gap-1.5 text-xs text-gray-600">
+                              <input type="number" min="1" step="1" value={c.quantity} aria-label="How many used up"
+                                onChange={(e) => updateConsumable(c.key, { quantity: e.target.value })}
+                                className="w-16 px-2 py-1 rounded-lg border border-[#c7d2f5] bg-white text-sm text-gray-900" />
+                              {opt?.unit || 'pcs'} used up
+                            </label>
+                          ) : (
+                            <span className="text-xs text-gray-500">Recorded only; stock stays the same.</span>
+                          )}
+                        </div>
+                        <FieldError message={fe.errors[`con-${c.key}`]} />
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {/* Other materials needed beyond the job order's (a recut, a wrong measurement...) */}
+          {rows !== null && assignment.assignmentType !== 'special_task' && (
             <div className="border border-gray-200 rounded-xl overflow-hidden">
               <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-200 flex items-center justify-between gap-2">
-                <p className="text-xs font-semibold text-gray-600">Extra materials used by {assignment.workerName}</p>
-                <button type="button" onClick={() => setAddingExtra(true)}
-                  className="text-xs font-medium text-[#011c72] hover:underline">+ Add extra material</button>
+                <p className="text-xs font-semibold text-gray-600">Other materials used by {assignment.workerName}</p>
+                <button type="button" onClick={addRow}
+                  className="text-xs font-medium text-[#011c72] hover:underline shrink-0">+ Add material</button>
               </div>
-              {extras === null ? (
-                <p className="text-xs text-gray-400 text-center py-3">Loading…</p>
-              ) : materials.length === 0 ? (
+              <datalist id="cut-extra-reasons">
+                {EXTRA_REASONS.map((x) => <option key={x} value={x} />)}
+              </datalist>
+              {addedRows.length === 0 && extras.length === 0 ? (
                 <p className="text-xs text-gray-500 px-4 py-3">
-                  None. If they needed more than planned (e.g. a recut), add it so stock and the job&apos;s cost stay right.
+                  None. If they needed more than the job order lists (e.g. a recut after a cutting mistake), add it with the reason
+                  so stock and the job&apos;s cost stay right.
                 </p>
               ) : (
                 <ul className="divide-y divide-gray-100">
-                  {materials.map((m, i) => (
-                    <li key={i} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
-                      <span className="text-gray-800">{m.name}<span className="text-gray-400 text-xs"> · {m.reason}</span></span>
-                      <span className="text-gray-500 font-medium shrink-0">{m.qty}</span>
+                  {addedRows.map(renderCutRow)}
+                  {extras.map((x) => (
+                    <li key={`issued-${x.id}`} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
+                      <span className="text-gray-800">{x.materialName || 'Material'}<span className="text-gray-400 text-xs"> · {x.reason} (recorded earlier)</span></span>
+                      <span className="text-gray-500 font-medium shrink-0">{formatLength(x.quantity)}</span>
                     </li>
                   ))}
                 </ul>
               )}
             </div>
-          )}
-          {addingExtra && assignment.jobOrderDbId && (
-            <ExtraMaterialDialog
-              jobOrderId={assignment.jobOrderDbId} jobOrderRef={assignment.jobOrderRef}
-              workerId={assignment.workerId} workerName={assignment.workerName}
-              onClose={() => setAddingExtra(false)}
-              onSaved={() => { setAddingExtra(false); loadExtras(); }}
-            />
           )}
         </div>
 
@@ -629,8 +874,9 @@ export default function WorkerDashboard() {
     setCompletionTarget({ assignment: a, jobOrder: jo });
   };
 
-  const confirmComplete = async (hoursWorked: number, unitsWorked: number, payOverride: number | null, materialsUsed: object[]) => {
-    if (!completionTarget) return;
+  const confirmComplete = async (hoursWorked: number, unitsWorked: number, payOverride: number | null,
+    materialsUsed: object[], materialCuts: MaterialCut[], consumables: ConsumableUse[]) => {
+    if (!completionTarget) return false;
     const a = completionTarget.assignment;
     try {
       await api.workerAssignments.update(a.id, {
@@ -639,10 +885,13 @@ export default function WorkerDashboard() {
         unitsWorked,
         ...(payOverride != null ? { payOverride } : {}),
         materialsUsed,
+        ...(materialCuts.length ? { materialCuts } : {}),
+        ...(consumables.length ? { consumables } : {}),
       });
       setCompletionTarget(null);
       refreshAssignments();
-    } catch (err) { showError(err, "Couldn't mark the task complete."); }
+      return true;
+    } catch (err) { showError(err, "Couldn't mark the task complete."); return false; }
   };
 
   // ── Worker modal ──

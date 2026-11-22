@@ -363,6 +363,12 @@ export interface ProductOrderTimelineEvent {
   by?: string;
 }
 
+/** Appearance set in Settings: images as data URLs; navIcons by sidebar key */
+export interface Branding {
+  logo: string | null;
+  navIcons: Record<string, string>;
+}
+
 export interface RawMaterial {
   id: number;
   itemId: string;
@@ -387,6 +393,12 @@ export interface RawMaterial {
   status?: string;
   /** Job order ID this material was added for (when status is 'needed') */
   sourceJobOrderId?: string;
+  /** Consumables (glue, thread...) are counted in plain units and marked used in Inventory */
+  isConsumable?: boolean;
+  /** 'yd' for length stock, else the consumable's count unit (pcs...) */
+  unit?: string;
+  /** A consumable marked partly used since it was last marked fully used */
+  partialUseAt?: string | null;
   lastUpdated: string;
 }
 
@@ -405,7 +417,14 @@ export interface Supplier {
   paymentTerm?: PaymentTerm | null;
   paymentTermDays?: number | null;
   paymentTermLabel?: string | null;
+  /** Inventory materials usually bought from this supplier */
+  materials?: { id: number; name: string; stockQuantity: number; unit: string; branchName?: string | null }[];
 }
+
+/** A material a supplier supplies, when saving: one already in Inventory, or a new item to add */
+export type SupplierMaterialEntry =
+  | { materialId: number }
+  | { new: { materialType: string; color?: string; pattern?: string; costPerUnit?: number } };
 
 /** When a supplier must be paid: Cash in Advance (on approval), COD (on delivery)
  *  or Net N days (N days after the first delivery) */
@@ -559,6 +578,8 @@ export interface RawMaterialInput {
   status?: string;
   /** The job order ID this material is being ordered for */
   sourceJobOrderId?: string;
+  isConsumable?: boolean;
+  unit?: string;
 }
 
 export interface FinishedGood {
@@ -647,7 +668,12 @@ export interface ChatMessage {
 }
 
 export interface MaterialUsageLog {
-  id: number;
+  /** A number for usage logs; "po-…" for purchase order deliveries and returns */
+  id: number | string;
+  /** in = stock came in (PO delivery, given back), out = stock went out (used, returned to supplier) */
+  direction?: 'in' | 'out';
+  kind?: 'usage' | 'purchase_order';
+  purchaseOrderId?: number;
   materialId: number;
   materialName?: string;
   materialUnit?: string;
@@ -680,6 +706,8 @@ export interface JobOrderItem {
   notes?: string;
   /** FK to inventory_materials.id — used to deduct stock on job order completion */
   materialId?: number;
+  /** What workers recorded using (from their cuts); replaces quantity in the actual cost */
+  actualQuantity?: number;
   /** Older orders don't store this; see jobOrderItemCategory() */
   category?: 'material' | 'labor' | 'expense';
   /** Worker assignment this labor line is linked to (managed by the server) */
@@ -812,6 +840,20 @@ export interface WaitingOn {
   workerName: string;
   description?: string | null;
   status: string;
+}
+
+/** A job order material line, for recording what a worker cut and used */
+export interface CutMaterialLine {
+  /** Index of the line on the job order */
+  line: number;
+  lineName: string;
+  plannedQuantity: number;
+  /** Already cut of this material by other tasks on the job order */
+  alreadyCut?: number;
+  /** False: an older line saved without its material; one of the options is chosen */
+  linked: boolean;
+  /** Inventory materials for the line: its own, or those an older line's name matches */
+  options: RawMaterial[];
 }
 
 export interface WorkerAssignment {
@@ -975,22 +1017,49 @@ export interface PurchaseOrderItem {
   name: string;
   quantity: number;
   unit: string;
+  /** Ticked on the PO: the material is a consumable (counted in plain units) */
+  consumable?: boolean;
   unitPrice: number;
   totalPrice: number;
   /** Index of the line on the PO (used when receiving) */
   line: number;
+  /** Received and kept (deliveries minus returns to the supplier) */
   receivedQuantity: number;
+  /** Sent back to the supplier */
+  returnedQuantity?: number;
   remainingQuantity: number;
 }
 
 /** One delivery received against a PO, or the closing of one whose rest won't come */
+/** Items returned to suppliers in a period, with totals by supplier and reason */
+export interface PurchaseReturnsReport {
+  period: { startDate: string; endDate: string };
+  summary: { returns: number; lines: number; totalValue: number; replacedValue: number; suppliers: number };
+  bySupplier: PurchaseReturnGroup[];
+  byReason: PurchaseReturnGroup[];
+  entries: {
+    id: string; date: string | null; purchaseOrderId: number; poNumber: string; supplierId: number | null; supplierName: string;
+    item: string; quantity: number; unit: string; unitPrice: number; value: number; reason: string; replacement: boolean;
+    documentNumber: string | null; notes: string | null; byName: string | null;
+  }[];
+}
+export interface PurchaseReturnGroup {
+  key: string | number; label: string; count: number; returns: number; value: number; topReason: string | null;
+}
+
 export interface PurchaseOrderReceipt {
   id: number | null;
-  kind: 'delivery' | 'closed';
+  /** return = sent back to the supplier */
+  kind: 'delivery' | 'closed' | 'return';
   receivedAt: string | null;
   receivedByName: string | null;
   notes: string | null;
   items: { line: number; materialId?: number | null; name: string; quantity: number }[];
+  /** Returns: why, and whether the supplier will replace the items */
+  returnReason?: string | null;
+  replacement?: boolean | null;
+  /** Deliveries: the supplier's invoice / delivery receipt no. */
+  invoiceNumber?: string | null;
 }
 
 export type PurchaseOrderReceivingStatus = 'not_received' | 'partial' | 'complete' | 'closed_short';
@@ -1018,7 +1087,28 @@ export interface PurchaseOrder {
   receivedByName?: string | null;
   /** Paying the supplier, apart from receiving the goods */
   amountPaid: number;
+  /** Left to pay on the whole order (orderTotal minus payments) */
   balance: number;
+  /** What the order comes to now: ordered less returns not replaced (once closed: what was received) */
+  orderTotal: number;
+  /** Accounts payable recorded: value of what was received and kept */
+  payableAmount: number;
+  /** Value returned to the supplier */
+  returnedAmount: number;
+  /** Remaining accounts payable: payableAmount minus payments */
+  payableBalance: number;
+  /** Paid beyond what the order now comes to: the supplier owes it back */
+  supplierCredit: number;
+  /** Paid ahead for goods not received yet */
+  prepaid: number;
+  /** What the due date applies to (the order for Cash in Advance, else what arrived) */
+  amountDue: number;
+  /** First delivery date (the payable starts then) and the supplier invoice numbers */
+  invoiceDate: string | null;
+  invoiceNumbers: string[];
+  /** Supplier credit refunded or applied to another PO (comes off amountPaid) */
+  creditUsed: number;
+  credits: PurchaseOrderCreditEntry[];
   paymentStatus: 'unpaid' | 'partial' | 'paid';
   /** How each was paid isn't sent here: it shows in the Expense Log only */
   payments: PurchaseOrderPayment[];
@@ -1033,8 +1123,18 @@ export interface PurchaseOrder {
   daysUntilDue: number | null;
 }
 
+/** Use of a supplier credit: refunded by the supplier, or applied to another PO */
+export interface PurchaseOrderCreditEntry {
+  id: number; kind: 'refund' | 'applied'; amount: number; date: string | null;
+  targetPurchaseOrderId: number | null; targetPoNumber: string | null;
+  referenceNumber: string | null; notes: string | null; recordedByName: string | null;
+  voided: boolean; voidReason: string | null;
+}
+
 export interface PurchaseOrderPayment {
   id: number; amount: number; paymentDate: string | null; referenceNumber: string | null; notes: string | null;
+  /** Paid with a supplier credit from another PO (no new money out) */
+  fromCredit?: boolean;
   recordedByName: string | null; recordedAt: string | null;
   voided: boolean; voidedAt: string | null; voidedByName: string | null; voidReason: string | null;
 }
@@ -1637,6 +1737,13 @@ export const api = {
         body: JSON.stringify(item),
       }),
 
+    /** A consumable fully used (takes `quantity`, default 1, out of stock) or partly used (recorded only) */
+    consumableUse: (id: number, data: { kind: 'full' | 'partial'; quantity?: number; notes?: string }) =>
+      fetchApi<RawMaterial>(`/api/inventory/raw-materials/${id}/consumable-use`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
     /** Correct stock by hand, with a reason (recorded in Item History and the Audit Trail) */
     adjustStock: (data: { kind: 'material' | 'premade'; itemId: number; newQuantity: number; reason: string; notes?: string }) =>
       fetchApi<{ oldQuantity: number; newQuantity: number }>('/api/inventory/stock-adjustments', {
@@ -1690,9 +1797,11 @@ export const api = {
       const q = includeInactive ? '?includeInactive=true' : '';
       return fetchApi<Supplier[]>(`/api/inventory/suppliers${q}`);
     },
-    createSupplier: (data: Omit<Supplier, 'id' | 'isActive' | 'createdAt'>) =>
+    /** Materials below their reorder level (lowest stock first) */
+    getLowStock: () => fetchApi<RawMaterial[]>('/api/inventory/low-stock'),
+    createSupplier: (data: Omit<Supplier, 'id' | 'isActive' | 'createdAt' | 'materials'> & { materials?: SupplierMaterialEntry[] }) =>
       fetchApi<Supplier>('/api/inventory/suppliers', { method: 'POST', body: JSON.stringify(data) }),
-    updateSupplier: (id: number, data: Partial<Supplier>) =>
+    updateSupplier: (id: number, data: Partial<Omit<Supplier, 'materials'>> & { materials?: SupplierMaterialEntry[] }) =>
       fetchApi<Supplier>(`/api/inventory/suppliers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
 
     // Waste Logs
@@ -1873,7 +1982,7 @@ export const api = {
     create: (po: {
       supplierName: string;
       supplierId?: number;
-      items: Array<{ materialId?: number; name: string; quantity: number; unit: string; unitPrice: number }>;
+      items: Array<{ materialId?: number; name: string; quantity: number; unit: string; unitPrice: number; consumable?: boolean }>;
       expectedDelivery: string;
       /** Left out: the supplier's default. '' = no term */
       paymentTerm?: PaymentTerm | '';
@@ -1888,14 +1997,24 @@ export const api = {
       fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/approve`, { method: 'POST' }),
     
     /** Record what arrived; with no items, everything still outstanding is received */
-    receive: (id: number, data?: { items: { line: number; quantity: number }[]; notes?: string }) =>
+    receive: (id: number, data?: { items: { line: number; quantity: number }[]; notes?: string; invoiceNumber?: string }) =>
       fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/receive`, { method: 'POST', body: JSON.stringify(data || {}) }),
+    /** Return received items to the supplier (they leave stock; the payable goes down) */
+    returnItems: (id: number, data: { items: { line: number; quantity: number }[]; reason: string; notes?: string; replacement: boolean;
+      /** Return slip / debit memo no. */ documentNumber?: string; /** YYYY-MM-DD the replacement is expected */ expectedReplacement?: string }) =>
+      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/return`, { method: 'POST', body: JSON.stringify(data) }),
     /** The rest of a partly received PO won't come: stop waiting for it */
     closeReceiving: (id: number, reason: string) =>
       fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/close-receiving`, { method: 'POST', body: JSON.stringify({ reason }) }),
     /** Pay the supplier (also makes the Expense Log entry) */
     recordPayment: (id: number, data: { amount: number; paymentDate: string; paymentMethod: string; referenceNumber?: string; notes?: string }) =>
       fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/payments`, { method: 'POST', body: JSON.stringify(data) }),
+    /** Supplier credit: refunded by the supplier, or applied to another PO of the same supplier */
+    useSupplierCredit: (id: number, data: { kind: 'refund' | 'apply'; amount: number; date?: string; paymentMethod?: string;
+      referenceNumber?: string; notes?: string; targetPurchaseOrderId?: number }) =>
+      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/supplier-credit`, { method: 'POST', body: JSON.stringify(data) }),
+    voidSupplierCredit: (id: number, creditId: number, reason: string) =>
+      fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/supplier-credit/${creditId}/void`, { method: 'POST', body: JSON.stringify({ reason }) }),
     voidPayment: (id: number, paymentId: number, reason: string) =>
       fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}/payments/${paymentId}/void`, { method: 'POST', body: JSON.stringify({ reason }) }),
     /** Change this PO's payment term ('' = no term) */
@@ -2139,6 +2258,13 @@ export const api = {
       if (params.branchId) q.set('branchId', String(params.branchId));
       return fetchApi<ExtraMaterialsReport>(`/api/reports/extra-materials?${q}`);
     },
+    /** Items returned to suppliers in the period */
+    getPurchaseReturnsReport: (params: { startDate?: string; endDate?: string }) => {
+      const q = new URLSearchParams();
+      if (params.startDate) q.set('startDate', params.startDate);
+      if (params.endDate) q.set('endDate', params.endDate);
+      return fetchApi<PurchaseReturnsReport>(`/api/reports/purchase-returns?${q}`);
+    },
     getSettlementReport: (params?: { startDate?: string; endDate?: string }) => {
       const query = new URLSearchParams();
       if (params?.startDate) query.append('startDate', params.startDate);
@@ -2188,6 +2314,11 @@ export const api = {
   },
 
   settings: {
+    /** Logo and custom sidebar icons (public: the sign-in page and browser tab use the logo) */
+    getBranding: () => fetchApi<Branding>('/api/settings/branding'),
+    /** null puts back the built-in logo / icon */
+    updateBranding: (data: { logo?: string | null; navIcons?: Record<string, string | null> }) =>
+      fetchApi<Branding>('/api/settings/branding', { method: 'PUT', body: JSON.stringify(data) }),
     // Users
     getUsers: (includeInactive?: boolean) => {
       const query = includeInactive ? '?includeInactive=true' : '';
@@ -2325,13 +2456,18 @@ export const api = {
         body: JSON.stringify(data),
       }),
     /** workerId moves a task that hasn't started to another worker */
-    update: (id: number, data: Partial<{ status: string; hoursWorked: number; unitsWorked: number; payOverride: number; materialsUsed: object[]; expectedHours: number; notes: string; description: string; scheduledDate: string; workerId: number }>) =>
+    /** materialCuts: on completion, what was cut from stock and how much of it was used (yards) */
+    update: (id: number, data: Partial<{ status: string; hoursWorked: number; unitsWorked: number; payOverride: number; materialsUsed: object[]; materialCuts: { line?: number; materialId: number; cut: number; used: number; reason?: string }[]; consumables: { materialId: number; kind: 'full' | 'partial'; quantity?: number }[]; expectedHours: number; notes: string; description: string; scheduledDate: string; workerId: number }>) =>
       fetchApi<{ assignment: WorkerAssignment }>(`/api/worker-assignments/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
     delete: (id: number) =>
       fetchApi<{ message: string }>(`/api/worker-assignments/${id}`, { method: 'DELETE' }),
+    /** The job order's materials a worker can record cuts of when finishing this task */
+    cutMaterials: (id: number) =>
+      fetchApi<{ materials: CutMaterialLine[]; notInInventory: string[]; extraMaterials: RawMaterial[]; consumables: RawMaterial[] }>(
+        `/api/worker-assignments/${id}/cut-materials`),
   },
 
   customers: {

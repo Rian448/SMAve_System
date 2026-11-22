@@ -5,6 +5,9 @@ import Link from 'next/link';
 import { api, RawMaterial, Supplier } from '@/lib/api';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import { PaymentTermPicker, TermValue, termValueError, termExplanation, termLabel } from '@/components/PaymentTerms';
+import LengthInput from '@/components/LengthInput';
+import { manilaDateString } from '@/lib/dateUtils';
+import { formatMaterialQty } from '@/lib/length';
 
 interface POItem {
   material_id: string;
@@ -12,6 +15,8 @@ interface POItem {
   quantity: number;
   unit_cost: number;
   unit: string;
+  /** Glue, thread, staples...: counted in plain units, not picked on job orders */
+  consumable: boolean;
 }
 
 export default function NewPurchaseOrderPage() {
@@ -28,6 +33,8 @@ export default function NewPurchaseOrderPage() {
   const [supplierId, setSupplierId] = useState('');
   const chosenSupplier = savedSuppliers.find(s => String(s.id) === supplierId);
   const [expectedDate, setExpectedDate] = useState('');
+  // Today in the Philippines: the earliest expected delivery date (earlier days can't be picked)
+  const today = manilaDateString();
   // Starts as the supplier's default term; may be changed for this order only
   const [term, setTerm] = useState<TermValue>({ term: '', days: null });
   useEffect(() => {
@@ -37,7 +44,7 @@ export default function NewPurchaseOrderPage() {
   const termChanged = !!chosenSupplier && (term.term !== supplierTerm.term || (term.term === 'net' && term.days !== supplierTerm.days));
   const [notes, setNotes] = useState('');
   const [items, setItems] = useState<POItem[]>([
-    { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd' }
+    { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd', consumable: false }
   ]);
 
   useEffect(() => {
@@ -78,7 +85,8 @@ export default function NewPurchaseOrderPage() {
         material_name: [m.materialType, m.color, m.pattern].filter(Boolean).join(' - '),
         quantity: qty,
         unit_cost: m.costPerUnit || m.unitPrice,
-        unit: 'yd',
+        unit: m.isConsumable ? (m.unit || 'pcs') : 'yd',
+        consumable: !!m.isConsumable,
       });
     }
     if (lines.size) setItems([...lines.values()]);
@@ -96,7 +104,7 @@ export default function NewPurchaseOrderPage() {
   }) : [];
 
   const addItem = () => {
-    setItems([...items, { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd' }]);
+    setItems([...items, { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd', consumable: false }]);
   };
 
   const removeItem = (index: number) => {
@@ -105,7 +113,7 @@ export default function NewPurchaseOrderPage() {
     }
   };
 
-  const updateItem = (index: number, field: keyof POItem, value: string | number) => {
+  const updateItem = (index: number, field: keyof POItem, value: string | number | boolean) => {
     const newItems = [...items];
     if (field === 'material_id') {
       // The dropdown gives the id as text
@@ -118,9 +126,17 @@ export default function NewPurchaseOrderPage() {
           material_name: label,
           // A purchase order pays the supplier's cost, not our selling price
           unit_cost: material.costPerUnit || material.unitPrice,
-          unit: 'yd'
+          // Already a consumable in Inventory: stays ticked (and counted in its unit)
+          consumable: !!material.isConsumable,
+          unit: material.isConsumable ? (material.unit || 'pcs') : 'yd',
         };
       }
+    } else if (field === 'consumable') {
+      const material = materials.find(m => String(m.id) === newItems[index].material_id);
+      newItems[index] = {
+        ...newItems[index], consumable: !!value,
+        unit: value ? (material?.isConsumable && material.unit) || 'pcs' : 'yd',
+      };
     } else {
       newItems[index] = { ...newItems[index], [field]: value };
     }
@@ -140,7 +156,8 @@ export default function NewPurchaseOrderPage() {
     items.forEach((item, index) => { if (item.material_id && !firstRow.has(item.material_id)) firstRow.set(item.material_id, index); });
     if (fe.show({
       'po-supplier': !chosenSupplier && 'Choose the supplier.',
-      'po-date': !expectedDate && 'Choose the expected delivery date.',
+      'po-date': !expectedDate ? 'Choose the expected delivery date.'
+        : expectedDate < today && 'The expected delivery date must be today or a later date.',
       'po-term': termValueError(term),
       ...Object.fromEntries(items.flatMap((item, index) => [
         [`po-material-${index}`, !item.material_id ? (anyMaterial ? 'Select a material, or remove this row.'
@@ -160,7 +177,8 @@ export default function NewPurchaseOrderPage() {
           name: item.material_name,
           quantity: item.quantity,
           unit: item.unit,
-          unitPrice: item.unit_cost
+          unitPrice: item.unit_cost,
+          consumable: item.consumable,
         })),
         expectedDelivery: expectedDate,
         paymentTerm: term.term,
@@ -263,6 +281,7 @@ export default function NewPurchaseOrderPage() {
                 </label>
                 <input
                   type="date"
+                  min={today}
                   value={expectedDate}
                   onChange={(e) => setExpectedDate(e.target.value)}
                   className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
@@ -307,6 +326,9 @@ export default function NewPurchaseOrderPage() {
               Only materials already in Inventory can be ordered. For a new material, add it in{' '}
               <Link href="/inventory" className="text-[#011c72] font-medium hover:underline">Inventory</Link> first
               (it starts at 0 yd). Stock goes up only when this order is received.
+              Lengths can be entered in yards, feet, inches and centimeters; they are added together.
+              Tick <b>Consumable</b> for supplies like glue, thread or staples: they are counted in pieces,
+              are not chosen on job orders, and are marked used up in Inventory.
             </p>
             {otherSupplierItems.length > 0 && (
               <p className="mb-4 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
@@ -323,7 +345,7 @@ export default function NewPurchaseOrderPage() {
                 {items.map((item, index) => (
                   <div key={index} className="p-4 bg-gray-50 rounded-lg">
                     <div className="grid grid-cols-12 gap-4 items-end">
-                      <div className="col-span-12 md:col-span-4" {...fe.field(`po-material-${index}`)}>
+                      <div className="col-span-12 md:col-span-5" {...fe.field(`po-material-${index}`)}>
                         <label className="block text-xs font-medium text-gray-500 mb-1">
                           Material
                         </label>
@@ -342,7 +364,7 @@ export default function NewPurchaseOrderPage() {
                           ).filter(([, list]) => list.length > 0).map(([label, list]) => {
                             const opts = list.map(m => (
                               <option key={m.id} value={m.id.toString()}>
-                                {m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} yd in stock)
+                                {m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({formatMaterialQty(m.stockQuantity, m)} in stock){m.isConsumable ? ' · consumable' : ''}
                               </option>
                             ));
                             return label ? <optgroup key={label} label={label}>{opts}</optgroup> : opts;
@@ -350,36 +372,17 @@ export default function NewPurchaseOrderPage() {
                         </select>
                         <FieldError message={fe.errors[`po-material-${index}`]} />
                       </div>
-                      <div className="col-span-4 md:col-span-2" {...fe.field(`po-qty-${index}`)}>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">
-                          Quantity (yd)
+                      <div className="col-span-12 md:col-span-2">
+                        <label className="flex items-center gap-2 py-2 cursor-pointer text-sm text-gray-700">
+                          <input type="checkbox" checked={item.consumable}
+                            onChange={(e) => updateItem(index, 'consumable', e.target.checked)}
+                            className="w-4 h-4 rounded border-gray-300 text-[#011c72] focus:ring-[#011c72]" />
+                          Consumable
                         </label>
-                        <input
-                          type="number"
-                          min="0.01"
-                          step="0.01"
-                          value={item.quantity}
-                          onChange={(e) => updateItem(index, 'quantity', Number(e.target.value))}
-                          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                          required
-                        />
-                        <FieldError message={fe.errors[`po-qty-${index}`]} />
                       </div>
-                      <div className="col-span-4 md:col-span-2">
+                      <div className="col-span-5 md:col-span-2">
                         <label className="block text-xs font-medium text-gray-500 mb-1">
-                          Unit
-                        </label>
-                        <input
-                          type="text"
-                          value={item.unit}
-                          onChange={(e) => updateItem(index, 'unit', e.target.value)}
-                          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                          readOnly
-                        />
-                      </div>
-                      <div className="col-span-4 md:col-span-2">
-                        <label className="block text-xs font-medium text-gray-500 mb-1">
-                          Unit Cost
+                          Unit Cost (per {item.consumable ? item.unit || 'pc' : 'yd'})
                         </label>
                         <input
                           type="number"
@@ -391,7 +394,7 @@ export default function NewPurchaseOrderPage() {
                           required
                         />
                       </div>
-                      <div className="col-span-10 md:col-span-1 text-right">
+                      <div className="col-span-5 md:col-span-2 text-right">
                         <label className="block text-xs font-medium text-gray-500 mb-1">
                           Total
                         </label>
@@ -411,6 +414,29 @@ export default function NewPurchaseOrderPage() {
                           </svg>
                         </button>
                       </div>
+                    </div>
+                    {/* Quantity: a length for yard stock, a plain count for consumables */}
+                    <div className="mt-3" {...fe.field(`po-qty-${index}`)}>
+                      <p className="block text-xs font-medium text-gray-500 mb-1">
+                        Quantity {item.consumable ? `(${item.unit || 'pcs'})` : '(length)'}
+                      </p>
+                      {item.consumable ? (
+                        <div className="flex gap-2 max-w-xs">
+                          <input type="number" min="1" step="1" value={item.quantity}
+                            onChange={(e) => updateItem(index, 'quantity', Number(e.target.value))}
+                            className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                          <input type="text" value={item.unit} aria-label="Unit"
+                            onChange={(e) => updateItem(index, 'unit', e.target.value.slice(0, 20))}
+                            placeholder="pcs"
+                            className="w-24 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                        </div>
+                      ) : (
+                        <div className="max-w-xl">
+                          <LengthInput value={item.quantity} ariaLabel="Quantity"
+                            onChange={(yards) => updateItem(index, 'quantity', yards)} />
+                        </div>
+                      )}
+                      <FieldError message={fe.errors[`po-qty-${index}`]} />
                     </div>
                   </div>
                 ))}

@@ -43,6 +43,15 @@ type BranchOption = { id: number; name: string };
 const ALL_TIME_START = '2000-01-01';
 const isDate = (s: string | null): s is string => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
+/** A margin %: positive as it is; a loss is shown with at most 4 digits (down to
+ *  -999.9%), since a tiny sale against big costs gives numbers like -12,345.6% */
+const MIN_SHOWN_MARGIN = -999.9;
+function pct(value: number): string {
+  const v = Number(value) || 0;
+  if (v < MIN_SHOWN_MARGIN) return `< ${MIN_SHOWN_MARGIN.toFixed(1)}%`;
+  return `${v.toFixed(1)}%`;
+}
+
 export default function OwnerPage() {
   return (
     <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>
@@ -53,6 +62,9 @@ export default function OwnerPage() {
 
 function OwnerDashboard() {
   const router = useRouter();
+  // Just "Dashboard" for accounts that don't also have the day-to-day one (the owner role)
+  const { can: canDo } = useAuth();
+  const title = canDo('dashboard.view') ? 'Owner Dashboard' : 'Dashboard';
   const params = useSearchParams();
   const tab = (TABS.some(t => t.id === params.get('tab')) ? params.get('tab') : 'overview') as Tab;
   const today = manilaDateString();
@@ -80,7 +92,7 @@ function OwnerDashboard() {
     <div className="min-h-screen bg-gray-50">
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="mb-6">
-          <h1 className="text-2xl font-bold text-gray-900">Owner Dashboard</h1>
+          <h1 className="text-2xl font-bold text-gray-900">{title}</h1>
           <p className="text-gray-500 mt-1">How the business is doing, at a glance. Sales and profit exclude VAT, which is collected for the government.</p>
         </div>
         <div className="mb-6 border-b border-gray-200 overflow-x-auto">
@@ -292,7 +304,7 @@ function Overview({ filters, onOpen }: { filters: Filters; onOpen: (t: Tab) => v
           sub={<>Cost of goods sold + operating expenses<br />All expenses paid out: {peso(data.cashflowByMethod.totalOut)}</>}
           onOpen={() => onOpen('expenses')} openLabel="View expenses" />
         <Tile large label="Net income" value={<Amount value={totals.netIncome} />} tone={totals.netIncome >= 0 ? 'good' : 'bad'} />
-        <Tile large label="Profit margin" value={`${totals.profitMargin.toFixed(1)}%`} sub="Net income ÷ sales" />
+        <Tile large label="Profit margin" value={pct(totals.profitMargin)} sub="Net income ÷ sales" />
       </div>
 
       {/* A box with its own button: the amount's eye button can't sit inside another button */}
@@ -521,7 +533,7 @@ function JobCosting({ filters }: { filters: Filters }) {
             <Tile label="Materials" value={<Amount value={data.totals.materials} />} />
             <Tile label="Direct labor" value={<Amount value={data.totals.labor} />} />
             <Tile label="Other job costs" value={<Amount value={data.totals.otherCosts} />} />
-            <Tile label="Gross margin" value={<Amount value={data.totals.grossMargin} />} sub={`${data.totals.marginPercent.toFixed(1)}% of selling price`} />
+            <Tile label="Gross margin" value={<Amount value={data.totals.grossMargin} />} sub={`${pct(data.totals.marginPercent)} of selling price`} />
           </div>
           {data.jobs.length === 0 ? (
             <p className="bg-white rounded-xl border border-gray-200 p-10 text-center text-sm text-gray-400">No finished job orders in this period.</p>
@@ -569,7 +581,7 @@ function JobRow({ job, open, onToggle }: { job: JobCostingRow; open: boolean; on
         <td className={`px-4 py-2.5 text-right font-semibold ${losing ? 'text-red-700' : 'text-gray-900'}`}><Money v={job.grossMargin} /></td>
         <td className="px-4 py-2.5 text-right whitespace-nowrap">
           <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${losing ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
-            {losing ? '▼ ' : '▲ '}{job.marginPercent.toFixed(1)}%
+            {losing ? '▼ ' : '▲ '}{pct(job.marginPercent)}
           </span>
         </td>
       </tr>
@@ -585,7 +597,7 @@ function JobRow({ job, open, onToggle }: { job: JobCostingRow; open: boolean; on
                 <Line label="Materials (COGS)" value={`− ${peso(job.materials)}`} />
                 <Line label="Direct labor" value={`− ${peso(job.labor)}`} />
                 <Line label="Other job costs" value={`− ${peso(job.otherCosts)}`} />
-                <Line label="Gross margin" value={`${peso(job.grossMargin)} (${job.marginPercent.toFixed(1)}%)`} strong />
+                <Line label="Gross margin" value={`${peso(job.grossMargin)} (${pct(job.marginPercent)})`} strong />
               </div>
               <table className="w-full text-xs">
                 <thead><tr className="text-left text-gray-500 border-b border-gray-200">
@@ -655,7 +667,7 @@ function ProfitLoss({ filters }: { filters: Filters }) {
               : data.operatingExpenses.byCategory.map(c => <Line key={c.category} label={c.category} value={peso(c.amount)} />)}
             <Line label="Total operating expenses" value={peso(data.operatingExpenses.total)} strong />
             <p className={`flex justify-between gap-6 text-base font-bold border-t-2 border-gray-300 pt-2 mt-2 ${data.netIncome < 0 ? 'text-red-700' : 'text-gray-900'}`}>
-              <span>Net income</span><span>{peso(data.netIncome)} ({data.profitMargin.toFixed(1)}%)</span>
+              <span>Net income</span><span>{peso(data.netIncome)} ({pct(data.profitMargin)})</span>
             </p>
             <p className="pt-2 text-xs text-gray-500">
               {data.orderCounts.jobOrders} job orders and {data.orderCounts.premadeOrders} premade orders finished in this period.
