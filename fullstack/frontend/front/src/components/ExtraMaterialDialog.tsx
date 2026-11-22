@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { api, type RawMaterial, type MaterialWasteLog, type ManagedWorker } from '@/lib/api';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 
-const REASONS = ['Cutting mistake', 'Sewing error', 'Defective material', 'Wrong measurement', 'Rework requested'];
+const REASONS = ['Actually needed', 'Cutting mistake', 'Sewing error', 'Defective material', 'Wrong measurement', 'Rework requested'];
 
 /**
  * Issue extra material for a job order: it leaves stock now, is added to the

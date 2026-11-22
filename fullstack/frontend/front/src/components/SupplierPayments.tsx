@@ -34,6 +34,11 @@ export default function SupplierPayments({ po, onChange }: { po: PurchaseOrder; 
   const fe = useFieldErrors();
   const canPay = can('purchase_orders.pay');
   const payable = PAYABLE.includes(po.status) && po.balance > 0;
+  // Owed now = accounts payable (what arrived, unpaid). The rest of the order balance
+  // is for goods not delivered yet: not owed until they arrive (except Cash in Advance)
+  const owedNow = po.payableBalance ?? po.balance;
+  const notYetDelivered = Math.max(0, Math.round((po.balance - owedNow) * 100) / 100);
+  const advance = po.paymentTerm === 'advance';
 
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState('');
@@ -46,7 +51,8 @@ export default function SupplierPayments({ po, onChange }: { po: PurchaseOrder; 
   const [success, setSuccess] = useState('');
 
   const startPayment = () => {
-    setAmount(po.balance.toFixed(2)); setDate(manilaDateString()); setMethod(''); setReference(''); setNotes('');
+    // Suggest what is owed now; with nothing owed yet (or Cash in Advance), the order balance
+    setAmount((!advance && owedNow > 0 ? owedNow : po.balance).toFixed(2)); setDate(manilaDateString()); setMethod(''); setReference(''); setNotes('');
     setError(''); setSuccess(''); fe.clear(); setOpen(true);
   };
 
@@ -56,7 +62,7 @@ export default function SupplierPayments({ po, onChange }: { po: PurchaseOrder; 
     const value = Math.round(Number(amount) * 100) / 100;
     if (fe.show({
       'pay-amount': !(value > 0) ? 'Enter an amount above zero.'
-        : value > po.balance && `That is more than the balance of ${exactPeso(po.balance)}.`,
+        : value > po.balance && `That is more than the order balance of ${exactPeso(po.balance)}.`,
       'pay-date': !date ? 'Choose the payment date.' : date > manilaDateString() && 'The date cannot be in the future.',
       'pay-method': !method && 'Choose how the supplier was paid.',
     })) return;
@@ -111,11 +117,32 @@ export default function SupplierPayments({ po, onChange }: { po: PurchaseOrder; 
       </div>
 
       <dl className="space-y-2 text-sm">
-        <div className="flex justify-between"><dt className="text-gray-600">PO total</dt><dd className="font-medium text-gray-900 tabular-nums">{exactPeso(po.totalAmount)}</dd></div>
+        {/* The order as it stands now (less returns not replaced); remaining A/P is in the card above */}
+        <div className="flex justify-between"><dt className="text-gray-600">Order total{po.orderTotal !== po.totalAmount ? ' (after returns)' : ''}</dt>
+          <dd className="font-medium text-gray-900 tabular-nums">{exactPeso(po.orderTotal ?? po.totalAmount)}</dd></div>
         <div className="flex justify-between"><dt className="text-gray-600">Paid</dt><dd className="font-medium text-green-700 tabular-nums">{exactPeso(po.amountPaid)}</dd></div>
-        <div className="flex justify-between border-t border-gray-200 pt-2"><dt className="font-semibold text-gray-900">Balance</dt>
-          <dd className={`font-bold tabular-nums ${po.balance > 0 ? 'text-red-700' : 'text-gray-900'}`}>{exactPeso(po.balance)}</dd></div>
+        {/* Owed now (A/P) + Not yet delivered = Order balance */}
+        <div className="flex justify-between border-t border-gray-200 pt-2">
+          <dt className="font-semibold text-gray-900">Owed now (A/P)</dt>
+          <dd className={`font-bold tabular-nums ${owedNow > 0 ? 'text-red-700' : 'text-gray-900'}`}>{exactPeso(owedNow)}</dd></div>
+        {notYetDelivered > 0 && (
+          <div className="flex justify-between"><dt className="text-gray-600">Not yet delivered</dt>
+            <dd className="tabular-nums text-gray-600">+{exactPeso(notYetDelivered)}</dd></div>
+        )}
+        {/* The order balance only matters before delivery when paying in advance */}
+        {advance && notYetDelivered > 0 && (
+          <div className="flex justify-between border-t border-gray-100 pt-2">
+            <dt className="font-semibold text-gray-900">Order balance <span className="font-normal text-gray-500">(incl. not yet delivered)</span></dt>
+            <dd className={`font-bold tabular-nums ${po.balance > 0 ? 'text-red-700' : 'text-gray-900'}`}>{exactPeso(po.balance)}</dd></div>
+        )}
       </dl>
+      {notYetDelivered > 0 && (
+        <p className="mt-2 text-xs text-gray-500">
+          {advance
+            ? `Cash in Advance: the whole order balance is due before delivery.`
+            : `${exactPeso(notYetDelivered)} is for items not delivered yet. It isn't owed until they arrive, then it moves to Owed now.`}
+        </p>
+      )}
 
       {success && <p role="status" className="mt-4 rounded-lg bg-green-50 border border-green-200 px-3 py-2 text-sm text-green-800">✓ {success}</p>}
       {error && <p role="alert" className="mt-4 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">{error}</p>}
@@ -186,6 +213,7 @@ export default function SupplierPayments({ po, onChange }: { po: PurchaseOrder; 
                     {p.referenceNumber ? ` · Ref. ${p.referenceNumber}` : ''}
                     {p.recordedByName ? ` · by ${p.recordedByName}` : ''}
                   </p>
+                  {p.fromCredit && <p className="text-xs font-medium text-orange-700">Paid with supplier credit (no new money out)</p>}
                   {p.notes && <p className="text-xs text-gray-500">{p.notes}</p>}
                   {p.voided && (
                     <p className="text-xs text-red-700 mt-0.5">

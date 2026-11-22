@@ -1,7 +1,11 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { api, type PurchaseOrder } from '@/lib/api';
+import { formatLength } from '@/lib/length';
 
+/** A PO line's quantity: length for yard stock (39 yd 2 ft 1 in), else the number and unit */
+const poQty = (n: number, unit?: string) =>
+  !unit || unit === 'yd' ? formatLength(n) : `${fmtQty(n)} ${unit}`;
 const fmtQty = (n: number) => (Number(n) || 0).toLocaleString('en-PH', { maximumFractionDigits: 4 });
 
 interface Props {
@@ -9,6 +13,8 @@ interface Props {
   onClose: () => void;
   /** Called with the updated PO after a delivery (or closing) is saved */
   onSaved: (po: PurchaseOrder) => void;
+  /** Opens Return to Supplier (shown once something has been received) */
+  onReturn?: () => void;
 }
 
 /**
@@ -16,10 +22,12 @@ interface Props {
  * Only what is entered goes into stock; the PO stays "Partially received" until
  * every line is in. A partly received PO can also be closed when the rest won't come.
  */
-export default function ReceivePurchaseOrderDialog({ po, onClose, onSaved }: Props) {
+export default function ReceivePurchaseOrderDialog({ po, onClose, onSaved, onReturn }: Props) {
   const open = po.items.filter((it) => it.remainingQuantity > 0);
+  const canReturn = !!onReturn && po.items.some((it) => it.receivedQuantity > 0);
   const [qty, setQty] = useState<Record<number, string>>({});
   const [notes, setNotes] = useState('');
+  const [invoiceNumber, setInvoiceNumber] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [closing, setClosing] = useState(false);
@@ -36,7 +44,7 @@ export default function ReceivePurchaseOrderDialog({ po, onClose, onSaved }: Pro
     if (raw === undefined || raw === '') return '';
     const n = Number(raw);
     if (!Number.isFinite(n) || n < 0) return 'Enter 0 or more.';
-    if (n > remaining + 1e-9) return `Only ${fmtQty(remaining)} left to receive.`;
+    if (n > remaining + 1e-4) return `Only ${fmtQty(remaining)} left to receive.`;
     return '';
   };
   const entered = open
@@ -50,7 +58,9 @@ export default function ReceivePurchaseOrderDialog({ po, onClose, onSaved }: Pro
     if (entered.length === 0) { setError('Enter how much of at least one item arrived.'); return; }
     setSaving(true);
     try {
-      const res = await api.purchaseOrders.receive(po.id, { items: entered, notes: notes.trim() || undefined });
+      const res = await api.purchaseOrders.receive(po.id, {
+        items: entered, notes: notes.trim() || undefined, invoiceNumber: invoiceNumber.trim() || undefined,
+      });
       if (res.data) onSaved(res.data);
     } catch (e) {
       setError(e instanceof Error && e.message ? e.message : 'Failed to record the delivery.');
@@ -108,9 +118,9 @@ export default function ReceivePurchaseOrderDialog({ po, onClose, onSaved }: Pro
                           <p className={done ? '' : 'font-medium text-gray-900'}>{it.name}</p>
                           {!it.materialId && !done && <p className="text-xs text-amber-700">Not linked to an inventory item: stock won&apos;t change</p>}
                         </td>
-                        <td className="px-3 py-2 text-right whitespace-nowrap">{fmtQty(it.quantity)} {it.unit}</td>
-                        <td className="px-3 py-2 text-right whitespace-nowrap">{fmtQty(it.receivedQuantity)}</td>
-                        <td className="px-3 py-2 text-right whitespace-nowrap font-medium">{done ? 'Done' : fmtQty(it.remainingQuantity)}</td>
+                        <td className="px-3 py-2 text-right whitespace-nowrap">{poQty(it.quantity, it.unit)}</td>
+                        <td className="px-3 py-2 text-right whitespace-nowrap">{poQty(it.receivedQuantity, it.unit)}</td>
+                        <td className="px-3 py-2 text-right whitespace-nowrap font-medium">{done ? 'Done' : poQty(it.remainingQuantity, it.unit)}</td>
                         <td className="px-3 py-2">
                           {done ? <span className="text-xs">All received</span> : (<>
                             <input type="number" min="0" step="any" max={it.remainingQuantity} value={qty[it.line] ?? ''}
@@ -126,11 +136,22 @@ export default function ReceivePurchaseOrderDialog({ po, onClose, onSaved }: Pro
                 </tbody>
               </table>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Notes <span className="font-normal text-gray-400">(optional)</span></label>
-              <input type="text" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. delivery receipt no., damaged items"
-                className={`${input} border-gray-200`} />
+            <div className="grid sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Supplier invoice no. <span className="font-normal text-gray-400">(optional)</span></label>
+                <input type="text" value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} maxLength={100}
+                  placeholder="e.g. SI-10234" className={`${input} border-gray-200`} />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Notes <span className="font-normal text-gray-400">(optional)</span></label>
+                <input type="text" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. delivery receipt no."
+                  className={`${input} border-gray-200`} />
+              </div>
             </div>
+            <p className="text-xs text-gray-500">
+              What you record here becomes accounts payable at the PO&apos;s prices. Anything that arrived damaged or wrong:
+              record it, then use <b>Return to Supplier</b>.
+            </p>
           </>) : (
             <div className="space-y-3">
               <p className="text-sm text-gray-600">
@@ -165,12 +186,18 @@ export default function ReceivePurchaseOrderDialog({ po, onClose, onSaved }: Pro
                 className="px-4 py-2 rounded-lg bg-orange-600 hover:bg-orange-700 text-white text-sm font-medium disabled:opacity-50">
                 {saving ? 'Closing…' : 'Close receiving'}
               </button>
-            ) : (
+            ) : (<>
+              {canReturn && (
+                <button type="button" onClick={onReturn} disabled={saving}
+                  className="px-4 py-2 rounded-lg border border-orange-300 text-orange-700 text-sm font-medium hover:bg-orange-50 disabled:opacity-50">
+                  Return to Supplier
+                </button>
+              )}
               <button type="button" onClick={receive} disabled={saving}
                 className="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white text-sm font-medium disabled:opacity-50">
                 {saving ? 'Saving…' : 'Record delivery'}
               </button>
-            )}
+            </>)}
           </div>
         </div>
       </div>

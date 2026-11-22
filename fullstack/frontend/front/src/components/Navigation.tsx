@@ -6,6 +6,7 @@ import { useNotifications } from '@/context/NotificationContext';
 import { formatDateTime } from '@/lib/dateUtils';
 import { useEffect, useRef, useState } from 'react';
 import { useConfirm } from './ConfirmDialog';
+import { useBranding } from '@/lib/branding';
 
 type NavItem = { name: string; path: string; icon: () => React.JSX.Element; perms?: string[] };
 type NavGroup = { name: string; icon: () => React.JSX.Element; items: NavItem[] };
@@ -95,11 +96,6 @@ const AuditIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
   </svg>
 );
-const HistoryIcon = () => (
-  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-  </svg>
-);
 const LogoIcon = () => (
   <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
@@ -121,6 +117,78 @@ const LogoutIcon = () => (
   </svg>
 );
 
+// Pages are grouped into categories that open a flyout. Each page needs any one of its permissions.
+const NAV_ENTRIES: NavEntry[] = [
+  { name: 'Overview', icon: DashboardIcon, items: [
+    { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, perms: ['dashboard.view'] },
+    { name: 'Owner Dashboard', path: '/owner', icon: OwnerIcon, perms: ['owner.view'] },
+    { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, perms: ['announcements.view'] },
+  ] },
+  { name: 'Sales', icon: SalesIcon, items: [
+    { name: 'Sales', path: '/sales', icon: SalesIcon, perms: ['sales.view'] },
+    { name: 'Customers', path: '/customers', icon: CustomersIcon, perms: ['customers.view'] },
+  ] },
+  // Its own entry: payments are managed here, and each one still opens its job order
+  { name: 'Payments', path: '/payments', icon: PaymentsIcon, perms: ['payments.view'] },
+  { name: 'Operations', icon: InventoryIcon, items: [
+    { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'premade.receive'] },
+    // Product orders are opened from Sales (View Details); /product-orders still works
+    // Item History is off the menu (Inventory's Item Trail tab covers usage); /item-history still opens it
+    { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, perms: ['workers.add', 'workers.edit', 'workers.delete'] },
+  ] },
+  { name: 'Purchasing', icon: PurchaseOrderIcon, items: [
+    { name: 'Purchase Orders', path: '/purchase-orders', icon: PurchaseOrderIcon, perms: ['purchase_orders.view'] },
+    { name: 'Receiving', path: '/purchase-orders/receiving', icon: ReceivingIcon, perms: ['purchase_orders.receive'] },
+    { name: 'Suppliers', path: '/suppliers', icon: SupplierIcon, perms: ['suppliers.view'] },
+  ] },
+  { name: 'Finance', icon: CostingIcon, items: [
+    { name: 'Expenses', path: '/expenses', icon: ExpensesIcon, perms: ['expenses.view', 'expenses.add'] },
+    { name: 'Costing', path: '/costing', icon: CostingIcon, perms: ['costing.view'] },
+  ] },
+  { name: 'Analytics', icon: ReportsIcon, items: [
+    { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, perms: ['forecasting.view'] },
+    { name: 'Reports', path: '/reports', icon: ReportsIcon, perms: ['reports.sales', 'reports.inventory', 'reports.settlement'] },
+  ] },
+  // Its own entry so the full log isn't buried under Settings
+  { name: 'Audit Trail', path: '/audit-trail', icon: AuditIcon, perms: ['reports.audit_trail'] },
+  { name: 'Settings', path: '/settings', icon: SettingsIcon, perms: ['settings.edit', 'users.manage', 'branches.manage'] },
+];
+
+/** Key a custom sidebar icon is saved under: the page's path, or "group:Name" for a category */
+const iconKey = (entry: NavEntry) => ('items' in entry ? `group:${entry.name}` : entry.path);
+
+/** Every sidebar icon that can be changed in Settings > Appearance, with its built-in one */
+export const NAV_ICON_SLOTS: { key: string; label: string; group?: string; Icon: () => React.JSX.Element }[] =
+  NAV_ENTRIES.flatMap((entry) => 'items' in entry
+    ? [{ key: iconKey(entry), label: `${entry.name} (menu group)`, Icon: entry.icon },
+       ...entry.items.map((i) => ({ key: iconKey(i), label: i.name, group: entry.name, Icon: i.icon }))]
+    : [{ key: iconKey(entry), label: entry.name, Icon: entry.icon }]);
+
+/** The built-in logo mark, for Settings to show next to an uploaded one */
+export const DefaultLogo = () => (
+  <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0"><LogoIcon /></div>
+);
+
+/** A custom icon from Settings when there is one, else the built-in icon */
+function NavIcon({ entry, custom }: { entry: NavEntry; custom: Record<string, string> }) {
+  const src = custom[iconKey(entry)];
+  const Icon = entry.icon;
+  // eslint-disable-next-line @next/next/no-img-element
+  return src ? <img src={src} alt="" className="w-5 h-5 shrink-0 object-contain" /> : <Icon />;
+}
+
+/** The logo square: the uploaded logo, or the built-in mark */
+function LogoMark({ logo }: { logo: string | null }) {
+  return logo ? (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={logo} alt="Logo" className="w-8 h-8 rounded-lg object-contain shrink-0 bg-white" />
+  ) : (
+    <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0">
+      <LogoIcon />
+    </div>
+  );
+}
+
 export default function Navigation({ collapsed: collapsedSetting, onToggle, mobileOpen, onMobileOpen, onMobileClose }: NavigationProps) {
   // The open drawer always shows full labels, whatever the desktop collapse setting is
   const collapsed = collapsedSetting && !mobileOpen;
@@ -130,6 +198,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
   const { notifications, unreadCount, markRead, markAllRead, archived, loadArchived, archive, restore, remove } = useNotifications();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const { confirm, confirmDialog } = useConfirm();
+  const branding = useBranding();
   const [notifOpen, setNotifOpen] = useState(false);
   // The account menu under the name and initial, top right
   const [accountOpen, setAccountOpen] = useState(false);
@@ -178,49 +247,15 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
   // Signed-out visitors only ever see the sign-in page (the front page forwards there)
   if (!isAuthenticated) return null;
 
-  // Pages are grouped into categories that open a flyout. Each page needs any one of its permissions.
-  const navEntries: NavEntry[] = [
-    { name: 'Overview', icon: DashboardIcon, items: [
-      { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, perms: ['dashboard.view'] },
-      { name: 'Owner Dashboard', path: '/owner', icon: OwnerIcon, perms: ['owner.view'] },
-      { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, perms: ['announcements.view'] },
-    ] },
-    { name: 'Sales', icon: SalesIcon, items: [
-      { name: 'Sales', path: '/sales', icon: SalesIcon, perms: ['sales.view'] },
-      { name: 'Customers', path: '/customers', icon: CustomersIcon, perms: ['customers.view'] },
-    ] },
-    // Its own entry: payments are managed here, and each one still opens its job order
-    { name: 'Payments', path: '/payments', icon: PaymentsIcon, perms: ['payments.view'] },
-    { name: 'Operations', icon: InventoryIcon, items: [
-      { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'premade.receive'] },
-      // Product orders are opened from Sales (View Details); /product-orders still works
-      // Replaces Item Trail (branch transfers from the retired online ordering; /delivery still opens it)
-      { name: 'Item History', path: '/item-history', icon: HistoryIcon, perms: ['inventory.view', 'premade.view'] },
-      { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, perms: ['workers.add', 'workers.edit', 'workers.delete'] },
-    ] },
-    { name: 'Purchasing', icon: PurchaseOrderIcon, items: [
-      { name: 'Purchase Orders', path: '/purchase-orders', icon: PurchaseOrderIcon, perms: ['purchase_orders.view'] },
-      { name: 'Receiving', path: '/purchase-orders/receiving', icon: ReceivingIcon, perms: ['purchase_orders.receive'] },
-      { name: 'Suppliers', path: '/suppliers', icon: SupplierIcon, perms: ['suppliers.view'] },
-    ] },
-    { name: 'Finance', icon: CostingIcon, items: [
-      { name: 'Expenses', path: '/expenses', icon: ExpensesIcon, perms: ['expenses.view', 'expenses.add'] },
-      { name: 'Costing', path: '/costing', icon: CostingIcon, perms: ['costing.view'] },
-    ] },
-    { name: 'Analytics', icon: ReportsIcon, items: [
-      { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, perms: ['forecasting.view'] },
-      { name: 'Reports', path: '/reports', icon: ReportsIcon, perms: ['reports.sales', 'reports.inventory', 'reports.settlement'] },
-    ] },
-    // Its own entry so the full log isn't buried under Settings
-    { name: 'Audit Trail', path: '/audit-trail', icon: AuditIcon, perms: ['reports.audit_trail'] },
-    { name: 'Settings', path: '/settings', icon: SettingsIcon, perms: ['settings.edit', 'users.manage', 'branches.manage'] },
-  ];
+  const navEntries = NAV_ENTRIES;
 
   const allowed = (item: NavItem) => (item.perms ? can(...item.perms) : true);
   // Drop pages the user can't open; a category left with a single page shows as that page
   const visibleEntries: NavEntry[] = navEntries.flatMap((entry): NavEntry[] => {
     if (!('items' in entry)) return allowed(entry) ? [entry] : [];
-    const items = entry.items.filter(allowed);
+    // Without the day-to-day Dashboard (the owner role), the owner one is just "Dashboard"
+    const items = entry.items.filter(allowed).map((i) =>
+      i.path === '/owner' && !can('dashboard.view') ? { ...i, name: 'Dashboard' } : i);
     if (items.length === 0) return [];
     if (items.length === 1) return [items[0]];
     return [{ ...entry, items }];
@@ -247,7 +282,6 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
   const badgeFor = (path: string) => (path === '/delivery' && unreadCount > 0 ? unreadCount : 0);
 
   const renderLink = (item: NavItem, inFlyout = false) => {
-    const Icon = item.icon;
     const isActive = isActivePath(item.path);
     const badge = badgeFor(item.path);
     const iconOnly = collapsed && !inFlyout;
@@ -266,7 +300,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
         }`}
       >
         <span className="relative shrink-0">
-          <Icon />
+          <NavIcon entry={item} custom={branding.navIcons} />
           {iconOnly && badge > 0 && (
             <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-0.5 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">
               {badge > 9 ? '9+' : badge}
@@ -325,9 +359,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
         </svg>
       </button>
       <Link href="/" className="md:hidden flex items-center gap-2 min-w-0">
-        <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0">
-          <LogoIcon />
-        </div>
+        <LogoMark logo={branding.logo} />
       </Link>
       <span className="min-w-0 truncate px-3 md:px-4 py-1.5 rounded-xl border border-gray-200 bg-white text-sm font-bold text-gray-900 shadow-sm">
         {pageName}
@@ -404,9 +436,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
       {/* Header */}
       <div className={`flex items-center h-16 px-3 border-b border-gray-200 shrink-0 ${collapsed ? 'justify-center' : 'gap-2'}`}>
         <Link href="/" title="Home" className={`flex items-center gap-2 min-w-0 ${collapsed ? '' : 'flex-1'}`}>
-          <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0">
-            <LogoIcon />
-          </div>
+          <LogoMark logo={branding.logo} />
           {!collapsed && (
             <span className="font-bold text-gray-900 text-sm flex-1 truncate">
               Seatmakers Ave
@@ -439,7 +469,6 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
         {visibleEntries.map((entry) => {
           if (!('items' in entry)) return renderLink(entry);
 
-          const Icon = entry.icon;
           const isActive = entry.items.some((i) => isActivePath(i.path));
           const badge = entry.items.reduce((n, i) => n + badgeFor(i.path), 0);
           const isOpen = mobileOpen
@@ -471,7 +500,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
                 }`}
               >
                 <span className="relative shrink-0">
-                  <Icon />
+                  <NavIcon entry={entry} custom={branding.navIcons} />
                   {collapsed && badge > 0 && (
                     <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-red-500" />
                   )}

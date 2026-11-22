@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { api, PaymentTerm, PaymentTermOptions, PurchaseOrder, PurchaseOrderTermStatus } from '@/lib/api';
 import { formatDate } from '@/lib/dateUtils';
+import { exactPeso } from '@/lib/format';
 
 /**
  * Payment terms for suppliers and purchase orders: when the supplier must be paid.
@@ -36,7 +37,7 @@ export type TermValue = { term: PaymentTerm | ''; days: number | null };
 export function termLabel(term: PaymentTerm | '' | null | undefined, days?: number | null) {
   if (term === 'advance') return 'Cash in Advance';
   if (term === 'cod') return 'COD (Cash on Delivery)';
-  if (term === 'net' && days) return `Net ${days} day${days === 1 ? '' : 's'}`;
+  if (term === 'net' && days) return `n/${days}`;
   return 'No term';
 }
 
@@ -44,7 +45,7 @@ export function termLabel(term: PaymentTerm | '' | null | undefined, days?: numb
 export function termExplanation(term: PaymentTerm | '' | null | undefined, days?: number | null) {
   if (term === 'advance') return 'Due when the purchase order is approved (pay before the supplier ships).';
   if (term === 'cod') return 'Due the day the first delivery is received.';
-  if (term === 'net' && days) return `Due ${days} day${days === 1 ? '' : 's'} after the first delivery is received.`;
+  if (term === 'net' && days) return `n/${days} (Net ${days}): the full amount received is due ${days} day${days === 1 ? '' : 's'} after the first delivery.`;
   return 'No due date or reminders. Payments can still be recorded any time.';
 }
 
@@ -87,8 +88,8 @@ export function PaymentTermPicker({ value, onChange, id, className = '', compact
         <option value="">No term</option>
         <option value="advance">Cash in Advance</option>
         <option value="cod">COD (Cash on Delivery)</option>
-        {netDays.map(d => <option key={d} value={`net:${d}`}>Net {d} days</option>)}
-        <option value="custom">Custom Net days…</option>
+        {netDays.map(d => <option key={d} value={`net:${d}`}>n/{d} (Net {d} days)</option>)}
+        <option value="custom">Custom n/… days</option>
       </select>
       {selected === 'custom' && (
         <span className="inline-flex items-center gap-1.5">
@@ -167,32 +168,73 @@ export function PurchaseOrderTermCard({ po, onChange, canChange }: {
     } finally { setBusy(false); }
   };
 
-  const tone = po.termStatus === 'overdue' ? 'border-red-200 bg-red-50'
-    : po.termStatus === 'due_soon' ? 'border-amber-200 bg-amber-50' : 'border-gray-200 bg-white';
+  const tone = po.termStatus === 'overdue' ? 'border-red-200' : po.termStatus === 'due_soon' ? 'border-amber-200' : 'border-gray-200';
+  const badge = apBadge(po);
+  const field = (label: string, value: React.ReactNode, cls = '') => (
+    <div>
+      <p className="text-xs text-gray-500">{label}</p>
+      <p className={`text-sm font-semibold text-gray-900 mt-0.5 ${cls}`}>{value}</p>
+    </div>
+  );
   return (
-    <div className={`rounded-xl shadow-sm border p-6 ${tone}`}>
-      <div className="flex items-center justify-between gap-3 mb-3">
-        <h2 className="text-lg font-semibold text-gray-900">Payment Terms</h2>
-        <TermStatusBadge status={po.termStatus} />
+    <div className={`rounded-xl shadow-sm border bg-white ${tone}`}>
+      <div className="px-6 pt-5 pb-4 flex items-start justify-between gap-3 border-b border-gray-100">
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Accounts Payable · Purchase Order</p>
+          <p className="text-lg font-bold text-gray-900 mt-0.5">{po.poNumber}</p>
+        </div>
+        <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${badge.cls}`}>{badge.label}</span>
       </div>
       {!editing ? (
         <>
-          <p className="text-base font-medium text-gray-900">{po.paymentTermLabel || 'No term'}</p>
-          {po.paymentTerm ? (
-            <p className={`mt-1 text-sm ${po.termStatus === 'overdue' ? 'text-red-700 font-medium' : po.termStatus === 'due_soon' ? 'text-amber-800 font-medium' : 'text-gray-600'}`}>
-              {dueText(po)}
+          <div className="px-6 py-4 grid grid-cols-2 gap-x-4 gap-y-3 border-b border-gray-100">
+            {field('Supplier', po.supplierName)}
+            {field('Payment terms', po.paymentTermLabel || 'No term')}
+            {field('Invoice date', po.invoiceDate ? formatDate(po.invoiceDate) : <span className="text-gray-400 font-normal">On first delivery</span>)}
+            {field('Due date', po.dueDate ? formatDate(po.dueDate)
+              : <span className="text-gray-400 font-normal">{po.paymentTerm ? (po.paymentTerm === 'advance' ? 'Once approved' : 'Set on first delivery') : '—'}</span>,
+              po.termStatus === 'overdue' ? 'text-red-700' : po.termStatus === 'due_soon' ? 'text-amber-800' : '')}
+            {po.invoiceNumbers.length > 0 && (
+              <div className="col-span-2">{field(`Supplier invoice no${po.invoiceNumbers.length > 1 ? 's' : ''}.`, po.invoiceNumbers.join(', '))}</div>
+            )}
+          </div>
+          <dl className="px-6 py-4 space-y-1.5 text-sm border-b border-gray-100">
+            <div className="flex justify-between"><dt className="text-gray-600">Ordered</dt><dd className="tabular-nums text-gray-500">{exactPeso(po.totalAmount)}</dd></div>
+            <div className="flex justify-between"><dt className="text-gray-600">Received (accounts payable)</dt><dd className="tabular-nums font-medium text-gray-900">{exactPeso(po.payableAmount)}</dd></div>
+            {po.returnedAmount > 0 && (
+              <div className="flex justify-between"><dt className="text-gray-600">Returned to supplier</dt><dd className="tabular-nums text-orange-700">−{exactPeso(po.returnedAmount)}</dd></div>
+            )}
+            <div className="flex justify-between"><dt className="text-gray-600">Total payments</dt><dd className="tabular-nums text-green-700">−{exactPeso(po.amountPaid)}</dd></div>
+            <div className="flex justify-between pt-2 mt-1 border-t border-gray-100">
+              <dt className="font-semibold text-gray-900">Remaining A/P</dt>
+              <dd className={`tabular-nums font-bold ${po.payableBalance > 0 ? 'text-gray-900' : 'text-green-700'}`}>{exactPeso(po.payableBalance)}</dd>
+            </div>
+            {po.prepaid > 0 && (
+              <p className="text-xs text-gray-500">{exactPeso(po.prepaid)} paid ahead for items not received yet.</p>
+            )}
+            {po.supplierCredit > 0 && (
+              <p className="text-xs font-medium text-orange-700">Supplier credit: {exactPeso(po.supplierCredit)} paid more than the order now comes to (to be refunded or used on a later order).</p>
+            )}
+          </dl>
+          <div className="px-6 py-4">
+            <p className="text-xs text-gray-500">Amount due</p>
+            <p className="text-2xl font-bold text-gray-900 tabular-nums">{exactPeso(po.amountDue)}</p>
+            <p className={`mt-1 text-xs ${po.termStatus === 'overdue' ? 'text-red-700 font-medium' : po.termStatus === 'due_soon' ? 'text-amber-800 font-medium' : 'text-gray-500'}`}>
+              {po.paymentTerm
+                ? (po.dueDate && po.amountDue > 0
+                    ? `Payment must be completed by ${formatDate(po.dueDate)}, under these agreed terms. ${dueText(po).startsWith('Overdue') ? dueText(po) + '.' : ''}`
+                    : termExplanation(po.paymentTerm, po.paymentTermDays))
+                : 'No term: no due date or reminders. Payments can be recorded any time.'}
             </p>
-          ) : (
-            <p className="mt-1 text-sm text-gray-500">No due date or reminders for this order.</p>
-          )}
-          <p className="mt-2 text-xs text-gray-500">{termExplanation(po.paymentTerm, po.paymentTermDays)}</p>
-          {canChange && po.status !== 'cancelled' && (
-            <button type="button" onClick={start} className="mt-3 text-sm font-medium text-[#011c72] hover:underline">
-              Change term
-            </button>
-          )}
+            {canChange && po.status !== 'cancelled' && (
+              <button type="button" onClick={start} className="mt-3 text-sm font-medium text-[#011c72] hover:underline">
+                Change term
+              </button>
+            )}
+          </div>
         </>
       ) : (
+        <div className="px-6 py-4">
         <div className="space-y-3">
           <PaymentTermPicker value={value} onChange={setValue} />
           <p className="text-xs text-gray-500">{termExplanation(value.term, value.days)} Reminders start again for the new due date.</p>
@@ -207,7 +249,22 @@ export function PurchaseOrderTermCard({ po, onChange, canChange }: {
             </button>
           </div>
         </div>
+        </div>
       )}
     </div>
   );
+}
+
+/** Where the payable stands: Unpaid / Partially Paid / Paid / Overdue / Awaiting delivery */
+function apBadge(po: PurchaseOrder): { label: string; cls: string } {
+  if (po.status === 'cancelled') return { label: 'Cancelled', cls: 'bg-gray-100 text-gray-500' };
+  if (po.supplierCredit > 0) return { label: 'Supplier credit', cls: 'bg-orange-100 text-orange-800' };
+  if (po.termStatus === 'overdue') return { label: 'Overdue', cls: 'bg-red-100 text-red-700' };
+  if (po.payableAmount <= 0) return po.amountPaid > 0
+    ? { label: 'Paid ahead', cls: 'bg-blue-50 text-blue-700' }
+    : { label: 'Awaiting delivery', cls: 'bg-gray-100 text-gray-600' };
+  if (po.payableBalance <= 0) return { label: 'Paid', cls: 'bg-green-100 text-green-700' };
+  if (po.termStatus === 'due_soon') return { label: 'Due soon', cls: 'bg-amber-100 text-amber-800' };
+  return po.amountPaid > 0 ? { label: 'Partially paid', cls: 'bg-amber-50 text-amber-800' }
+    : { label: 'Unpaid', cls: 'bg-red-50 text-red-700' };
 }

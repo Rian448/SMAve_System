@@ -10,6 +10,8 @@ import {
 } from '@/lib/api';
 import Combobox from '@/components/Combobox';
 import MaterialPicker from '@/components/MaterialPicker';
+import LengthInput from '@/components/LengthInput';
+import { formatLength } from '@/lib/length';
 import PremadeItemPicker from '@/components/PremadeItemPicker';
 import { useVatRate } from '@/lib/useVatRate';
 import { useFieldErrors, FieldError, emailProblem, phoneProblem, cleanPhoneInput, PHONE_DIGITS } from '@/lib/useFieldErrors';
@@ -340,7 +342,8 @@ function NewJobOrderForm() {
     const response = await api.inventory.getRawMaterials(
       user?.branchId ? { branchId: user.branchId, includeWarehouse: true } : undefined
     );
-    setInventoryMaterials(response.data || []);
+    // Consumables (glue, thread...) aren't chosen on job orders: they are marked used in Inventory
+    setInventoryMaterials((response.data || []).filter((m) => !m.isConsumable));
   }, [user?.branchId]);
 
   useEffect(() => {
@@ -616,6 +619,75 @@ function NewJobOrderForm() {
     }
     return {};
   };
+
+  // Lines on the Materials step that came from a service card's material, by service,
+  // so changing or clearing that material replaces or removes its line (once)
+  const serviceLinesRef = useRef<Map<string, { lineId: string | null; label: string }>>(new Map());
+
+  /** Leaving the Service step: each service's material becomes a line under
+   *  Materials & Parts (from Inventory when it matches, else typed in), unless it
+   *  is already there. Quantity starts at 1 for staff to set. */
+  const carryServiceMaterials = () => {
+    const picked: [string, string][] = ([
+      ['flooring', flooring], ['reupholstery', reupholstery], ['ceiling', ceiling],
+      ['sidings', sidings], ['seatCovers', seatCovers],
+    ] as [string, { selected: boolean; material: string }][])
+      .map(([key, s]) => [key, s.selected ? s.material.trim() : '']);
+    const lines = serviceLinesRef.current;
+    // Compared without case or extra spaces, so "fabric -  beige" still finds Fabric - Beige
+    const norm = (v: string) => v.split(/\s+/).filter(Boolean).join(' ').toLowerCase();
+    const labelOf = (m: RawMaterial) => norm([m.materialType, m.color, m.pattern].map((v) => (v || '').trim()).filter(Boolean).join(' - '));
+
+    // Worked out from the current list, not inside a setMaterials updater: React
+    // runs updaters twice in development, and the second run would see `lines`
+    // already updated and add nothing
+    let next = [...materials];
+    let changed = false;
+    const usable = inventoryMaterials.filter((m) => !m.isArchived);
+    const ownFirst = (list: RawMaterial[]) => list.find((m) => m.branchId === user?.branchId) || list[0];
+    for (const [key, label] of picked) {
+      // The full label picked from the list ("Canvas - White"), or else just the
+      // material's name typed in ("Canvas"): then the first one, changeable on the line
+      const wanted = norm(label);
+      const inv = wanted ? (ownFirst(usable.filter((m) => labelOf(m) === wanted))
+        || ownFirst(usable.filter((m) => norm(m.materialType) === wanted))) : undefined;
+      const had = lines.get(key);
+      const hadLine = had?.lineId ? next.find((m) => m.id === had.lineId) : undefined;
+      // Same material as before: leave it, unless it went in as typed-in only
+      // because Inventory hadn't loaded yet
+      if (had && norm(had.label) === wanted && !(inv && hadLine?.materialSource === 'custom')) continue;
+      if (hadLine) { next = next.filter((m) => m.id !== hadLine.id); changed = true; }
+      lines.delete(key);
+      if (!label) continue;
+
+      const already = next.some((m) => inv ? Number(m.materialId) === inv.id : norm(m.name) === wanted);
+      if (already) { lines.set(key, { lineId: null, label }); continue; }
+
+      materialIdRef.current += 1;
+      const id = `mat-${materialIdRef.current}`;
+      next.push(inv
+        ? { id, materialSource: 'inventory', materialId: inv.id, name: inv.materialType, quantity: 1, unitPrice: inv.unitPrice ?? 0 }
+        : { id, materialSource: 'custom', materialId: '', name: label, quantity: 1, unitPrice: 0 });
+      lines.set(key, { lineId: id, label });
+      changed = true;
+    }
+    if (changed) setMaterials(next);
+  };
+
+  // Whenever the Materials step opens (Next, a draft opened at it, or after going
+  // back to change a service), and again once Inventory has loaded
+  useEffect(() => {
+    if (step === 4 && orderType === 'normal') carryServiceMaterials();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, orderType, inventoryMaterials]);
+
+  // Reaching Review with no price yet: start from the suggested price (materials ×
+  // the % set there), which staff can still change
+  useEffect(() => {
+    if (step === 5 && orderType === 'normal' && !(estimatedTotal > 0) && suggestedPrice > 0
+        && suggestedPrice <= MAX_JOB_ORDER_PRICE) setEstimatedTotal(suggestedPrice);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, orderType]);
 
   const goNext = () => {
     setError(''); fe.clear();
@@ -1926,16 +1998,15 @@ function NewJobOrderForm() {
                 <div className="space-y-2">
                   {/* Header */}
                   <div className="grid grid-cols-12 gap-2 px-2 text-xs font-medium text-gray-500 uppercase tracking-wide">
-                    <div className="col-span-4">Source / Name</div>
-                    <div className="col-span-3">Material</div>
-                    <div className="col-span-2 text-center">Qty (yd)</div>
-                    <div className="col-span-2 text-right">Unit Price</div>
+                    <div className="col-span-3">Source / Name</div>
+                    <div className="col-span-6">Material</div>
+                    <div className="col-span-2 text-right">Unit Price (per yd)</div>
                     <div className="col-span-1"></div>
                   </div>
                   {materials.map((m) => (
                     <div key={m.id} {...fe.field(`material-${m.id}`)}
                       className={`grid grid-cols-12 gap-2 items-center p-3 rounded-lg border ${fe.errors[`material-${m.id}`] ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'}`}>
-                      <div className="col-span-4">
+                      <div className="col-span-3">
                         <select value={m.materialSource}
                           onChange={(e) => updateMaterial(m.id, 'materialSource', e.target.value as 'inventory' | 'custom')}
                           className="w-full px-2 py-1.5 rounded-md border border-gray-200 bg-white text-xs text-gray-900 focus:ring-1 focus:ring-[#011c72]">
@@ -1943,7 +2014,7 @@ function NewJobOrderForm() {
                           <option value="custom">Type New</option>
                         </select>
                       </div>
-                      <div className="col-span-3">
+                      <div className="col-span-6">
                         {m.materialSource === 'inventory' ? (
                           <MaterialPicker
                             materials={inventoryMaterials}
@@ -1960,11 +2031,6 @@ function NewJobOrderForm() {
                         )}
                       </div>
                       <div className="col-span-2">
-                        <input type="number" min="0" step="0.1" value={m.quantity}
-                          onChange={(e) => updateMaterial(m.id, 'quantity', parseFloat(e.target.value) || 0)}
-                          className="w-full px-2 py-1.5 rounded-md border border-gray-200 bg-white text-xs text-gray-900 text-center focus:ring-1 focus:ring-[#011c72]" />
-                      </div>
-                      <div className="col-span-2">
                         <input type="number" min="0" step="0.01" value={m.unitPrice}
                           onChange={(e) => updateMaterial(m.id, 'unitPrice', parseFloat(e.target.value) || 0)}
                           className="w-full px-2 py-1.5 rounded-md border border-gray-200 bg-white text-xs text-gray-900 text-right focus:ring-1 focus:ring-[#011c72]" />
@@ -1976,6 +2042,12 @@ function NewJobOrderForm() {
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                           </svg>
                         </button>
+                      </div>
+                      {/* Estimated length for pricing; stock is taken by what the workers cut */}
+                      <div className="col-span-12 sm:col-span-9 sm:col-start-4">
+                        <p className="text-[11px] font-medium text-gray-500 mb-0.5">Estimated quantity (yd / ft / in / cm)</p>
+                        <LengthInput compact value={m.quantity} ariaLabel="Quantity"
+                          onChange={(yards) => updateMaterial(m.id, 'quantity', yards)} />
                       </div>
                       <FieldError message={fe.errors[`material-${m.id}`]} className="col-span-12 mt-0" />
                     </div>
@@ -2060,7 +2132,7 @@ function NewJobOrderForm() {
                 <div className="space-y-1">
                   {materials.map((m) => (
                     <div key={m.id} className="flex justify-between text-sm">
-                      <span className="text-gray-700">{m.name || '(unnamed)'} × {m.quantity}</span>
+                      <span className="text-gray-700">{m.name || '(unnamed)'} × {formatLength(Number(m.quantity) || 0)}</span>
                       <span className="text-gray-900 font-medium">₱{((Number(m.quantity) || 0) * (Number(m.unitPrice) || 0)).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
                   ))}

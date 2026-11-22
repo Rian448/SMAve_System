@@ -4,6 +4,7 @@ import "./globals.css";
 import SidebarLayout from "@/components/SidebarLayout";
 import { AuthProvider } from "@/context/AuthContext";
 import { NotificationProvider } from "@/context/NotificationContext";
+import BrandingFavicon from "@/components/BrandingFavicon";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -30,6 +31,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
+        <BrandingFavicon />
         <AuthProvider>
           <NotificationProvider>
             <SidebarLayout>

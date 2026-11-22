@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { api, type Supplier } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
@@ -7,9 +7,28 @@ import { useConfirm } from '@/components/ConfirmDialog';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import Paginated from '@/components/Paginated';
 import { PaymentTermPicker, TermValue, termValueError, termExplanation } from '@/components/PaymentTerms';
+import SupplierMaterialsEditor, {
+  type SupplierMaterialRow, newSupplierMaterialRow, supplierMaterialEntries, supplierMaterialsProblem,
+} from '@/components/SupplierMaterialsEditor';
+import { formatMaterialQty } from '@/lib/length';
 
 const EMPTY_FORM = { name: '', contactPerson: '', phone: '', email: '', address: '', materialsSupplied: '', notes: '' };
 const NO_TERM: TermValue = { term: '', days: null };
+
+/** Phone / telephone: digits only, up to 15 (the longest international number) */
+const SUPPLIER_PHONE_MAX = 15;
+const cleanSupplierPhone = (v: string) => v.replace(/\D/g, '').slice(0, SUPPLIER_PHONE_MAX);
+/** name@domain.ext, e.g. name@gmail.com, sales@company.com.ph (same rule as the server) */
+const SUPPLIER_EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}$/;
+
+/** A supplier must be reachable: a phone / telephone number or an email, each in the right format */
+function contactProblem(phone: string, email: string): string {
+  const p = phone.trim(), e = email.trim();
+  if (!p && !e) return 'Enter a phone / telephone number or an email address.';
+  if (p && !/^\d{7,15}$/.test(p)) return 'The phone / telephone number must be 7 to 15 digits, numbers only.';
+  if (e && !SUPPLIER_EMAIL_RE.test(e)) return 'Enter a valid email address, e.g. name@gmail.com or sales@company.com.ph.';
+  return '';
+}
 
 /**
  * Suppliers used to be a tab inside Inventory. The records and API are the same
@@ -36,6 +55,9 @@ export default function SuppliersPage() {
   // Default payment term, copied onto each new purchase order for the supplier
   const [newTerm, setNewTerm] = useState<TermValue>(NO_TERM);
   const [editTerm, setEditTerm] = useState<TermValue>(NO_TERM);
+  // Materials Supplied: picked from Inventory (low stock first) or added as new items
+  const [newMaterials, setNewMaterials] = useState<SupplierMaterialRow[]>(() => [newSupplierMaterialRow()]);
+  const [editMaterials, setEditMaterials] = useState<SupplierMaterialRow[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -56,13 +78,20 @@ export default function SuppliersPage() {
     setFormError('');
     if (fe.show({
       'supplier-name': !newSupplier.name.trim() && 'Enter the supplier name.',
+      'supplier-contact': contactProblem(newSupplier.phone, newSupplier.email),
+      'supplier-materials': supplierMaterialsProblem(newMaterials)
+        || (supplierMaterialEntries(newMaterials).length === 0 && 'Add at least one material this supplier supplies.'),
       'supplier-term': termValueError(newTerm),
     })) return;
     setSaving(true);
     try {
-      await api.inventory.createSupplier({ ...newSupplier, paymentTerm: newTerm.term || null, paymentTermDays: newTerm.days });
+      await api.inventory.createSupplier({
+        ...newSupplier, paymentTerm: newTerm.term || null, paymentTermDays: newTerm.days,
+        materials: supplierMaterialEntries(newMaterials),
+      });
       setNewSupplier(EMPTY_FORM);
       setNewTerm(NO_TERM);
+      setNewMaterials([newSupplierMaterialRow()]);
       await load();
     } catch (err) { setFormError((err instanceof Error && err.message) || 'Failed to add supplier.'); }
     finally { setSaving(false); }
@@ -71,20 +100,24 @@ export default function SuppliersPage() {
   const startEdit = (s: Supplier) => {
     setEditingId(s.id);
     setEditSupplier({
-      name: s.name, contactPerson: s.contactPerson || '', phone: s.phone || '', email: s.email || '',
+      name: s.name, contactPerson: s.contactPerson || '', phone: cleanSupplierPhone(s.phone || ''), email: s.email || '',
       address: s.address || '', materialsSupplied: s.materialsSupplied || '', notes: s.notes || '',
     });
     setEditTerm({ term: s.paymentTerm || '', days: s.paymentTermDays ?? null });
+    setEditMaterials((s.materials || []).map((m) => newSupplierMaterialRow(m.id)));
   };
 
   const handleSave = async (id: number) => {
     setFormError('');
     if (!editSupplier.name.trim()) { setFormError('Enter the supplier name.'); return; }
-    const termError = termValueError(editTerm);
-    if (termError) { setFormError(termError); return; }
+    const problem = contactProblem(editSupplier.phone, editSupplier.email) || supplierMaterialsProblem(editMaterials) || termValueError(editTerm);
+    if (problem) { setFormError(problem); return; }
     setSaving(true);
     try {
-      await api.inventory.updateSupplier(id, { ...editSupplier, paymentTerm: editTerm.term || null, paymentTermDays: editTerm.days });
+      await api.inventory.updateSupplier(id, {
+        ...editSupplier, paymentTerm: editTerm.term || null, paymentTermDays: editTerm.days,
+        materials: supplierMaterialEntries(editMaterials),
+      });
       setEditingId(null);
       await load();
     } catch (err) { setFormError((err instanceof Error && err.message) || 'Failed to update supplier.'); }
@@ -146,10 +179,20 @@ export default function SuppliersPage() {
                 <FieldError message={fe.errors['supplier-name']} />
               </div>
               <input type="text" value={newSupplier.contactPerson} onChange={e => setNewSupplier(p => ({ ...p, contactPerson: e.target.value }))} placeholder="Contact Person" className={input} />
-              <input type="text" value={newSupplier.phone} onChange={e => setNewSupplier(p => ({ ...p, phone: e.target.value }))} placeholder="Phone" className={input} />
-              <input type="email" value={newSupplier.email} onChange={e => setNewSupplier(p => ({ ...p, email: e.target.value }))} placeholder="Email" className={input} />
               <input type="text" value={newSupplier.address} onChange={e => setNewSupplier(p => ({ ...p, address: e.target.value }))} placeholder="Address" className={input} />
-              <input type="text" value={newSupplier.materialsSupplied} onChange={e => setNewSupplier(p => ({ ...p, materialsSupplied: e.target.value }))} placeholder="Materials Supplied" className={input} />
+              <div className="md:col-span-3 grid grid-cols-1 md:grid-cols-2 gap-3" {...fe.field('supplier-contact')}>
+                <input type="tel" inputMode="numeric" maxLength={SUPPLIER_PHONE_MAX} value={newSupplier.phone}
+                  onChange={e => setNewSupplier(p => ({ ...p, phone: cleanSupplierPhone(e.target.value) }))}
+                  placeholder="Phone / Telephone (numbers only)" className={input} />
+                <input type="email" value={newSupplier.email} onChange={e => setNewSupplier(p => ({ ...p, email: e.target.value.trim() }))} placeholder="Email (e.g. name@gmail.com)" className={input} />
+                <p className="md:col-span-2 -mt-1 text-xs text-gray-500">At least one is required. Phone / telephone: numbers only, up to 15 digits (e.g. 09171234567 or 0281234567). Email: e.g. name@gmail.com.</p>
+                <FieldError message={fe.errors['supplier-contact']} className="md:col-span-2" />
+              </div>
+              <div className="md:col-span-3" {...fe.field('supplier-materials')}>
+                <p className="block text-sm font-medium text-gray-700 mb-1">Materials Supplied *</p>
+                <SupplierMaterialsEditor rows={newMaterials} onChange={setNewMaterials} />
+                <FieldError message={fe.errors['supplier-materials']} />
+              </div>
               <input type="text" value={newSupplier.notes} onChange={e => setNewSupplier(p => ({ ...p, notes: e.target.value }))} placeholder="Notes" className={`md:col-span-3 ${input}`} />
               <div className="md:col-span-3" {...fe.field('supplier-term')}>
                 <label htmlFor="supplier-term" className="block text-sm font-medium text-gray-700 mb-1">Payment Terms</label>
@@ -201,7 +244,7 @@ export default function SuppliersPage() {
                   <tr>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Supplier</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Contact</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone / Email</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone / Telephone · Email</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Materials</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Payment Terms</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
@@ -212,7 +255,8 @@ export default function SuppliersPage() {
                   {rows.map(s => {
                     const editing = editingId === s.id;
                     return (
-                      <tr key={s.id} className="hover:bg-gray-50 transition-colors">
+                      <Fragment key={s.id}>
+                      <tr className="hover:bg-gray-50 transition-colors">
                         <td className="px-6 py-4 whitespace-nowrap">
                           {editing ? (
                             <div className="space-y-1">
@@ -236,8 +280,10 @@ export default function SuppliersPage() {
                         <td className="px-6 py-4 whitespace-nowrap">
                           {editing ? (
                             <div className="space-y-1">
-                              <input type="text" value={editSupplier.phone} onChange={e => setEditSupplier(p => ({ ...p, phone: e.target.value }))} placeholder="Phone" className={`w-32 ${cellInput}`} />
-                              <input type="email" value={editSupplier.email} onChange={e => setEditSupplier(p => ({ ...p, email: e.target.value }))} placeholder="Email" className={`w-40 ${cellInput}`} />
+                              <input type="tel" inputMode="numeric" maxLength={SUPPLIER_PHONE_MAX} value={editSupplier.phone}
+                                onChange={e => setEditSupplier(p => ({ ...p, phone: cleanSupplierPhone(e.target.value) }))}
+                                placeholder="Phone / Telephone" className={`w-36 ${cellInput}`} />
+                              <input type="email" value={editSupplier.email} onChange={e => setEditSupplier(p => ({ ...p, email: e.target.value.trim() }))} placeholder="name@gmail.com" className={`w-40 ${cellInput}`} />
                             </div>
                           ) : (
                             <div>
@@ -248,7 +294,15 @@ export default function SuppliersPage() {
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           {editing ? (
-                            <input type="text" value={editSupplier.materialsSupplied} onChange={e => setEditSupplier(p => ({ ...p, materialsSupplied: e.target.value }))} placeholder="Materials" className={`w-36 ${cellInput}`} />
+                            <span className="text-xs text-gray-500">Edit below</span>
+                          ) : s.materials && s.materials.length > 0 ? (
+                            <div className="flex flex-wrap gap-1 max-w-64 whitespace-normal">
+                              {s.materials.slice(0, 4).map(m => (
+                                <span key={m.id} title={`${formatMaterialQty(m.stockQuantity, { isConsumable: m.unit !== 'yd', unit: m.unit })} in stock`}
+                                  className="px-2 py-0.5 rounded-full bg-gray-100 text-xs text-gray-700">{m.name}</span>
+                              ))}
+                              {s.materials.length > 4 && <span className="px-2 py-0.5 text-xs text-gray-500">+{s.materials.length - 4} more</span>}
+                            </div>
                           ) : (
                             <span className="text-sm text-gray-600 truncate max-w-35 block">{s.materialsSupplied || '—'}</span>
                           )}
@@ -285,6 +339,15 @@ export default function SuppliersPage() {
                           </td>
                         )}
                       </tr>
+                      {editing && (
+                        <tr className="bg-[#fbfcff]">
+                          <td colSpan={canEdit ? 7 : 6} className="px-6 py-4">
+                            <p className="text-sm font-medium text-gray-700 mb-2">Materials Supplied by {editSupplier.name || s.name}</p>
+                            <div className="max-w-3xl"><SupplierMaterialsEditor rows={editMaterials} onChange={setEditMaterials} supplierId={s.id} /></div>
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     );
                   })}
                 </tbody>

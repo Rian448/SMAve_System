@@ -10,6 +10,8 @@ import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import Link from 'next/link';
 import Paginated from '@/components/Paginated';
 import { exactPeso } from '@/lib/format';
+import LengthInput from '@/components/LengthInput';
+import { formatLength, formatMaterialQty } from '@/lib/length';
 
 type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'waste-log' | 'ai-predictions';
 
@@ -75,7 +77,7 @@ function InventoryContent() {
   const [saving, setSaving] = useState(false);
   const [searchTerm, setSearchTerm] = useState(searchParams.get('q') || '');
   const statusParam = searchParams.get('status');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'in-stock' | 'low-stock' | 'out-of-stock'>(
+  const [statusFilter, setStatusFilter] = useState<'all' | 'in-stock' | 'low-stock' | 'out-of-stock' | 'consumables'>(
     statusParam === 'low-stock' || statusParam === 'out-of-stock' || statusParam === 'in-stock'
       ? statusParam
       : 'all'
@@ -110,7 +112,9 @@ function InventoryContent() {
     unitPrice: '',
     priceMode: 'markup' as 'markup' | 'manual',
     supplierId: '',
-    stockQuantity: ''
+    stockQuantity: '',
+    isConsumable: false,
+    unit: 'pcs',
   });
 
   const [globalThreshold, setGlobalThreshold] = useState(0);
@@ -417,8 +421,38 @@ function InventoryContent() {
       unitPrice: String(material.unitPrice),
       priceMode: 'markup',
       supplierId: material.supplierId != null ? String(material.supplierId) : '',
-      stockQuantity: String(material.stockQuantity)
+      stockQuantity: String(material.stockQuantity),
+      isConsumable: !!material.isConsumable,
+      unit: material.isConsumable ? (material.unit || 'pcs') : 'pcs',
     });
+  };
+
+  // Consumables: marked fully used (leaves stock) or partly used (recorded only)
+  const [consumableBusyId, setConsumableBusyId] = useState<number | null>(null);
+  const markConsumable = async (material: RawMaterial, kind: 'full' | 'partial') => {
+    const name = [material.materialType, material.color, material.pattern].filter(Boolean).join(' - ');
+    const unit = material.unit || 'pcs';
+    const ok = await confirm(kind === 'full' ? {
+      title: 'Mark as fully used?',
+      message: <>One {unit === 'pcs' ? 'piece' : unit} of {name} is used up and leaves stock
+        ({formatMaterialQty(material.stockQuantity, material)} now, {formatMaterialQty(Math.max(0, material.stockQuantity - 1), material)} after).</>,
+      confirmLabel: 'Fully used',
+    } : {
+      title: 'Mark as partially used?',
+      message: <>{name} is recorded as opened and partly used. Stock stays at {formatMaterialQty(material.stockQuantity, material)} until it is marked fully used.</>,
+      confirmLabel: 'Partially used',
+    });
+    if (!ok) return;
+    setConsumableBusyId(material.id);
+    setFormError('');
+    try {
+      await api.inventory.consumableUse(material.id, { kind, quantity: kind === 'full' ? 1 : undefined });
+      await fetchInventory();
+    } catch (err) {
+      setFormError(err instanceof Error && err.message ? err.message : 'Could not record the use.');
+    } finally {
+      setConsumableBusyId(null);
+    }
   };
 
   const handleSaveMaterial = async (materialId: number) => {
@@ -444,6 +478,8 @@ function InventoryContent() {
         markupPercent: Number.isNaN(markupPercent) ? 25 : markupPercent,
         ...(editMaterial.priceMode === 'manual' ? { unitPrice: Number(editMaterial.unitPrice) } : {}),
         supplierId: editMaterial.supplierId ? Number(editMaterial.supplierId) : null,
+        isConsumable: editMaterial.isConsumable,
+        ...(editMaterial.isConsumable ? { unit: editMaterial.unit.trim() || 'pcs' } : {}),
       });
 
       setEditingMaterialId(null);
@@ -876,7 +912,8 @@ function InventoryContent() {
         statusFilter === 'all' ||
         (statusFilter === 'out-of-stock' && qty <= 0) ||
         (statusFilter === 'low-stock' && isLowStock(qty, m.lowStockThreshold)) ||
-        (statusFilter === 'in-stock' && qty > 0 && !isLowStock(qty, m.lowStockThreshold));
+        (statusFilter === 'in-stock' && qty > 0 && !isLowStock(qty, m.lowStockThreshold)) ||
+        (statusFilter === 'consumables' && !!m.isConsumable);
       return matchesSearch && matchesType && matchesStatus;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -942,7 +979,7 @@ function InventoryContent() {
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
       </svg>
     )},
-    { id: 'material-usage' as TabType, name: 'Material Usage', icon: (
+    { id: 'material-usage' as TabType, name: 'Item Trail', icon: (
       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
       </svg>
@@ -1126,7 +1163,7 @@ function InventoryContent() {
                         <ul className="mt-1 space-y-0.5">
                           {lowStockItems.map(m => (
                             <li key={m.id} className="text-xs text-orange-600">
-                              {m.materialType}{m.color ? ` (${m.color})` : ''}{m.pattern ? ` / ${m.pattern}` : ''} — {m.stockQuantity} yd remaining
+                              {m.materialType}{m.color ? ` (${m.color})` : ''}{m.pattern ? ` / ${m.pattern}` : ''} — {formatMaterialQty(m.stockQuantity, m)} remaining
                             </li>
                           ))}
                         </ul>
@@ -1387,24 +1424,15 @@ function InventoryContent() {
                     <select
                       value={entry.materialId}
                       onChange={(e) => updatePremadeMaterialRow(index, 'materialId', e.target.value)}
-                      className="md:col-span-7 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
+                      className="md:col-span-10 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
                     >
                       <option value="">Select material</option>
                       {rawMaterials.map((material) => (
                         <option key={material.id} value={material.id}>
-                          {material.materialType}{material.color ? ` - ${material.color}` : ''}{material.pattern ? ` (${material.pattern})` : ''} ({material.stockQuantity} yd available)
+                          {material.materialType}{material.color ? ` - ${material.color}` : ''}{material.pattern ? ` (${material.pattern})` : ''} ({formatMaterialQty(material.stockQuantity, material)} available)
                         </option>
                       ))}
                     </select>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={entry.quantityUsed}
-                      onChange={(e) => updatePremadeMaterialRow(index, 'quantityUsed', e.target.value)}
-                      placeholder="Yards used"
-                      className="md:col-span-3 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
-                    />
                     <button
                       type="button"
                       onClick={() => removePremadeMaterialRow(index)}
@@ -1412,14 +1440,36 @@ function InventoryContent() {
                     >
                       Remove
                     </button>
+                    {/* Amount used: a length (yd / ft / in / cm, added up) for yard stock, a count for consumables */}
+                    {(() => {
+                      const mat = rawMaterials.find((x) => String(x.id) === entry.materialId);
+                      return (
+                        <div className="md:col-span-12">
+                          <p className="text-xs font-medium text-gray-500 mb-1">
+                            Amount used {mat?.isConsumable ? `(${mat.unit || 'pcs'})` : '(yd / ft / in / cm)'}
+                          </p>
+                          {mat?.isConsumable ? (
+                            <input type="number" min="0" step="1" value={entry.quantityUsed}
+                              onChange={(e) => updatePremadeMaterialRow(index, 'quantityUsed', e.target.value)}
+                              placeholder={mat.unit || 'pcs'}
+                              className="w-40 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
+                          ) : (
+                            <div className="max-w-xl">
+                              <LengthInput value={entry.quantityUsed === '' ? '' : Number(entry.quantityUsed)} ariaLabel="Amount used"
+                                onChange={(yards) => updatePremadeMaterialRow(index, 'quantityUsed', yards ? String(yards) : '')} />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                     {premadeMode === 'restock' && recipeById.get(entry.materialId) && (() => {
                       const r = recipeById.get(entry.materialId)!;
                       const needed = Number(entry.quantityUsed) || 0;
                       return (
                         <p className={`md:col-span-12 -mt-1 text-xs ${needed > r.stock ? 'text-red-600' : 'text-gray-500'}`}>
-                          Previously {r.perPiece != null ? `${r.perPiece.toLocaleString('en-PH', { maximumFractionDigits: 4 })} yd per piece` : `${r.batchQuantity} yd for a batch`}
+                          Previously {r.perPiece != null ? `${formatLength(r.perPiece)} per piece` : `${formatLength(r.batchQuantity)} for a batch`}
                           {r.costPerUnit > 0 && ` · ₱${r.costPerUnit.toLocaleString('en-PH', { minimumFractionDigits: 2 })} per yard (≈ ₱${(needed * r.costPerUnit).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} for this)`}
-                          {` · ${r.stock.toLocaleString('en-PH')} yd in stock`}{needed > r.stock && ' — not enough'}
+                          {` · ${formatLength(r.stock)} in stock`}{needed > r.stock && ' — not enough'}
                         </p>
                       );
                     })()}
@@ -1563,7 +1613,7 @@ function InventoryContent() {
                 <select value={newWaste.materialId} onChange={e => setNewWaste(p => ({ ...p, materialId: e.target.value }))} className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900">
                   <option value="">Select Material *</option>
                   {rawMaterials.map(m => (
-                    <option key={m.id} value={m.id}>{m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} yd available)</option>
+                    <option key={m.id} value={m.id}>{m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({formatMaterialQty(m.stockQuantity, m)} available)</option>
                   ))}
                 </select>
                 <FieldError message={fe.errors['waste-material']} />
@@ -1646,6 +1696,7 @@ function InventoryContent() {
                     <option value="in-stock">In Stock</option>
                     <option value="low-stock">Low Stock</option>
                     <option value="out-of-stock">Out of Stock</option>
+                    <option value="consumables">Consumables</option>
                   </select>
                   {(searchTerm || materialTypeFilter || statusFilter !== 'all') && (
                     <button
@@ -1780,6 +1831,25 @@ function InventoryContent() {
                               className="px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
                             />
                           </div>
+                          <div className="flex items-center gap-3 flex-wrap">
+                            <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                              <input type="checkbox" checked={editMaterial.isConsumable}
+                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, isConsumable: e.target.checked }))}
+                                className="w-4 h-4 rounded border-gray-300 text-[#011c72] focus:ring-[#011c72]" />
+                              Consumable (glue, thread, staples...)
+                            </label>
+                            {editMaterial.isConsumable && (
+                              <input type="text" value={editMaterial.unit} aria-label="Counted in"
+                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, unit: e.target.value.slice(0, 20) }))}
+                                placeholder="pcs"
+                                className="w-24 px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+                            )}
+                            <span className="text-xs text-gray-500">
+                              {editMaterial.isConsumable
+                                ? 'Counted in plain units, not chosen on job orders, marked used here.'
+                                : 'Length stock in yards (shown as yd / ft / in).'}
+                            </span>
+                          </div>
                           {/* Pricing */}
                           <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
                             <div className="flex items-center gap-3 mb-2">
@@ -1799,7 +1869,7 @@ function InventoryContent() {
                             </div>
                             <div className="grid grid-cols-3 gap-2 items-end">
                               <div>
-                                <label className="block text-xs text-gray-500 mb-1">Cost/Yard (₱)</label>
+                                <label className="block text-xs text-gray-500 mb-1">Cost/{editMaterial.isConsumable ? (editMaterial.unit || 'pc') : 'Yard'} (₱)</label>
                                 <input type="number" min="0" step="0.01" value={editMaterial.costPerUnit}
                                   onChange={(e) => setEditMaterial((prev) => ({ ...prev, costPerUnit: e.target.value }))}
                                   placeholder="0.00"
@@ -1866,6 +1936,13 @@ function InventoryContent() {
                               {material.sku && (
                                 <span className="text-xs font-mono text-gray-400">{material.sku}</span>
                               )}
+                              {material.isConsumable && (
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-purple-50 text-purple-700">Consumable</span>
+                              )}
+                              {material.isConsumable && material.partialUseAt && (
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-amber-50 text-amber-700"
+                                  title={`Marked partially used ${formatDateTime(material.partialUseAt)}`}>Partially used</span>
+                              )}
                               {material.supplierName && (
                                 <span className="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700">{material.supplierName}</span>
                               )}
@@ -1880,7 +1957,7 @@ function InventoryContent() {
                                 </span>
                               )}
                               <span>Selling: <span className="font-medium text-gray-700">{formatCurrency(material.unitPrice)}</span></span>
-                              <span>Stock: <span className="font-medium text-gray-700">{material.stockQuantity} yd</span></span>
+                              <span>Stock: <span className="font-medium text-gray-700">{formatMaterialQty(material.stockQuantity, material)}</span></span>
                             </div>
                           </div>
                           {/* Status + actions */}
@@ -1899,11 +1976,26 @@ function InventoryContent() {
                             {canChangeMaterial(material) && can('inventory.adjust_stock') && (
                               <button
                                 onClick={() => openAdjust({ kind: 'material', id: material.id, current: material.stockQuantity,
-                                  name: [material.materialType, material.color, material.pattern].filter(Boolean).join(' - '), unit: 'yd' })}
+                                  name: [material.materialType, material.color, material.pattern].filter(Boolean).join(' - '),
+                                  unit: material.isConsumable ? (material.unit || 'pcs') : 'yd' })}
                                 className="text-sm font-medium text-amber-700 hover:text-amber-800 transition-colors"
                               >
                                 Adjust stock
                               </button>
+                            )}
+                            {material.isConsumable && canChangeMaterial(material) && can('inventory.log_waste', 'inventory.adjust_stock') && (
+                              <>
+                                <button type="button" disabled={consumableBusyId === material.id || material.stockQuantity <= 0}
+                                  onClick={() => markConsumable(material, 'full')}
+                                  className="text-sm font-medium text-red-700 hover:text-red-800 disabled:opacity-40 transition-colors">
+                                  Fully used
+                                </button>
+                                <button type="button" disabled={consumableBusyId === material.id || material.stockQuantity <= 0}
+                                  onClick={() => markConsumable(material, 'partial')}
+                                  className="text-sm font-medium text-gray-600 hover:text-gray-800 disabled:opacity-40 transition-colors">
+                                  Partially used
+                                </button>
+                              </>
                             )}
                           </div>
                         </div>
@@ -2149,19 +2241,19 @@ function InventoryContent() {
                   <svg className="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
-                  <h3 className="text-lg font-medium text-gray-900 mb-2">No material usage yet</h3>
-                  <p className="text-gray-500">Material usage entries appear here when premade products are added or job orders are completed.</p>
+                  <h3 className="text-lg font-medium text-gray-900 mb-2">Nothing in the item trail yet</h3>
+                  <p className="text-gray-500">Entries appear here when materials come in or go out: purchase order deliveries and returns, premade products added, workers&apos; cuts, job orders completed and consumables marked used.</p>
                 </div>
               ) : (
                 <Paginated items={filteredUsageLogs} resetKey={searchTerm} label="entries">{rows => (
                 <table className="w-full">
                   <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">When Used</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">When</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Material</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Where Used</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">What Happened</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">How Much</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Used By</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">By</th>
                       {seesAllInventory && (
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Branch</th>
                       )}
@@ -2176,11 +2268,23 @@ function InventoryContent() {
                           <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                             {log.materialName || 'N/A'}
                           </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                            {log.usedInReference}
+                          <td className="px-6 py-4 text-sm text-gray-600">
+                            {log.kind === 'purchase_order' && log.purchaseOrderId ? (
+                              <Link href={`/purchase-orders/${log.purchaseOrderId}`} className="text-[#011c72] hover:underline">{log.usedInReference}</Link>
+                            ) : log.usedInReference}
+                            {log.kind === 'purchase_order' && log.notes && <span className="block text-xs text-gray-400">{log.notes}</span>}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                            {log.quantityUsed}
+                            {(() => {
+                              // yd / ft / in for length stock, the count and unit for consumables
+                              const mat = rawMaterials.find((x) => x.id === log.materialId);
+                              const incoming = log.direction === 'in';
+                              return (
+                                <span className={`font-medium ${incoming ? 'text-green-700' : 'text-gray-900'}`}>
+                                  {incoming ? '+' : '−'}{formatMaterialQty(Math.abs(Number(log.quantityUsed) || 0), mat)}
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                             {log.workerName ? (
@@ -2664,23 +2768,28 @@ function InventoryContent() {
                   {adjusting.kind === 'material' ? 'purchase orders' : 'Add Stock (made from raw materials) or deliveries'}.
                   Every adjustment is recorded with your name and reason.
                 </p>
-                <div className="grid grid-cols-2 gap-3">
+                <div className={`grid gap-3 ${adjusting.unit === 'yd' ? 'grid-cols-1' : 'grid-cols-2'}`}>
                   <div>
                     <p className="text-xs text-gray-500 mb-1">Current stock</p>
                     <p className="px-3 py-2 rounded-lg bg-gray-50 border border-gray-200 text-sm font-medium text-gray-900">
-                      {adjusting.current.toLocaleString('en-PH')} {adjusting.unit}
+                      {adjusting.unit === 'yd' ? formatLength(adjusting.current) : `${adjusting.current.toLocaleString('en-PH')} ${adjusting.unit}`}
                     </p>
                   </div>
                   <div>
-                    <label htmlFor="adjust-qty" className="block text-xs text-gray-500 mb-1">Correct stock ({adjusting.unit}) *</label>
-                    <input id="adjust-qty" type="number" min="0" step={adjusting.kind === 'premade' ? '1' : '0.01'} autoFocus
-                      value={adjustForm.newQuantity} onChange={e => setAdjustForm(f => ({ ...f, newQuantity: e.target.value }))}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+                    <label htmlFor="adjust-qty" className="block text-xs text-gray-500 mb-1">Correct stock ({adjusting.unit === 'yd' ? 'length' : adjusting.unit}) *</label>
+                    {adjusting.unit === 'yd' ? (
+                      <LengthInput value={adjustForm.newQuantity === '' ? '' : Number(adjustForm.newQuantity)} ariaLabel="Correct stock"
+                        onChange={(yards) => setAdjustForm(f => ({ ...f, newQuantity: String(yards) }))} />
+                    ) : (
+                      <input id="adjust-qty" type="number" min="0" step={adjusting.kind === 'premade' ? '1' : '0.01'} autoFocus
+                        value={adjustForm.newQuantity} onChange={e => setAdjustForm(f => ({ ...f, newQuantity: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+                    )}
                   </div>
                 </div>
                 {change !== null && change !== 0 && (
                   <p className={`text-sm font-medium ${change > 0 ? 'text-green-700' : 'text-red-600'}`}>
-                    {change > 0 ? '+' : ''}{Math.round(change * 100) / 100} {adjusting.unit}
+                    {change > 0 ? '+' : ''}{adjusting.unit === 'yd' ? formatLength(change) : `${Math.round(change * 100) / 100} ${adjusting.unit}`}
                   </p>
                 )}
                 <div>
