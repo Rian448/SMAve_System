@@ -482,6 +482,32 @@ export interface AIPrediction {
   baselineErrorPercent?: number | null;
 }
 
+/** A worker's finished work for a period: GET /api/managed-workers/:id/work-summary */
+export interface WorkerWorkSummary {
+  worker: ManagedWorker;
+  start: string;
+  end: string;
+  /** pay is null for roles that may not see labor cost */
+  totals: { tasks: number; jobOrders: number; hours: number; pay: number | null; yardsUsed: number; yardsExcess: number; openTasks: number };
+  days: { date: string; tasks: number; hours: number; pay: number | null }[];
+  tasks: {
+    id: number;
+    date: string;
+    finishedAt: string | null;
+    jobOrderRef: string;
+    jobOrderDbId: number | null;
+    task: string | null;
+    customerName: string | null;
+    vehicle: string | null;
+    branchName: string | null;
+    hours: number;
+    pay: number | null;
+    payOverridden: boolean;
+    cuts: { material: string; unit: string; used: number; excess: number }[];
+    consumables: { material: string; unit: string; quantity: number; partial: boolean }[];
+  }[];
+}
+
 export const FORECAST_METHOD_LABELS: Record<NonNullable<AIPrediction['method']>, string> = {
   moving_average: 'Moving average', croston_sba: 'Croston (bursty use)',
   exp_smoothing: 'Exponential smoothing', prophet: 'Prophet',
@@ -2441,6 +2467,12 @@ export const api = {
     linkableAccounts: () => fetchApi<LinkableWorkerAccount[]>('/api/managed-workers/linkable-accounts'),
     /** The signed-in worker's own assignments */
     myWork: () => fetchApi<MyWork>('/api/my-work'),
+    /** What a worker finished in a period (Philippine dates, YYYY-MM-DD), with hours and pay */
+    workSummary: (workerId: number, start: string, end: string) =>
+      fetchApi<WorkerWorkSummary>(`/api/managed-workers/${workerId}/work-summary?start=${start}&end=${end}`),
+    /** The same, for the signed-in worker's own work */
+    myWorkSummary: (start: string, end: string) =>
+      fetchApi<WorkerWorkSummary>(`/api/my-work/summary?start=${start}&end=${end}`),
     /** Extra material issued under workers' names (filter by worker and/or job order) */
     extraMaterials: (params: { workerId?: number; jobOrderId?: number } = {}) => {
       const q = new URLSearchParams();

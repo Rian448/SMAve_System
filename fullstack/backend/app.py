@@ -12634,6 +12634,134 @@ def get_my_work():
         } for a in rows],
     }})
 
+def worker_work_summary(worker, in_branch=None, show_pay=True):
+    """What a worker finished between ?start= and ?end= (YYYY-MM-DD, Philippine
+    dates; both default to today): each task with its job order, hours, pay and
+    the material cut / left over / consumables, plus totals and a per-day breakdown.
+    Returns (payload, None) or (None, error response)."""
+    today = manila_today()
+    try:
+        start = datetime.strptime(request.args.get('start') or today.isoformat(), '%Y-%m-%d').date()
+        end = datetime.strptime(request.args.get('end') or today.isoformat(), '%Y-%m-%d').date()
+    except ValueError:
+        return None, (jsonify({'status': 'error', 'message': 'Dates must be YYYY-MM-DD'}), 400)
+    if end < start:
+        start, end = end, start
+    if (end - start).days > 400:
+        return None, (jsonify({'status': 'error', 'message': 'Choose a period of at most a year'}), 400)
+    # end_time is stored in UTC: the Philippine day starts 8 hours earlier
+    lo = datetime.combine(start, datetime.min.time()) - PH_OFFSET
+    hi = datetime.combine(end + timedelta(days=1), datetime.min.time()) - PH_OFFSET
+    done = (WorkerAssignment.query.filter(WorkerAssignment.worker_id == worker.id,
+                                          WorkerAssignment.status == 'completed',
+                                          WorkerAssignment.end_time >= lo, WorkerAssignment.end_time < hi)
+            .order_by(WorkerAssignment.end_time).all())
+    if in_branch:
+        done = [a for a in done if in_branch(a)]
+    ids = [a.id for a in done] or [-1]
+    order_ids = {a.job_order_db_id for a in done if a.job_order_db_id}
+    orders = {o.id: o for o in JobOrder.query.filter(JobOrder.id.in_(order_ids))} if order_ids else {}
+
+    def mat_name(mat):
+        return ' - '.join(filter(None, [mat.material_type, mat.color])) if mat else 'Removed material'
+
+    cuts, extras = defaultdict(dict), defaultdict(list)
+    for log in MaterialUsageLog.query.filter(MaterialUsageLog.worker_assignment_id.in_(ids)).all():
+        if log.used_in_type == 'job_order_cut':
+            row = cuts[log.worker_assignment_id].setdefault(log.material_id, {
+                'material': mat_name(log.material), 'unit': material_unit(log.material) if log.material else 'yd',
+                'used': 0.0, 'excess': 0.0})
+            row['used'] += float(log.quantity_used or 0)
+        elif log.used_in_type in ('consumable', 'consumable_partial'):
+            extras[log.worker_assignment_id].append({
+                'material': mat_name(log.material), 'unit': material_unit(log.material) if log.material else 'pcs',
+                'quantity': float(log.quantity_used or 0), 'partial': log.used_in_type == 'consumable_partial'})
+    for w in MaterialWasteLog.query.filter(MaterialWasteLog.worker_assignment_id.in_(ids),
+                                           MaterialWasteLog.reason == CUT_EXCESS_REASON).all():
+        mat = InventoryMaterial.query.get(w.material_id)
+        row = cuts[w.worker_assignment_id].setdefault(w.material_id, {
+            'material': mat_name(mat), 'unit': material_unit(mat) if mat else 'yd', 'used': 0.0, 'excess': 0.0})
+        row['excess'] += float(w.quantity or 0)
+
+    tasks, days = [], {}
+    for a in done:
+        o = orders.get(a.job_order_db_id)
+        day = (a.end_time + PH_OFFSET).date().isoformat()
+        pay = float(a.pay or 0)
+        hours = float(a.hours_worked or 0)
+        task_cuts = [{**c, 'used': round(c['used'], 4), 'excess': round(c['excess'], 4)}
+                     for c in cuts.get(a.id, {}).values()]
+        tasks.append({
+            'id': a.id, 'date': day, 'finishedAt': fmt_dt(a.end_time),
+            'jobOrderRef': a.special_task_title if a.assignment_type == 'special_task' else a.job_order_ref,
+            'jobOrderDbId': a.job_order_db_id, 'task': a.description,
+            'customerName': o.customer_name if o else None,
+            'vehicle': ' '.join(filter(None, [(o.vehicle_info or {}).get('make'), (o.vehicle_info or {}).get('model')]))
+                       if o and isinstance(o.vehicle_info, dict) else None,
+            'branchName': o.branch.name if o and o.branch else None,
+            'hours': hours, 'pay': pay, 'payOverridden': a.pay_override is not None,
+            'cuts': task_cuts, 'consumables': extras.get(a.id, []),
+        })
+        d = days.setdefault(day, {'date': day, 'tasks': 0, 'hours': 0.0, 'pay': 0.0})
+        d['tasks'] += 1
+        d['hours'] += hours
+        d['pay'] += pay
+
+    yards_used = sum(c['used'] for t in tasks for c in t['cuts'] if c['unit'] == 'yd')
+    yards_excess = sum(c['excess'] for t in tasks for c in t['cuts'] if c['unit'] == 'yd')
+    open_q = WorkerAssignment.query.filter(WorkerAssignment.worker_id == worker.id,
+                                           WorkerAssignment.status != 'completed').all()
+    if in_branch:
+        open_q = [a for a in open_q if in_branch(a)]
+    total_pay = money(sum(t['pay'] for t in tasks))
+    if not show_pay:  # pay is payroll: only for those who see labor cost
+        for row in tasks + list(days.values()):
+            row['pay'] = None
+        total_pay = None
+    return {
+        'worker': managed_worker_to_dict(worker),
+        'start': start.isoformat(), 'end': end.isoformat(),
+        'totals': {
+            'tasks': len(tasks),
+            'jobOrders': len({t['jobOrderRef'] for t in tasks}),
+            'hours': round(sum(t['hours'] for t in tasks), 2),
+            'pay': total_pay,
+            'yardsUsed': round(yards_used, 2), 'yardsExcess': round(yards_excess, 2),
+            'openTasks': len(open_q),
+        },
+        'days': [{**d, 'hours': round(d['hours'], 2), 'pay': money(d['pay']) if d['pay'] is not None else None}
+                 for d in sorted(days.values(), key=lambda x: x['date'])],
+        'tasks': list(reversed(tasks)),  # newest first
+    }, None
+
+
+@app.route('/api/managed-workers/<int:worker_id>/work-summary', methods=['GET'])
+@require_auth
+@require_permission('workers.view')
+def managed_worker_work_summary(worker_id):
+    worker = ManagedWorker.query.get(worker_id)
+    if not worker:
+        return jsonify({'status': 'error', 'message': 'Worker not found'}), 404
+    payload, error = worker_work_summary(worker, assignment_in_branch(request.current_user),
+                                         show_pay=sees_labor_cost(request.current_user))
+    if error:
+        return error
+    return jsonify({'status': 'success', 'data': payload})
+
+
+@app.route('/api/my-work/summary', methods=['GET'])
+@require_auth
+def my_work_summary():
+    """The signed-in worker's own finished work and pay for a period."""
+    worker = ManagedWorker.query.filter_by(user_id=request.current_user['id']).first()
+    if not worker:
+        return jsonify({'status': 'error', 'message': 'Your account is not linked to a worker'}), 404
+    payload, error = worker_work_summary(worker)
+    if error:
+        return error
+    return jsonify({'status': 'success', 'data': payload})
+
+
 @app.route('/api/managed-workers/<int:worker_id>', methods=['DELETE'])
 @require_auth
 @require_permission('workers.delete')
@@ -13933,11 +14061,19 @@ def get_ai_predictions():
 @require_auth
 @require_permission('forecasting.manage')
 def recompute_ai_predictions():
-    cache = AIPredictionCache.query.first()
-    if not cache or cache.upload_rows == 0:
-        return jsonify({'status': 'error', 'message': 'No historical data uploaded yet'}), 400
+    # Forecasts come from the uploaded history and/or the live material usage
+    # (Item Trail), so either one is enough to compute them
+    has_history = db.session.query(HistoricalInventoryData.id).first() is not None
+    has_usage = db.session.query(MaterialUsageLog.id).first() is not None
+    if not has_history and not has_usage:
+        return jsonify({'status': 'error',
+                        'message': 'Nothing to forecast yet: upload history or record some material usage'}), 400
 
-    if cache.status == 'computing':
+    cache = AIPredictionCache.query.first()
+    if not cache:
+        cache = AIPredictionCache(status='idle', predictions_json='[]')
+        db.session.add(cache)
+    elif cache.status == 'computing':
         return jsonify({'status': 'error', 'message': 'Computation already in progress'}), 400
 
     cache.status = 'computing'

@@ -9,6 +9,13 @@ import LengthInput from '@/components/LengthInput';
 import { manilaDateString } from '@/lib/dateUtils';
 import { formatMaterialQty } from '@/lib/length';
 
+/** Restock suggestions bought from one supplier: one purchase order */
+interface RestockGroup {
+  supplierId: number | null;
+  items: POItem[];
+  done: boolean;
+}
+
 interface POItem {
   material_id: string;
   material_name: string;
@@ -63,14 +70,26 @@ export default function NewPurchaseOrderPage() {
       .catch(err => console.error(err));
   }, []);
 
-  // Items picked from the restock recommendations (Forecasting) arrive as
-  // ?restock=CODE:qty,CODE:qty. They fill the lines to review; nothing is saved yet.
+  // Items picked from the restock recommendations (Forecasting, Inventory → AI
+  // Predictions) arrive as ?restock=CODE:qty,CODE:qty. A purchase order is for one
+  // supplier, so they are split by each material's supplier: one order per
+  // supplier, filled in one after another. Nothing is saved until each is created.
   const [restockNote, setRestockNote] = useState<{ added: number; missing: string[] } | null>(null);
+  const [groups, setGroups] = useState<RestockGroup[]>([]);
+  const [groupIndex, setGroupIndex] = useState(0);
+  const [justCreated, setJustCreated] = useState('');
+  const loadGroup = (list: RestockGroup[], index: number) => {
+    const g = list[index];
+    setGroupIndex(index);
+    setItems(g.items.map(it => ({ ...it })));
+    setSupplierId(g.supplierId ? String(g.supplierId) : '');
+  };
   useEffect(() => {
     if (loadingMaterials) return;
     const raw = new URLSearchParams(window.location.search).get('restock');
     if (!raw) return;
-    const lines = new Map<number, POItem>();
+    const bySupplier = new Map<number | null, POItem[]>();
+    const seen = new Set<number>();
     const missing: string[] = [];
     for (const part of raw.split(',')) {
       const at = part.lastIndexOf(':');
@@ -79,8 +98,11 @@ export default function NewPurchaseOrderPage() {
       // Only materials in Inventory can be ordered, once each
       const m = materials.find(x => x.itemId === code && !x.isArchived);
       if (!m || !(qty > 0)) { missing.push(code); continue; }
-      if (lines.has(m.id)) continue;
-      lines.set(m.id, {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      const key = m.supplierId || null;
+      if (!bySupplier.has(key)) bySupplier.set(key, []);
+      bySupplier.get(key)!.push({
         material_id: String(m.id),
         material_name: [m.materialType, m.color, m.pattern].filter(Boolean).join(' - '),
         quantity: qty,
@@ -89,13 +111,21 @@ export default function NewPurchaseOrderPage() {
         consumable: !!m.isConsumable,
       });
     }
-    if (lines.size) setItems([...lines.values()]);
-    // A purchase order is for one supplier: choose it when every item has the same one
-    const suppliers = new Set([...lines.keys()].map(id => materials.find(m => m.id === id)?.supplierId).filter(Boolean));
-    if (suppliers.size === 1) setSupplierId(String([...suppliers][0]));
-    setRestockNote({ added: lines.size, missing });
+    // Materials with a supplier first; any without one last (the supplier is chosen by hand)
+    const list: RestockGroup[] = [...bySupplier.entries()]
+      .sort(([a], [b]) => (a === null ? 1 : 0) - (b === null ? 1 : 0))
+      .map(([sid, its]) => ({ supplierId: sid, items: its, done: false }));
+    if (list.length) {
+      setGroups(list);
+      loadGroup(list, 0);
+      // A few days out by default; change it to what the supplier says
+      setExpectedDate(prev => prev || manilaDateString(new Date(Date.now() + 3 * 86400000)));
+    }
+    setRestockNote({ added: seen.size, missing });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadingMaterials]);
+  const supplierName = (id: number | null) =>
+    id ? savedSuppliers.find(s => s.id === id)?.name || 'Supplier' : 'No supplier set';
 
   // Lines whose material is normally bought from a different supplier than the one chosen
   const otherSupplierItems = chosenSupplier ? items.filter(it => {
@@ -186,6 +216,20 @@ export default function NewPurchaseOrderPage() {
       };
 
       await api.purchaseOrders.create(purchaseOrder);
+      // Restock suggestions from several suppliers: go on to the next supplier's order
+      if (groups.length > 1) {
+        const updated = groups.map((g, i) => (i === groupIndex ? { ...g, done: true } : g));
+        const next = updated.findIndex(g => !g.done);
+        setGroups(updated);
+        if (next >= 0) {
+          setJustCreated(chosenSupplier!.name);
+          loadGroup(updated, next);
+          setNotes('');
+          setLoading(false);
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          return;
+        }
+      }
       router.push('/purchase-orders');
     } catch (err) {
       console.error(err);
@@ -218,13 +262,42 @@ export default function NewPurchaseOrderPage() {
         {error && (
           <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>
         )}
+        {justCreated && (
+          <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-xl text-sm text-green-800">
+            Purchase order for <b>{justCreated}</b> created. Next: <b>{supplierName(groups[groupIndex]?.supplierId ?? null)}</b>.
+          </div>
+        )}
         {restockNote && (
-          <div className="mb-6 p-4 bg-[#eef1fb] border border-[#c7d2f5] rounded-xl text-sm text-[#011c72] space-y-1">
+          <div className="mb-6 p-4 bg-[#eef1fb] border border-[#c7d2f5] rounded-xl text-sm text-[#011c72] space-y-2">
             <p>
-              <b>{restockNote.added} item{restockNote.added === 1 ? '' : 's'}</b> added from the restock recommendations with the suggested quantities.
-              Review the quantities and remove anything you don&apos;t need. Nothing is ordered until you create the purchase order,
+              <b>{restockNote.added} item{restockNote.added === 1 ? '' : 's'}</b> added from the restock recommendations with the suggested quantities,
+              {' '}each with its supplier, cost and payment terms filled in.
+              Review them and remove anything you don&apos;t need. Nothing is ordered until you create the purchase order,
               and stock only goes up when it is received.
             </p>
+            {groups.length > 1 && (
+              <div>
+                <p className="font-semibold">
+                  These come from {groups.length} suppliers, so they make {groups.length} purchase orders, one per supplier:
+                </p>
+                <ol className="mt-1 space-y-1">
+                  {groups.map((g, i) => (
+                    <li key={i} className="flex flex-wrap items-center gap-2">
+                      <span className={`inline-flex w-5 h-5 items-center justify-center rounded-full text-[11px] font-bold ${g.done ? 'bg-green-600 text-white' : i === groupIndex ? 'bg-[#011c72] text-white' : 'bg-white text-[#011c72] border border-[#c7d2f5]'}`}>
+                        {g.done ? '✓' : i + 1}
+                      </span>
+                      <span className={i === groupIndex ? 'font-semibold' : ''}>
+                        {supplierName(g.supplierId)}: {g.items.length} item{g.items.length === 1 ? '' : 's'}
+                      </span>
+                      {g.done ? <span className="text-xs text-green-700">created</span>
+                        : i === groupIndex ? <span className="text-xs">(this form)</span>
+                        : <button type="button" onClick={() => loadGroup(groups, i)}
+                            className="text-xs font-medium underline hover:no-underline">Do this one now</button>}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
             {restockNote.missing.length > 0 && (
               <p className="text-amber-800">Not added (not in Inventory): {restockNote.missing.join(', ')}</p>
             )}
