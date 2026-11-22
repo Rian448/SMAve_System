@@ -12,6 +12,7 @@ import Combobox from '@/components/Combobox';
 import MaterialPicker from '@/components/MaterialPicker';
 import LengthInput from '@/components/LengthInput';
 import { formatLength } from '@/lib/length';
+import type { VehicleHistory } from '@/lib/api';
 import PremadeItemPicker from '@/components/PremadeItemPicker';
 import { useVatRate } from '@/lib/useVatRate';
 import { useFieldErrors, FieldError, emailProblem, phoneProblem, cleanPhoneInput, PHONE_DIGITS } from '@/lib/useFieldErrors';
@@ -619,6 +620,50 @@ function NewJobOrderForm() {
     }
     return {};
   };
+
+  // ── Earlier work on this car / model: suggestions for the Materials step ──
+  const [vehicleHistory, setVehicleHistory] = useState<VehicleHistory | null>(null);
+  const [historyDismissed, setHistoryDismissed] = useState(false);
+  const [historyApplied, setHistoryApplied] = useState('');
+  const historyServices = [
+    flooring.selected && 'flooring', reupholstery.selected && 'reupholstery', ceiling.selected && 'ceiling',
+    sidings.selected && 'sidings', seatCovers.selected && 'seat_covers', otherServices.selected && 'other',
+  ].filter(Boolean).join(', ');
+  useEffect(() => {
+    if (orderType !== 'normal' || step < 3 || skipVehicle) { setVehicleHistory(null); return; }
+    const make = vehicleMake.trim(), model = vehicleModel.trim(), plate = vehiclePlate.trim();
+    if (!(make && model) && plate.replace(/[^A-Za-z0-9]/g, '').length < 4) { setVehicleHistory(null); return; }
+    const timer = setTimeout(() => {
+      api.sales.getVehicleHistory({
+        make, model, year: vehicleYear, plate, services: historyServices,
+        ...(editingDraftId ? { excludeId: editingDraftId } : {}),
+      }).then((res) => setVehicleHistory(res.data || null)).catch(() => setVehicleHistory(null));
+    }, 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderType, step >= 3, skipVehicle, vehicleMake, vehicleModel, vehicleYear, vehiclePlate, historyServices]);
+
+  /** Put suggested materials on the Materials step: a line already there gets the
+   *  suggested amount, others are added. Nothing else is removed; staff can still edit. */
+  const applySuggestion = (items: { materialId: number; name: string; quantity: number }[], from: string) => {
+    let next = [...materials];
+    const skipped: string[] = [];
+    for (const it of items) {
+      const inv = inventoryMaterials.find((x) => x.id === it.materialId && !x.isArchived);
+      if (!inv) { skipped.push(it.name); continue; }
+      const existing = next.find((x) => Number(x.materialId) === inv.id);
+      if (existing) {
+        next = next.map((x) => (x.id === existing.id ? { ...x, quantity: it.quantity } : x));
+      } else {
+        materialIdRef.current += 1;
+        next.push({ id: `mat-${materialIdRef.current}`, materialSource: 'inventory', materialId: inv.id,
+          name: inv.materialType, quantity: it.quantity, unitPrice: inv.unitPrice ?? 0 });
+      }
+    }
+    setMaterials(next);
+    setHistoryApplied(`Added from ${from}.${skipped.length ? ` Not in stock here any more: ${skipped.join(', ')}.` : ''}`);
+  };
+  const inStockHere = (id: number) => inventoryMaterials.some((x) => x.id === id && !x.isArchived && x.stockQuantity > 0);
 
   // Lines on the Materials step that came from a service card's material, by service,
   // so changing or clearing that material replaces or removes its line (once)
@@ -1684,6 +1729,26 @@ function NewJobOrderForm() {
                   className={inputCls} placeholder="ABC 1234" />
               </div>
             </div>
+            {vehicleHistory && vehicleHistory.sameCar.length > 0 && (
+              <div className="mt-4 rounded-xl border border-[#c7d2f5] bg-[#eef1fb] px-4 py-3 text-sm text-[#011c72]">
+                <p className="font-semibold">This car was done before</p>
+                <ul className="mt-1 space-y-0.5">
+                  {vehicleHistory.sameCar.map((j) => (
+                    <li key={j.id}>
+                      <a href={`/sales/${j.id}`} target="_blank" rel="noreferrer" className="font-mono hover:underline">{j.jobOrderId}</a>
+                      {' · '}{j.services.replace(/_/g, ' ')}{j.date ? ` · ${formatDate(j.date)}` : ''}{j.branchName ? ` · ${j.branchName}` : ''}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-1 text-xs text-[#011c72]/80">Its materials are suggested on the Materials step.</p>
+              </div>
+            )}
+            {vehicleHistory && vehicleHistory.sameCar.length === 0 && (vehicleHistory.sameModelCount || 0) > 0 && (
+              <p className="mt-4 text-sm text-gray-600">
+                {vehicleMake} {vehicleModel}: done {vehicleHistory.sameModelCount} time{vehicleHistory.sameModelCount === 1 ? '' : 's'} before.
+                Usual materials are suggested on the Materials step.
+              </p>
+            )}
           </div>
         );
 
@@ -1989,6 +2054,62 @@ function NewJobOrderForm() {
                 </button>
               </div>
 
+              {/* Suggestions from earlier jobs on this car / model (nothing changes until applied) */}
+              {vehicleHistory && !historyDismissed && (vehicleHistory.sameCar.some((j) => j.materials.length) || vehicleHistory.suggestion) && (
+                <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="text-sm font-semibold text-amber-900">Suggested materials from earlier jobs</p>
+                    <button type="button" onClick={() => setHistoryDismissed(true)} className="text-xs text-amber-800 hover:underline shrink-0">Hide</button>
+                  </div>
+                  {(() => {
+                    const last = vehicleHistory.sameCar.find((j) => j.materials.length);
+                    if (!last) return null;
+                    return (
+                      <div className="text-sm">
+                        <p className="text-amber-900">
+                          <b>Same car</b> ({last.plateNumber || vehiclePlate}) — <span className="font-mono">{last.jobOrderId}</span>
+                          {last.date ? `, ${formatDate(last.date)}` : ''}, actually used:
+                        </p>
+                        <ul className="mt-1 text-amber-900">
+                          {last.materials.map((it) => (
+                            <li key={it.materialId}>
+                              {formatLength(it.quantity)} {it.name}
+                              {!inStockHere(it.materialId) && <span className="text-red-700"> (not in stock here)</span>}
+                            </li>
+                          ))}
+                        </ul>
+                        <button type="button" onClick={() => applySuggestion(last.materials, last.jobOrderId)}
+                          className="mt-2 px-3 py-1.5 rounded-lg bg-[#011c72] hover:bg-[#01268c] text-white text-xs font-medium">
+                          Use same as last time
+                        </button>
+                      </div>
+                    );
+                  })()}
+                  {vehicleHistory.suggestion && (
+                    <div className="text-sm border-t border-amber-200 pt-3 first:border-0 first:pt-0">
+                      <p className="text-amber-900">
+                        <b>{vehicleMake} {vehicleModel}</b> usually takes (from {vehicleHistory.suggestion.basedOnJobs} earlier job{vehicleHistory.suggestion.basedOnJobs === 1 ? '' : 's'}
+                        {vehicleHistory.suggestion.sameService ? ', same service' : ''}{vehicleHistory.suggestion.similarYear ? ', similar year' : ''}):
+                      </p>
+                      <ul className="mt-1 text-amber-900">
+                        {vehicleHistory.suggestion.items.map((it) => (
+                          <li key={it.materialId}>
+                            {formatLength(it.quantity)} {it.name}
+                            <span className="text-amber-700 text-xs"> · used in {it.share}% of those jobs</span>
+                            {!inStockHere(it.materialId) && <span className="text-red-700"> (not in stock here)</span>}
+                          </li>
+                        ))}
+                      </ul>
+                      <button type="button" onClick={() => applySuggestion(vehicleHistory.suggestion!.items, `earlier ${vehicleMake} ${vehicleModel} jobs`)}
+                        className="mt-2 px-3 py-1.5 rounded-lg border border-[#011c72] text-[#011c72] hover:bg-white text-xs font-medium">
+                        Use suggested materials
+                      </button>
+                    </div>
+                  )}
+                  <p className="text-xs text-amber-800">Only a suggestion: amounts can be changed and lines removed below.</p>
+                  {historyApplied && <p className="text-xs font-medium text-green-700">✓ {historyApplied}</p>}
+                </div>
+              )}
               {materials.length === 0 ? (
                 <div {...fe.field('materialsList', true)}
                   className={`text-center py-6 border-2 border-dashed rounded-xl text-sm ${fe.errors.materialsList ? 'border-red-300 text-red-600' : 'border-gray-200 text-gray-400'}`}>
@@ -2488,7 +2609,7 @@ function NewJobOrderForm() {
               </button>
               <div className="flex items-center gap-3">
                 <button type="button" onClick={saveDraft} disabled={loading}
-                  className="inline-flex items-center gap-2.5 px-6 py-3 rounded-xl text-base font-semibold bg-white border-2 border-[#011c72] text-[#011c72] hover:bg-[#eef1fb] transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-2 sm:gap-2.5 px-3 sm:px-6 py-3 rounded-xl text-sm sm:text-base font-semibold whitespace-nowrap bg-white border-2 border-[#011c72] text-[#011c72] hover:bg-[#eef1fb] transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                   title={editingDraftId ? 'Save your changes to this draft' : 'Save this order as a draft to finish later'}>
                   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h8l4 4v10a2 2 0 01-2 2H7a2 2 0 01-2-2V5z M9 3v4h6" />

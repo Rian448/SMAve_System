@@ -2756,7 +2756,8 @@ def get_alerts():
             'type': 'low_stock',
             'severity': 'warning' if (material.stock_quantity or 0) > 0 else 'critical',
             'title': f"Low Stock: {name}",
-            'description': f"Current: {float(material.stock_quantity or 0)} (Reorder at: {threshold})",
+            'description': f"Current: {format_material_qty(material.stock_quantity, material)} "
+                           f"(Reorder at: {format_material_qty(threshold, material)})",
             'itemId': material.id,
             # Lets the dashboard deep-link straight to this material in inventory.
             'itemName': material.material_type or name,
@@ -2827,6 +2828,23 @@ def material_to_dict(material):
 # inches (1 ft = 0.333333... yd) can land a hair over a stored amount, so limits allow
 # this much, and the amount is then capped at the limit.
 QTY_TOLERANCE = 0.0001
+
+def format_length(yards):
+    """"39 yd 2 ft 1 in", as the pages show lengths (inches to 0.1)."""
+    total_in = round(abs(float(yards or 0)) * 36, 1)
+    yd = int(total_in // 36 + 1e-9)
+    rest = round(total_in - yd * 36, 1)
+    ft = int(rest // 12 + 1e-9)
+    inches = round(rest - ft * 12, 1)
+    parts = [f'{yd} yd' if yd else '', f'{ft} ft' if ft else '', f'{inches:g} in' if inches else '']
+    text = ' '.join(p for p in parts if p) or '0 yd'
+    return ('-' if float(yards or 0) < 0 else '') + text
+
+def format_material_qty(qty, material):
+    """A quantity in the material's terms: a length for yard stock, "5 cans" for consumables."""
+    if material is not None and material.is_consumable:
+        return f'{float(qty or 0):g} {material_unit(material)}'
+    return format_length(qty)
 
 def material_unit(material):
     """'yd' for length stock; a consumable's own count unit (pcs by default)."""
@@ -5737,6 +5755,113 @@ def job_order_pricing(data, order=None):
         'vat_inclusive': True,
     }, None
 
+# ── Vehicle history: suggest materials from earlier jobs on the same car / model ──
+def _norm_plate(plate):
+    return re.sub(r'[^A-Z0-9]', '', str(plate or '').upper())
+
+def _norm_text(value):
+    return ' '.join(str(value or '').split()).lower()
+
+def _service_set(description):
+    """{'seat_covers', 'flooring', ...} from a job order's description ("reupholstery (sofa)" -> reupholstery)."""
+    return {part.strip().split(' (')[0] for part in str(description or '').lower().split(',') if part.strip()}
+
+def _job_materials(order):
+    """[(material id, name, quantity)] of an order's Inventory material lines, using what
+    workers recorded as used (actualQuantity) when there is one, else the planned amount."""
+    out = []
+    for it in order.items or []:
+        if item_category(it) != 'material':
+            continue
+        mid = _int_or_none(it.get('materialId'))
+        qty = it.get('actualQuantity') if it.get('actualQuantity') is not None else it.get('quantity')
+        qty = finite_number(qty, 0.0) or 0.0
+        if mid and qty > 0:
+            out.append((mid, it.get('name') or '', round(qty, 4)))
+    return out
+
+def _snap_yards(qty):
+    """Suggested lengths to the nearest foot (1/3 yd), at least one foot."""
+    return round(max(round(qty * 3), 1) / 3, 4)
+
+@app.route('/api/sales/job-orders/vehicle-history', methods=['GET'])
+@require_auth
+@require_permission('sales.add', 'sales.edit')
+def get_vehicle_history():
+    """Earlier job orders on the same car (plate) and the materials usually used for the
+    same make and model (and service), to suggest on a new job order. Suggestions only:
+    nothing is changed. ?make=&model=&year=&plate=&services=&excludeId="""
+    make, model = _norm_text(request.args.get('make')), _norm_text(request.args.get('model'))
+    plate = _norm_plate(request.args.get('plate'))
+    year = _int_or_none(request.args.get('year'))
+    services = _service_set(request.args.get('services'))
+    exclude = _int_or_none(request.args.get('excludeId'))
+    if not (make and model) and not plate:
+        return jsonify({'status': 'success', 'data': {'sameCar': [], 'suggestion': None}})
+
+    orders = (JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided')))
+              .order_by(JobOrder.created_at.desc()).limit(3000).all())
+    same_car, same_model = [], []
+    for o in orders:
+        if o.id == exclude:
+            continue
+        v = o.vehicle_info or {}
+        if plate and len(plate) >= 4 and _norm_plate(v.get('plateNumber')) == plate:
+            same_car.append(o)
+        if make and model and _norm_text(v.get('make')) == make and _norm_text(v.get('model')) == model:
+            same_model.append(o)
+
+    names = {m.id: m for m in InventoryMaterial.query.filter(InventoryMaterial.id.in_(
+        {mid for o in same_car + same_model for mid, _, _ in _job_materials(o)} or {-1})).all()}
+    label = lambda mid, fallback: (' - '.join(filter(None, [names[mid].material_type, names[mid].color, names[mid].pattern]))
+                                   if mid in names else fallback)
+
+    def car_entry(o):
+        v = o.vehicle_info or {}
+        return {'id': o.id, 'jobOrderId': o.job_order_id, 'date': fmt_dt(o.created_at), 'status': o.status,
+                'services': o.description, 'year': v.get('year'), 'plateNumber': v.get('plateNumber'),
+                'branchName': o.branch.name if o.branch else None,
+                'materials': [{'materialId': mid, 'name': label(mid, name), 'quantity': qty}
+                              for mid, name, qty in _job_materials(o)]}
+
+    # Same model: the jobs closest to this one (same service, similar year) when there are enough
+    pool = same_model
+    narrowed = {'service': False, 'year': False}
+    if services:
+        same_service = [o for o in pool if _service_set(o.description) == services]
+        if len(same_service) >= 2:
+            pool, narrowed['service'] = same_service, True
+    if year:
+        near_year = [o for o in pool if abs((_int_or_none((o.vehicle_info or {}).get('year')) or year) - year) <= 3]
+        if len(near_year) >= 2:
+            pool, narrowed['year'] = near_year, True
+    with_materials = [o for o in pool if _job_materials(o)]
+
+    suggestion = None
+    if with_materials:
+        seen = {}
+        for o in with_materials:
+            for mid, name, qty in _job_materials(o):
+                seen.setdefault(mid, {'name': label(mid, name), 'quantities': []})['quantities'].append(qty)
+        total = len(with_materials)
+        ranked = sorted(seen.items(), key=lambda kv: -len(kv[1]['quantities']))
+        # Materials used on at least a quarter of these jobs (the most common one always)
+        picked = [kv for i, kv in enumerate(ranked) if i == 0 or len(kv[1]['quantities']) / total >= 0.25][:4]
+        items = []
+        for mid, info in picked:
+            q = sorted(info['quantities'])
+            median = q[len(q) // 2] if len(q) % 2 else (q[len(q) // 2 - 1] + q[len(q) // 2]) / 2
+            items.append({'materialId': mid, 'name': info['name'], 'quantity': _snap_yards(median),
+                          'usedInJobs': len(q), 'share': round(len(q) / total * 100)})
+        suggestion = {'basedOnJobs': total, 'sameService': narrowed['service'], 'similarYear': narrowed['year'],
+                      'items': items}
+
+    return jsonify({'status': 'success', 'data': {
+        'sameCar': [car_entry(o) for o in same_car[:5]],
+        'sameModelCount': len(same_model),
+        'suggestion': suggestion,
+    }})
+
 @app.route('/api/sales/job-orders', methods=['POST'])
 @require_auth
 @require_permission('sales.add')
@@ -7177,8 +7302,10 @@ def purchase_order_remaining_by_line(po, receipts=None):
     """Still to be received per line: ordered minus delivered, plus what was
     returned for the supplier to replace."""
     q = purchase_order_line_quantities(po, receipts)
-    return [max(float(it.get('quantity') or 0) - q['delivered'][i] + q['replace'][i], 0.0)
+    left = [max(float(it.get('quantity') or 0) - q['delivered'][i] + q['replace'][i], 0.0)
             for i, it in enumerate(po.items or [])]
+    # A rounding leftover (e.g. 1 ft ordered as 0.333333 yd, received as 0.3333) is nothing left
+    return [0.0 if r < QTY_TOLERANCE else r for r in left]
 
 
 def purchase_order_receiving_status(po, received=None):

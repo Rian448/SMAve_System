@@ -1112,10 +1112,11 @@ export default function WorkerDashboard() {
 
         {/* ── ASSIGN TAB ─────────────────────────────────────────────────── */}
         {activeTab === 'assign' && (
-          <div className="flex gap-6 items-start">
+          // Phones: the job order list on top, the workers below it; side by side from tablets up
+          <div className="flex flex-col md:flex-row gap-6 md:items-start">
 
             {/* Left — Job Orders panel */}
-            <div className="w-72 shrink-0 bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col" style={{ maxHeight: 'calc(100vh - 200px)' }}>
+            <div className="w-full md:w-72 shrink-0 bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col max-h-[60vh] md:max-h-[calc(100vh-200px)]">
               <div className="p-4 border-b border-gray-100">
                 <h2 className="text-sm font-semibold text-gray-900 mb-3">Job Orders</h2>
                 <div className="flex gap-1 bg-gray-100 rounded-lg p-0.5 mb-3 text-xs">
@@ -1157,7 +1158,7 @@ export default function WorkerDashboard() {
             </div>
 
             {/* Right — Workers */}
-            <div className="flex-1 space-y-4">
+            <div className="flex-1 min-w-0 space-y-4">
               {pickedBanner('"Assign here" on a worker')}
               {activeWorkers.length === 0 ? (
                 <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 text-sm">

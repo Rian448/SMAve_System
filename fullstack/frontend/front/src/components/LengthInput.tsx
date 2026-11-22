@@ -3,11 +3,12 @@ import { useState } from 'react';
 import { formatLength, splitYards, toYards } from '@/lib/length';
 
 type Field = 'yd' | 'ft' | 'in' | 'cm';
+// The unit also shows inside each box, so the labels stay short enough for one line
 const FIELDS: { key: Field; label: string }[] = [
-  { key: 'yd', label: 'Yards (yd)' },
-  { key: 'ft', label: 'Feet (ft)' },
-  { key: 'in', label: 'Inches (in)' },
-  { key: 'cm', label: 'Centimeters (cm)' },
+  { key: 'yd', label: 'Yards' },
+  { key: 'ft', label: 'Feet' },
+  { key: 'in', label: 'Inches' },
+  { key: 'cm', label: 'Centimeters' },
 ];
 
 const fieldsFor = (yards: number): Record<Field, string> => {
@@ -59,10 +60,11 @@ export default function LengthInput({
 
   return (
     <div>
-      <div className="grid grid-cols-4 gap-1.5" role="group" aria-label={ariaLabel}>
+      {/* Two by two on phones, one row of four from small tablets up */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5" role="group" aria-label={ariaLabel}>
         {FIELDS.map(({ key, label }) => (
           <div key={key} className="min-w-0">
-            {!compact && <label className="block text-[11px] font-medium text-gray-500 mb-0.5">{label}</label>}
+            {!compact && <label className="block text-[11px] font-medium text-gray-500 mb-0.5 truncate">{label}</label>}
             <div className="relative">
               <input type="text" inputMode="decimal" value={fields[key]} placeholder="0"
                 aria-label={`${ariaLabel} – ${label}`}

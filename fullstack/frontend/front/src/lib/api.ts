@@ -692,6 +692,20 @@ export interface MaterialUsageLog {
   usedAt: string;
 }
 
+/** Earlier work on a car / model, for suggesting materials on a new job order */
+export interface VehicleHistory {
+  sameCar: {
+    id: number; jobOrderId: string; date: string | null; status: string; services: string; year?: number | string | null;
+    plateNumber?: string | null; branchName?: string | null;
+    materials: { materialId: number; name: string; quantity: number }[];
+  }[];
+  sameModelCount?: number;
+  suggestion: {
+    basedOnJobs: number; sameService: boolean; similarYear: boolean;
+    items: { materialId: number; name: string; quantity: number; usedInJobs: number; share: number }[];
+  } | null;
+}
+
 export interface JobOrderItem {
   name: string;
   quantity: number;
@@ -1893,6 +1907,12 @@ export const api = {
   // SALES
   // ==================
   sales: {
+    /** Earlier jobs on the same car (plate) and materials usually used on the same model (suggestions) */
+    getVehicleHistory: (params: { make?: string; model?: string; year?: string; plate?: string; services?: string; excludeId?: number }) => {
+      const q = new URLSearchParams();
+      Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== '') q.set(k, String(v)); });
+      return fetchApi<VehicleHistory>(`/api/sales/job-orders/vehicle-history?${q}`);
+    },
     // Job Orders
     getJobOrders: (params?: { status?: string; branchId?: number }) => {
       const query = new URLSearchParams();
