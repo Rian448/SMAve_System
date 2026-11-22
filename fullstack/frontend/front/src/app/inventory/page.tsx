@@ -12,6 +12,7 @@ import Paginated from '@/components/Paginated';
 import { exactPeso } from '@/lib/format';
 import LengthInput from '@/components/LengthInput';
 import { formatLength, formatMaterialQty } from '@/lib/length';
+import { findSimilarName, normalizeName } from '@/lib/similarNames';
 
 type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'waste-log' | 'ai-predictions';
 
@@ -504,7 +505,8 @@ function InventoryContent() {
     const restocking = premadeMode === 'restock';
     if (fe.show({
       'premade-product': restocking && !restockProductId && 'Choose the product to add stock to.',
-      'premade-name': !restocking && !newPremade.name.trim() && 'Enter the product name.',
+      'premade-name': !restocking && (!newPremade.name.trim() ? 'Enter the product name.'
+        : sameNameAndCategory && nameMatch && `${nameMatch.item.name} (${nameMatch.item.category}) already exists. Use "Add stock to it instead".`),
       'premade-quantity': (Number.isNaN(quantity) || !(quantity > 0)) && 'Enter how many pieces (more than 0).',
       'premade-price': !restocking && Number.isNaN(price) && 'Price must be a number.',
       'premade-branch': !branchId && 'Choose where this product goes.',
@@ -632,6 +634,18 @@ function InventoryContent() {
   // Warehouse rows are the ones stock is made into (branches get theirs by delivery)
   const restockable = finishedGoods.filter((g) => g.isWarehouse && !g.isArchived);
   const restockProduct = restockable.find((g) => g.id === restockProductId);
+
+  // A new product named like one already in stock: the same name in other capitals
+  // or spacing ("TESLA" / "tesla"), or a typo away ("Telsa" / "Tesla")
+  const [similarDismissed, setSimilarDismissed] = useState('');
+  const nameMatch = premadeMode === 'new' ? findSimilarName(newPremade.name, restockable, (g) => g.name) : null;
+  const sameNameAndCategory = nameMatch?.kind === 'same'
+    && normalizeName(nameMatch.item.category || '') === normalizeName(newPremade.category || '');
+  const showNameMatch = !!nameMatch && (nameMatch.kind === 'same' || similarDismissed !== normalizeName(newPremade.name));
+  const switchToExistingProduct = (id: number) => {
+    switchPremadeMode('restock');
+    chooseRestockProduct(id);
+  };
   const recipeById = new Map((recipe?.materials || []).map((m) => [String(m.materialId), m]));
 
   // ── Distribution ──────────────────────────────────────────────────────────
@@ -1340,6 +1354,28 @@ function InventoryContent() {
                   className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
                 />
                 <FieldError message={fe.errors['premade-name']} />
+                {nameMatch && showNameMatch && (
+                  <div role="status" className={`mt-2 rounded-lg border px-3 py-2 text-sm ${nameMatch.kind === 'same'
+                    ? 'border-red-200 bg-red-50 text-red-800' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
+                    <p>
+                      {nameMatch.kind === 'same'
+                        ? <>This product already exists: <b>{nameMatch.item.name}</b></>
+                        : <>Did you mean <b>{nameMatch.item.name}</b>? It is already in stock.</>}
+                      <span className="text-xs"> ({nameMatch.item.category} · {nameMatch.item.quantity} in stock)</span>
+                    </p>
+                    {nameMatch.kind === 'same' && !sameNameAndCategory && (
+                      <p className="text-xs mt-0.5">It is under another category, so a new one here is a separate variant.</p>
+                    )}
+                    <div className="mt-1.5 flex flex-wrap gap-3">
+                      <button type="button" onClick={() => switchToExistingProduct(nameMatch.item.id)}
+                        className="text-xs font-semibold text-[#011c72] hover:underline">Add stock to it instead</button>
+                      {nameMatch.kind === 'similar' && (
+                        <button type="button" onClick={() => setSimilarDismissed(normalizeName(newPremade.name))}
+                          className="text-xs text-gray-600 hover:underline">No, it&apos;s a different product</button>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>}
               <div {...fe.field('premade-quantity')}>
                 <input
@@ -1640,12 +1676,13 @@ function InventoryContent() {
         {/* Tabs */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 mb-6">
           <div className="border-b border-gray-200">
-            <nav className="flex -mb-px">
+            {/* Swipe sideways on phones instead of pushing the page wider */}
+            <nav className="flex -mb-px overflow-x-auto">
               {tabs.map((tab) => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center px-6 py-4 text-sm font-medium border-b-2 transition-colors ${
+                  className={`flex items-center shrink-0 whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4 text-sm font-medium border-b-2 transition-colors ${
                     activeTab === tab.id
                       ? 'border-[#011c72] text-[#011c72]'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -1915,8 +1952,8 @@ function InventoryContent() {
                           </div>
                         </div>
                       ) : (
-                        /* View mode */
-                        <div className="flex items-center gap-4">
+                        /* View mode: on phones the status and buttons go under the details */
+                        <div className="flex flex-wrap sm:flex-nowrap items-center gap-x-4 gap-y-2">
                           {/* Color swatch */}
                           <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-[#dde6ff] flex items-center justify-center">
                             <svg className="w-5 h-5 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1961,7 +1998,7 @@ function InventoryContent() {
                             </div>
                           </div>
                           {/* Status + actions */}
-                          <div className="flex-shrink-0 flex items-center gap-3">
+                          <div className="flex-shrink-0 flex flex-wrap items-center gap-x-3 gap-y-1 w-full sm:w-auto pl-14 sm:pl-0">
                             <span className={`px-2 py-1 text-xs font-medium rounded-full ${status.class}`}>
                               {status.label}
                             </span>
