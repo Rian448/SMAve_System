@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, has_request_context
 from flask_cors import CORS
 from datetime import date as date_cls, datetime, timedelta
 from functools import wraps
@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from html import escape
 
 app = Flask(__name__)
@@ -204,6 +204,8 @@ class JobOrder(db.Model):
     __tablename__ = 'job_orders'
     id = db.Column(db.Integer, primary_key=True)
     job_order_id = db.Column(db.String(50), unique=True, nullable=False)
+    # True when the number was typed in on the form rather than generated
+    number_is_manual = db.Column(db.Boolean, default=False)
     customer_id = db.Column(db.Integer, nullable=True)
     customer_name = db.Column(db.String(255), nullable=False)
     customer_phone = db.Column(db.String(50), nullable=False)
@@ -321,6 +323,8 @@ class ProductOrder(db.Model):
     __tablename__ = 'product_orders'
     id = db.Column(db.Integer, primary_key=True)
     order_number = db.Column(db.String(50), unique=True, nullable=False)
+    # True when the number was typed in on the form rather than generated
+    number_is_manual = db.Column(db.Boolean, default=False)
     customer_name = db.Column(db.String(255), nullable=False)
     customer_phone = db.Column(db.String(50), nullable=False)
     customer_email = db.Column(db.String(255))
@@ -341,6 +345,9 @@ class ProductOrder(db.Model):
     vat_percent = db.Column(db.Float, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # When the sale was completed (UTC). updated_at moves on every later edit, so
+    # it can't date the sale; older completed orders are backfilled from it once.
+    completed_at = db.Column(db.DateTime, nullable=True)
 
     branch = db.relationship('Branch', foreign_keys=[branch_id])
     pickup_branch = db.relationship('Branch', foreign_keys=[pickup_branch_id])
@@ -475,6 +482,11 @@ class InventoryMaterial(db.Model):
     cost_per_unit = db.Column(db.Float, default=0)
     # Markup applied on cost to derive the selling unit_price (e.g. 25 = +25%)
     markup_percent = db.Column(db.Float, default=25)
+    # Consumables (glue, thread, staples...) are counted in plain units, aren't picked
+    # on job orders, and leave stock when marked fully used in Inventory. Everything
+    # else is length stock kept in yards (entered and shown as yd/ft/in/cm).
+    is_consumable = db.Column(db.Boolean, default=False)
+    unit = db.Column(db.String(20), default='yd')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -542,6 +554,11 @@ class MaterialUsageLog(db.Model):
     used_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     managed_worker_id = db.Column(db.Integer, db.ForeignKey('managed_workers.id'), nullable=True)
     notes = db.Column(db.Text)
+    # Ties together the logs of one premade add / restock (and its stock record)
+    batch_id = db.Column(db.String(36), nullable=True, index=True)
+    # The worker task whose cut this is (used_in_type 'job_order_cut'), so reopening
+    # the task can give it back
+    worker_assignment_id = db.Column(db.Integer, nullable=True, index=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     material = db.relationship('InventoryMaterial')
@@ -584,6 +601,10 @@ class Supplier(db.Model):
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Default payment term for this supplier's purchase orders (see PAYMENT_TERMS);
+    # each PO copies it and may change it. NULL = no term agreed.
+    payment_term = db.Column(db.String(20), nullable=True)
+    payment_term_days = db.Column(db.Integer, nullable=True)
 
 class VehicleMake(db.Model):
     """Reference table of vehicle makes/brands (e.g. Toyota, Honda).
@@ -628,12 +649,49 @@ class MaterialWasteLog(db.Model):
     managed_worker_id = db.Column(db.Integer, db.ForeignKey('managed_workers.id'), nullable=True)
     # Cost per unit when it was logged, so later price changes don't rewrite it
     unit_cost = db.Column(db.Float, nullable=True)
+    # Set on the excess of a worker's cut (cut minus used), for the same reason
+    worker_assignment_id = db.Column(db.Integer, nullable=True, index=True)
 
     material = db.relationship('InventoryMaterial')
     branch = db.relationship('Branch')
     logged_by_user = db.relationship('User', foreign_keys=[logged_by])
     job_order = db.relationship('JobOrder')
     worker = db.relationship('ManagedWorker')
+
+class StockAdjustmentLog(db.Model):
+    """A stock quantity typed in by hand (an edit on the Inventory page) or an
+    item's starting stock. Every other stock change already has its own record
+    (usage, waste, purchase orders, sales, deliveries); these didn't, so they are
+    kept here for the Item History. Recorded from when this table was added."""
+    __tablename__ = 'stock_adjustment_logs'
+    id = db.Column(db.Integer, primary_key=True)
+    item_kind = db.Column(db.String(20), nullable=False)  # 'material' | 'premade'
+    item_id = db.Column(db.Integer, nullable=False, index=True)
+    branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
+    # 'starting' | 'production' | 'manual_edit' (older edits) | 'adjustment' (Adjust stock, with a reason)
+    reason = db.Column(db.String(20), nullable=False)
+    old_quantity = db.Column(db.Float, nullable=True)
+    new_quantity = db.Column(db.Float, nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    batch_id = db.Column(db.String(36), nullable=True)
+    # Why the stock was adjusted, e.g. "Physical count correction — found 2 rolls in storage"
+    note = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    branch = db.relationship('Branch')
+    user = db.relationship('User', foreign_keys=[user_id])
+
+
+def log_stock_adjustment(kind, item_id, branch_id, reason, old_qty, new_qty, user, batch_id=None, note=None):
+    """Record a hand-made stock change (only when the quantity really changed)."""
+    if reason in ('manual_edit', 'adjustment') and old_qty is not None and abs(float(old_qty) - float(new_qty)) < 1e-9:
+        return
+    db.session.add(StockAdjustmentLog(
+        item_kind=kind, item_id=item_id, branch_id=branch_id, reason=reason,
+        old_quantity=None if old_qty is None else float(old_qty), new_quantity=float(new_qty),
+        user_id=(user or {}).get('id'), batch_id=batch_id, note=(note or None) and note[:255],
+    ))
+
 
 class HistoricalInventoryData(db.Model):
     __tablename__ = 'historical_inventory_data'
@@ -783,8 +841,12 @@ class WorkerAvailabilitySchedule(db.Model):
     __table_args__ = (db.UniqueConstraint('managed_worker_id', 'date', name='uq_worker_date'),)
 
 class Expense(db.Model):
-    """Money the business spends that isn't stock bought through purchase orders:
-    rent, power, wages paid outside job orders, supplies and so on."""
+    """Money the business pays out: rent, power, wages paid outside job orders,
+    supplies and so on, logged by hand -- and supplier payments for purchase
+    orders, made automatically (purchase_order_payment_id set). Those are stock
+    bought, not running costs: they show as money paid out, but stay out of the
+    operating expenses in profit and loss (the material's cost counts there as
+    cost of goods sold once it is used)."""
     __tablename__ = 'expenses'
     id = db.Column(db.Integer, primary_key=True)
     expense_date = db.Column(db.Date, nullable=False, index=True)
@@ -796,9 +858,64 @@ class Expense(db.Model):
     branch_id = db.Column(db.Integer, db.ForeignKey('branches.id'), nullable=True)
     created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # Receipt / transfer / GCash reference, when there is one
+    reference_number = db.Column(db.String(100), nullable=True)
+    # Set on the entry made for a supplier payment (one entry per payment)
+    purchase_order_payment_id = db.Column(db.Integer, nullable=True, index=True)
 
     branch = db.relationship('Branch')
     creator = db.relationship('User', foreign_keys=[created_by])
+
+class PurchaseOrderPayment(db.Model):
+    """A payment made to the supplier for a purchase order (a PO may be paid in
+    parts). Each one has its Expense Log entry, which holds how it was paid.
+    A mistake is voided, never deleted, so the history stays."""
+    __tablename__ = 'purchase_order_payments'
+    id = db.Column(db.Integer, primary_key=True)
+    purchase_order_id = db.Column(db.Integer, db.ForeignKey('purchase_orders.id'), nullable=False, index=True)
+    amount = db.Column(db.Float, nullable=False)
+    payment_date = db.Column(db.Date, nullable=False)
+    payment_method = db.Column(db.String(30), nullable=False)
+    reference_number = db.Column(db.String(100), nullable=True)
+    notes = db.Column(db.Text, nullable=True)
+    expense_id = db.Column(db.Integer, nullable=True)
+    recorded_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    voided_at = db.Column(db.DateTime, nullable=True)
+    voided_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    void_reason = db.Column(db.Text, nullable=True)
+
+    recorder = db.relationship('User', foreign_keys=[recorded_by])
+    voider = db.relationship('User', foreign_keys=[voided_by])
+
+class PurchaseOrderCredit(db.Model):
+    """Use of a supplier credit (paid more than a PO now comes to, e.g. after a
+    return): refunded by the supplier, or applied as payment to another PO of the
+    same supplier. Either way it comes off what was paid on this PO. Voided, never
+    deleted, like payments."""
+    __tablename__ = 'purchase_order_credits'
+    id = db.Column(db.Integer, primary_key=True)
+    purchase_order_id = db.Column(db.Integer, db.ForeignKey('purchase_orders.id'), nullable=False, index=True)
+    kind = db.Column(db.String(20), nullable=False)  # 'refund' | 'applied'
+    amount = db.Column(db.Float, nullable=False)
+    credit_date = db.Column(db.Date, nullable=False)
+    # applied: the PO it paid, and the payment made there
+    target_purchase_order_id = db.Column(db.Integer, db.ForeignKey('purchase_orders.id'), nullable=True)
+    target_payment_id = db.Column(db.Integer, nullable=True)
+    # refund: how the money came back, and its (negative) Expense Log entry
+    payment_method = db.Column(db.String(30), nullable=True)
+    reference_number = db.Column(db.String(100), nullable=True)
+    notes = db.Column(db.Text, nullable=True)
+    expense_id = db.Column(db.Integer, nullable=True)
+    recorded_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    voided_at = db.Column(db.DateTime, nullable=True)
+    voided_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    void_reason = db.Column(db.Text, nullable=True)
+
+    recorder = db.relationship('User', foreign_keys=[recorded_by])
+    voider = db.relationship('User', foreign_keys=[voided_by])
+    target = db.relationship('PurchaseOrder', foreign_keys=[target_purchase_order_id])
 
 class AuditLog(db.Model):
     """Audit trail. Kept in the database — an in-memory list was wiped on every
@@ -829,6 +946,35 @@ class PurchaseOrder(db.Model):
     approved_at = db.Column(db.DateTime, nullable=True)
     received_at = db.Column(db.DateTime, nullable=True)
     received_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    # When the supplier must be paid (see purchase_order_due_date). Copied from the
+    # supplier's default when the PO is made; NULL = no term (older POs).
+    payment_term = db.Column(db.String(20), nullable=True)
+    payment_term_days = db.Column(db.Integer, nullable=True)
+    # The due date each reminder was last sent for, so it goes out once per due date
+    due_soon_notified_for = db.Column(db.Date, nullable=True)
+    overdue_notified_for = db.Column(db.Date, nullable=True)
+
+class PurchaseOrderReceipt(db.Model):
+    """One delivery received against a purchase order (a PO may arrive in several),
+    or the closing of a PO whose remaining items will not come (kind 'closed')."""
+    __tablename__ = 'purchase_order_receipts'
+    id = db.Column(db.Integer, primary_key=True)
+    purchase_order_id = db.Column(db.Integer, db.ForeignKey('purchase_orders.id'), nullable=False, index=True)
+    kind = db.Column(db.String(20), nullable=False, default='delivery')  # 'delivery' | 'closed' | 'return'
+    # Return to supplier: why (bad quality, damaged...), and whether the supplier
+    # will send replacements (the quantity is then to be received again)
+    return_reason = db.Column(db.String(100), nullable=True)
+    replacement = db.Column(db.Boolean, nullable=True)
+    # Supplier's invoice / delivery receipt number for a delivery (optional)
+    invoice_number = db.Column(db.String(100), nullable=True)
+    # [{line, materialId, name, quantity}]: line is the index in the PO's items
+    items = db.Column(db.JSON, nullable=False, default=list)
+    notes = db.Column(db.Text, nullable=True)
+    received_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    received_by_user = db.relationship('User', foreign_keys=[received_by])
+
 
 class LineupSlip(db.Model):
     """Production line-up slip for a job order: its tasks and who is on them."""
@@ -933,12 +1079,13 @@ PERMISSION_MODULES = [
     ('payments', 'Payments', [('view', 'View'), ('add', 'Add'), ('request_override', 'Request override'),
                               ('approve_override', 'Approve overrides')]),
     ('inventory', 'Inventory', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'), ('delete', 'Archive'),
-                                ('log_waste', 'Log waste')]),
+                                ('log_waste', 'Log waste'), ('adjust_stock', 'Adjust stock')]),
     ('premade', 'Premade Products', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'),
-                                     ('distribute', 'Distribute'), ('receive', 'Receive deliveries')]),
+                                     ('distribute', 'Distribute'), ('receive', 'Receive deliveries'),
+                                     ('adjust_stock', 'Adjust stock')]),
     ('suppliers', 'Suppliers', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit')]),
     ('purchase_orders', 'Purchase Orders', [('view', 'View'), ('add', 'Add'), ('approve', 'Approve'),
-                                            ('receive', 'Receive')]),
+                                            ('receive', 'Receive'), ('pay', 'Record supplier payments')]),
     ('product_orders', 'Product Orders', [('view', 'View'), ('edit', 'Edit'), ('payment', 'Record payments'),
                                           ('transfer', 'Transfers'), ('flag_spam', 'Flag spam')]),
     ('costing', 'Costing', [('view', 'View'), ('edit', 'Edit')]),
@@ -965,10 +1112,12 @@ PERMISSIONS = {
 }
 
 _SUPERVISOR_EXCLUDED = {
-    'payments.approve_override', 'purchase_orders.approve', 'reports.audit_trail',
+    'payments.approve_override', 'purchase_orders.approve', 'purchase_orders.pay', 'reports.audit_trail',
     'workers.add', 'workers.edit', 'workers.delete', 'workers.delete_assignment',
     'catalog.manage', 'blacklist.manage', 'branches.manage', 'branches.all', 'users.manage',
     'owner.view', 'expenses.delete',
+    # Correcting stock by hand is for administrators (or whoever they give it to)
+    'inventory.adjust_stock', 'premade.adjust_stock',
 }
 # Defaults reproduce what each role could do before permissions existed
 ROLE_DEFAULT_PERMISSIONS = {
@@ -989,9 +1138,10 @@ ROLE_DEFAULT_PERMISSIONS = {
         'expenses.view', 'expenses.add',
     }),
     # The owner reviews the results of the day-to-day work rather than doing it:
-    # every view, all branches, and the owner dashboard -- no editing
+    # every view, all branches, and the owner dashboard (instead of the day-to-day
+    # one) -- no editing
     'owner': frozenset({
-        'owner.view', 'dashboard.view', 'branches.all',
+        'owner.view', 'branches.all',
         'sales.view', 'custom_requests.view', 'customers.view', 'payments.view',
         'inventory.view', 'premade.view', 'suppliers.view', 'purchase_orders.view', 'product_orders.view',
         'costing.view', 'forecasting.view', 'item_trail.view', 'announcements.view', 'workers.view',
@@ -1070,9 +1220,40 @@ def raw_material_branch_error(user, branch_id):
         return None
     return inventory_branch_error(user, branch_id)
 
-# Delegation policy. Administrators may change anyone's access. Anyone else who
-# manages users can't change their own account, can't touch administrator
-# accounts or hand out the administrator role, and can only grant or remove
+# Account hierarchy. Managing users (editing, role, permissions, password reset,
+# archive/restore, delete) only works on accounts whose role ranks BELOW your own:
+# an administrator can't change another administrator, a supervisor can't change
+# another supervisor or the owner. Nobody changes their own account here (My
+# Profile is for that). Per-user permission grants never move anyone up this
+# ladder: it goes by role alone.
+ROLE_RANK = {
+    'administrator': 5,
+    'owner': 4,
+    'supervisor': 3,
+    'sales_manager': 2,
+    'seat_maker': 1,
+    'sewer': 1,
+    'customer': 0,
+}
+
+def role_rank(role_key):
+    return ROLE_RANK.get(role_key or '', 0)
+
+ROLE_NAMES = {r['key']: r['name'] for r in default_roles}
+
+def role_assign_error(actor, role_key):
+    """Why `actor` may not give an account this role, or None. Only roles below
+    your own -- except that administrators may make new administrators, since
+    nobody ranks above them (otherwise no administrator could ever be added)."""
+    if is_administrator(actor):
+        return None
+    if role_rank(role_key) >= role_rank(actor.get('role')):
+        return (f"You can only give out roles below your own. "
+                f"{ROLE_NAMES.get(role_key, role_key)} is not below {ROLE_NAMES.get(actor.get('role'), actor.get('role'))}.")
+    return None
+
+# Delegation policy for permissions. Administrators may grant anything to the
+# accounts below them. Anyone else who manages users can only grant or remove
 # permissions they hold themselves -- never these privileged ones, which decide
 # who manages accounts and who sees every branch.
 PRIVILEGED_PERMISSIONS = frozenset({'users.manage', 'branches.manage', 'branches.all'})
@@ -1082,21 +1263,37 @@ def is_administrator(user):
 
 def target_account_error(actor, target):
     """Why `actor` may not manage the `target` account at all, or None."""
-    if is_administrator(actor):
-        return None
     if target.id == actor['id']:
-        return 'Only an administrator can change your own account here. Use My Profile for your details.'
-    if target.role and target.role.key == 'administrator':
-        return 'Only an administrator can change an administrator account.'
+        return ("You can't change your own account here: your role and permissions can only be "
+                "changed by someone above you. Use My Profile for your details and password.")
+    target_role = target.role.key if target.role else None
+    if role_rank(target_role) >= role_rank(actor.get('role')):
+        same = target_role == actor.get('role')
+        name = ROLE_NAMES.get(target_role, target_role or 'this')
+        return (f"You can't change another {name} account: accounts at your own level can't manage each other."
+                if same else f"You can't change a {name} account: it ranks above yours.")
     return None
+
+def refuse_account_change(what, reason):
+    """Record a refused account change ("edit maria", "archive juan") in the
+    Audit Trail, then build the 403 response."""
+    me = request.current_user
+    # log_action commits: drop anything the request had already changed first,
+    # so a refused edit can't half-save
+    db.session.rollback()
+    log_action(me['id'], me['fullName'], 'ACCESS_DENIED', 'Settings',
+               f"Refused to {what}: {reason}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'error', 'message': reason}), 403
 
 def delegation_error(actor, perms_before, perms_after, new_role_key=None):
     """Why `actor` may not change an account's access from perms_before to
     perms_after (and to new_role_key, if the role changes), or None."""
+    if new_role_key is not None:
+        error = role_assign_error(actor, new_role_key)
+        if error:
+            return error
     if is_administrator(actor):
         return None
-    if new_role_key == 'administrator':
-        return 'Only an administrator can give out the administrator role.'
     changed = set(perms_before) ^ set(perms_after)
     privileged = changed & PRIVILEGED_PERMISSIONS
     if privileged:
@@ -1291,6 +1488,11 @@ def run_migrations():
         "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS materials_used JSON",
         # Track which managed worker used materials (FK to managed_workers)
         "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS managed_worker_id INTEGER REFERENCES managed_workers(id)",
+        "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS batch_id VARCHAR(36)",
+        "ALTER TABLE stock_adjustment_logs ADD COLUMN IF NOT EXISTS batch_id VARCHAR(36)",
+        "ALTER TABLE stock_adjustment_logs ADD COLUMN IF NOT EXISTS note VARCHAR(255)",
+        "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS number_is_manual BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE product_orders ADD COLUMN IF NOT EXISTS number_is_manual BOOLEAN DEFAULT FALSE",
         # Per-order discount override on job orders
         "ALTER TABLE job_orders ADD COLUMN IF NOT EXISTS discount_percent REAL",
         # Printed job order slip snapshot
@@ -1332,6 +1534,31 @@ def run_migrations():
         "UPDATE branches SET deactivated_at = CURRENT_TIMESTAMP WHERE is_active = FALSE AND deactivated_at IS NULL",
         # Who confirmed a purchase order's delivery
         "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS received_by INTEGER REFERENCES users(id)",
+        # When a premade sale was completed; older ones take their last update
+        "ALTER TABLE product_orders ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP",
+        # Supplier payments (purchase_order_payments is created by create_all)
+        "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS reference_number VARCHAR(100)",
+        "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS purchase_order_payment_id INTEGER",
+        "UPDATE product_orders SET completed_at = updated_at WHERE status = 'completed' AND completed_at IS NULL",
+        # Payment terms: a default per supplier, copied onto each purchase order,
+        # and which due-date reminders a PO has had. Existing rows stay NULL (no term).
+        "ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS payment_term VARCHAR(20)",
+        "ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS payment_term_days INTEGER",
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS payment_term VARCHAR(20)",
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS payment_term_days INTEGER",
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS due_soon_notified_for DATE",
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS overdue_notified_for DATE",
+        # Consumables and units; cuts recorded when a worker finishes a task
+        "ALTER TABLE inventory_materials ADD COLUMN IF NOT EXISTS is_consumable BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE inventory_materials ADD COLUMN IF NOT EXISTS unit VARCHAR(20) DEFAULT 'yd'",
+        "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS worker_assignment_id INTEGER",
+        "ALTER TABLE material_waste_logs ADD COLUMN IF NOT EXISTS worker_assignment_id INTEGER",
+        "CREATE INDEX IF NOT EXISTS ix_material_usage_logs_worker_assignment_id ON material_usage_logs (worker_assignment_id)",
+        "CREATE INDEX IF NOT EXISTS ix_material_waste_logs_worker_assignment_id ON material_waste_logs (worker_assignment_id)",
+        # Returns to supplier and supplier invoice numbers on PO deliveries
+        "ALTER TABLE purchase_order_receipts ADD COLUMN IF NOT EXISTS return_reason VARCHAR(100)",
+        "ALTER TABLE purchase_order_receipts ADD COLUMN IF NOT EXISTS replacement BOOLEAN",
+        "ALTER TABLE purchase_order_receipts ADD COLUMN IF NOT EXISTS invoice_number VARCHAR(100)",
     ]
     is_sqlite = db.engine.dialect.name == 'sqlite'
     for sql in migrations:
@@ -1346,9 +1573,29 @@ def run_migrations():
         except Exception:
             pass  # Column already exists or statement not supported on this DB
 
+def purge_obsolete_permission_overrides():
+    """Delete per-user grants and revokes of permissions that no longer exist
+    (e.g. appointments.view, from the retired Appointments module). They never
+    had any effect (effective_permissions skips them), but the permissions dialog
+    sent them back on save, where they were refused as unknown -- so the
+    affected accounts' permissions could not be changed at all."""
+    stale = UserPermissionOverride.query.filter(~UserPermissionOverride.permission.in_(list(PERMISSIONS))).all()
+    if not stale:
+        return
+    users = {o.user_id for o in stale}
+    for o in stale:
+        db.session.delete(o)
+    # The users' permission fingerprint changes: an open dialog must reload first
+    for user in User.query.filter(User.id.in_(users)).all():
+        bump_auth_version(user)
+    db.session.commit()
+    print(f"[permissions] removed {len(stale)} obsolete override(s): "
+          f"{', '.join(sorted({o.permission for o in stale}))}", flush=True)
+
 def init_db():
     db.create_all()
     run_migrations()
+    purge_obsolete_permission_overrides()
 
     # Seed roles
     for role in default_roles:
@@ -1568,8 +1815,21 @@ def finite_number(value, default=None):
     return number if math.isfinite(number) else None
 
 def money(amount):
-    """Round to the centavo, halves up (0.005 -> 0.01), as a float."""
-    return float(Decimal(str(amount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+    """Round to the centavo, halves up (0.005 -> 0.01), as a float.
+
+    A value that isn't a real number (NaN or Infinity, e.g. from a stock or cost
+    saved before inputs were validated) counts as 0 instead of failing the whole
+    response, and very large values are rounded with enough precision that
+    quantize doesn't overflow."""
+    try:
+        value = float(amount or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value):
+        return 0.0
+    with localcontext() as ctx:
+        ctx.prec = 60
+        return float(Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 def vat_percent_error(raw):
     """Error message if raw isn't a valid VAT rate, else None."""
@@ -1604,7 +1864,7 @@ def vat_breakdown(gross, vat_percent):
 
 MAX_FAILED_ATTEMPTS = 5
 # Same reply for an unknown username and a wrong password, so neither is revealed
-LOGIN_FAILED_MESSAGE = 'Incorrect username or password.'
+LOGIN_FAILED_MESSAGE = 'Incorrect username/email or password.'
 LOCKOUT_MINUTES = 15
 
 def hash_password(raw_password: str) -> str:
@@ -1701,14 +1961,17 @@ def lock_product_order_numbering():
     SystemSetting.query.filter_by(key=PRODUCT_ORDER_NUMBER_LOCK).with_for_update().first()
 
 def generate_job_order_id(branch_code):
-    """Generate unique job order ID"""
+    """Next job order number for this branch and year (JO-BA-2026-0001, ...).
+    Numbers typed in by hand don't move the sequence (a typed JO-BA-2026-9999 won't
+    make the next one 10000), but a number already taken is always skipped."""
     year = datetime.now().year
     prefix = f'JO-{branch_code}-{year}-'
 
     existing_ids = [
         row[0]
         for row in db.session.query(JobOrder.job_order_id)
-        .filter(JobOrder.job_order_id.like(f'{prefix}%'))
+        .filter(JobOrder.job_order_id.like(f'{prefix}%'),
+                db.or_(JobOrder.number_is_manual.is_(None), JobOrder.number_is_manual.is_(False)))
         .all()
         if row[0]
     ]
@@ -1721,7 +1984,32 @@ def generate_job_order_id(branch_code):
             continue
         next_sequence = max(next_sequence, sequence + 1)
 
+    while order_number_taken('job', f'{prefix}{next_sequence:04d}'):
+        next_sequence += 1
     return f'{prefix}{next_sequence:04d}'
+
+
+# A number typed in on the New Job Order form: letters, digits and - _ / . (no spaces)
+ORDER_NUMBER_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_./-]{2,49}$')
+
+def order_number_taken(kind, number):
+    """Whether a job order ('job') or premade sale ('premade') already has this
+    number. Case doesn't matter: JO-BA-1 and jo-ba-1 count as the same."""
+    model = JobOrder if kind == 'job' else ProductOrder
+    column = JobOrder.job_order_id if kind == 'job' else ProductOrder.order_number
+    return db.session.query(model.id).filter(db.func.lower(column) == number.strip().lower()).first() is not None
+
+def manual_order_number_error(kind, number):
+    """Why a typed order number can't be used, or None."""
+    number = (number or '').strip()
+    if not number:
+        return 'Enter the order number, or press Generate.'
+    if not ORDER_NUMBER_PATTERN.match(number):
+        return ('Order numbers are 3 to 50 characters: letters, numbers and - _ / . '
+                '(no spaces), starting with a letter or number.')
+    if order_number_taken(kind, number):
+        return f'{number} is already used by another order. Use a different number or press Generate.'
+    return None
 
 def generate_lineup_slip_number(branch_code):
     """Next line-up slip number for this branch and year (LS-MW-2026-0001, ...)"""
@@ -1787,16 +2075,41 @@ def can_see_delivery(user, d):
 # AUTHENTICATION ROUTES
 # ============================================
 
+def find_login_account(identifier):
+    """The active account a login name points at, or None.
+
+    Usernames can't contain "@" (USERNAME_PATTERN), so anything with one is an
+    email, matched ignoring capitals; anything else is a username, exactly as
+    before. If it could mean more than one account (e.g. two old records whose
+    emails differ only in capitals) nobody is signed in rather than guessing.
+    Deactivated accounts are never found, whichever identifier is used."""
+    if not identifier:
+        return None
+    if '@' in identifier:
+        matches = User.query.filter(db.func.lower(User.email) == identifier.lower(),
+                                    User.is_active.is_(True)).limit(2).all()
+    else:
+        matches = User.query.filter(User.username == identifier, User.is_active.is_(True)).limit(2).all()
+    if len(matches) != 1:
+        if len(matches) > 1:
+            print(f"[auth] login name matches {len(matches)} accounts; refused", flush=True)
+        return None
+    return matches[0]
+
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    username = data.get('username', '')
+    data = request.get_json(silent=True) or {}
+    # "Username or email" (older clients send it as `username`)
+    identifier = str(data.get('identifier') or data.get('username') or '').strip()
     raw_password = data.get('password', '')
+    if not isinstance(raw_password, str):
+        raw_password = ''
 
-    user = User.query.filter_by(username=username, is_active=True).first()
-
+    user = find_login_account(identifier)
+    # Same reply for an unknown name, an unknown email and an ambiguous one
     if not user:
         return jsonify({'status': 'error', 'message': LOGIN_FAILED_MESSAGE}), 401
+    username = user.username  # logs name the account, not what was typed
 
     # Check if account is locked
     now_utc = datetime.utcnow()
@@ -1888,7 +2201,31 @@ RESET_CODE_MAX_ATTEMPTS = 5
 RESET_CODE_RESEND_SECONDS = 60
 RESET_CODE_MAX_PER_HOUR = 5
 MIN_PASSWORD_LENGTH = 8
+# Generous, so long passphrases work, but bounded so hashing can't be abused
+MAX_PASSWORD_LENGTH = 256
 EMAIL_PATTERN = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+# What every new or changed password needs. Spaces and any language's letters are
+# allowed; the frontend (lib/password.ts) shows the same list as the user types.
+PASSWORD_RULES = (
+    (lambda p: len(p) >= MIN_PASSWORD_LENGTH, f'at least {MIN_PASSWORD_LENGTH} characters'),
+    (lambda p: any(c.isupper() for c in p), 'an uppercase letter'),
+    (lambda p: any(c.islower() for c in p), 'a lowercase letter'),
+    (lambda p: any(c in '0123456789' for c in p), 'a number'),
+    (lambda p: any(not c.isalnum() and not c.isspace() for c in p), 'a symbol (such as @ # $ % & !)'),
+)
+
+def password_error(password):
+    """Why this password can't be used, or None. Never echoes the password."""
+    if not isinstance(password, str) or not password:
+        return 'Enter a password.'
+    if len(password) > MAX_PASSWORD_LENGTH:
+        return f'Password must be at most {MAX_PASSWORD_LENGTH} characters.'
+    missing = [label for ok, label in PASSWORD_RULES if not ok(password)]
+    if not missing:
+        return None
+    listed = missing[0] if len(missing) == 1 else ', '.join(missing[:-1]) + ' and ' + missing[-1]
+    return f'Password needs {listed}.'
 
 def send_email(to_email, to_name, subject, text, html):
     """Send one email through Brevo. Returns True on success.
@@ -1990,9 +2327,9 @@ def reset_password():
     new_password = data.get('newPassword') or ''
     if not email or not code or not new_password:
         return jsonify({'status': 'error', 'message': 'Email, code and new password are required'}), 400
-    if len(new_password) < MIN_PASSWORD_LENGTH:
-        return jsonify({'status': 'error',
-                        'message': f'Password must be at least {MIN_PASSWORD_LENGTH} characters'}), 400
+    error = password_error(new_password)
+    if error:
+        return jsonify({'status': 'error', 'message': error, 'code': 'weak_password'}), 400
 
     invalid = jsonify({'status': 'error', 'message': 'This code is invalid or has expired. Request a new one.'}), 400
     user = _active_user_by_email(email)
@@ -2122,9 +2459,9 @@ def change_my_password():
     user = User.query.get(request.current_user['id'])
     data = request.get_json(silent=True) or {}
     new_password = data.get('newPassword') or ''
-    if len(new_password) < MIN_PASSWORD_LENGTH:
-        return jsonify({'status': 'error',
-                        'message': f'New password must be at least {MIN_PASSWORD_LENGTH} characters.'}), 400
+    error = password_error(new_password)
+    if error:
+        return jsonify({'status': 'error', 'message': error, 'code': 'weak_password'}), 400
     error = check_current_password(user, data.get('currentPassword'))
     if error:
         return error
@@ -2479,8 +2816,105 @@ def material_to_dict(material):
         'isArchived': material.is_archived,
         'sourceJobOrderId': material.source_job_order_id,
         'status': material.status or 'available',
+        'isConsumable': bool(material.is_consumable),
+        'unit': material_unit(material),
+        # A consumable opened and partly used since it was last marked fully used
+        'partialUseAt': fmt_dt(consumable_partial_since(material)) if material.is_consumable else None,
         'lastUpdated': material.updated_at.strftime('%Y-%m-%d') if material.updated_at else None
     }
+
+# Stock is kept to 4 decimals (0.0001 yd is under 0.1 mm). A length typed in feet or
+# inches (1 ft = 0.333333... yd) can land a hair over a stored amount, so limits allow
+# this much, and the amount is then capped at the limit.
+QTY_TOLERANCE = 0.0001
+
+def material_unit(material):
+    """'yd' for length stock; a consumable's own count unit (pcs by default)."""
+    if not material.is_consumable:
+        return 'yd'
+    unit = (material.unit or '').strip()
+    return unit if unit and unit != 'yd' else 'pcs'
+
+def consumable_partial_since(material):
+    """When the consumable was last marked partly used, if that came after it was
+    last marked fully used (else None)."""
+    last = lambda kind: db.session.query(db.func.max(MaterialUsageLog.created_at)).filter(
+        MaterialUsageLog.material_id == material.id, MaterialUsageLog.used_in_type == kind).scalar()
+    partial = last('consumable_partial')
+    if not partial:
+        return None
+    full = last('consumable')
+    return partial if not full or partial > full else None
+
+@app.route('/api/inventory/raw-materials/<int:material_id>/consumable-use', methods=['POST'])
+@require_auth
+@require_permission('inventory.log_waste', 'inventory.adjust_stock')
+def record_consumable_use(material_id):
+    """Mark a consumable fully used (takes `quantity` units, 1 by default, out of
+    stock) or partly used (recorded only: nothing leaves stock until it is used up)."""
+    data = request.get_json(silent=True) or {}
+    kind = data.get('kind')
+    if kind not in ('full', 'partial'):
+        return jsonify({'status': 'error', 'message': 'Choose fully used or partially used'}), 400
+    material = InventoryMaterial.query.filter_by(id=material_id).with_for_update().first()
+    if not material or material.is_archived:
+        return jsonify({'status': 'error', 'message': 'Material not found'}), 404
+    if not material.is_consumable:
+        return jsonify({'status': 'error', 'message': 'Only consumables are marked used here'}), 400
+    error = raw_material_branch_error(request.current_user, material.branch_id)
+    if error:
+        return error
+    unit = material_unit(material)
+    qty, error = use_consumable(material, kind, data.get('quantity', 1), (data.get('notes') or '').strip() or None)
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 400
+    db.session.commit()
+    if kind == 'full':
+        queue_forecast_refresh([material.id])
+    name = ' - '.join(filter(None, [material.material_type, material.color, material.pattern]))
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory',
+               f"Marked {qty:g} {unit} of {name} fully used" if kind == 'full' else f"Marked {name} partially used",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': material_to_dict(material)})
+
+def use_consumable(material, kind, quantity=1, notes=None, reference=None, worker_id=None, assignment_id=None):
+    """Record a consumable fully used (`quantity` units leave stock) or partly used
+    (logged only). Returns (quantity taken, None) or (None, error message)."""
+    unit = material_unit(material)
+    qty = 0.0
+    if kind == 'full':
+        qty = finite_number(quantity)
+        if qty is None or qty <= 0:
+            return None, 'Quantity must be more than zero'
+        on_hand = float(material.stock_quantity or 0)
+        name = ' - '.join(filter(None, [material.material_type, material.color, material.pattern]))
+        if qty > on_hand + QTY_TOLERANCE:
+            return None, f'{name}: only {on_hand:g} {unit} in stock'
+        qty = min(qty, on_hand)
+        material.stock_quantity = round(on_hand - qty, 4)
+        material.updated_at = datetime.now()
+    db.session.add(MaterialUsageLog(
+        material_id=material.id, quantity_used=qty,
+        used_in_type='consumable' if kind == 'full' else 'consumable_partial',
+        used_in_reference=reference or ('Fully used' if kind == 'full' else 'Partially used'),
+        branch_id=material.branch_id, used_by=request.current_user['id'], notes=notes,
+        managed_worker_id=worker_id, worker_assignment_id=assignment_id,
+    ))
+    return qty, None
+
+def apply_consumable_fields(material, data):
+    """isConsumable / unit from a request: a consumable keeps a count unit (pcs
+    unless given), anything else is length stock in yards."""
+    if 'isConsumable' in data:
+        material.is_consumable = bool(data['isConsumable'])
+    if material.is_consumable:
+        unit = str(data.get('unit') or '').strip()[:20]
+        if unit and unit != 'yd':
+            material.unit = unit
+        elif not material.unit or material.unit == 'yd':
+            material.unit = 'pcs'
+    else:
+        material.unit = 'yd'
 
 def build_raw_material_group_key(material):
     return f"{material.material_type.lower()}|{material.color.lower()}|{material.pattern.lower()}"
@@ -2824,9 +3258,14 @@ def raw_material_numbers_error(data):
 def create_raw_material():
     data = request.get_json()
 
-    required = ['materialType', 'stockQuantity', 'branchId']
+    required = ['materialType', 'branchId']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    # Adding an item only registers it: it starts at 0 and its stock comes in by
+    # receiving purchase orders. (0 may still be sent, as job orders do.)
+    if data.get('stockQuantity') not in (None, '') and finite_number(data.get('stockQuantity')) != 0:
+        return jsonify({'status': 'error', 'message': 'New items start with 0 stock. '
+                        'Stock is added by receiving a purchase order.'}), 400
     # Selling price may be given directly (unitPrice) or derived from cost + markup
     if 'unitPrice' not in data and 'costPerUnit' not in data:
         return jsonify({'status': 'error', 'message': 'Either unitPrice or costPerUnit is required'}), 400
@@ -2859,7 +3298,7 @@ def create_raw_material():
 
     cost_per_unit = finite_number(data.get('costPerUnit'), 0.0)
     markup_percent = finite_number(data.get('markupPercent'), 25.0)
-    stock_quantity = finite_number(data.get('stockQuantity'))
+    stock_quantity = 0.0
     low_stock_threshold = finite_number(data.get('lowStockThreshold'), 0.0)
     # If a selling price is supplied use it; otherwise derive it from cost + markup
     unit_price = finite_number(data.get('unitPrice'))
@@ -2869,8 +3308,6 @@ def create_raw_material():
         return jsonify({'status': 'error', 'message': 'Cost must be a number of zero or more'}), 400
     if markup_percent is None or markup_percent < 0:
         return jsonify({'status': 'error', 'message': 'Markup must be a number of zero or more'}), 400
-    if stock_quantity is None or stock_quantity < 0:
-        return jsonify({'status': 'error', 'message': 'Stock quantity must be a number of zero or more'}), 400
     if low_stock_threshold is None or low_stock_threshold < 0:
         return jsonify({'status': 'error', 'message': 'Reorder level must be a number of zero or more'}), 400
     if unit_price is None:
@@ -2893,8 +3330,12 @@ def create_raw_material():
         source_job_order_id=source_job_order_id,
         status=material_status
     )
+    apply_consumable_fields(material, data)
 
     db.session.add(material)
+    db.session.flush()
+    log_stock_adjustment('material', material.id, material.branch_id, 'starting', None,
+                         material.stock_quantity or 0, request.current_user)
     db.session.commit()
 
     log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory',
@@ -2902,6 +3343,75 @@ def create_raw_material():
                request.remote_addr or '0.0.0.0')
 
     return jsonify({'status': 'success', 'data': material_to_dict(material)}), 201
+
+STOCK_EDIT_MOVED_MSG = ('Stock can no longer be changed by editing the item. '
+                        'Use Adjust stock and give the reason.')
+
+STOCK_ADJUST_REASONS = ('Physical count correction', 'Data entry error', 'Opening stock',
+                        'Damaged / lost', 'Other')
+
+@app.route('/api/inventory/stock-adjustments', methods=['POST'])
+@require_auth
+def adjust_stock():
+    """Correct an item's stock by hand, with a reason. Body: {kind: 'material' | 'premade',
+    itemId, newQuantity, reason, notes?}. Recorded in the Item History and the Audit Trail."""
+    user = request.current_user
+    data = request.get_json(silent=True) or {}
+    kind = data.get('kind')
+    if kind not in ('material', 'premade'):
+        return jsonify({'status': 'error', 'message': 'kind must be material or premade'}), 400
+    permission = 'inventory.adjust_stock' if kind == 'material' else 'premade.adjust_stock'
+    if not has_perm(user, permission):
+        return jsonify({'status': 'error', 'message': "You don't have permission to adjust stock."}), 403
+    Model = InventoryMaterial if kind == 'material' else PremadeProduct
+    item = Model.query.filter_by(id=data.get('itemId')).with_for_update().first()
+    if not item:
+        return jsonify({'status': 'error', 'message': 'Item not found'}), 404
+    error = inventory_branch_error(user, item.branch_id)
+    if error:
+        return error
+
+    new_qty = finite_number(data.get('newQuantity'))
+    if new_qty is None:
+        return jsonify({'status': 'error', 'message': 'Enter the correct stock as a number'}), 400
+    if new_qty < 0:
+        return jsonify({'status': 'error', 'message': 'Stock cannot be negative'}), 400
+    if kind == 'premade' and new_qty != int(new_qty):
+        return jsonify({'status': 'error', 'message': 'Premade stock is counted in whole pieces'}), 400
+    reason = (data.get('reason') or '').strip()
+    if reason not in STOCK_ADJUST_REASONS:
+        return jsonify({'status': 'error', 'message': 'Choose the reason for the adjustment'}), 400
+    notes = (data.get('notes') or '').strip()
+    if reason == 'Other' and not notes:
+        return jsonify({'status': 'error', 'message': 'Explain the reason for the adjustment'}), 400
+    note = f'{reason} — {notes}' if notes else reason
+
+    old_qty = float((item.stock_quantity if kind == 'material' else item.quantity) or 0)
+    if abs(new_qty - old_qty) < 1e-9:
+        return jsonify({'status': 'error', 'message': 'That is already the current stock'}), 400
+    if kind == 'premade':
+        promised = premade_pending_outgoing(item.id)
+        if new_qty < promised:
+            return jsonify({'status': 'error',
+                            'message': f'{promised:g} pcs are promised to deliveries still awaiting receipt. '
+                                       f'Stock can\'t go below that; cancel a delivery first.'}), 400
+    if kind == 'material':
+        item.stock_quantity = new_qty
+        if new_qty > 0:
+            item.status = 'available'  # as receiving a purchase order does
+        unit, name = 'yd', item.material_type
+    else:
+        item.quantity = new_qty
+        unit, name = 'pcs', item.name
+    item.updated_at = datetime.utcnow()
+    log_stock_adjustment(kind, item.id, item.branch_id, 'adjustment', old_qty, new_qty, user, note=note)
+    db.session.commit()
+
+    change = new_qty - old_qty
+    log_action(user['id'], user['fullName'], 'STOCK_ADJUST', 'Inventory',
+               f"Adjusted {name}: {old_qty:g} → {new_qty:g} {unit} ({change:+g}). {note}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': {'oldQuantity': old_qty, 'newQuantity': new_qty}})
 
 @app.route('/api/inventory/raw-materials/<int:material_id>', methods=['PUT'])
 @require_auth
@@ -2943,15 +3453,16 @@ def update_raw_material(material_id):
         material.unit_price = float(data['unitPrice'])
     elif 'costPerUnit' in data or 'markupPercent' in data:
         material.unit_price = round((material.cost_per_unit or 0) * (1 + (material.markup_percent if material.markup_percent is not None else 25) / 100), 2)
+    # Stock isn't edited here any more: it comes in through purchase orders, goes out
+    # through job orders and waste, and is corrected with Adjust stock (with a reason).
+    # The same number sent back unchanged is fine.
     if 'stockQuantity' in data:
-        new_stock = finite_number(data['stockQuantity'])  # None for text, NaN and Infinity
-        if new_stock is None:
-            return jsonify({'status': 'error', 'message': 'Stock quantity must be a number'}), 400
-        if not new_stock >= 0:
-            return jsonify({'status': 'error', 'message': 'Stock quantity cannot be negative'}), 400
-        material.stock_quantity = new_stock
+        sent = finite_number(data['stockQuantity'])
+        if sent is None or abs(sent - float(material.stock_quantity or 0)) > 1e-9:
+            return jsonify({'status': 'error', 'message': STOCK_EDIT_MOVED_MSG}), 400
     if 'lowStockThreshold' in data:
         material.low_stock_threshold = float(data['lowStockThreshold'] or 0)
+    apply_consumable_fields(material, data)
     if 'supplierId' in data:
         material.supplier_id = int(data['supplierId']) if data['supplierId'] else None
     if 'branchId' in data:
@@ -3050,9 +3561,12 @@ def premade_cost_per_piece(entered, materials_cost, pieces):
 @require_auth
 @require_permission('premade.add')
 def create_finished_good():
-    data = request.get_json()
+    data = request.get_json() or {}
+    # existingProductId: make more of a product already in stock (its quantity goes
+    # up; its name, category and price stay as they are) instead of a new row
+    existing_id = data.get('existingProductId')
 
-    required = ['name', 'quantity', 'category', 'price', 'branchId', 'materialsUsed']
+    required = ['quantity', 'branchId', 'materialsUsed'] + ([] if existing_id else ['name', 'category', 'price'])
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
 
@@ -3060,7 +3574,8 @@ def create_finished_good():
         return jsonify({'status': 'error', 'message': 'Please provide materials used for this premade product'}), 400
 
     try:
-        made_qty, price = float(data['quantity']), float(data['price'])
+        made_qty = float(data['quantity'])
+        price = float(data['price']) if not existing_id else 0.0
     except (TypeError, ValueError):
         return jsonify({'status': 'error', 'message': 'Quantity and price must be numbers'}), 400
     if not made_qty > 0 or not price >= 0:
@@ -3089,6 +3604,30 @@ def create_finished_good():
 
     production_branch = warehouse
     deliver_to = None if branch.id == warehouse.id else branch
+
+    existing = None
+    if existing_id:
+        # Only the warehouse's own rows are produced into (branch rows are filled by deliveries)
+        existing = PremadeProduct.query.filter_by(id=existing_id).with_for_update().first()
+        if not existing or existing.is_archived or existing.branch_id != warehouse.id:
+            return jsonify({'status': 'error', 'message': 'That product is not in the warehouse stock list. '
+                            'Choose it from the warehouse, or add it as a new product.'}), 400
+    else:
+        # The same product (same name and category) already at the warehouse: add to it
+        # instead of making a second row. A different name or category is a different variant.
+        name_key = (data.get('name') or '').strip().lower()
+        category_key = (data.get('category') or '').strip().lower()
+        duplicate = PremadeProduct.query.filter(
+            PremadeProduct.branch_id == warehouse.id,
+            PremadeProduct.is_archived.is_(False),
+            db.func.lower(db.func.trim(PremadeProduct.name)) == name_key,
+            db.func.lower(db.func.trim(db.func.coalesce(PremadeProduct.category, ''))) == category_key,
+        ).first()
+        if duplicate:
+            return jsonify({'status': 'error', 'code': 'premade_exists',
+                            'message': f'{duplicate.name} ({duplicate.category}) is already in stock. '
+                                       'Add stock to it instead of creating a second item.',
+                            'existingProduct': premade_product_to_dict(duplicate)}), 409
 
     usage_entries = []
     computed_cost = 0
@@ -3125,20 +3664,34 @@ def create_finished_good():
         # recorded cost fall back to their price
         computed_cost += (float(material.cost_per_unit or 0) or float(material.unit_price or 0)) * quantity_used
 
-    next_id = (db.session.query(db.func.max(PremadeProduct.id)).scalar() or 0) + 1
-    product = PremadeProduct(
-        name=data['name'].strip(),
-        sku=data.get('sku') or f"FG-{next_id:03d}",
-        quantity=float(data['quantity']),
-        unit='pcs',
-        category=data['category'],
-        price=float(data['price']),
-        cost=premade_cost_per_piece(data.get('cost'), computed_cost, made_qty),
-        branch_id=production_branch.id,
-        is_archived=False
-    )
-
-    db.session.add(product)
+    batch_cost = premade_cost_per_piece(data.get('cost'), computed_cost, made_qty)
+    batch_id = uuid.uuid4().hex
+    if existing:
+        product = existing
+        old_qty = float(product.quantity or 0)
+        # Cost per piece becomes the average over the stock on hand and the new batch,
+        # so earlier pieces keep the cost they were made at
+        if old_qty > 0 and float(product.cost or 0) > 0:
+            product.cost = money((old_qty * float(product.cost) + made_qty * batch_cost) / (old_qty + made_qty))
+        else:
+            product.cost = batch_cost
+        product.quantity = old_qty + made_qty
+        product.updated_at = datetime.utcnow()
+    else:
+        old_qty = None
+        next_id = (db.session.query(db.func.max(PremadeProduct.id)).scalar() or 0) + 1
+        product = PremadeProduct(
+            name=data['name'].strip(),
+            sku=data.get('sku') or f"FG-{next_id:03d}",
+            quantity=made_qty,
+            unit='pcs',
+            category=data['category'],
+            price=price,
+            cost=batch_cost,
+            branch_id=production_branch.id,
+            is_archived=False
+        )
+        db.session.add(product)
 
     # Flush so product.id is available for usage logs before commit.
     db.session.flush()
@@ -3156,7 +3709,9 @@ def create_finished_good():
             used_in_reference=f"{product.sku} - {product.name}",
             branch_id=product.branch_id,
             used_by=request.current_user['id'],
-            notes=f"Used to add premade product stock (qty: {product.quantity})"
+            notes=(f"Used to restock premade product (+{made_qty:g}, qty: {made_qty:g})" if existing
+                   else f"Used to add premade product stock (qty: {made_qty:g})"),
+            batch_id=batch_id,
         ))
 
     # A shop branch was chosen, so hand the stock over as a pending delivery
@@ -3165,7 +3720,7 @@ def create_finished_good():
     if deliver_to:
         transfers, error = create_premade_transfers(
             product,
-            [{'branchId': deliver_to.id, 'quantity': float(product.quantity)}],
+            [{'branchId': deliver_to.id, 'quantity': made_qty}],
             request.current_user,
             notes=f'Raised automatically when {product.name} was added for {deliver_to.name}.',
         )
@@ -3175,23 +3730,111 @@ def create_finished_good():
             return jsonify(payload), code
         pending_transfer = transfers[0]
 
+    log_stock_adjustment('premade', product.id, product.branch_id, 'production' if existing else 'starting',
+                         old_qty, product.quantity or 0, request.current_user, batch_id=batch_id)
     db.session.commit()
+    queue_forecast_refresh(entry['material'].id for entry in usage_entries)
 
-    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory',
-               f"Created finished good: {product.name} at {production_branch.name}"
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE' if existing else 'CREATE', 'Inventory',
+               (f"Restocked finished good: {product.name} +{made_qty:g} (now {float(product.quantity):g}) at {production_branch.name}"
+                if existing else f"Created finished good: {product.name} at {production_branch.name}")
                + (f" — delivery raised for {deliver_to.name}" if deliver_to else ''),
                request.remote_addr or '0.0.0.0')
 
     return jsonify({
         'status': 'success',
         'data': premade_product_to_dict(product),
+        'restocked': bool(existing),
         'pendingTransfer': premade_transfer_to_dict(pending_transfer) if pending_transfer else None,
         'message': (
-            f'Added to {production_branch.name}. {float(product.quantity):g} '
+            f'{"Added" if not existing else f"+{made_qty:g} added"} to {production_branch.name}. {made_qty:g} '
             f'{product.unit or "pcs"} awaiting confirmation at {deliver_to.name}.'
-            if deliver_to else f'Added to {production_branch.name}.'
+            if deliver_to else
+            (f'+{made_qty:g} added to {product.name} (now {float(product.quantity):g}).' if existing
+             else f'Added to {production_branch.name}.')
         ),
-    }), 201
+    }), 200 if existing else 201
+
+
+def premade_production_batches(product_ids):
+    """Material usage of premade production, grouped into batches (one per add or
+    restock: the logs written by one request share their time to the second).
+    Returns [{at, logs, pieces}], newest first; pieces is None when not recorded."""
+    import re as _re
+    logs = (MaterialUsageLog.query.filter(MaterialUsageLog.premade_product_id.in_(product_ids or [-1]))
+            .order_by(MaterialUsageLog.created_at.desc()).all())
+    batches = []
+    by_batch = {}
+    for log in logs:
+        if log.batch_id:
+            if log.batch_id in by_batch:
+                by_batch[log.batch_id]['logs'].append(log)
+                continue
+            by_batch[log.batch_id] = {'at': log.created_at, 'productId': log.premade_product_id, 'logs': [log],
+                                      'pieces': None, 'batchId': log.batch_id}
+            batches.append(by_batch[log.batch_id])
+        elif (batches and not batches[-1].get('batchId') and log.premade_product_id == batches[-1]['productId']
+              and log.created_at and batches[-1]['at']
+              and abs((batches[-1]['at'] - log.created_at).total_seconds()) <= 2):
+            # Older logs (before batch ids): those of one add were written together
+            batches[-1]['logs'].append(log)
+        else:
+            batches.append({'at': log.created_at, 'productId': log.premade_product_id, 'logs': [log], 'pieces': None})
+    for b in batches:
+        # Pieces made: from the stock record of that add/restock, else from the usage note
+        adj = StockAdjustmentLog.query.filter_by(batch_id=b['batchId']).first() if b.get('batchId') else None
+        adj = adj or (StockAdjustmentLog.query.filter(
+            StockAdjustmentLog.batch_id.is_(None),
+            StockAdjustmentLog.item_kind == 'premade', StockAdjustmentLog.item_id == b['productId'],
+            StockAdjustmentLog.reason.in_(('starting', 'production')),
+            StockAdjustmentLog.created_at.between(b['at'] - timedelta(seconds=3), b['at'] + timedelta(seconds=3)))
+            .first()) if b['at'] else None
+        if adj:
+            b['pieces'] = float(adj.new_quantity) - float(adj.old_quantity or 0)
+            b['adjustment'] = adj
+        else:
+            m = _re.search(r'qty: ([\d.]+)', b['logs'][0].notes or '')
+            b['pieces'] = float(m.group(1)) if m else None
+    return batches
+
+
+@app.route('/api/inventory/finished-goods/<int:item_id>/recipe', methods=['GET'])
+@require_auth
+@require_permission('premade.add')
+def get_premade_recipe(item_id):
+    """The materials the latest batch of this product used, per piece, to fill in
+    a restock. Older rows of the same product (same name) count too."""
+    product = PremadeProduct.query.get(item_id)
+    if not product:
+        return jsonify({'status': 'error', 'message': 'Premade product not found'}), 404
+    same = [p.id for p in PremadeProduct.query.filter(
+        db.func.lower(db.func.trim(PremadeProduct.name)) == (product.name or '').strip().lower()).all()]
+    batches = premade_production_batches([product.id]) or premade_production_batches(same)
+    if not batches:
+        return jsonify({'status': 'success', 'data': {'materials': [], 'basedOn': None}})
+    latest = batches[0]
+    pieces = latest['pieces'] if latest['pieces'] and latest['pieces'] > 0 else None
+    totals = {}
+    for log in latest['logs']:
+        totals[log.material_id] = totals.get(log.material_id, 0) + float(log.quantity_used or 0)
+    materials = []
+    for material_id, total in totals.items():
+        m = InventoryMaterial.query.get(material_id)
+        materials.append({
+            'materialId': material_id,
+            'name': m.material_type if m else 'Removed material',
+            'detail': ' · '.join(v for v in ((m.color, m.pattern) if m else ()) if v),
+            'batchQuantity': round(total, 4),
+            'perPiece': round(total / pieces, 6) if pieces else None,
+            'costPerUnit': float((m.cost_per_unit or 0) or (m.unit_price or 0)) if m else 0,
+            'stock': float(m.stock_quantity or 0) if m else 0,
+            'branchName': m.branch.name if m and m.branch else None,
+            'available': bool(m and not m.is_archived),
+        })
+    return jsonify({'status': 'success', 'data': {
+        'materials': materials,
+        'basedOn': {'date': _iso(latest['at']), 'pieces': pieces},
+    }})
 
 @app.route('/api/inventory/finished-goods/<int:item_id>', methods=['PUT'])
 @require_auth
@@ -3210,8 +3853,12 @@ def update_finished_good(item_id):
         product.name = data['name'].strip()
     if 'sku' in data:
         product.sku = data['sku']
+    # As with raw materials: stock is changed by production, deliveries and sales,
+    # and corrected with Adjust stock (with a reason), not by editing the product
     if 'quantity' in data:
-        product.quantity = float(data['quantity'])
+        sent = finite_number(data['quantity'])
+        if sent is None or abs(sent - float(product.quantity or 0)) > 1e-9:
+            return jsonify({'status': 'error', 'message': STOCK_EDIT_MOVED_MSG}), 400
     product.unit = 'pcs'
     if 'category' in data:
         product.category = data['category']
@@ -3281,6 +3928,13 @@ def create_premade_transfers(product, allocations, actor, notes='', batch_id=Non
     """
     if not allocations:
         return None, ({'status': 'error', 'message': 'Select at least one branch to give stock to'}, 400)
+    # Premade stock only moves warehouse → branch. Branches don't send to each other:
+    # they restock on the scheduled delivery from the warehouse.
+    warehouse = get_warehouse_branch()
+    if not warehouse or product.branch_id != warehouse.id:
+        return None, ({'status': 'error',
+                       'message': 'Premade stock can only be transferred from the main warehouse. '
+                                  'Branches are restocked by the warehouse, not by each other.'}, 403)
 
     available = premade_available_quantity(product)
     requested_total = 0.0
@@ -3519,7 +4173,48 @@ def get_material_usage_logs():
         query = query.filter_by(material_id=int(material_id))
 
     logs = query.order_by(MaterialUsageLog.created_at.desc()).limit(300).all()
-    return jsonify({'status': 'success', 'data': [material_usage_to_dict(log) for log in logs]})
+    # A negative use is stock given back (e.g. a job order's materials lowered)
+    entries = [{**material_usage_to_dict(log), 'direction': 'in' if float(log.quantity_used or 0) < 0 else 'out',
+                'kind': 'usage'} for log in logs]
+
+    # Purchase order deliveries (stock in) and returns to the supplier (stock out)
+    receipts = (PurchaseOrderReceipt.query.filter(PurchaseOrderReceipt.kind.in_(('delivery', 'return')))
+                .order_by(PurchaseOrderReceipt.created_at.desc()).limit(300).all())
+    pos = {p.id: p for p in PurchaseOrder.query.filter(
+        PurchaseOrder.id.in_({r.purchase_order_id for r in receipts} or {-1})).all()}
+    mat_ids = {_int_or_none(it.get('materialId')) for r in receipts for it in (r.items or [])} - {None}
+    mats = {m.id: m for m in InventoryMaterial.query.filter(InventoryMaterial.id.in_(mat_ids or {-1})).all()}
+    for r in receipts:
+        po = pos.get(r.purchase_order_id)
+        if not po:
+            continue
+        for it in r.items or []:
+            material = mats.get(_int_or_none(it.get('materialId')))
+            if not material or (material_id and material.id != int(material_id)):
+                continue
+            if branch_ids is not None and material.branch_id not in branch_ids:
+                continue
+            returned = r.kind == 'return'
+            reference = (f"Returned to {po.supplier_name} — {r.return_reason or 'return'} ({po.po_number})" if returned
+                         else f"Received from {po.supplier_name} ({po.po_number})")
+            entries.append({
+                'id': f"po-{r.id}-{it.get('line')}", 'materialId': material.id,
+                'materialName': material.material_type, 'materialUnit': material_unit(material),
+                'premadeProductId': None, 'premadeProductName': None,
+                'quantityUsed': float(it.get('quantity') or 0),
+                'usedInType': 'purchase_return' if returned else 'purchase_received',
+                'usedInReference': reference,
+                'branchId': material.branch_id, 'branchName': material.branch.name if material.branch else None,
+                'usedBy': r.received_by, 'usedByName': r.received_by_user.full_name if r.received_by_user else None,
+                'managedWorkerId': None, 'workerName': None,
+                'notes': ' — '.join(v for v in ((f'Invoice / slip no. {r.invoice_number}' if r.invoice_number else None), r.notes) if v) or None,
+                'usedAt': fmt_dt(r.created_at), 'sortAt': r.created_at.isoformat() if r.created_at else '',
+                'direction': 'out' if returned else 'in', 'kind': 'purchase_order', 'purchaseOrderId': po.id,
+            })
+    for e, log in zip(entries, logs):
+        e['sortAt'] = log.created_at.isoformat() if log.created_at else ''
+    entries.sort(key=lambda e: e['sortAt'], reverse=True)
+    return jsonify({'status': 'success', 'data': entries[:400]})
 
 @app.route('/api/inventory/categories', methods=['GET'])
 @require_auth
@@ -3569,7 +4264,86 @@ def supplier_to_dict(s):
         'notes': s.notes,
         'isActive': s.is_active,
         'createdAt': s.created_at.strftime('%Y-%m-%d') if s.created_at else None,
+        'paymentTerm': s.payment_term,
+        'paymentTermDays': s.payment_term_days,
+        'paymentTermLabel': payment_term_label(s.payment_term, s.payment_term_days),
+        # Inventory materials usually bought from this supplier
+        'materials': [{
+            'id': m.id, 'name': ' - '.join(filter(None, [m.material_type, m.color, m.pattern])),
+            'stockQuantity': float(m.stock_quantity or 0), 'unit': material_unit(m),
+            'branchName': m.branch.name if m.branch else None,
+        } for m in InventoryMaterial.query.filter_by(supplier_id=s.id, is_archived=False)
+                                          .order_by(InventoryMaterial.material_type, InventoryMaterial.id).all()],
     }
+
+# name@domain.tld: letters, digits and . _ % + - before the @; a domain of labels
+# separated by dots, ending in a 2+ letter extension (gmail.com, yahoo.com, company.com.ph)
+SUPPLIER_EMAIL_RE = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}')
+
+def supplier_contact_error(phone, email):
+    """A supplier must be reachable: a phone number or an email address."""
+    phone, email = (phone or '').strip(), (email or '').strip()
+    if not phone and not email:
+        return 'Enter a phone / telephone number or an email address for the supplier'
+    # Digits only (mobile or landline with area code), at most 15 (the longest international number)
+    if phone and not re.fullmatch(r'\d{7,15}', phone):
+        return 'The phone / telephone number must be 7 to 15 digits, numbers only'
+    if email and not SUPPLIER_EMAIL_RE.fullmatch(email):
+        return 'Enter a valid email address, e.g. name@gmail.com or sales@company.com.ph'
+    return None
+
+def apply_supplier_materials(supplier, entries, user):
+    """Link the materials the supplier supplies: [{materialId}] for ones already in
+    Inventory, or [{new: {materialType, color, pattern, costPerUnit}}] to add a new
+    item (at the warehouse, 0 in stock). Materials left off stop pointing to this
+    supplier. Also refreshes the supplier's materials text. Returns an error message or None."""
+    if not isinstance(entries, list):
+        return 'Materials supplied are not in the right format'
+    keep = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return 'Materials supplied are not in the right format'
+        if entry.get('materialId'):
+            material = InventoryMaterial.query.get(_int_or_none(entry['materialId']))
+            if not material or material.is_archived:
+                return 'One of the chosen materials is no longer in Inventory'
+            keep.append(material)
+            continue
+        new = entry.get('new') or {}
+        name = str(new.get('materialType') or '').strip()[:255]
+        if not name:
+            return 'Enter the name of each new material'
+        color = str(new.get('color') or '').strip()[:100]
+        pattern = str(new.get('pattern') or '').strip()[:100]
+        cost = finite_number(new.get('costPerUnit'), 0.0)
+        if cost is None or cost < 0:
+            return 'Cost must be a number of zero or more'
+        warehouse = Branch.query.filter_by(is_warehouse=True).first() or Branch.query.first()
+        same = InventoryMaterial.query.filter(
+            db.func.lower(InventoryMaterial.material_type) == name.lower(),
+            db.func.lower(db.func.coalesce(InventoryMaterial.color, '')) == color.lower(),
+            db.func.lower(db.func.coalesce(InventoryMaterial.pattern, '')) == pattern.lower(),
+            InventoryMaterial.branch_id == warehouse.id, InventoryMaterial.is_archived.is_(False)).first()
+        if same:
+            keep.append(same)
+            continue
+        material = InventoryMaterial(material_type=name, color=color, pattern=pattern, cost_per_unit=cost,
+                                     markup_percent=25, unit_price=round(cost * 1.25, 2), stock_quantity=0,
+                                     low_stock_threshold=0, branch_id=warehouse.id, is_archived=False,
+                                     status='available', supplier_id=supplier.id)
+        db.session.add(material)
+        db.session.flush()
+        log_stock_adjustment('material', material.id, material.branch_id, 'starting', None, 0, user)
+        keep.append(material)
+    keep_ids = {m.id for m in keep}
+    for m in InventoryMaterial.query.filter_by(supplier_id=supplier.id).all():
+        if m.id not in keep_ids:
+            m.supplier_id = None
+    for m in keep:
+        m.supplier_id = supplier.id
+    names = list(dict.fromkeys(' - '.join(filter(None, [m.material_type, m.color, m.pattern])) for m in keep))
+    supplier.materials_supplied = ', '.join(names)[:5000] or None
+    return None
 
 @app.route('/api/inventory/suppliers', methods=['GET'])
 @require_auth
@@ -3589,7 +4363,15 @@ def create_supplier():
     data = request.get_json()
     if not data.get('name', '').strip():
         return jsonify({'status': 'error', 'message': 'Supplier name is required'}), 400
+    term, term_days, term_error = parse_payment_term(data)
+    if term_error:
+        return jsonify({'status': 'error', 'message': term_error}), 400
+    contact_error = supplier_contact_error(data.get('phone'), data.get('email'))
+    if contact_error:
+        return jsonify({'status': 'error', 'message': contact_error}), 400
     supplier = Supplier(
+        payment_term=term,
+        payment_term_days=term_days,
         name=data['name'].strip(),
         contact_person=data.get('contactPerson', '').strip() or None,
         phone=data.get('phone', '').strip() or None,
@@ -3599,6 +4381,12 @@ def create_supplier():
         notes=data.get('notes', '').strip() or None,
     )
     db.session.add(supplier)
+    db.session.flush()
+    if 'materials' in data:
+        error = apply_supplier_materials(supplier, data['materials'], request.current_user)
+        if error:
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': error}), 400
     db.session.commit()
     log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Inventory', f"Created supplier: {supplier.name}", request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': supplier_to_dict(supplier)}), 201
@@ -3619,8 +4407,30 @@ def update_supplier(supplier_id):
     if 'materialsSupplied' in data: supplier.materials_supplied = data['materialsSupplied'].strip() or None
     if 'notes' in data: supplier.notes = data['notes'].strip() or None
     if 'isActive' in data: supplier.is_active = bool(data['isActive'])
+    if 'phone' in data or 'email' in data:
+        contact_error = supplier_contact_error(supplier.phone, supplier.email)
+        if contact_error:
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': contact_error}), 400
+    if 'materials' in data:
+        error = apply_supplier_materials(supplier, data['materials'], request.current_user)
+        if error:
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': error}), 400
+    term_note = ''
+    if 'paymentTerm' in data:
+        term, term_days, term_error = parse_payment_term(data)
+        if term_error:
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': term_error}), 400
+        before = payment_term_label(supplier.payment_term, supplier.payment_term_days) or 'no term'
+        supplier.payment_term, supplier.payment_term_days = term, term_days
+        after = payment_term_label(term, term_days) or 'no term'
+        if before != after:
+            # Existing purchase orders keep the term they were made with
+            term_note = f" (default payment term {before} → {after})"
     db.session.commit()
-    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated supplier: {supplier.name}", request.remote_addr or '0.0.0.0')
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated supplier: {supplier.name}{term_note}", request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': supplier_to_dict(supplier)})
 
 # ============================================
@@ -3962,7 +4772,32 @@ def get_payments():
         # for (no branch on the account = nothing)
         own_orders = db.session.query(JobOrder.id).filter(JobOrder.branch_id == (user_branch_id(user) or -1))
         query = query.filter(PaymentRecord.job_order_id.in_(own_orders))
-    payments = query.order_by(PaymentRecord.created_at.desc()).all()
+    # Optional ?startDate=&endDate= (YYYY-MM-DD, Philippine calendar days, both
+    # inclusive; either may be left out). Stored times are UTC, so a PH day runs
+    # 16:00 UTC the day before to 16:00 UTC that day.
+    start_date, end_date = request.args.get('startDate'), request.args.get('endDate')
+    try:
+        start_utc = datetime.strptime(start_date, '%Y-%m-%d') - PH_OFFSET if start_date else None
+        end_utc = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1) - PH_OFFSET if end_date else None
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Dates must be YYYY-MM-DD'}), 400
+    if start_utc and end_utc and start_utc >= end_utc:
+        return jsonify({'status': 'error', 'message': 'The start date must be on or before the end date'}), 400
+    if start_utc:
+        query = query.filter(PaymentRecord.created_at >= start_utc)
+    if end_utc:
+        query = query.filter(PaymentRecord.created_at < end_utc)
+    # ?sort= latest (default) | oldest | amount_desc | amount_asc; ties fall back to newest first
+    sort_orders = {
+        'latest': [PaymentRecord.created_at.desc(), PaymentRecord.id.desc()],
+        'oldest': [PaymentRecord.created_at.asc(), PaymentRecord.id.asc()],
+        'amount_desc': [PaymentRecord.amount.desc(), PaymentRecord.created_at.desc(), PaymentRecord.id.desc()],
+        'amount_asc': [PaymentRecord.amount.asc(), PaymentRecord.created_at.desc(), PaymentRecord.id.desc()],
+    }
+    sort = request.args.get('sort') or 'latest'
+    if sort not in sort_orders:
+        return jsonify({'status': 'error', 'message': f'sort must be one of: {", ".join(sort_orders)}'}), 400
+    payments = query.order_by(*sort_orders[sort]).all()
     return jsonify({'status': 'success', 'data': [payment_record_to_dict(p) for p in payments]})
 
 @app.route('/api/payments', methods=['POST'])
@@ -3992,6 +4827,8 @@ def create_payment():
     amount = money(amount)
     remaining = money(max(float(job_order.total_price or 0) - float(job_order.down_payment or 0), 0))
     method = data.get('paymentMethod', 'cash')
+    if method not in ACCEPTED_PAYMENT_METHODS:
+        return jsonify({'status': 'error', 'message': PAYMENT_METHOD_ERROR}), 400
     reference = (data.get('referenceNumber') or '').strip() or None
     notes = (data.get('notes') or '').strip() or None
     excess = None
@@ -4112,8 +4949,8 @@ def refund_excess_payment(excess_id):
         return error
     data = request.get_json() or {}
     method = data.get('refundMethod')
-    if method not in PAYMENT_METHODS:
-        return jsonify({'status': 'error', 'message': 'Choose how the money was returned'}), 400
+    if method not in ACCEPTED_PAYMENT_METHODS:
+        return jsonify({'status': 'error', 'message': 'Choose how the money was returned: Cash, GCash or Bank Transfer'}), 400
     excess.status = 'refunded'
     excess.refund_method = method
     excess.refund_reference = (data.get('referenceNumber') or '').strip() or None
@@ -4468,6 +5305,10 @@ def job_order_cost(items):
             actual = it.get('actualLaborCost')
             total += float(actual) if actual is not None else qty * float(it.get('laborCost') or 0)
         else:
+            # Once workers have recorded what they used, that replaces the estimate
+            # (their cutting excess is counted with the order's extra material)
+            if it.get('actualQuantity') is not None:
+                qty = float(it['actualQuantity'])
             total += qty * float(it.get('materialCost') or 0)
     return round(total, 2)
 
@@ -4536,9 +5377,12 @@ def sync_labor_assignments(order, previous_items):
                       if c.id not in claimed and c.id not in linked_ids
                       and c.worker_id == worker.id and (c.description or '').strip() == desc), None)
         if a is None:
+            # A worker chosen on the job order gets the work on their calendar for the
+            # next day (Philippine time); it can still be moved from Worker Management
             a = WorkerAssignment(worker_id=worker.id, job_order_ref=order.job_order_id,
                                  job_order_db_id=order.id, description=desc,
-                                 status='pending', assignment_type='job_order')
+                                 status='pending', assignment_type='job_order',
+                                 scheduled_date=manila_today() + timedelta(days=1))
             db.session.add(a)
             db.session.flush()
         elif a.status == 'pending':
@@ -4802,6 +5646,44 @@ def job_order_entered_price(order):
     total = float(order.total_price or 0)
     return money(total / (1 - d / 100)) if d < 100 else total
 
+def job_order_completeness_error(description, vehicle_info, items, total_price):
+    """Why a job order isn't complete enough to be a real (non-draft) order, or None.
+    The same rules as the New Job Order form's steps: a service, a vehicle unless
+    the job is reupholstery alone, at least one material line with a quantity and
+    unit price above zero, and a price above zero. Drafts skip this."""
+    services = [part.strip().lower() for part in (description or '').split(',') if part.strip()]
+    if not services:
+        return 'Select at least one service'
+    reupholstery_only = all(part.startswith('reupholstery') for part in services)
+    if not reupholstery_only:
+        vehicle = vehicle_info or {}
+        missing = lambda v: not str(v or '').strip() or str(v).strip().upper() == 'N/A'
+        if missing(vehicle.get('make')) or missing(vehicle.get('model')):
+            return 'Enter the vehicle make and model'
+        try:
+            year = int(vehicle.get('year'))
+        except (TypeError, ValueError):
+            return 'Enter the vehicle year'
+        if not (1970 <= year <= manila_today().year + 1):
+            return f'Vehicle year must be from 1970 to {manila_today().year + 1}'
+    materials = [it for it in (items or []) if (it.get('category') or 'material') == 'material']
+    if not materials:
+        return 'Add at least one material'
+    for it in materials:
+        name = str(it.get('name') or '').strip() or 'a material'
+        try:
+            qty, unit = float(it.get('quantity') or 0), float(it.get('unitPrice') or 0)
+        except (TypeError, ValueError):
+            return f'Quantity and unit price of {name} must be numbers'
+        if qty <= 0:
+            return f'Quantity of {name} must be more than 0'
+        if unit <= 0:
+            return f'Unit price of {name} must be more than ₱0'
+    if not total_price or total_price <= 0:
+        return 'Enter the price for the work'
+    return None
+
+
 def job_order_pricing(data, order=None):
     """Work out a job order's price on the server. Returns (fields, error).
 
@@ -4871,6 +5753,9 @@ def create_job_order():
         return jsonify({'status': 'error', 'message': 'Customer name is required to save a draft'}), 400
     if is_draft and not data.get('branchId'):
         return jsonify({'status': 'error', 'message': 'Branch is required to save a draft'}), 400
+    phone_error = customer_phone_error(data.get('customerPhone'))
+    if phone_error:
+        return jsonify({'status': 'error', 'message': phone_error}), 400
 
     # Look up branch from database
     branch_db = Branch.query.get(data['branchId'])
@@ -4882,7 +5767,15 @@ def create_job_order():
         return error
 
     lock_branch_numbering(branch_db.id)
-    job_order_id = generate_job_order_id(branch_db.code)
+    # A number typed on the form, or else the next one generated for the branch
+    typed_number = (data.get('jobOrderNumber') or '').strip()
+    if typed_number:
+        number_error = manual_order_number_error('job', typed_number)
+        if number_error:
+            return jsonify({'status': 'error', 'message': number_error, 'code': 'order_number'}), 400
+        job_order_id = typed_number
+    else:
+        job_order_id = generate_job_order_id(branch_db.code)
     
     items = data.get('items') or []
     material_error = material_branch_error(items, branch_db.id)
@@ -4894,6 +5787,10 @@ def create_job_order():
     if price_error:
         return jsonify({'status': 'error', 'message': price_error}), 400
     total_price = pricing['total_price']
+    if not is_draft:
+        incomplete = job_order_completeness_error(data.get('description'), data.get('vehicleInfo'), items, total_price)
+        if incomplete:
+            return jsonify({'status': 'error', 'message': incomplete}), 400
     computed_cost = sum(item.get('quantity', 0) * (item.get('materialCost', 0) + item.get('laborCost', 0)) for item in items)
     estimated_cost = data.get('estimatedCost') if data.get('estimatedCost') is not None else computed_cost
     try:
@@ -4902,6 +5799,12 @@ def create_job_order():
         return jsonify({'status': 'error', 'message': 'Down payment must be a number'}), 400
     if down_payment < 0 or down_payment > total_price:
         return jsonify({'status': 'error', 'message': 'Down payment must be between ₱0 and the order total'}), 400
+    if not is_draft:
+        error = deposit_error(total_price, down_payment)
+        if error:
+            return jsonify({'status': 'error', 'message': error, 'code': 'deposit'}), 400
+    if down_payment > 0 and data.get('paymentMethod', 'cash') not in ACCEPTED_PAYMENT_METHODS:
+        return jsonify({'status': 'error', 'message': PAYMENT_METHOD_ERROR}), 400
     if down_payment > 0 and not has_perm(request.current_user, 'payments.add'):
         return jsonify({'status': 'error', 'message': 'You do not have permission to record payments'}), 403
     balance = max(total_price - down_payment, 0) if total_price > 0 else 0
@@ -4950,6 +5853,7 @@ def create_job_order():
     # Create database record
     new_order = JobOrder(
         job_order_id=job_order_id,
+        number_is_manual=bool(typed_number),
         customer_id=resolved_customer_id,
         customer_name=str(data['customerName']).strip(),
         customer_phone=str(data.get('customerPhone') or '').strip(),
@@ -4977,12 +5881,14 @@ def create_job_order():
     )
 
     db.session.add(new_order)
+    clash_message = (f'{job_order_id} was just used by another order. Use a different number or press Generate.'
+                     if typed_number else NUMBER_CLASH_MESSAGE)
     try:
         db.session.flush()  # get new_order.id before commit
     except IntegrityError:
-        # Two saves picked the same number (only possible without row locks)
+        # Two saves picked the same number at the same moment
         db.session.rollback()
-        return jsonify({'status': 'error', 'message': NUMBER_CLASH_MESSAGE}), 409
+        return jsonify({'status': 'error', 'message': clash_message, 'code': 'order_number'}), 409
     if not is_draft:
         sync_labor_assignments(new_order, [])
     new_order.actual_cost = job_order_cost(new_order.items)
@@ -5011,9 +5917,9 @@ def create_job_order():
     try:
         db.session.commit()
     except IntegrityError:
-        # Two saves picked the same number (only possible without row locks)
+        # Two saves picked the same number at the same moment
         db.session.rollback()
-        return jsonify({'status': 'error', 'message': NUMBER_CLASH_MESSAGE}), 409
+        return jsonify({'status': 'error', 'message': clash_message, 'code': 'order_number'}), 409
 
     log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Sales', f"Created job order: {job_order_id}", request.remote_addr or '0.0.0.0')
 
@@ -5051,7 +5957,281 @@ def job_order_materials_taken(order):
         MaterialUsageLog.used_in_reference == order.job_order_id,
         MaterialUsageLog.used_by.isnot(None),
     ).group_by(MaterialUsageLog.material_id).all()
-    return any(float(total or 0) > 0 for _, total in rows)
+    return any(float(total or 0) > 0 for _, total in rows) or bool(cut_material_ids(order))
+
+
+# ── Cuts: what a worker cut from stock for a job, and how much of it they used ──
+# Recorded when the worker's task is marked finished. The whole cut leaves stock:
+# the used part as usage (used_in_type 'job_order_cut'), the rest as cutting
+# excess in the waste log, tied to the job. A material with cuts is no longer
+# taken by its planned quantity when the job order is completed.
+CUT_EXCESS_REASON = 'Cutting excess'
+
+def _int_or_none(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+def order_line_material(order, item):
+    """The Inventory material a job order line uses: its stored materialId, or for
+    older lines saved without one, a material of the same name at the order's
+    branch (first) or the warehouse. None for a material not in Inventory."""
+    # No branch limit on the id: the material may be the warehouse's
+    material_id = _int_or_none(item.get('materialId'))
+    if material_id:
+        material = InventoryMaterial.query.filter_by(id=material_id).first()
+        if material:
+            return material
+    options = line_material_options(order, item)
+    return options[0] if options else None
+
+def line_material_options(order, item):
+    """Inventory materials a line saved without a materialId may mean: those whose
+    name or full label ("Fabric - Beige - Plain") is the line's name, at the order's
+    branch first, then the warehouse. A plain name like "Canvas" can match several."""
+    name = ' '.join((item.get('name') or '').split()).lower()
+    if not name:
+        return []
+    warehouse = Branch.query.filter_by(is_warehouse=True).first()
+    branch_ids = [order.branch_id, warehouse.id if warehouse else 1]
+    candidates = InventoryMaterial.query.filter(
+        InventoryMaterial.branch_id.in_(branch_ids), InventoryMaterial.is_archived.is_(False)
+    ).order_by(db.case((InventoryMaterial.branch_id == order.branch_id, 0), else_=1), InventoryMaterial.id).all()
+    norm = lambda v: ' '.join((v or '').split()).lower()
+    label = lambda m: norm(' - '.join(filter(None, [m.material_type, m.color, m.pattern])))
+    exact = [m for m in candidates if label(m) == name]
+    return exact or [m for m in candidates if norm(m.material_type) == name]
+
+def order_cut_lines(order):
+    """The order's material lines a worker can record cuts of: {line (index),
+    item, linked, options}. A linked line (stored materialId) has its one
+    material; an older unlinked one, the Inventory materials its name matches.
+    Also the names of lines with no Inventory material at all."""
+    lines, missing, seen = [], [], set()
+    for idx, it in enumerate(order.items or []):
+        name = (it.get('name') or '').strip()
+        if item_category(it) != 'material' or not name:
+            continue
+        mid = _int_or_none(it.get('materialId'))
+        linked = InventoryMaterial.query.filter_by(id=mid).first() if mid else None
+        if linked:
+            if not linked.is_consumable and linked.id not in seen:
+                seen.add(linked.id)
+                lines.append({'line': idx, 'item': it, 'linked': True, 'options': [linked]})
+            continue
+        options = [m for m in line_material_options(order, it) if not m.is_consumable]
+        if options:
+            lines.append({'line': idx, 'item': it, 'linked': False, 'options': options})
+        else:
+            missing.append(name)
+    return lines, missing
+
+def extra_cut_materials(order):
+    """Length materials a worker may add when finishing a task on this order: the
+    order's branch and the warehouse, not archived, not consumables."""
+    warehouse = Branch.query.filter_by(is_warehouse=True).first()
+    return InventoryMaterial.query.filter(
+        InventoryMaterial.branch_id.in_([order.branch_id, warehouse.id if warehouse else 1]),
+        InventoryMaterial.is_archived.is_(False), db.or_(InventoryMaterial.is_consumable.is_(False),
+                                                         InventoryMaterial.is_consumable.is_(None)),
+    ).order_by(InventoryMaterial.material_type, InventoryMaterial.color, InventoryMaterial.id).all()
+
+def order_consumables(order):
+    """Consumables at the order's branch and the warehouse, for marking used on a task."""
+    warehouse = Branch.query.filter_by(is_warehouse=True).first()
+    return InventoryMaterial.query.filter(
+        InventoryMaterial.branch_id.in_([order.branch_id, warehouse.id if warehouse else 1]),
+        InventoryMaterial.is_archived.is_(False), InventoryMaterial.is_consumable.is_(True),
+    ).order_by(InventoryMaterial.material_type, InventoryMaterial.id).all()
+
+def record_assignment_consumables(assignment, order, entries):
+    """Consumables marked on finishing a task: [{materialId, kind: full|partial,
+    quantity}]. Returns an error response or None. The caller commits."""
+    if not isinstance(entries, list):
+        return _error('Consumables are not in the right format')
+    allowed = {m.id: m for m in order_consumables(order)}
+    task = assignment.description or 'task'
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get('kind') not in ('full', 'partial'):
+            return _error('Mark each consumable fully or partially used')
+        material = allowed.get(_int_or_none(entry.get('materialId')))
+        if not material:
+            return _error("That consumable can't be used for this job order")
+        _, error = use_consumable(material, entry['kind'], entry.get('quantity', 1),
+                                  notes=f"{assignment.worker.name if assignment.worker else 'Worker'} ({task})",
+                                  reference=order.job_order_id, worker_id=assignment.worker_id,
+                                  assignment_id=assignment.id)
+        if error:
+            return _error(error)
+    return None
+
+def cut_material_ids(order):
+    """Materials workers have recorded cuts of on this order."""
+    return {mid for (mid,) in db.session.query(MaterialUsageLog.material_id).filter(
+        MaterialUsageLog.used_in_type == 'job_order_cut',
+        MaterialUsageLog.used_in_reference == order.job_order_id).distinct()}
+
+def apply_cut_quantities(order):
+    """Put the used amount from workers' cuts on each material line as
+    actualQuantity (or clear it where there are none), and refresh the cost."""
+    totals = dict(db.session.query(MaterialUsageLog.material_id, db.func.sum(MaterialUsageLog.quantity_used)).filter(
+        MaterialUsageLog.used_in_type == 'job_order_cut',
+        MaterialUsageLog.used_in_reference == order.job_order_id,
+    ).group_by(MaterialUsageLog.material_id).all())
+    items, seen = [dict(it) for it in (order.items or [])], set()
+    for it in items:
+        material = order_line_material(order, it) if totals and item_category(it) == 'material' else None
+        mid = material.id if material else None
+        if mid in totals and mid not in seen:
+            it['actualQuantity'] = round(float(totals[mid] or 0), 4)
+            seen.add(mid)
+        else:
+            it.pop('actualQuantity', None)
+    order.items = items
+    order.actual_cost = job_order_actual_cost(order, items)
+
+def _error(message, code=400):
+    return jsonify({'status': 'error', 'message': message}), code
+
+def record_assignment_cuts(assignment, order, cuts):
+    """Take each {line, materialId, cut, used} (yards, or the material's unit) out
+    of stock for this task. `line` is the order line's index: an older line saved
+    without a materialId gets the chosen one, so it stays linked. Returns an error
+    response, or None. The caller commits."""
+    if not isinstance(cuts, list):
+        return _error('Materials cut are not in the right format')
+    lines, _ = order_cut_lines(order)
+    by_line = {l['line']: l for l in lines}
+    allowed = {m.id for l in lines for m in l['options']}
+    extra_ok = {m.id for m in extra_cut_materials(order)}
+    worker = assignment.worker
+    task = assignment.description or 'task'
+    totals, links = {}, {}  # material id -> [cut, used]; unlinked line -> material id
+    reasons = {}  # material id -> why extra material was needed (rows the worker added)
+    for entry in cuts:
+        if not isinstance(entry, dict):
+            return _error('Materials cut are not in the right format')
+        mid = _int_or_none(entry.get('materialId'))
+        cut, used = finite_number(entry.get('cut'), 0.0), finite_number(entry.get('used'), 0.0)
+        if cut is None or used is None or cut < 0 or used < 0:
+            return _error('Cut and used amounts must be numbers of zero or more')
+        if cut == 0 and used == 0:
+            continue
+        if mid not in allowed and mid not in extra_ok:
+            return _error("That material can't be cut for this job order")
+        line = by_line.get(_int_or_none(entry.get('line')))
+        if line and not line['linked'] and any(m.id == mid for m in line['options']):
+            links[line['line']] = mid
+        if not line:
+            # Material the worker added (a recut, a wrong measurement...): say why
+            reason = str(entry.get('reason') or '').strip()[:200]
+            if not reason:
+                return _error('Give the reason the added material was needed')
+            reasons.setdefault(mid, [])
+            if reason not in reasons[mid]:
+                reasons[mid].append(reason)
+        total = totals.setdefault(mid, [0.0, 0.0])
+        total[0] += cut
+        total[1] += used
+    items = [dict(it) for it in (order.items or [])]
+    for idx, mid in links.items():
+        items[idx]['materialId'] = mid
+    # A material the worker added that isn't on the order gets its own line (planned
+    # 0), so what they used counts in the job's cost
+    on_lines = {_int_or_none(it.get('materialId')) for it in items if item_category(it) == 'material'}
+    for mid in totals:
+        if mid not in on_lines:
+            extra = InventoryMaterial.query.get(mid)
+            items.append({
+                'name': ' - '.join(filter(None, [extra.material_type, extra.color, extra.pattern])),
+                'category': 'material', 'materialId': mid, 'quantity': 0,
+                'unitPrice': float(extra.unit_price or 0),
+                'materialCost': float(extra.cost_per_unit or extra.unit_price or 0), 'laborCost': 0,
+                'addedBy': worker.name if worker else 'worker',
+                'notes': '; '.join(reasons.get(mid, [])),
+            })
+    order.items = items
+    seen = set(totals)
+    for mid, (cut, used) in totals.items():
+        cut, used = round(cut, 4), round(used, 4)
+        material = InventoryMaterial.query.filter_by(id=mid).with_for_update().first()
+        if not material:
+            return _error('Material not found', 404)
+        name = ' - '.join(filter(None, [material.material_type, material.color, material.pattern]))
+        unit = material_unit(material)
+        if used > cut:
+            return _error(f"{name}: used ({used:g} {unit}) can't be more than what was cut ({cut:g} {unit})")
+
+        # A completion already took this material by its planned quantity: give that
+        # back first, the cut replaces it
+        planned = float(db.session.query(db.func.coalesce(db.func.sum(MaterialUsageLog.quantity_used), 0)).filter(
+            MaterialUsageLog.material_id == mid, MaterialUsageLog.used_in_type == 'job_order',
+            MaterialUsageLog.used_in_reference == order.job_order_id, MaterialUsageLog.used_by.isnot(None)).scalar() or 0)
+        if planned > 0:
+            material.stock_quantity = round(float(material.stock_quantity or 0) + planned, 4)
+            db.session.add(MaterialUsageLog(
+                material_id=mid, quantity_used=-planned, used_in_type='job_order',
+                used_in_reference=order.job_order_id, branch_id=order.branch_id,
+                used_by=request.current_user['id'],
+                notes=f"Returned from job order {order.job_order_id} — replaced by the amount cut"))
+
+        on_hand = float(material.stock_quantity or 0)
+        if cut > on_hand + QTY_TOLERANCE:
+            return _error(f'{name}: only {on_hand:g} {unit} in stock, less than the {cut:g} {unit} cut')
+        if cut > on_hand:
+            cut, used = on_hand, min(used, on_hand)
+        material.stock_quantity = round(on_hand - used, 4)
+        material.updated_at = datetime.now()
+        db.session.add(MaterialUsageLog(
+            material_id=mid, quantity_used=used, used_in_type='job_order_cut',
+            used_in_reference=order.job_order_id, branch_id=order.branch_id,
+            used_by=request.current_user['id'], managed_worker_id=assignment.worker_id,
+            worker_assignment_id=assignment.id,
+            notes=f"Cut {cut:g} {unit}, used {used:g} {unit} — {worker.name if worker else 'worker'} ({task})"))
+        why = f" — Reason: {'; '.join(reasons[mid])}" if reasons.get(mid) else ''
+        if why:
+            db.session.flush()
+            last = MaterialUsageLog.query.filter_by(worker_assignment_id=assignment.id, material_id=mid,
+                                                    used_in_type='job_order_cut').order_by(MaterialUsageLog.id.desc()).first()
+            if last:
+                last.notes = (last.notes or '') + why
+        excess = round(cut - used, 4)
+        if excess > 0:
+            log, error = record_waste(mid, excess, CUT_EXCESS_REASON,
+                                      f"Cut {cut:g} {unit}, used {used:g} {unit} ({task}){why}",
+                                      job_order=order, worker_id=assignment.worker_id)
+            if error:
+                return error
+            log.worker_assignment_id = assignment.id
+    db.session.flush()
+    apply_cut_quantities(order)
+    queue_forecast_refresh(seen)
+    return None
+
+def undo_assignment_cuts(assignment, order):
+    """Reopening a task: what its cuts took goes back into stock."""
+    changed = set()
+    for log in MaterialUsageLog.query.filter(MaterialUsageLog.worker_assignment_id == assignment.id,
+                                             MaterialUsageLog.used_in_type.in_(('job_order_cut', 'consumable', 'consumable_partial'))).all():
+        if log.material:
+            log.material.stock_quantity = round(float(log.material.stock_quantity or 0) + float(log.quantity_used or 0), 4)
+        changed.add(log.material_id)
+        db.session.delete(log)
+    for log in MaterialWasteLog.query.filter_by(worker_assignment_id=assignment.id).all():
+        if log.material:
+            log.material.stock_quantity = round(float(log.material.stock_quantity or 0) + float(log.quantity or 0), 4)
+        changed.add(log.material_id)
+        db.session.delete(log)
+    if changed and order:
+        db.session.flush()
+        # Lines a worker added for material not on the order go once nothing is cut of it
+        still_cut = cut_material_ids(order)
+        order.items = [it for it in (order.items or [])
+                       if not (it.get('addedBy') and _int_or_none(it.get('materialId')) not in still_cut)]
+        apply_cut_quantities(order)
+    if changed:
+        queue_forecast_refresh(changed)
 
 @app.route('/api/sales/job-orders/<int:order_id>', methods=['PUT'])
 @require_auth
@@ -5130,6 +6310,9 @@ def update_job_order(order_id):
                 return jsonify({'status': 'error', 'message': 'Customer name cannot be empty'}), 400
             order.customer_name = name
         if 'customerPhone' in data:
+            phone_error = customer_phone_error(data.get('customerPhone'))
+            if phone_error:
+                return jsonify({'status': 'error', 'message': phone_error}), 400
             order.customer_phone = (data.get('customerPhone') or '').strip()
         if 'customerEmail' in data:
             order.customer_email = (data.get('customerEmail') or '').strip()
@@ -5195,6 +6378,7 @@ def update_job_order(order_id):
         # cancelled/voided orders no longer need anyone.
         if order.status not in ('draft', 'cancelled', 'voided'):
             sync_labor_assignments(order, previous_items)
+        apply_cut_quantities(order)
         order.actual_cost = job_order_actual_cost(order)
     elif prev_status == 'draft' and order.status not in ('draft', 'cancelled', 'voided'):
         # Confirming a draft books the workers named on its labor lines.
@@ -5212,14 +6396,52 @@ def update_job_order(order_id):
                 slip.pop(key, None)
                 if (order.slip_data or {}).get(key):
                     slip[key] = order.slip_data[key]
+        # The job order page's slip editor doesn't send the service details typed
+        # on the New Job Order form; keep them
+        if 'serviceDetails' not in slip and (order.slip_data or {}).get('serviceDetails'):
+            slip['serviceDetails'] = order.slip_data['serviceDetails']
         order.slip_data = slip
 
     # A new price changes what is still owed
     if pricing:
         refresh_job_order_balance(order)
 
-    if data.get('status') == 'completed' and prev_status != 'completed':
-        order.completed_at = datetime.now()
+    # Confirming a draft makes it a real order: it must be complete, like a new one
+    if prev_status == 'draft' and order.status not in ('draft', 'cancelled', 'voided'):
+        incomplete = job_order_completeness_error(order.description, order.vehicle_info, order.items, order.total_price)
+        if incomplete:
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': f'This draft is not complete yet: {incomplete}. Edit the draft first.'}), 400
+        # Like a new order, it needs its deposit; it is recorded in this same save,
+        # so a draft is never confirmed without it
+        deposit = data.get('confirmDeposit') or {}
+        amount = finite_number(deposit.get('amount'), 0.0) if isinstance(deposit, dict) else None
+        total = money(order.total_price or 0)
+        if amount is None or amount < 0 or money(float(order.down_payment or 0) + amount) > total:
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': 'Down payment must be between ₱0 and the order total'}), 400
+        error = deposit_error(total, float(order.down_payment or 0) + amount)
+        if error:
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': error, 'code': 'deposit'}), 400
+        if amount > 0:
+            method = deposit.get('paymentMethod', 'cash')
+            if method not in ACCEPTED_PAYMENT_METHODS:
+                db.session.rollback()
+                return jsonify({'status': 'error', 'message': PAYMENT_METHOD_ERROR}), 400
+            if not has_perm(user, 'payments.add'):
+                db.session.rollback()
+                return jsonify({'status': 'error', 'message': 'You do not have permission to record payments'}), 403
+            db.session.add(PaymentRecord(job_order_id=order.id, amount=money(amount), payment_method=method,
+                                         notes='Down payment', recorded_by=user['id']))
+            order.down_payment = money(float(order.down_payment or 0) + amount)
+            refresh_job_order_balance(order)
+
+    # The day the work was finished, as a Philippine date (the server runs on UTC,
+    # so datetime.now() put work finished before 8 AM on the day before). An order
+    # moved straight to delivered was finished then too.
+    if order.status in EARNED_STATUSES and (prev_status not in EARNED_STATUSES or not order.completed_at):
+        order.completed_at = manila_today()
 
     order.updated_at = datetime.now()
 
@@ -5239,29 +6461,7 @@ def update_job_order(order_id):
             if item_category(item) != 'material':
                 continue
 
-            # Resolve the inventory material – prefer stored ID, fall back to name match.
-            # Do NOT restrict by branch_id on ID lookup — the material may belong to the
-            # warehouse even when the order is from a different branch.
-            inv_material = None
-            stored_material_id = item.get('materialId')
-            if stored_material_id:
-                inv_material = InventoryMaterial.query.filter_by(
-                    id=int(stored_material_id)
-                ).first()
-            if not inv_material:
-                material_name = item.get('name', '').strip().lower()
-                if material_name:
-                    warehouse = Branch.query.filter_by(is_warehouse=True).first()
-                    warehouse_id = warehouse.id if warehouse else 1
-                    # Search the order's branch first, then the warehouse
-                    inv_material = InventoryMaterial.query.filter(
-                        db.func.lower(InventoryMaterial.material_type) == material_name,
-                        InventoryMaterial.branch_id.in_([order.branch_id, warehouse_id]),
-                        InventoryMaterial.is_archived.is_(False)
-                    ).order_by(
-                        db.case((InventoryMaterial.branch_id == order.branch_id, 0), else_=1)
-                    ).first()
-
+            inv_material = order_line_material(order, item)
             if inv_material:
                 entry = to_use.setdefault(inv_material.id, [inv_material, 0.0])
                 entry[1] += qty
@@ -5282,6 +6482,10 @@ def update_job_order(order_id):
                 gone = InventoryMaterial.query.get(mid)
                 if gone:
                     to_use[mid] = [gone, 0.0]
+
+        # Materials workers recorded cuts of already left stock by those amounts
+        for mid in cut_material_ids(order):
+            to_use.pop(mid, None)
 
         for inv_material, qty in to_use.values():
             # Logs with used_by set are the ones written here (and that took stock)
@@ -5317,6 +6521,8 @@ def update_job_order(order_id):
             ))
 
     db.session.commit()
+    if data.get('status') == 'completed' and prev_status != 'completed':
+        queue_forecast_refresh(to_use.keys())
 
     # The audit trail entry is the order's status history: who, when, from what to what
     status_note = (f" (status: {prev_status.replace('_', ' ')} -> {order.status.replace('_', ' ')})"
@@ -5637,6 +6843,38 @@ def costed_job_orders(user):
     return query
 
 
+# The shop needs at least 30% of a job order's price paid before the work is
+# confirmed, so a customer who backs out doesn't leave it out of pocket. The form
+# suggests 50%; more (up to the full price) is fine, and the rest can be paid in
+# parts afterwards.
+MIN_DEPOSIT_PERCENT = 30
+
+def customer_phone_error(phone):
+    """Message if an (optional) customer phone isn't an 11-digit PH mobile number
+    (09XX XXX XXXX), else None. Spaces and dashes are ignored; +63 counts as 0."""
+    raw = str(phone or '').strip()
+    if not raw:
+        return None
+    digits = re.sub(r'\D', '', raw)
+    if re.search(r'[^\d\s\-().+]', raw):
+        digits = ''  # letters or other symbols: not a phone number
+    if digits.startswith('63') and len(digits) == 12:
+        digits = '0' + digits[2:]
+    if not re.fullmatch(r'09\d{9}', digits):
+        return 'Enter an 11-digit mobile number starting with 09, e.g. 0917 123 4567'
+    return None
+
+def minimum_deposit(total_price):
+    return money(float(total_price or 0) * MIN_DEPOSIT_PERCENT / 100)
+
+def deposit_error(total_price, paid):
+    """Message if `paid` is below the deposit a confirmed job order needs, else None."""
+    needed = minimum_deposit(total_price)
+    if float(total_price or 0) > 0 and money(paid or 0) < needed:
+        return (f'A down payment of at least {MIN_DEPOSIT_PERCENT}% of the total (₱{needed:,.2f}) '
+                f'is needed before the job order is confirmed')
+    return None
+
 def revenue_ex_vat(order):
     """What the order earns us: its total less any VAT collected for the government."""
     return vat_breakdown(order.total_price, order.vat_percent)['net']
@@ -5853,7 +7091,7 @@ def get_purchase_orders():
     status = request.args.get('status')
     query = PurchaseOrder.query
     if status:
-        query = query.filter_by(status=status)
+        query = query.filter(PurchaseOrder.status.in_([s.strip() for s in status.split(',') if s.strip()]))
     pos = query.order_by(PurchaseOrder.created_at.desc()).all()
     user = request.current_user
     if not all_branches(user):
@@ -5886,17 +7124,103 @@ def purchase_order_materials_error(user, items):
     return None
 
 
+# Receiving: open = still waiting for (more of) its items
+PO_OPEN_FOR_RECEIVING = ('approved', 'partially_received')
+
+
+def purchase_order_receipts(po):
+    """Deliveries received for a PO, oldest first, as dicts. A PO fully received
+    before deliveries were recorded one by one counts as one delivery of everything."""
+    rows = PurchaseOrderReceipt.query.filter_by(purchase_order_id=po.id).order_by(PurchaseOrderReceipt.created_at.asc()).all()
+    if rows:
+        return [{'id': r.id, 'kind': r.kind, 'at': r.created_at, 'by': r.received_by,
+                 'byName': r.received_by_user.full_name if r.received_by_user else None,
+                 'items': r.items or [], 'notes': r.notes, 'returnReason': r.return_reason,
+                 'replacement': bool(r.replacement), 'invoiceNumber': r.invoice_number} for r in rows]
+    if po.status == 'received':
+        by = User.query.get(po.received_by) if po.received_by else None
+        return [{'id': None, 'kind': 'delivery', 'at': po.received_at or po.created_at, 'by': po.received_by,
+                 'byName': by.full_name if by else None, 'notes': None,
+                 'returnReason': None, 'replacement': False, 'invoiceNumber': None,
+                 'items': [{'line': i, 'materialId': it.get('materialId'), 'name': it.get('name'),
+                            'quantity': float(it.get('quantity') or 0)} for i, it in enumerate(po.items or [])]}]
+    return []
+
+
+def purchase_order_line_quantities(po, receipts=None):
+    """Per line: delivered, returned to the supplier, and returned for replacement
+    (those are to be received again)."""
+    n = len(po.items or [])
+    q = {'delivered': [0.0] * n, 'returned': [0.0] * n, 'replace': [0.0] * n}
+    for r in (receipts if receipts is not None else purchase_order_receipts(po)):
+        if r['kind'] not in ('delivery', 'return'):
+            continue
+        for it in r['items']:
+            line = it.get('line')
+            if not (isinstance(line, int) and 0 <= line < n):
+                continue
+            qty = float(it.get('quantity') or 0)
+            if r['kind'] == 'delivery':
+                q['delivered'][line] += qty
+            else:
+                q['returned'][line] += qty
+                if r.get('replacement'):
+                    q['replace'][line] += qty
+    return q
+
+def purchase_order_received_by_line(po, receipts=None):
+    """What was received and kept, per line (deliveries minus returns)."""
+    q = purchase_order_line_quantities(po, receipts)
+    return [max(d - r, 0.0) for d, r in zip(q['delivered'], q['returned'])]
+
+def purchase_order_remaining_by_line(po, receipts=None):
+    """Still to be received per line: ordered minus delivered, plus what was
+    returned for the supplier to replace."""
+    q = purchase_order_line_quantities(po, receipts)
+    return [max(float(it.get('quantity') or 0) - q['delivered'][i] + q['replace'][i], 0.0)
+            for i, it in enumerate(po.items or [])]
+
+
+def purchase_order_receiving_status(po, received=None):
+    """not_received | partial | complete | closed_short, or None while not yet approved / cancelled."""
+    if po.status in ('pending', 'cancelled'):
+        return None
+    receipts = purchase_order_receipts(po)
+    everything = all(r <= 1e-9 for r in purchase_order_remaining_by_line(po, receipts))
+    if po.status == 'received':
+        return 'complete' if everything else 'closed_short'
+    q = purchase_order_line_quantities(po, receipts)
+    return 'partial' if any(d > 0 for d in q['delivered']) else 'not_received'
+
+
 def purchase_order_to_dict(po):
     day = lambda dt: dt.strftime('%Y-%m-%d') if dt else None
     people = {u.id: u.full_name or u.username for u in User.query.filter(
         User.id.in_([i for i in (po.created_by, po.approved_by, po.received_by) if i]))}
+    receipts = purchase_order_receipts(po)
+    received = purchase_order_received_by_line(po, receipts)
+    remaining = purchase_order_remaining_by_line(po, receipts)
+    returned = purchase_order_line_quantities(po, receipts)['returned']
+    payment_summary = purchase_order_payment_summary(po, receipts=receipts)
+    deliveries = [r for r in receipts if r['kind'] == 'delivery' and r['at']]
     return {
         'id': po.id,
         'poNumber': po.po_number,
         'supplierId': po.supplier_id,
         'supplierName': po.supplier_name,
-        'items': [{**it, 'totalPrice': round(float(it.get('quantity') or 0) * float(it.get('unitPrice') or 0), 2)}
-                  for it in (po.items or [])],
+        'items': [{**it, 'line': i,
+                   'totalPrice': round(float(it.get('quantity') or 0) * float(it.get('unitPrice') or 0), 2),
+                   'receivedQuantity': round(received[i], 4),
+                   'returnedQuantity': round(returned[i], 4),
+                   'remainingQuantity': round(remaining[i], 4)}
+                  for i, it in enumerate(po.items or [])],
+        'receivingStatus': purchase_order_receiving_status(po, received),
+        'receipts': [{'id': r['id'], 'kind': r['kind'], 'receivedAt': _iso(r['at']), 'receivedByName': r['byName'],
+                      'notes': r['notes'], 'items': r['items'], 'returnReason': r.get('returnReason'),
+                      'replacement': r.get('replacement'), 'invoiceNumber': r.get('invoiceNumber')} for r in receipts],
+        # The payable starts with the first delivery: its date and the supplier's invoice no(s).
+        'invoiceDate': manila_date_of(min(r['at'] for r in deliveries)).isoformat() if deliveries else None,
+        'invoiceNumbers': [r['invoiceNumber'] for r in deliveries if r.get('invoiceNumber')],
         'totalAmount': po.total_amount,
         'status': po.status,
         'expectedDelivery': po.expected_delivery,
@@ -5909,7 +7233,575 @@ def purchase_order_to_dict(po):
         'receivedAt': day(po.received_at),
         'receivedBy': po.received_by,
         'receivedByName': people.get(po.received_by),
+        **payment_summary,
+        **purchase_order_term_info(po, payment_summary, receipts),
     }
+
+def purchase_order_value(po, quantities):
+    return money(sum(float(it.get('unitPrice') or 0) * quantities[i] for i, it in enumerate(po.items or [])))
+
+# ── Supplier payments ──────────────────────────────────────────────────────────
+# Paying the supplier is tracked apart from receiving the goods: a PO can be
+# received but unpaid, or paid before it all arrives.
+SUPPLIER_PAYMENTS_CATEGORY = 'Supplier Payments'
+# A payment made with a supplier credit from another PO: no Expense Log entry (that
+# money was already spent when the first PO was paid)
+SUPPLIER_CREDIT_METHOD = 'supplier_credit'
+PO_PAYABLE_STATUSES = ('approved', 'partially_received', 'received')
+
+def purchase_order_payment_summary(po, payments=None, receipts=None):
+    """Amount paid, balance, payment status and history of a PO, and its accounts
+    payable. The mode of payment is left out on purpose: it is shown in the
+    Expense Log only.
+
+    Accounts payable is recorded as goods arrive: what was received and kept
+    (deliveries minus returns) at the PO's unit prices. The order total a PO can
+    be paid up to (e.g. in advance) is the ordered amount less returns that won't
+    be replaced, or once it is closed, what was received. No interest or discounts."""
+    if payments is None:
+        payments = (PurchaseOrderPayment.query.filter_by(purchase_order_id=po.id)
+                    .order_by(PurchaseOrderPayment.payment_date.asc(), PurchaseOrderPayment.id.asc()).all())
+    receipts = receipts if receipts is not None else purchase_order_receipts(po)
+    q = purchase_order_line_quantities(po, receipts)
+    kept = [max(d - r, 0.0) for d, r in zip(q['delivered'], q['returned'])]
+    payable = purchase_order_value(po, kept)
+    returned_value = purchase_order_value(po, q['returned'])
+    if po.status == 'received':
+        total = payable
+    else:
+        not_replaced = [r - rp for r, rp in zip(q['returned'], q['replace'])]
+        total = money(max(float(po.total_amount or 0) - purchase_order_value(po, not_replaced), 0))
+    credits = (PurchaseOrderCredit.query.filter_by(purchase_order_id=po.id)
+               .order_by(PurchaseOrderCredit.credit_date.asc(), PurchaseOrderCredit.id.asc()).all()) if po.id else []
+    paid_in = money(sum(float(x.amount or 0) for x in payments if not x.voided_at))
+    credit_used = money(sum(float(c.amount or 0) for c in credits if not c.voided_at))
+    # Refunded or applied elsewhere: no longer paid on this PO
+    paid = money(paid_in - credit_used)
+    balance = money(max(total - paid, 0))
+    status = 'unpaid' if paid <= 0 else 'paid' if balance <= 0 else 'partial'
+    ap_balance = money(max(payable - paid, 0))
+    return {
+        'amountPaid': paid, 'balance': balance, 'paymentStatus': status,
+        'orderTotal': total,
+        'payableAmount': payable,           # accounts payable recorded (received and kept)
+        'returnedAmount': returned_value,   # value sent back to the supplier
+        'payableBalance': ap_balance,       # remaining A/P
+        # Paid beyond what the order now comes to (e.g. paid ahead, then returned): owed back
+        'supplierCredit': money(max(paid - total, 0)),
+        # Paid ahead of delivery (for goods not received yet)
+        'prepaid': money(max(min(paid, total) - payable, 0)),
+        # What the due date applies to: the whole order when paid in advance, else what arrived
+        'amountDue': balance if po.payment_term == 'advance' else ap_balance,
+        'creditUsed': credit_used,
+        'credits': [{
+            'id': c.id, 'kind': c.kind, 'amount': money(c.amount),
+            'date': c.credit_date.isoformat() if c.credit_date else None,
+            'targetPurchaseOrderId': c.target_purchase_order_id,
+            'targetPoNumber': c.target.po_number if c.target else None,
+            'referenceNumber': c.reference_number, 'notes': c.notes,
+            'recordedByName': c.recorder.full_name if c.recorder else None,
+            'voided': bool(c.voided_at), 'voidReason': c.void_reason,
+        } for c in credits],
+        'payments': [{
+            'id': x.id, 'amount': money(x.amount), 'paymentDate': x.payment_date.isoformat() if x.payment_date else None,
+            # Paid with a credit from another PO of the same supplier (no new money out)
+            'fromCredit': x.payment_method == SUPPLIER_CREDIT_METHOD,
+            'referenceNumber': x.reference_number, 'notes': x.notes,
+            'recordedByName': x.recorder.full_name if x.recorder else None,
+            'recordedAt': to_pht(x.created_at) if x.created_at else None,
+            'voided': bool(x.voided_at), 'voidedAt': to_pht(x.voided_at) if x.voided_at else None,
+            'voidedByName': x.voider.full_name if x.voider else None, 'voidReason': x.void_reason,
+        } for x in payments],
+    }
+
+def purchase_order_expense_branch(po):
+    """The branch a supplier payment is logged under: the PO's branch when it has
+    exactly one, else none (shown under All branches)."""
+    ids = purchase_order_branch_ids(po)
+    return next(iter(ids)) if len(ids) == 1 else None
+
+# ── Payment terms ──────────────────────────────────────────────────────────────
+# How long the shop has to pay a supplier. Each supplier has a default; a PO
+# copies it when made and may be given another. The term only sets the due date
+# and the reminders: payments are still recorded (and reach the Expense Log) on
+# the day they are made, and receiving stock never waits on payment.
+#   advance  Cash in Advance  due when the PO is approved (pay before it ships)
+#   cod      Cash on Delivery due the day the first delivery is received
+#   net      Net N days       due N days after the first delivery
+PAYMENT_TERMS = ('advance', 'cod', 'net')
+MAX_TERM_DAYS = 365
+DEFAULT_TERM_PRESETS = (7, 15, 30, 60)    # Net options offered in the forms (Settings can change)
+DEFAULT_DUE_REMINDER_DAYS = 3             # "due soon" this many days before (Settings can change)
+MAX_DUE_REMINDER_DAYS = 60
+
+def payment_term_label(term, days):
+    if term == 'advance':
+        return 'Cash in Advance'
+    if term == 'cod':
+        return 'COD (Cash on Delivery)'
+    if term == 'net' and days:
+        return f"n/{int(days)}"
+    return None
+
+def parse_payment_term(data):
+    """(term, days, error) from {paymentTerm, paymentTermDays}. A blank term means
+    no term; Net needs 1-365 days."""
+    term = str(data.get('paymentTerm') or '').strip().lower()
+    if not term:
+        return None, None, None
+    if term not in PAYMENT_TERMS:
+        return None, None, 'Choose a payment term: Cash in Advance, COD or Net days'
+    if term != 'net':
+        return term, None, None
+    raw = data.get('paymentTermDays')
+    try:
+        days = int(str(raw).strip())
+        if str(raw).strip() != str(days):  # 30.5, "30 days"
+            raise ValueError
+    except (TypeError, ValueError):
+        return None, None, 'Enter the number of days for a Net term as a whole number'
+    if not 1 <= days <= MAX_TERM_DAYS:
+        return None, None, f'A Net term must be from 1 to {MAX_TERM_DAYS} days'
+    return term, days, None
+
+def _int_setting(key, default, low, high):
+    row = SystemSetting.query.filter_by(key=key).first()
+    try:
+        value = int(str(row.value).strip()) if row and str(row.value).strip() else default
+    except ValueError:
+        return default
+    return value if low <= value <= high else default
+
+def due_reminder_days():
+    """Days before the due date a PO counts as due soon (cached for the request)."""
+    in_request = has_request_context()
+    cached = getattr(request, '_due_reminder_days', None) if in_request else None
+    if cached is not None:
+        return cached
+    value = _int_setting('po_due_reminder_days', DEFAULT_DUE_REMINDER_DAYS, 0, MAX_DUE_REMINDER_DAYS)
+    if in_request:
+        request._due_reminder_days = value
+    return value
+
+def payment_term_presets():
+    row = SystemSetting.query.filter_by(key='po_term_presets').first()
+    if row and str(row.value).strip():
+        try:
+            days = sorted({int(x) for x in str(row.value).split(',') if x.strip()})
+            if days and all(1 <= d <= MAX_TERM_DAYS for d in days):
+                return days
+        except ValueError:
+            pass
+    return list(DEFAULT_TERM_PRESETS)
+
+def term_presets_error(value):
+    """Message if a po_term_presets value isn't a list of 1-365 day counts, else None."""
+    parts = [x.strip() for x in str(value).split(',') if x.strip()]
+    if not parts:
+        return 'Add at least one Net term, e.g. 7, 15, 30, 60'
+    if not all(re.fullmatch(r'\d{1,3}', x) and 1 <= int(x) <= MAX_TERM_DAYS for x in parts):
+        return f'Net terms must be whole numbers of days from 1 to {MAX_TERM_DAYS}, separated by commas'
+    if len(parts) > 12:
+        return 'Keep the list to 12 Net terms or fewer'
+    return None
+
+def manila_date_of(dt):
+    """The Philippine calendar date of a stored (UTC) datetime."""
+    return (dt + PH_OFFSET).date() if dt else None
+
+def purchase_order_due_date(po, receipts=None):
+    """When the supplier must be paid, or None: no term, cancelled, or the event
+    the term counts from (approval / first delivery) hasn't happened yet."""
+    if not po.payment_term or po.status in ('pending', 'cancelled'):
+        return None
+    if po.payment_term == 'advance':
+        return manila_date_of(po.approved_at)
+    deliveries = [r for r in (receipts if receipts is not None else purchase_order_receipts(po))
+                  if r['kind'] == 'delivery' and r['at']]
+    if not deliveries:
+        return None
+    first = manila_date_of(min(r['at'] for r in deliveries))
+    return first + timedelta(days=int(po.payment_term_days or 0) if po.payment_term == 'net' else 0)
+
+def purchase_order_term_info(po, summary, receipts=None, today=None):
+    """Term, due date and where the PO stands against it:
+    awaiting (due date not known yet) | not_due | due_soon | overdue | paid | paid_late,
+    or None for a PO with no term or that was cancelled."""
+    due = purchase_order_due_date(po, receipts)
+    status, days_left = None, None
+    if po.payment_term and po.status != 'cancelled':
+        today = today or manila_today()
+        if summary['balance'] <= 0:
+            paid_on = [p['paymentDate'] for p in summary['payments'] if not p['voided'] and p['paymentDate']]
+            status = 'paid_late' if due and paid_on and max(paid_on) > due.isoformat() else 'paid'
+        elif not due or summary['amountDue'] <= 0:
+            status = 'awaiting'
+        else:
+            days_left = (due - today).days
+            status = ('overdue' if days_left < 0
+                      else 'due_soon' if days_left <= due_reminder_days() else 'not_due')
+    return {
+        'paymentTerm': po.payment_term,
+        'paymentTermDays': po.payment_term_days,
+        'paymentTermLabel': payment_term_label(po.payment_term, po.payment_term_days),
+        'dueDate': due.isoformat() if due else None,
+        'termStatus': status,
+        'daysUntilDue': days_left,
+    }
+
+@app.route('/api/payment-terms', methods=['GET'])
+@require_auth
+@require_staff
+def get_payment_term_options():
+    """What the supplier and purchase order forms offer, and the reminder lead time."""
+    return jsonify({'status': 'success', 'data': {
+        'netDays': payment_term_presets(),
+        'reminderDays': due_reminder_days(),
+        'maxDays': MAX_TERM_DAYS,
+    }})
+
+@app.route('/api/purchase-orders/<int:po_id>/payment-term', methods=['PUT'])
+@require_auth
+@require_permission('purchase_orders.add', 'purchase_orders.approve')
+def update_purchase_order_payment_term(po_id):
+    """Change one PO's term (body: {paymentTerm, paymentTermDays}). Whoever raises
+    POs may set it while the PO awaits approval; afterwards only approvers can."""
+    user = request.current_user
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
+    if not po:
+        return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    if not can_see_purchase_order(user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
+    if po.status == 'cancelled':
+        return jsonify({'status': 'error', 'message': 'A cancelled purchase order has no payment term'}), 400
+    if po.status != 'pending' and not has_perm(user, 'purchase_orders.approve'):
+        return jsonify({'status': 'error', 'message': 'Only those who approve purchase orders can change the term once approved'}), 403
+    term, days, error = parse_payment_term(request.get_json(silent=True) or {})
+    if error:
+        return jsonify({'status': 'error', 'message': error}), 400
+    before = payment_term_label(po.payment_term, po.payment_term_days) or 'no term'
+    po.payment_term, po.payment_term_days = term, days
+    after = payment_term_label(term, days) or 'no term'
+    # A new due date gets its own reminders
+    po.due_soon_notified_for = None
+    po.overdue_notified_for = None
+    db.session.commit()
+    if before != after:
+        log_action(user['id'], user['fullName'], 'UPDATE', 'Purchase Orders',
+                   f"Changed payment term of {po.po_number} from {before} to {after}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
+
+# ── Due-date reminders ─────────────────────────────────────────────────────────
+# There is no background worker, so reminders are checked when staff load their
+# notifications (the bell asks every 30 seconds), at most every few minutes per
+# server process. Each PO gets one "due soon" and one "overdue" notice per due
+# date (the *_notified_for columns), even with several server processes.
+PO_REMINDER_CHECK_SECONDS = 600
+_po_reminders_checked_at = None
+
+def payables_recipients(branch_ids):
+    """Active staff who pay suppliers or review the business's finances, at one of
+    these branches or with access to every branch."""
+    staff = (User.query.join(Role, User.role_id == Role.id)
+             .filter(Role.key != 'customer', User.is_active == True).all())
+    overrides = {}
+    for o in UserPermissionOverride.query.filter(
+            UserPermissionOverride.user_id.in_([u.id for u in staff] or [-1])).all():
+        overrides.setdefault(o.user_id, []).append(o)
+    people = []
+    for u in staff:
+        perms = effective_permissions(u.id, u.role.key, overrides.get(u.id, []))
+        # The owner is told even without access to Purchase Orders (the notice then
+        # just doesn't open the PO); the payables total is on their dashboard
+        if not ({'purchase_orders.pay', 'owner.view'} & perms):
+            continue
+        if 'branches.all' in perms or u.branch_id in branch_ids:
+            people.append(u)
+    return people
+
+def send_po_due_reminders(force=False, today=None):
+    """Notify about POs that are due soon or overdue and not fully paid. Returns
+    how many notices went out (each PO counts once per notice, not per person)."""
+    global _po_reminders_checked_at
+    now = datetime.utcnow()
+    if not force and _po_reminders_checked_at and (now - _po_reminders_checked_at).total_seconds() < PO_REMINDER_CHECK_SECONDS:
+        return 0
+    _po_reminders_checked_at = now
+    today = today or manila_today()
+    lead = due_reminder_days()
+    sent = 0
+    candidates = (PurchaseOrder.query.filter(PurchaseOrder.payment_term.isnot(None),
+                                             PurchaseOrder.status.in_(PO_PAYABLE_STATUSES)).all())
+    for candidate in candidates:
+        summary = purchase_order_payment_summary(candidate)
+        due = purchase_order_due_date(candidate)
+        if summary['amountDue'] <= 0 or not due:
+            continue
+        days_left = (due - today).days
+        kind = 'po_overdue' if days_left < 0 else 'po_due_soon' if days_left <= lead else None
+        if not kind:
+            continue
+        flag = 'overdue_notified_for' if kind == 'po_overdue' else 'due_soon_notified_for'
+        if getattr(candidate, flag) == due:
+            continue
+        # Lock and look again: another server process may have just sent it
+        po = PurchaseOrder.query.filter_by(id=candidate.id).with_for_update().populate_existing().first()
+        if not po or getattr(po, flag) == due:
+            db.session.rollback()
+            continue
+        when = due.strftime('%b %d, %Y').replace(' 0', ' ')
+        balance = f"₱{summary['amountDue']:,.2f}"
+        if kind == 'po_overdue':
+            late = -days_left
+            title = f'Supplier payment overdue: {po.po_number}'
+            message = (f"{balance} to {po.supplier_name} was due {when} "
+                       f"({late} day{'s' if late != 1 else ''} ago).")
+        else:
+            title = f'Supplier payment due soon: {po.po_number}'
+            message = (f"{balance} to {po.supplier_name} is due "
+                       f"{'today' if days_left == 0 else 'tomorrow' if days_left == 1 else f'in {days_left} days'} ({when}).")
+        for person in payables_recipients(purchase_order_branch_ids(po)):
+            db.session.add(Notification(user_id=person.id, type=kind, title=title, message=message,
+                                        data={'purchaseOrderId': po.id, 'dueDate': due.isoformat()}))
+        setattr(po, flag, due)
+        db.session.commit()
+        sent += 1
+    return sent
+
+def purchase_order_payables(branch_id=None, today=None):
+    """What is still owed to suppliers today, for the owner dashboard: every
+    approved or received PO with a balance (with or without a term)."""
+    today = today or manila_today()
+    totals = {'total': 0.0, 'dueSoon': 0.0, 'overdue': 0.0, 'count': 0, 'dueSoonCount': 0, 'overdueCount': 0}
+    for po in PurchaseOrder.query.filter(PurchaseOrder.status.in_(PO_PAYABLE_STATUSES)).all():
+        if branch_id and branch_id not in purchase_order_branch_ids(po):
+            continue
+        summary = purchase_order_payment_summary(po)
+        # Accounts payable: what arrived and is unpaid (an advance term counts the order)
+        owed = summary['amountDue']
+        if owed <= 0:
+            continue
+        status = purchase_order_term_info(po, summary, today=today)['termStatus']
+        totals['total'] += owed
+        totals['count'] += 1
+        if status == 'overdue':
+            totals['overdue'] += owed
+            totals['overdueCount'] += 1
+        elif status == 'due_soon':
+            totals['dueSoon'] += owed
+            totals['dueSoonCount'] += 1
+    return {k: (money(v) if isinstance(v, float) else v) for k, v in totals.items()}
+
+@app.route('/api/purchase-orders/<int:po_id>/payments', methods=['POST'])
+@require_auth
+@require_permission('purchase_orders.pay')
+def record_purchase_order_payment(po_id):
+    """Record a payment to the supplier. Body: {amount, paymentDate?, paymentMethod,
+    referenceNumber?, notes?}. Also makes its Expense Log entry, in the same save."""
+    user = request.current_user
+    # Row lock: two people paying at once can't both pay the same balance
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
+    if not po:
+        return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    if not can_see_purchase_order(user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
+    if po.status not in PO_PAYABLE_STATUSES:
+        message = ('Approve the purchase order before paying the supplier' if po.status == 'pending'
+                   else 'A cancelled purchase order cannot be paid')
+        return jsonify({'status': 'error', 'message': message}), 400
+    data = request.get_json(silent=True) or {}
+    amount = finite_number(data.get('amount'))
+    if amount is None or amount <= 0:
+        return jsonify({'status': 'error', 'message': 'Enter an amount above zero'}), 400
+    amount = money(amount)
+    summary = purchase_order_payment_summary(po)
+    if summary['balance'] <= 0:
+        return jsonify({'status': 'error', 'message': 'This purchase order is already fully paid'}), 400
+    if amount > summary['balance']:
+        return jsonify({'status': 'error', 'message': f"That is more than the balance of ₱{summary['balance']:,.2f}"}), 400
+    method = data.get('paymentMethod')
+    if method not in PAYMENT_METHODS:
+        return jsonify({'status': 'error', 'message': 'Choose how the supplier was paid'}), 400
+    try:
+        paid_on = datetime.strptime(str(data.get('paymentDate') or manila_today()), '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Enter a valid payment date'}), 400
+    if paid_on > manila_today():
+        return jsonify({'status': 'error', 'message': 'The payment date cannot be in the future'}), 400
+    reference = (str(data.get('referenceNumber') or '')).strip()[:100] or None
+    notes = (str(data.get('notes') or '')).strip() or None
+
+    payment = PurchaseOrderPayment(purchase_order_id=po.id, amount=amount, payment_date=paid_on,
+                                   payment_method=method, reference_number=reference, notes=notes,
+                                   recorded_by=user['id'])
+    db.session.add(payment)
+    db.session.flush()
+    expense = Expense(expense_date=paid_on, category=SUPPLIER_PAYMENTS_CATEGORY,
+                      particulars=f'{po.po_number} – {po.supplier_name}'[:255], amount=amount,
+                      payment_method=method, reference_number=reference, notes=notes,
+                      branch_id=purchase_order_expense_branch(po), created_by=user['id'],
+                      purchase_order_payment_id=payment.id)
+    db.session.add(expense)
+    db.session.flush()
+    payment.expense_id = expense.id
+    db.session.commit()
+    after = purchase_order_payment_summary(po)
+    log_action(user['id'], user['fullName'], 'PAYMENT', 'Purchase Orders',
+               f"Paid ₱{amount:,.2f} to {po.supplier_name} for {po.po_number} "
+               f"(balance ₱{after['balance']:,.2f}, {after['paymentStatus']})", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)}), 201
+
+@app.route('/api/purchase-orders/<int:po_id>/payments/<int:payment_id>/void', methods=['POST'])
+@require_auth
+@require_permission('purchase_orders.pay')
+def void_purchase_order_payment(po_id, payment_id):
+    """Undo a payment recorded by mistake (with a reason). The payment stays in the
+    history as voided; its Expense Log entry is removed, so neither the balance
+    nor the expenses count it. A corrected payment is then recorded again."""
+    user = request.current_user
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
+    if not po:
+        return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    if not can_see_purchase_order(user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
+    payment = PurchaseOrderPayment.query.filter_by(id=payment_id, purchase_order_id=po.id).with_for_update().first()
+    if not payment:
+        return jsonify({'status': 'error', 'message': 'Payment not found'}), 404
+    if payment.voided_at:
+        return jsonify({'status': 'error', 'message': 'This payment was already voided'}), 400
+    reason = (str((request.get_json(silent=True) or {}).get('reason') or '')).strip()
+    if not reason:
+        return jsonify({'status': 'error', 'message': 'Say why the payment is being voided'}), 400
+    payment.voided_at = datetime.utcnow()
+    payment.voided_by = user['id']
+    payment.void_reason = reason[:500]
+    Expense.query.filter_by(purchase_order_payment_id=payment.id).delete(synchronize_session=False)
+    payment.expense_id = None
+    # Paid with a supplier credit: the credit goes back to the PO it came from
+    for credit in PurchaseOrderCredit.query.filter_by(target_payment_id=payment.id, voided_at=None).all():
+        credit.voided_at, credit.voided_by = payment.voided_at, user['id']
+        credit.void_reason = f'Payment on {po.po_number} voided: {reason}'[:500]
+    db.session.commit()
+    log_action(user['id'], user['fullName'], 'VOID', 'Purchase Orders',
+               f"Voided ₱{float(payment.amount):,.2f} payment for {po.po_number}: {reason}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
+
+@app.route('/api/purchase-orders/<int:po_id>/supplier-credit', methods=['POST'])
+@require_auth
+@require_permission('purchase_orders.pay')
+def use_supplier_credit(po_id):
+    """Use the supplier credit on a PO (paid more than it now comes to):
+    {kind: 'refund', amount, date?, paymentMethod, referenceNumber?, notes?} when the
+    supplier gives the money back (an Expense Log entry takes it off expenses), or
+    {kind: 'apply', amount, targetPurchaseOrderId, notes?} to pay another PO of the
+    same supplier with it."""
+    user = request.current_user
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
+    if not po:
+        return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    if not can_see_purchase_order(user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
+    data = request.get_json(silent=True) or {}
+    kind = data.get('kind')
+    if kind not in ('refund', 'apply'):
+        return jsonify({'status': 'error', 'message': 'Choose refund or apply to another purchase order'}), 400
+    amount = finite_number(data.get('amount'))
+    if amount is None or amount <= 0:
+        return jsonify({'status': 'error', 'message': 'Enter an amount above zero'}), 400
+    amount = money(amount)
+    credit = purchase_order_payment_summary(po)['supplierCredit']
+    if credit <= 0:
+        return jsonify({'status': 'error', 'message': 'This purchase order has no supplier credit'}), 400
+    if amount > credit + 0.004:
+        return jsonify({'status': 'error', 'message': f"The supplier credit is only ₱{credit:,.2f}"}), 400
+    try:
+        on = datetime.strptime(str(data.get('date') or manila_today()), '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Enter a valid date'}), 400
+    if on > manila_today():
+        return jsonify({'status': 'error', 'message': 'The date cannot be in the future'}), 400
+    reference = (str(data.get('referenceNumber') or '')).strip()[:100] or None
+    notes = (str(data.get('notes') or '')).strip() or None
+    entry = PurchaseOrderCredit(purchase_order_id=po.id, kind='refund' if kind == 'refund' else 'applied',
+                                amount=amount, credit_date=on, reference_number=reference, notes=notes,
+                                recorded_by=user['id'])
+    if kind == 'refund':
+        method = data.get('paymentMethod')
+        if method not in PAYMENT_METHODS:
+            return jsonify({'status': 'error', 'message': 'Choose how the supplier refunded it'}), 400
+        entry.payment_method = method
+        db.session.add(entry)
+        db.session.flush()
+        # Money back: a negative entry, so the Expense Log's supplier payments net out
+        expense = Expense(expense_date=on, category=SUPPLIER_PAYMENTS_CATEGORY,
+                          particulars=f'Refund from {po.supplier_name} – {po.po_number}'[:255], amount=-amount,
+                          payment_method=method, reference_number=reference, notes=notes,
+                          branch_id=purchase_order_expense_branch(po), created_by=user['id'])
+        db.session.add(expense)
+        db.session.flush()
+        entry.expense_id = expense.id
+        summary = f"Recorded ₱{amount:,.2f} refund from {po.supplier_name} for {po.po_number}"
+    else:
+        target = PurchaseOrder.query.filter_by(id=_int_or_none(data.get('targetPurchaseOrderId'))).with_for_update().first()
+        if not target or target.id == po.id:
+            return jsonify({'status': 'error', 'message': 'Choose the purchase order to apply the credit to'}), 400
+        if not can_see_purchase_order(user, target):
+            return jsonify({'status': 'error', 'message': 'That purchase order belongs to another branch'}), 403
+        if target.supplier_id != po.supplier_id:
+            return jsonify({'status': 'error', 'message': 'A credit can only pay another purchase order of the same supplier'}), 400
+        if target.status not in PO_PAYABLE_STATUSES:
+            return jsonify({'status': 'error', 'message': f'{target.po_number} must be approved and not cancelled'}), 400
+        target_balance = purchase_order_payment_summary(target)['balance']
+        if amount > target_balance + 0.004:
+            return jsonify({'status': 'error', 'message': f"{target.po_number} only has ₱{target_balance:,.2f} left to pay"}), 400
+        payment = PurchaseOrderPayment(purchase_order_id=target.id, amount=amount, payment_date=on,
+                                       payment_method=SUPPLIER_CREDIT_METHOD, reference_number=reference,
+                                       notes=f'Supplier credit from {po.po_number}' + (f' — {notes}' if notes else ''),
+                                       recorded_by=user['id'])
+        db.session.add(payment)
+        db.session.flush()
+        entry.target_purchase_order_id = target.id
+        entry.target_payment_id = payment.id
+        db.session.add(entry)
+        summary = f"Applied ₱{amount:,.2f} supplier credit from {po.po_number} to {target.po_number}"
+    db.session.commit()
+    log_action(user['id'], user['fullName'], 'PAYMENT', 'Purchase Orders', summary, request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)}), 201
+
+@app.route('/api/purchase-orders/<int:po_id>/supplier-credit/<int:credit_id>/void', methods=['POST'])
+@require_auth
+@require_permission('purchase_orders.pay')
+def void_supplier_credit(po_id, credit_id):
+    """Undo a refund or credit use recorded by mistake (with a reason): a refund's
+    Expense Log entry is removed; an applied credit's payment on the other PO is voided."""
+    user = request.current_user
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
+    if not po:
+        return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    if not can_see_purchase_order(user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
+    entry = PurchaseOrderCredit.query.filter_by(id=credit_id, purchase_order_id=po.id).with_for_update().first()
+    if not entry or entry.voided_at:
+        return jsonify({'status': 'error', 'message': 'That entry was not found or is already voided'}), 404
+    reason = (str((request.get_json(silent=True) or {}).get('reason') or '')).strip()
+    if not reason:
+        return jsonify({'status': 'error', 'message': 'Say why it is being voided'}), 400
+    now = datetime.utcnow()
+    entry.voided_at, entry.voided_by, entry.void_reason = now, user['id'], reason[:500]
+    if entry.expense_id:
+        Expense.query.filter_by(id=entry.expense_id).delete(synchronize_session=False)
+        entry.expense_id = None
+    if entry.target_payment_id:
+        payment = PurchaseOrderPayment.query.get(entry.target_payment_id)
+        if payment and not payment.voided_at:
+            payment.voided_at, payment.voided_by = now, user['id']
+            payment.void_reason = f'Supplier credit from {po.po_number} undone: {reason}'[:500]
+    db.session.commit()
+    log_action(user['id'], user['fullName'], 'VOID', 'Purchase Orders',
+               f"Voided ₱{float(entry.amount):,.2f} supplier credit {'refund' if entry.kind == 'refund' else 'use'} on {po.po_number}: {reason}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
 
 @app.route('/api/purchase-orders/<int:po_id>', methods=['GET'])
 @require_auth
@@ -5928,9 +7820,23 @@ def get_purchase_order(po_id):
 def create_purchase_order():
     data = request.get_json() or {}
 
-    required = ['supplierName', 'items', 'expectedDelivery']
+    required = ['supplierId', 'items', 'expectedDelivery']
     if not all(data.get(f) for f in required):
         return jsonify({'status': 'error', 'message': 'Supplier, at least one item and an expected delivery date are required'}), 400
+    # Delivery can be expected today or later, never on a day that has passed (Philippine date)
+    try:
+        expected = datetime.strptime(str(data['expectedDelivery'])[:10], '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Enter a valid expected delivery date'}), 400
+    if expected < manila_today():
+        return jsonify({'status': 'error', 'message': 'The expected delivery date must be today or a later date'}), 400
+    # Only saved suppliers: add a new one under Suppliers first
+    try:
+        supplier = Supplier.query.get(int(data['supplierId']))
+    except (TypeError, ValueError):
+        supplier = None
+    if not supplier or not supplier.is_active:
+        return jsonify({'status': 'error', 'message': 'Choose a saved, active supplier'}), 400
 
     if not isinstance(data['items'], list) or not all(isinstance(it, dict) for it in data['items']):
         return jsonify({'status': 'error', 'message': 'Items are not in the right format'}), 400
@@ -5940,6 +7846,7 @@ def create_purchase_order():
         'quantity': finite_number(it.get('quantity'), 0.0),
         'unit': it.get('unit', ''),
         'unitPrice': finite_number(it.get('unitPrice'), 0.0),
+        'consumable': bool(it.get('consumable')),
     } for it in data['items']]
     if any(it['quantity'] is None or it['unitPrice'] is None for it in items):
         return jsonify({'status': 'error', 'message': 'Quantities and unit prices must be numbers'}), 400
@@ -5947,18 +7854,49 @@ def create_purchase_order():
         return jsonify({'status': 'error', 'message': 'Every item needs a quantity above zero'}), 400
     if any(it['unitPrice'] < 0 for it in items):
         return jsonify({'status': 'error', 'message': 'Unit prices cannot be negative'}), 400
+    # Every line restocks a material already in Inventory: register new ones there first.
+    # The name is taken from Inventory so the line always matches its record.
+    for it in items:
+        try:
+            material = InventoryMaterial.query.get(int(it['materialId'])) if it.get('materialId') else None
+        except (TypeError, ValueError):
+            material = None
+        if not material or material.is_archived:
+            return jsonify({'status': 'error', 'message': 'Every item must be a material already in Inventory. '
+                            'Add new materials in Inventory first.'}), 400
+        it['materialId'] = material.id
+        it['name'] = ' - '.join(filter(None, [material.material_type, material.color, material.pattern]))
+        # Ticking Consumable on a line marks the material a consumable from now on
+        # (and unticking it, length stock again); its quantity is then a plain count
+        apply_consumable_fields(material, {'isConsumable': it['consumable'],
+                                           'unit': it['unit'] if it['consumable'] else ''})
+        it['unit'] = material_unit(material)
+    # One line per material: receiving goes by line, so a material listed twice could
+    # be counted against the wrong line
+    seen = set()
+    for it in items:
+        if it['materialId'] in seen:
+            return jsonify({'status': 'error', 'message': f"{it['name']} is on the order twice. "
+                            'Put the whole quantity on one line.'}), 400
+        seen.add(it['materialId'])
     error = purchase_order_materials_error(request.current_user, items)
     if error:
         return error
 
-    supplier_id = data.get('supplierId')
-    if supplier_id and not Supplier.query.get(supplier_id):
-        supplier_id = None
+    # The supplier's default term unless one was chosen for this PO (blank = none)
+    if 'paymentTerm' in data:
+        term, term_days, term_error = parse_payment_term(data)
+        if term_error:
+            return jsonify({'status': 'error', 'message': term_error}), 400
+    else:
+        term, term_days = supplier.payment_term, supplier.payment_term_days
 
     po = PurchaseOrder(
         po_number=generate_po_number(),
-        supplier_id=supplier_id,
-        supplier_name=data['supplierName'],
+        supplier_id=supplier.id,
+        supplier_name=supplier.name,
+        payment_term=term,
+        payment_term_days=term_days,
         items=items,
         total_amount=round(sum(it['quantity'] * it['unitPrice'] for it in items), 2),
         status='pending',
@@ -5997,35 +7935,203 @@ def approve_purchase_order(po_id):
 @require_auth
 @require_permission('purchase_orders.receive')
 def receive_purchase_order(po_id):
-    # Row lock: a second "Receive" waits and then sees the PO already received
+    """Record a delivery: {items: [{line, quantity}], notes}. Without items, everything
+    still outstanding is received (the old one-step receive). Stock goes up by what
+    arrived; the PO becomes partially_received until every line is in."""
+    # Row lock: two people receiving at once go one after the other
     po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
     if not po:
         return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
-
-    if not can_see_purchase_order(request.current_user, po):
+    user = request.current_user
+    if not can_see_purchase_order(user, po):
         return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
-    if po.status != 'approved':
-        return jsonify({'status': 'error', 'message': 'PO must be approved first'}), 400
-    # Receiving adds to each material's stock, so it must all be the user's own
-    error = purchase_order_materials_error(request.current_user, po.items)
+    if po.status not in PO_OPEN_FOR_RECEIVING:
+        message = 'PO must be approved first' if po.status == 'pending' else f'This PO is already {po.status.replace("_", " ")}'
+        return jsonify({'status': 'error', 'message': message}), 400
+    error = purchase_order_materials_error(user, po.items)
     if error:
         return error
 
-    # Update inventory
-    for item in po.items or []:
+    data = request.get_json(silent=True) or {}
+    lines = po.items or []
+    remaining = purchase_order_remaining_by_line(po)
+
+    if data.get('items') is None:
+        wanted = {i: q for i, q in enumerate(remaining) if q > 0}
+    else:
+        wanted = {}
+        for entry in data.get('items') or []:
+            try:
+                line = int(entry.get('line'))
+            except (TypeError, ValueError):
+                return jsonify({'status': 'error', 'message': 'Each received line needs its line number'}), 400
+            if not 0 <= line < len(lines):
+                return jsonify({'status': 'error', 'message': 'That line is not on this purchase order'}), 400
+            qty = finite_number(entry.get('quantity'), 0.0)
+            if qty is None or qty < 0:
+                return jsonify({'status': 'error', 'message': 'Quantities received must be numbers of 0 or more'}), 400
+            if qty == 0:
+                continue
+            name = lines[line].get('name') or 'an item'
+            if wanted.get(line, 0) + qty > remaining[line] + QTY_TOLERANCE:
+                return jsonify({'status': 'error', 'message':
+                                f'Only {remaining[line]:g} of {name} is still to be received'}), 400
+            wanted[line] = min(wanted.get(line, 0) + qty, remaining[line])
+    if not wanted:
+        return jsonify({'status': 'error', 'message': 'Enter how much of at least one item arrived'}), 400
+
+    receipt_items = []
+    for line, qty in sorted(wanted.items()):
+        item = lines[line]
         material = InventoryMaterial.query.get(item.get('materialId')) if item.get('materialId') else None
         if material:
-            material.stock_quantity = float(material.stock_quantity) + float(item['quantity'])
+            material.stock_quantity = float(material.stock_quantity) + qty
             material.status = 'available'
             material.updated_at = datetime.utcnow()
+        receipt_items.append({'line': line, 'materialId': item.get('materialId'), 'name': item.get('name'),
+                              'quantity': round(qty, 4)})
+    db.session.add(PurchaseOrderReceipt(purchase_order_id=po.id, kind='delivery', items=receipt_items,
+                                        notes=(data.get('notes') or '').strip() or None, received_by=user['id'],
+                                        invoice_number=str(data.get('invoiceNumber') or '').strip()[:100] or None))
 
-    po.status = 'received'
-    po.received_at = datetime.utcnow()
-    po.received_by = request.current_user['id']
+    complete = all(remaining[i] - wanted.get(i, 0) <= 1e-9 for i in range(len(lines)))
+    po.status = 'received' if complete else 'partially_received'
+    if complete:
+        po.received_at = datetime.utcnow()
+        po.received_by = user['id']
     db.session.commit()
 
-    log_action(request.current_user['id'], request.current_user['fullName'], 'RECEIVE', 'Purchase Orders', f"Received PO: {po.po_number}", request.remote_addr or '0.0.0.0')
+    summary = ', '.join(f"{it['name']} × {it['quantity']:g}" for it in receipt_items)
+    log_action(user['id'], user['fullName'], 'RECEIVE', 'Purchase Orders',
+               f"Received {'all remaining items of' if complete else 'part of'} PO {po.po_number}: {summary}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
 
+
+PO_RETURN_REASONS = ('Bad quality', 'Damaged', 'Wrong item', 'Wrong color / pattern', 'Excess quantity', 'Other')
+
+@app.route('/api/purchase-orders/<int:po_id>/return', methods=['POST'])
+@require_auth
+@require_permission('purchase_orders.receive')
+def return_purchase_order_items(po_id):
+    """Return received items to the supplier: {items: [{line, quantity}], reason,
+    notes, replacement}. They leave stock and the accounts payable goes down by
+    their value. With replacement the quantity is to be received again; without,
+    the order is simply that much smaller."""
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
+    if not po:
+        return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    user = request.current_user
+    if not can_see_purchase_order(user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
+    if po.status not in ('partially_received', 'received'):
+        return jsonify({'status': 'error', 'message': 'Only items already received can be returned'}), 400
+    error = purchase_order_materials_error(user, po.items)
+    if error:
+        return error
+    data = request.get_json(silent=True) or {}
+    reason = str(data.get('reason') or '').strip()[:100]
+    if not reason:
+        return jsonify({'status': 'error', 'message': 'Choose why the items are being returned'}), 400
+    notes = str(data.get('notes') or '').strip() or None
+    if reason == 'Other' and not notes:
+        return jsonify({'status': 'error', 'message': 'Explain the reason for the return'}), 400
+    replacement = bool(data.get('replacement'))
+    # Return slip / debit memo no. (kept in the receipt's document number)
+    slip = str(data.get('documentNumber') or '').strip()[:100] or None
+    expected = None
+    if replacement and data.get('expectedReplacement'):
+        try:
+            expected = datetime.strptime(str(data['expectedReplacement'])[:10], '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({'status': 'error', 'message': 'Enter a valid date for the replacement'}), 400
+        if expected < manila_today():
+            return jsonify({'status': 'error', 'message': 'The replacement date must be today or a later date'}), 400
+    lines = po.items or []
+    kept = purchase_order_received_by_line(po)
+    wanted = {}
+    for entry in data.get('items') or []:
+        line = _int_or_none(entry.get('line') if isinstance(entry, dict) else None)
+        if line is None or not 0 <= line < len(lines):
+            return jsonify({'status': 'error', 'message': 'That line is not on this purchase order'}), 400
+        qty = finite_number(entry.get('quantity'), 0.0)
+        if qty is None or qty < 0:
+            return jsonify({'status': 'error', 'message': 'Quantities returned must be numbers of 0 or more'}), 400
+        if qty == 0:
+            continue
+        wanted[line] = wanted.get(line, 0) + qty
+        if wanted[line] > kept[line] + QTY_TOLERANCE:
+            return jsonify({'status': 'error', 'message':
+                            f"Only {kept[line]:g} of {lines[line].get('name') or 'that item'} was received to return"}), 400
+        wanted[line] = min(wanted[line], kept[line])
+    if not wanted:
+        return jsonify({'status': 'error', 'message': 'Enter how much of at least one item is being returned'}), 400
+
+    return_items = []
+    for line, qty in sorted(wanted.items()):
+        item = lines[line]
+        material = (InventoryMaterial.query.filter_by(id=item.get('materialId')).with_for_update().first()
+                    if item.get('materialId') else None)
+        if material:
+            on_hand = float(material.stock_quantity or 0)
+            if qty > on_hand + QTY_TOLERANCE:
+                return jsonify({'status': 'error', 'message':
+                                f"Only {on_hand:g} of {item.get('name')} is in stock now, so {qty:g} can't be returned"}), 400
+            material.stock_quantity = round(max(on_hand - qty, 0), 4)
+            material.updated_at = datetime.utcnow()
+        return_items.append({'line': line, 'materialId': item.get('materialId'), 'name': item.get('name'),
+                             'quantity': round(qty, 4)})
+    db.session.add(PurchaseOrderReceipt(purchase_order_id=po.id, kind='return', items=return_items, notes=notes,
+                                        received_by=user['id'], return_reason=reason, replacement=replacement,
+                                        invoice_number=slip))
+    if expected:
+        # The PO now waits for the replacement: its expected delivery moves to that date
+        po.expected_delivery = expected.isoformat()
+    db.session.flush()
+    # Replacements coming: the PO waits for them again
+    remaining = purchase_order_remaining_by_line(po)
+    if any(r > 1e-9 for r in remaining):
+        if po.status == 'received' and replacement:
+            po.status = 'partially_received'
+    elif po.status == 'partially_received':
+        po.status = 'received'
+        po.received_at = datetime.utcnow()
+        po.received_by = user['id']
+    db.session.commit()
+    queue_forecast_refresh([it['materialId'] for it in return_items if it['materialId']])
+    value = purchase_order_value(po, [wanted.get(i, 0) for i in range(len(lines))])
+    summary = ', '.join(f"{it['name']} × {it['quantity']:g}" for it in return_items)
+    log_action(user['id'], user['fullName'], 'UPDATE', 'Purchase Orders',
+               f"Returned to supplier from {po.po_number} ({reason}{', replacement expected' if replacement else ''}): "
+               f"{summary} — ₱{value:,.2f} off the payable" + (f", slip {slip}" if slip else '')
+               + (f", replacement expected {expected.isoformat()}" if expected else ''), request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
+
+@app.route('/api/purchase-orders/<int:po_id>/close-receiving', methods=['POST'])
+@require_auth
+@require_permission('purchase_orders.receive')
+def close_purchase_order_receiving(po_id):
+    """The rest of a partly received PO will not come: stop waiting for it.
+    Nothing is added to stock; the PO shows as closed with items not received."""
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
+    if not po:
+        return jsonify({'status': 'error', 'message': 'Purchase order not found'}), 404
+    user = request.current_user
+    if not can_see_purchase_order(user, po):
+        return jsonify({'status': 'error', 'message': 'This purchase order belongs to another branch'}), 403
+    if po.status != 'partially_received':
+        return jsonify({'status': 'error', 'message': 'Only a partly received purchase order can be closed this way'}), 400
+    reason = ((request.get_json(silent=True) or {}).get('reason') or '').strip()
+    if not reason:
+        return jsonify({'status': 'error', 'message': 'Say why the rest will not be received'}), 400
+    db.session.add(PurchaseOrderReceipt(purchase_order_id=po.id, kind='closed', items=[], notes=reason,
+                                        received_by=user['id']))
+    po.status = 'received'
+    po.received_at = datetime.utcnow()
+    po.received_by = user['id']
+    db.session.commit()
+    log_action(user['id'], user['fullName'], 'UPDATE', 'Purchase Orders',
+               f"Closed PO {po.po_number} with items not received: {reason}", request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
 
 # Delivery status changes; delivered and cancelled deliveries are final
@@ -6054,6 +8160,8 @@ def get_deliveries():
         query = query.filter(Delivery.status == request.args['status'])
     if request.args.get('type'):
         query = query.filter(Delivery.type == request.args['type'])
+    if request.args.get('jobOrderId', type=int):
+        query = query.filter(Delivery.job_order_id == request.args.get('jobOrderId', type=int))
     deliveries_ = query.order_by(Delivery.created_at.desc()).all()
     return jsonify({'status': 'success', 'data': [delivery_to_dict(d) for d in deliveries_]})
 
@@ -6076,11 +8184,26 @@ def create_delivery():
     if not data.get('type') or not data.get('scheduledDate'):
         return jsonify({'status': 'error', 'message': 'Delivery type and date are required'}), 400
 
-    job_order = JobOrder.query.get(data['jobOrderId']) if data.get('jobOrderId') else None
+    job_order = JobOrder.query.filter_by(id=data['jobOrderId']).with_for_update().first() \
+        if data.get('jobOrderId') else None
+    if data.get('jobOrderId') and not job_order:
+        return jsonify({'status': 'error', 'message': 'Job order not found'}), 404
     if job_order:
         error = branch_access_error(request.current_user, job_order.branch_id)
         if error:
             return error
+        # Only finished work goes out, and one delivery at a time (row lock above:
+        # a double-clicked Schedule can't make two)
+        if job_order.status != 'completed':
+            return jsonify({'status': 'error', 'message':
+                            f'Only a completed job order can be delivered ({job_order.job_order_id} is '
+                            f"{job_order.status.replace('_', ' ')})"}), 400
+        open_delivery = Delivery.query.filter(Delivery.job_order_id == job_order.id,
+                                              Delivery.status.in_(('scheduled', 'in_transit', 'delivered'))).first()
+        if open_delivery:
+            return jsonify({'status': 'error', 'code': 'delivery_exists', 'deliveryId': open_delivery.id,
+                            'message': f'{job_order.job_order_id} already has delivery {open_delivery.delivery_number} '
+                                       f"({open_delivery.status.replace('_', ' ')})"}), 400
     # Deliver from the branch that did the job, unless one is given
     from_branch_id = data.get('fromBranchId') or (job_order.branch_id if job_order else None) \
         or user_branch_id(request.current_user)
@@ -6147,6 +8270,39 @@ def update_delivery_status(delivery_id):
 
     log_action(user['id'], user['fullName'], 'UPDATE', 'Delivery', f"Updated delivery status: {d.delivery_number} to {new_status}", request.remote_addr or '0.0.0.0')
 
+    return jsonify({'status': 'success', 'data': delivery_to_dict(d)})
+
+@app.route('/api/deliveries/<int:delivery_id>/reopen', methods=['POST'])
+@require_auth
+@require_permission('item_trail.update_status')
+def reopen_delivery(delivery_id):
+    """Correct a delivery marked delivered by mistake (administrators only, with a
+    reason). It goes back to in transit and its job order back to completed. Nothing
+    else moves: the job's stock was used and its sale counted when it was completed.
+    The original delivery time and the reason are kept in the notes and the Audit Trail."""
+    user = request.current_user
+    if not is_administrator(user):
+        return jsonify({'status': 'error', 'message': 'Only an administrator can correct a finished delivery'}), 403
+    d = Delivery.query.filter_by(id=delivery_id).with_for_update().first()
+    if not d:
+        return jsonify({'status': 'error', 'message': 'Delivery not found'}), 404
+    if d.status != 'delivered':
+        return jsonify({'status': 'error', 'message': 'Only a delivered delivery can be reopened'}), 400
+    reason = ((request.get_json(silent=True) or {}).get('reason') or '').strip()
+    if not reason:
+        return jsonify({'status': 'error', 'message': 'Say why the delivery is being corrected'}), 400
+    when = to_pht(d.delivered_at) if d.delivered_at else 'unknown time'
+    note = f"[Reopened by {user['fullName']}: marked delivered at {when} by mistake. Reason: {reason}]"
+    d.notes = f"{d.notes}\n{note}" if d.notes else note
+    d.status = 'in_transit'
+    d.delivered_at = None
+    if d.job_order and d.job_order.status == 'delivered':
+        d.job_order.status = 'completed'
+        d.job_order.updated_at = datetime.utcnow()
+    db.session.commit()
+    log_action(user['id'], user['fullName'], 'UPDATE', 'Delivery',
+               f"Reopened delivery {d.delivery_number} (was delivered at {when}): {reason}",
+               request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': delivery_to_dict(d)})
 
 @app.route('/api/deliveries/<int:delivery_id>/receipt', methods=['GET'])
@@ -6290,9 +8446,9 @@ def generate_product_order_number():
     """Generate a unique PS-XXXX premade sale number that won't collide."""
     max_id = db.session.query(db.func.max(ProductOrder.id)).scalar() or 0
     candidate = f"{PREMADE_SALE_PREFIX}{max_id + 1:04d}"
-    # If somehow it already exists, keep incrementing
+    # If it's already taken (e.g. typed in by hand), keep incrementing
     offset = 1
-    while ProductOrder.query.filter_by(order_number=candidate).first():
+    while order_number_taken('premade', candidate):
         offset += 1
         candidate = f"{PREMADE_SALE_PREFIX}{max_id + offset:04d}"
     return candidate
@@ -6707,6 +8863,8 @@ def build_premade_sale(staff, data):
     required = ['customerName', 'items', 'branchId']
     if not all(f in data for f in required) or not str(data['customerName'] or '').strip():
         return fail('Customer name, branch and items are required')
+    if customer_phone_error(data.get('customerPhone')):
+        return fail(customer_phone_error(data.get('customerPhone')))
     if not data['items']:
         return fail('At least one item is required')
 
@@ -6771,6 +8929,8 @@ def build_premade_sale(staff, data):
         return fail('You do not have permission to record payments', 403)
     if payment_amount < 0 or payment_amount > money(total_amount):
         return fail(f'Payment must be between ₱0 and the order total of ₱{total_amount:,.2f}')
+    if payment_amount > 0 and data.get('paymentMethod', 'cash') not in ACCEPTED_PAYMENT_METHODS:
+        return fail(PAYMENT_METHOD_ERROR)
     if payment_amount >= total_amount and total_amount > 0:
         initial_payment_status = 'paid'
     elif payment_amount > 0:
@@ -6779,8 +8939,15 @@ def build_premade_sale(staff, data):
         initial_payment_status = 'unpaid'
 
     lock_product_order_numbering()
+    # A number typed on the form, or else the next PS- number
+    typed_number = str(data.get('orderNumber') or '').strip()
+    if typed_number:
+        number_error = manual_order_number_error('premade', typed_number)
+        if number_error:
+            return None, None, ({'status': 'error', 'message': number_error, 'code': 'order_number'}, 400)
     order = ProductOrder(
-        order_number=generate_product_order_number(),
+        order_number=typed_number or generate_product_order_number(),
+        number_is_manual=bool(typed_number),
         customer_name=str(data['customerName']).strip(),
         customer_phone=str(data.get('customerPhone') or '').strip(),
         customer_email=data.get('customerEmail') or '',
@@ -6808,21 +8975,49 @@ def create_product_order():
     """Record a premade product sale made at a branch (walk-in, phone or
     message). Staff only: customers no longer order online."""
     staff = request.current_user
-    order, branch, error = build_premade_sale(staff, request.get_json(silent=True) or {})
+    data = request.get_json(silent=True) or {}
+    order, branch, error = build_premade_sale(staff, data)
     if error:
         db.session.rollback()
         payload, code = error
         return jsonify(payload), code
+    typed = str(data.get('orderNumber') or '').strip()
     try:
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
-        return jsonify({'status': 'error', 'message': NUMBER_CLASH_MESSAGE}), 409
+        message = (f'{typed} was just used by another order. Use a different number or press Generate.'
+                   if typed else NUMBER_CLASH_MESSAGE)
+        return jsonify({'status': 'error', 'message': message, 'code': 'order_number'}), 409
 
     log_action(staff['id'], staff['fullName'], 'CREATE', 'Product Orders',
                f"Recorded product order {order.order_number} for {order.customer_name} at {branch.name}",
                request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': product_order_to_dict(order)}), 201
+
+@app.route('/api/order-numbers/next', methods=['GET'])
+@require_auth
+@require_permission('sales.add')
+def next_order_number():
+    """The number a new order would get if saved now, for the New Job Order form.
+    ?kind=job&branchId=… (per branch and year) or ?kind=premade. Only a preview:
+    saving without a typed number generates it again, so it can never clash."""
+    kind = request.args.get('kind', 'job')
+    if kind == 'premade':
+        return jsonify({'status': 'success', 'data': {'number': generate_product_order_number()}})
+    branch = Branch.query.get(request.args.get('branchId', type=int) or 0)
+    if not branch:
+        return jsonify({'status': 'error', 'message': 'Choose a branch first'}), 400
+    return jsonify({'status': 'success', 'data': {'number': generate_job_order_id(branch.code)}})
+
+@app.route('/api/order-numbers/check', methods=['GET'])
+@require_auth
+@require_permission('sales.add')
+def check_order_number():
+    """Whether a typed number can be used: ?kind=job|premade&number=…"""
+    kind = 'premade' if request.args.get('kind') == 'premade' else 'job'
+    error = manual_order_number_error(kind, request.args.get('number', ''))
+    return jsonify({'status': 'success', 'data': {'available': error is None, 'message': error}})
 
 # ============================================
 # PREMADE JOB ORDER DRAFTS
@@ -6917,6 +9112,8 @@ def apply_premade_draft_fields(draft, data, staff):
         if not name:
             return 'Customer name is required to save a draft'
         draft.customer_name = name[:255]
+    if 'customerPhone' in data and customer_phone_error(data.get('customerPhone')):
+        return customer_phone_error(data.get('customerPhone'))
     for key, attr, size in (('customerPhone', 'customer_phone', 50), ('customerEmail', 'customer_email', 255),
                             ('customerAddress', 'customer_address', 255), ('paymentMethod', 'payment_method', 30)):
         if key in data:
@@ -7083,14 +9280,20 @@ def confirm_premade_draft(draft_id):
                    if rows else 'Add at least one product before confirming.')
         return jsonify({'status': 'error', 'message': message, 'data': payload}), 409
     payment_method = str(data.get('paymentMethod') or draft.payment_method or 'cash')[:30]
-    notes = [draft.notes or '', f'Recorded from draft {draft.draft_number}', f'Payment Method: {payment_method}']
+    paid_now = finite_number(data.get('paymentAmount'), 0.0) or 0
+    # The method is only needed (and checked, in build_premade_sale) when money is paid now
+    notes = [draft.notes or '', f'Recorded from draft {draft.draft_number}',
+             f'Payment Method: {payment_method}' if paid_now > 0 else '']
     order, _branch, sale_error = build_premade_sale(staff, {
         'customerName': draft.customer_name, 'customerPhone': draft.customer_phone or '',
         'customerEmail': draft.customer_email, 'customerAddress': draft.customer_address,
         'branchId': draft.branch_id, 'paymentAmount': data.get('paymentAmount') or 0,
+        'paymentMethod': payment_method,
         'items': [{'productId': it['productId'], 'quantity': it['quantity'], 'name': it.get('name')}
                   for it in draft.items or []],
         'notes': '\n'.join(n for n in notes if n),
+        # A sale number typed in when confirming, if any
+        'orderNumber': data.get('orderNumber'),
     })
     if sale_error:
         # Stock moved between the check above and the locked re-check: nothing is saved
@@ -7210,6 +9413,8 @@ def update_product_order(order_id):
         if previous_status != incoming_status:
             updated_fields.append(f"status: {previous_status} -> {incoming_status}")
         order.status = incoming_status
+        if incoming_status == 'completed' and previous_status != 'completed':
+            order.completed_at = datetime.utcnow()
 
         # Deduct inventory only once when transitioning into completed.
         if previous_status != 'completed' and incoming_status == 'completed':
@@ -7367,6 +9572,13 @@ def my_notifications_query(archived=False):
 @app.route('/api/notifications', methods=['GET'])
 @require_auth
 def get_notifications():
+    # Supplier payment reminders are made here (throttled): there is no background worker.
+    # A failure must never stop the bell from loading.
+    try:
+        send_po_due_reminders()
+    except Exception as exc:  # pragma: no cover - logged, not raised
+        db.session.rollback()
+        app.logger.warning('PO due reminders failed: %s', exc)
     limit = min(int(request.args.get('limit', 30)), 100)
     archived = request.args.get('archived') in ('1', 'true')
     notifs = (my_notifications_query(archived)
@@ -7476,6 +9688,279 @@ def get_transfer_dashboard():
             'overdue': sum(1 for e in enriched if e['isOverdue']),
         },
     })
+
+# ============================================
+# ITEM HISTORY (read only: nothing here changes stock)
+# ============================================
+# Built from the records the system already keeps for each kind of stock change.
+# Nothing is invented: what was never recorded (hand edits and starting stock
+# before stock_adjustment_logs existed) is listed as a limitation instead.
+
+def _iso(dt):
+    return dt.isoformat() + 'Z' if dt else None
+
+
+def _item_history_access(kind):
+    """(branch ids the user may see or None for all, error response)."""
+    user = request.current_user
+    needed = ('inventory.view',) if kind == 'material' else ('inventory.view', 'premade.view')
+    if not has_perm(user, *needed):
+        return None, (jsonify({'status': 'error', 'message': "You don't have access to this inventory"}), 403)
+    return inventory_read_branches(user, request.args.get('branchId'), include_warehouse=True)
+
+
+@app.route('/api/item-history/items', methods=['GET'])
+@require_auth
+def item_history_items():
+    """Items to pick from (archived ones too: their history still matters)."""
+    kind = request.args.get('kind', 'material')
+    if kind not in ('material', 'premade'):
+        return jsonify({'status': 'error', 'message': 'kind must be material or premade'}), 400
+    branch_ids, error = _item_history_access(kind)
+    if error:
+        return error
+    Model = InventoryMaterial if kind == 'material' else PremadeProduct
+    q = Model.query
+    if branch_ids is not None:
+        q = q.filter(Model.branch_id.in_(branch_ids or [-1]))
+    rows = q.all()
+    out = []
+    for r in rows:
+        if kind == 'material':
+            out.append({'id': r.id, 'name': r.material_type, 'detail': ' · '.join(v for v in (r.color, r.pattern) if v),
+                        'code': r.item_id or r.sku or '', 'stock': float(r.stock_quantity or 0),
+                        'branchId': r.branch_id, 'branchName': r.branch.name if r.branch else None,
+                        'isArchived': bool(r.is_archived)})
+        else:
+            out.append({'id': r.id, 'name': r.name, 'detail': r.category or '', 'code': r.sku or '',
+                        'stock': float(r.quantity or 0), 'branchId': r.branch_id,
+                        'branchName': r.branch.name if getattr(r, 'branch', None) else
+                        (Branch.query.get(r.branch_id).name if r.branch_id and Branch.query.get(r.branch_id) else None),
+                        'isArchived': bool(r.is_archived), 'price': float(r.price or 0)})
+    out.sort(key=lambda x: (x['isArchived'], (x['name'] or '').lower(), x['branchName'] or ''))
+    return jsonify({'status': 'success', 'data': out})
+
+
+def _event(key, at, type_, label, qty, **extra):
+    """One line of an item's history. qty is the stock change: + in, - out, 0 = none."""
+    return {'key': key, 'at': _iso(at), 'type': type_, 'label': label, 'quantity': qty, **extra}
+
+
+def _material_history(material, see_customers):
+    events = []
+    branch_name = material.branch.name if material.branch else None
+    jo_cache = {}
+
+    def job_order_by_code(code):
+        if code not in jo_cache:
+            jo_cache[code] = JobOrder.query.filter_by(job_order_id=code).first()
+        return jo_cache[code]
+
+    for log in MaterialUsageLog.query.filter_by(material_id=material.id).all():
+        qty = float(log.quantity_used or 0)
+        who = log.used_by_user.full_name if log.used_by_user else None
+        worker = log.managed_worker.name if log.managed_worker else None
+        branch = log.branch.name if log.branch else branch_name
+        if log.used_in_type in ('job_order', 'job_order_cut'):
+            jo = job_order_by_code(log.used_in_reference)
+            took_stock = log.used_by is not None  # written by a completion, which moves stock
+            events.append(_event(
+                f'usage-{log.id}', log.created_at,
+                'job_order_use' if qty >= 0 else 'job_order_return',
+                ('Used in custom job order' if qty >= 0 else 'Returned from job order') if took_stock
+                else 'Recorded use (imported, no stock change)',
+                (-qty if took_stock else 0), usage='custom',
+                reference=log.used_in_reference,
+                link={'kind': 'job_order', 'id': jo.id} if jo else None,
+                customerName=(jo.customer_name if jo and see_customers else None),
+                status=jo.status if jo else None, branchName=branch, by=who, worker=worker, notes=log.notes))
+        elif log.used_in_type == 'premade_product':
+            events.append(_event(
+                f'usage-{log.id}', log.created_at, 'premade_production', 'Used to make premade item', -qty,
+                usage='premade', reference=log.used_in_reference,
+                link={'kind': 'premade', 'id': log.premade_product_id} if log.premade_product_id else None,
+                branchName=branch, by=who, worker=worker, notes=log.notes))
+        else:
+            events.append(_event(f'usage-{log.id}', log.created_at, 'other_use', f'Used ({log.used_in_type})', -qty,
+                                 reference=log.used_in_reference, branchName=branch, by=who, notes=log.notes))
+
+    for w in MaterialWasteLog.query.filter_by(material_id=material.id).all():
+        qty = float(w.quantity or 0)
+        common = dict(branchName=w.branch.name if w.branch else branch_name,
+                      by=w.logged_by_user.full_name if w.logged_by_user else None,
+                      worker=w.worker.name if w.worker else None,
+                      notes=' — '.join(v for v in (w.reason, w.notes) if v))
+        if w.job_order_id:
+            jo = w.job_order
+            events.append(_event(f'waste-{w.id}', w.created_at, 'extra_material', 'Extra material for job order', -qty,
+                                 usage='custom', reference=jo.job_order_id if jo else None,
+                                 link={'kind': 'job_order', 'id': w.job_order_id},
+                                 customerName=(jo.customer_name if jo and see_customers else None),
+                                 status=jo.status if jo else None, **common))
+        else:
+            events.append(_event(f'waste-{w.id}', w.created_at, 'waste', 'Waste / scrap', -qty, **common))
+
+    for po in PurchaseOrder.query.filter(PurchaseOrder.status.in_(('partially_received', 'received'))).all():
+        for r_index, receipt in enumerate(purchase_order_receipts(po)):
+            for it in receipt['items']:
+                if str(it.get('materialId') or '') != str(material.id):
+                    continue
+                qty = float(it.get('quantity') or 0)
+                line = it.get('line')
+                unit = float(((po.items or [])[line] if isinstance(line, int) and line < len(po.items or []) else {}).get('unitPrice') or 0)
+                returned = receipt['kind'] == 'return'
+                why = receipt.get('returnReason') if returned else None
+                events.append(_event(f'po-{po.id}-{receipt["id"] or "all"}-{r_index}-{line}', receipt['at'],
+                                     'purchase_returned' if returned else 'purchase_received',
+                                     'Returned to supplier' if returned else 'Received from purchase order',
+                                     -qty if returned else qty, reference=po.po_number,
+                                     link={'kind': 'purchase_order', 'id': po.id}, unitPrice=unit,
+                                     total=round(qty * unit, 2), branchName=branch_name, by=receipt['byName'],
+                                     notes=f'Supplier: {po.supplier_name}' + (f' — {why}' if why else '')
+                                     + (f" — {receipt['notes']}" if receipt['notes'] else '')))
+    return events
+
+
+def _premade_history(product, see_customers):
+    events = []
+    branch = Branch.query.get(product.branch_id) if product.branch_id else None
+    branch_name = branch.name if branch else None
+
+    # Sales (product orders) that included this item
+    for order in ProductOrder.query.order_by(ProductOrder.created_at.asc()).all():
+        for i, item in enumerate(order.items or []):
+            if str(item.get('productId') or '') != str(product.id):
+                continue
+            qty = float(item.get('quantity') or 0)
+            unit = float(item.get('unitPrice', item.get('price', 0)) or 0)
+            cancelled = order.status == 'cancelled'
+            # Orders take stock when placed (or, for older walk-in ones, when completed);
+            # a cancelled one gave its stock back, so it no longer moves stock
+            moved = (not cancelled) and (stock_taken_at_placement(item) or order.status == 'completed')
+            events.append(_event(
+                f'sale-{order.id}-{i}', order.created_at, 'sale',
+                'Sold (cancelled, stock returned)' if cancelled else 'Sold', -qty if moved else 0,
+                reference=order.order_number, link={'kind': 'product_order', 'id': order.id},
+                customerName=order.customer_name if see_customers else None,
+                unitPrice=unit, total=float(item.get('total') or round(qty * unit, 2)),
+                soldQuantity=qty, status=order.status, paymentStatus=order.payment_status,
+                branchName=order.branch.name if order.branch else branch_name))
+
+    # Warehouse → branch deliveries: sent from this row, or received into it
+    for t in PremadeStockTransfer.query.filter_by(product_id=product.id).all():
+        dest = t.destination_branch.name if t.destination_branch else 'a branch'
+        events.append(_event(
+            f'delivery-out-{t.id}', t.resolved_at if t.status == 'received' else t.created_at, 'delivery_out',
+            f'Delivered to {dest}' if t.status == 'received' else
+            (f'Delivery to {dest} cancelled' if t.status == 'cancelled' else f'Delivery to {dest} (awaiting receipt)'),
+            -float(t.quantity or 0) if t.status == 'received' else 0,
+            status=t.status, branchName=branch_name,
+            by=(t.resolved_by.full_name if t.resolved_by else t.created_by.full_name if t.created_by else None),
+            notes=t.notes))
+    incoming = (PremadeStockTransfer.query
+                .filter(PremadeStockTransfer.destination_branch_id == product.branch_id,
+                        PremadeStockTransfer.status == 'received').all())
+    for t in incoming:
+        src = t.product
+        # The same rule the receipt used to pick this row: same branch, same name
+        if not src or src.id == product.id or (src.name or '').strip().lower() != (product.name or '').strip().lower():
+            continue
+        events.append(_event(
+            f'delivery-in-{t.id}', t.resolved_at or t.created_at, 'delivery_in',
+            f'Received from {t.source_branch.name if t.source_branch else "warehouse"}', float(t.quantity or 0),
+            status='received', branchName=branch_name,
+            by=t.resolved_by.full_name if t.resolved_by else None, notes=t.notes))
+
+    # Made from raw materials: one row per add or restock, with what it used.
+    # Its stock record (if any) is folded in here so it isn't listed twice.
+    for b in premade_production_batches([product.id]):
+        parts = [f"{u.material.material_type if u.material else 'material'} × {float(u.quantity_used or 0):g}" for u in b['logs']]
+        adj = b.get('adjustment')
+        events.append(_event(
+            f'made-{product.id}-{b["logs"][0].id}', b['at'], 'production',
+            'Restocked (made from raw materials)' if adj is not None and adj.reason == 'production' else 'Made from raw materials',
+            (b['pieces'] or 0) if adj is not None else 0,
+            branchName=branch_name, by=b['logs'][0].used_by_user.full_name if b['logs'][0].used_by_user else None,
+            notes=(f"{b['pieces']:g} pcs made · " if b['pieces'] else '') + 'Materials used: ' + ', '.join(parts),
+            _adjustmentId=adj.id if adj is not None else None))
+    return events
+
+
+@app.route('/api/item-history', methods=['GET'])
+@require_auth
+def item_history():
+    """Every recorded stock movement of one item, newest first. Read only."""
+    kind = request.args.get('kind', 'material')
+    if kind not in ('material', 'premade'):
+        return jsonify({'status': 'error', 'message': 'kind must be material or premade'}), 400
+    try:
+        item_id = int(request.args.get('itemId'))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Choose an item'}), 400
+    branch_ids, error = _item_history_access(kind)
+    if error:
+        return error
+    Model = InventoryMaterial if kind == 'material' else PremadeProduct
+    item = Model.query.get(item_id)
+    if not item or (branch_ids is not None and item.branch_id not in branch_ids):
+        return jsonify({'status': 'error', 'message': 'Item not found'}), 404
+
+    user = request.current_user
+    see_customers = has_perm(user, 'sales.view', 'product_orders.view')
+    events = _material_history(item, see_customers) if kind == 'material' else _premade_history(item, see_customers)
+
+    adjustments = StockAdjustmentLog.query.filter_by(item_kind=kind, item_id=item.id).all()
+    folded = {e.pop('_adjustmentId') for e in events if e.get('_adjustmentId')}
+    for e in events:
+        e.pop('_adjustmentId', None)
+    for a in adjustments:
+        if a.id in folded:
+            continue
+        change = float(a.new_quantity) - float(a.old_quantity or 0)
+        events.append({
+            'key': f'adj-{a.id}', 'at': _iso(a.created_at),
+            'type': {'starting': 'starting_stock', 'production': 'production',
+                     'adjustment': 'stock_adjustment'}.get(a.reason, 'manual_edit'),
+            'label': {'starting': 'Starting stock', 'production': 'Restocked',
+                      'adjustment': 'Stock adjusted'}.get(a.reason, 'Stock edited by hand'),
+            'quantity': float(a.new_quantity) if a.reason == 'starting' else change,
+            'branchName': a.branch.name if a.branch else None,
+            'by': a.user.full_name if a.user else None,
+            'notes': ' · '.join(filter(None, [
+                (f'{float(a.old_quantity):g} → {float(a.new_quantity):g}' if a.old_quantity is not None
+                 else f'Added with {float(a.new_quantity):g} in stock'),
+                getattr(a, 'note', None)])),
+        })
+    if not any(a.reason == 'starting' for a in adjustments):
+        events.append(_event(f'created-{item.id}', item.created_at, 'added', 'Added to inventory', 0,
+                             notes='Starting quantity not recorded (added before stock edits were tracked)'))
+
+    events.sort(key=lambda e: e['at'] or '', reverse=True)
+    tracked_since = db.session.query(db.func.min(StockAdjustmentLog.created_at)).scalar()
+    limitations = [
+        'Stock edited by hand and starting stock are only recorded from '
+        + ((tracked_since + PH_OFFSET).strftime('%B %d, %Y') if tracked_since else 'today')
+        + ' on; earlier hand edits were never saved, so there is no running balance.',
+    ]
+    if kind == 'material':
+        limitations.append('Materials are taken from stock when a job order is completed, so open job orders do not appear yet.')
+    else:
+        limitations.append('Premade items are sold through premade (product) orders, not job orders.')
+    if not see_customers:
+        limitations.append('Customer names are hidden: you do not have access to sales.')
+
+    name = item.material_type if kind == 'material' else item.name
+    stock = float((item.stock_quantity if kind == 'material' else item.quantity) or 0)
+    branch = Branch.query.get(item.branch_id) if item.branch_id else None
+    return jsonify({'status': 'success', 'data': {
+        'item': {'id': item.id, 'kind': kind, 'name': name, 'stock': stock,
+                 'code': (item.item_id or item.sku or '') if kind == 'material' else (item.sku or ''),
+                 'branchName': branch.name if branch else None, 'isArchived': bool(item.is_archived),
+                 'price': float((item.unit_price if kind == 'material' else item.price) or 0)},
+        'events': events,
+        'limitations': limitations,
+    }})
+
 
 @app.route('/api/product-order-transfers/bulk-action', methods=['POST'])
 @require_auth
@@ -7902,6 +10387,69 @@ def get_extra_materials_report():
         'entries': entries,
     }})
 
+@app.route('/api/reports/purchase-returns', methods=['GET'])
+@require_auth
+@require_permission('reports.inventory', 'purchase_orders.view')
+def get_purchase_returns_report():
+    """Items returned to suppliers in the period: each line returned, and totals by
+    supplier and by reason, to see which suppliers send bad or wrong goods."""
+    start_date, end_date, start_dt, end_dt, error = ph_report_period()
+    if error:
+        return error
+    user = request.current_user
+    receipts = (PurchaseOrderReceipt.query.filter(PurchaseOrderReceipt.kind == 'return',
+                                                  PurchaseOrderReceipt.created_at >= start_dt,
+                                                  PurchaseOrderReceipt.created_at <= end_dt)
+                .order_by(PurchaseOrderReceipt.created_at.desc()).all())
+    pos = {p.id: p for p in PurchaseOrder.query.filter(
+        PurchaseOrder.id.in_({r.purchase_order_id for r in receipts} or {-1})).all()}
+    entries = []
+    for r in receipts:
+        po = pos.get(r.purchase_order_id)
+        if not po or not can_see_purchase_order(user, po):
+            continue
+        for it in r.items or []:
+            line = it.get('line')
+            po_line = (po.items or [])[line] if isinstance(line, int) and 0 <= line < len(po.items or []) else {}
+            qty = float(it.get('quantity') or 0)
+            price = float(po_line.get('unitPrice') or 0)
+            entries.append({
+                'id': f'{r.id}-{line}', 'date': _iso(r.created_at), 'purchaseOrderId': po.id, 'poNumber': po.po_number,
+                'supplierId': po.supplier_id, 'supplierName': po.supplier_name, 'item': it.get('name') or po_line.get('name'),
+                'quantity': round(qty, 4), 'unit': po_line.get('unit') or 'yd', 'unitPrice': price,
+                'value': money(qty * price), 'reason': r.return_reason or '—', 'replacement': bool(r.replacement),
+                'documentNumber': r.invoice_number, 'notes': r.notes,
+                'byName': r.received_by_user.full_name if r.received_by_user else None, 'returnId': r.id,
+            })
+
+    def group(key, label):
+        out = {}
+        for e in entries:
+            row = out.setdefault(key(e), {'key': key(e), 'label': label(e), 'count': 0, 'value': 0.0,
+                                          'returns': set(), 'reasons': {}})
+            row['count'] += 1
+            row['value'] += e['value']
+            row['returns'].add(e['returnId'])
+            row['reasons'][e['reason']] = row['reasons'].get(e['reason'], 0) + 1
+        return sorted(({'key': r['key'], 'label': r['label'], 'count': r['count'], 'returns': len(r['returns']),
+                        'value': money(r['value']),
+                        'topReason': max(r['reasons'], key=r['reasons'].get) if r['reasons'] else None}
+                       for r in out.values()), key=lambda r: -r['value'])
+
+    return jsonify({'status': 'success', 'data': {
+        'period': {'startDate': start_date, 'endDate': end_date},
+        'summary': {
+            'returns': len({e['returnId'] for e in entries}),
+            'lines': len(entries),
+            'totalValue': money(sum(e['value'] for e in entries)),
+            'replacedValue': money(sum(e['value'] for e in entries if e['replacement'])),
+            'suppliers': len({e['supplierId'] for e in entries}),
+        },
+        'bySupplier': group(lambda e: e['supplierId'] or 0, lambda e: e['supplierName'] or '—'),
+        'byReason': group(lambda e: e['reason'].lower(), lambda e: e['reason']),
+        'entries': entries,
+    }})
+
 @app.route('/api/reports/sales', methods=['GET'])
 @require_auth
 @require_permission('reports.sales')
@@ -7910,130 +10458,101 @@ def get_sales_report():
     start_date, end_date, start_dt, end_dt, error = ph_report_period()
     if error:
         return error
-    branch_id = request.args.get('branchId')
+    # None = every branch; a branch-limited account only ever sees its own branch
+    if not all_branches(user):
+        scope = user_branch_id(user) or -1
+    elif request.args.get('branchId'):
+        try:
+            scope = int(request.args['branchId'])
+        except ValueError:
+            return jsonify({'status': 'error', 'message': 'Invalid branch'}), 400
+    else:
+        scope = None
+    start = datetime.strptime(start_date, '%Y-%m-%d').date()
+    end = datetime.strptime(end_date, '%Y-%m-%d').date()
 
-    # ── Job Orders ── (drafts are not real sales yet, so exclude them)
+    # Revenue: sales earned in the period, without VAT -- the same definition as
+    # the Owner Dashboard and the main Dashboard (earned_sales): a job order when
+    # its work was finished, a premade sale when it was completed
+    jobs, premade = earned_sales(start, end, scope)
+    total_revenue = money(sum(j['net'] for j in jobs))
+    premade_revenue = money(sum(p['net'] for p in premade))
+
+    # ── Orders placed in the period ── (drafts are not real sales yet)
     jo_query = JobOrder.query.filter(
         JobOrder.created_at >= start_dt,
         JobOrder.created_at <= end_dt,
         JobOrder.status != 'draft'
     )
-
-    user_branch = None
-    if not all_branches(user):
-        user_branch = Branch.query.get(user_branch_id(user)) if user_branch_id(user) else None
-        if user_branch:
-            jo_query = jo_query.filter(JobOrder.branch_id == user_branch.id)
-        else:
-            jo_query = jo_query.filter(False)
-    elif branch_id:
-        jo_query = jo_query.filter(JobOrder.branch_id == int(branch_id))
-
+    if scope is not None:
+        jo_query = jo_query.filter(JobOrder.branch_id == scope)
     orders = jo_query.all()
-
     total_orders = len(orders)
-    # Revenue excludes VAT (collected for the government); pending balances below stay as billed
-    total_revenue = sum(revenue_ex_vat(o) for o in orders if o.status in EARNED_STATUSES)
-    total_pending_revenue = sum(float(o.balance) for o in orders if o.payment_status != 'paid')
+    # Still to be paid on live orders (as billed, with VAT); cancelled and voided ones are owed nothing
+    total_pending_revenue = sum(float(o.balance or 0) for o in orders
+                                if o.payment_status != 'paid' and o.status not in ('cancelled', 'voided'))
 
     status_breakdown = {}
     daily_sales = {}
+    def day(bucket, d):
+        return bucket.setdefault(d, {'orders': 0, 'revenue': 0.0})
 
     for o in orders:
-        status = o.status
-        if status not in status_breakdown:
-            status_breakdown[status] = {'count': 0, 'value': 0}
-        status_breakdown[status]['count'] += 1
-        status_breakdown[status]['value'] += revenue_ex_vat(o)
+        entry = status_breakdown.setdefault(o.status, {'count': 0, 'value': 0})
+        entry['count'] += 1
+        entry['value'] += revenue_ex_vat(o)
+        if o.created_at:
+            day(daily_sales, (o.created_at + PH_OFFSET).strftime('%Y-%m-%d'))['orders'] += 1
+    for j in jobs:
+        day(daily_sales, j['date'].isoformat())['revenue'] += j['net']
 
-        date = (o.created_at + PH_OFFSET).strftime('%Y-%m-%d') if o.created_at else ''
-        if date:
-            if date not in daily_sales:
-                daily_sales[date] = {'orders': 0, 'revenue': 0}
-            daily_sales[date]['orders'] += 1
-            if o.status in EARNED_STATUSES:
-                daily_sales[date]['revenue'] += revenue_ex_vat(o)
-
-    # ── Premade Product Orders ──
-    # Each branch gets revenue credit for items where sourceBranchId == their branch.
-    # This covers both single-branch orders (all items attributed to one branch) and
-    # multi-branch orders (each branch credited for items they supplied).
-    all_product_orders = ProductOrder.query.filter(
+    # ── Premade sales ── each line belongs to the branch whose stock it came from
+    premade_placed = ProductOrder.query.filter(
         ProductOrder.created_at >= start_dt,
         ProductOrder.created_at <= end_dt
     ).all()
-
-    premade_revenue = 0.0
     premade_pending = 0.0
-    premade_orders_seen = set()
+    premade_orders = 0
     premade_daily = {}
-
-    for po in all_product_orders:
-        # Determine how much of this order is attributed to the current branch
-        if not all_branches(user):
-            if not user_branch:
-                continue
-            attributed_total = sum(
-                float(item.get('total', 0))
-                for item in (po.items or [])
-                if item.get('sourceBranchId') == user_branch.id
-            )
-        elif branch_id:
-            bid = int(branch_id)
-            attributed_total = sum(
-                float(item.get('total', 0))
-                for item in (po.items or [])
-                if item.get('sourceBranchId') == bid
-            )
-        else:
-            # Admin with no branch filter: full order value
-            attributed_total = float(po.total_amount or 0)
-
-        if attributed_total <= 0:
+    for po in premade_placed:
+        gross, _ = premade_sale_share(po, scope)
+        if gross <= 0:
             continue
-        # Revenue excludes the VAT inside product prices, like job orders and the
-        # Owner P&L (orders from before rates were saved used the standard 12%)
-        rate = po.vat_percent if po.vat_percent is not None else DEFAULT_VAT_PERCENT
-        attributed_net = vat_breakdown(attributed_total, rate)['net']
-
-        premade_orders_seen.add(po.id)
-        date = (po.created_at + PH_OFFSET).strftime('%Y-%m-%d') if po.created_at else ''
-        if date not in premade_daily:
-            premade_daily[date] = {'orders': 0, 'revenue': 0}
-        premade_daily[date]['orders'] += 1
-
-        if po.status == 'completed':
-            premade_revenue += attributed_net
-            if date:
-                premade_daily[date]['revenue'] += attributed_net
-        elif po.status not in ('cancelled',):
+        premade_orders += 1
+        if po.created_at:
+            day(premade_daily, (po.created_at + PH_OFFSET).strftime('%Y-%m-%d'))['orders'] += 1
+        if po.status not in ('completed', 'cancelled'):
             # pending / processing / ready all count as pending revenue
-            premade_pending += attributed_total
+            premade_pending += gross
+    for p in premade:
+        day(premade_daily, p['date'].isoformat())['revenue'] += p['net']
 
     report = {
         'period': {'startDate': start_date, 'endDate': end_date},
         'summary': {
             'totalOrders': total_orders,
-            'completedOrders': sum(1 for o in orders if o.status in EARNED_STATUSES),
+            'completedOrders': len(jobs),
             'totalRevenue': total_revenue,
-            'pendingRevenue': total_pending_revenue,
-            'averageOrderValue': round(total_revenue / total_orders, 2) if total_orders > 0 else 0
+            'pendingRevenue': money(total_pending_revenue),
+            'averageOrderValue': money(total_revenue / len(jobs)) if jobs else 0,
+            'vatCollected': money(sum(j['vat'] for j in jobs) + sum(p['vat'] for p in premade)),
         },
         'statusBreakdown': [
             {'status': k, 'count': v['count'], 'value': v['value']}
             for k, v in status_breakdown.items()
         ],
         'dailySales': [
-            {'date': k, 'orders': v['orders'], 'revenue': v['revenue']}
+            {'date': k, 'orders': v['orders'], 'revenue': money(v['revenue'])}
             for k, v in sorted(daily_sales.items())
         ],
         'premadeSummary': {
-            'totalOrders': len(premade_orders_seen),
-            'completedRevenue': round(premade_revenue, 2),
-            'pendingRevenue': round(premade_pending, 2),
+            'totalOrders': premade_orders,
+            'completedOrders': len(premade),
+            'completedRevenue': premade_revenue,
+            'pendingRevenue': money(premade_pending),
         },
         'premadeDailySales': [
-            {'date': k, 'orders': v['orders'], 'revenue': v['revenue']}
+            {'date': k, 'orders': v['orders'], 'revenue': money(v['revenue'])}
             for k, v in sorted(premade_daily.items())
         ],
     }
@@ -8098,7 +10617,7 @@ def get_inventory_report():
                 'name': m.material_type,
                 'currentStock': float(m.stock_quantity),
                 'reorderPoint': effective_reorder_level(m, global_threshold),
-                'unit': ''
+                'unit': material_unit(m)
             }
             for m in low_stock
         ],
@@ -8214,7 +10733,12 @@ def get_branch_settlement():
 
 EXPENSE_CATEGORIES = ['Rent', 'Electricity', 'Water', 'Internet & Phone', 'Salaries & Wages', 'Supplies',
                       'Transportation', 'Repairs & Maintenance', 'Marketing', 'Taxes & Permits', 'Other']
+# Expenses: how the shop paid for something (any of these)
 PAYMENT_METHODS = ['cash', 'gcash', 'maya', 'bank_transfer', 'credit_card', 'debit_card', 'check', 'other']
+# Customer payments and refunds: the only ways the shop accepts money. Older records
+# may hold card, Maya or cheque payments; they stay as they are, but no new ones.
+ACCEPTED_PAYMENT_METHODS = ['cash', 'gcash', 'bank_transfer']
+PAYMENT_METHOD_ERROR = 'Payment method must be Cash, GCash or Bank Transfer'
 
 def parse_period():
     """(start, end) dates from ?startDate=&endDate= (YYYY-MM-DD); defaults to
@@ -8230,7 +10754,7 @@ def parse_period():
         return None, None, (jsonify({'status': 'error', 'message': 'The start date is after the end date'}), 400)
     return start, end, None
 
-def expense_to_dict(e):
+def expense_to_dict(e, po_by_payment=None):
     return {
         'id': e.id,
         'date': e.expense_date.isoformat() if e.expense_date else None,
@@ -8243,6 +10767,10 @@ def expense_to_dict(e):
         'branchName': e.branch.name if e.branch else None,
         'createdBy': e.creator.full_name if e.creator else None,
         'createdAt': to_pht(e.created_at) if e.created_at else None,
+        'referenceNumber': e.reference_number,
+        # A supplier payment: changed or undone from its purchase order only
+        'purchaseOrderPaymentId': e.purchase_order_payment_id,
+        'purchaseOrderId': po_by_payment.get(e.purchase_order_payment_id) if po_by_payment else None,
     }
 
 def scoped_expenses(user):
@@ -8261,11 +10789,22 @@ def list_expenses():
     q = scoped_expenses(request.current_user).filter(Expense.expense_date >= start, Expense.expense_date <= end)
     if request.args.get('category'):
         q = q.filter(Expense.category == request.args['category'])
+    # Users who see every branch can narrow the list to one (others are already scoped to theirs)
+    branch_filter = request.args.get('branchId', type=int)
+    if branch_filter and all_branches(request.current_user):
+        q = q.filter(Expense.branch_id == branch_filter)
     rows = q.order_by(Expense.expense_date.desc(), Expense.id.desc()).all()
+    pay_ids = [e.purchase_order_payment_id for e in rows if e.purchase_order_payment_id]
+    po_links = {pid: po_id for pid, po_id in db.session.query(PurchaseOrderPayment.id, PurchaseOrderPayment.purchase_order_id)
+                .filter(PurchaseOrderPayment.id.in_(pay_ids))} if pay_ids else {}
     return jsonify({'status': 'success', 'data': {
-        'expenses': [expense_to_dict(e) for e in rows],
+        'expenses': [expense_to_dict(e, po_links) for e in rows],
         'total': money(sum(float(e.amount or 0) for e in rows)),
+        # Of the total, stock bought through purchase orders (not a running cost)
+        'supplierPaymentsTotal': money(sum(float(e.amount or 0) for e in rows if e.purchase_order_payment_id)),
+        # Supplier payments are made from purchase orders, so they aren't offered when logging one
         'categories': EXPENSE_CATEGORIES,
+        'filterCategories': EXPENSE_CATEGORIES + [SUPPLIER_PAYMENTS_CATEGORY],
         'paymentMethods': PAYMENT_METHODS,
     }})
 
@@ -8320,6 +10859,9 @@ def delete_expense(expense_id):
     expense = scoped_expenses(user).filter(Expense.id == expense_id).first()
     if not expense:
         return jsonify({'status': 'error', 'message': 'Expense not found'}), 404
+    if expense.purchase_order_payment_id:
+        return jsonify({'status': 'error', 'message': 'This is a supplier payment. Void it from its purchase order, '
+                        'so the purchase order balance stays right.'}), 400
     label = f"₱{float(expense.amount):,.2f} ({expense.category}): {expense.particulars}"
     db.session.delete(expense)
     db.session.commit()
@@ -8328,10 +10870,16 @@ def delete_expense(expense_id):
 
 
 def job_order_finished_on(order):
-    """The day a job order's work was finished (older orders: the day created)."""
+    """The Philippine day a job order's work was finished (older orders: the day created)."""
     if order.completed_at:
-        return order.completed_at if not isinstance(order.completed_at, datetime) else order.completed_at.date()
+        return order.completed_at.date() if isinstance(order.completed_at, datetime) else order.completed_at
     return (order.created_at + PH_OFFSET).date() if order.created_at else None
+
+def product_order_completed_on(order):
+    """The Philippine day a premade sale was completed. updated_at is only a
+    fallback for rows the completed_at backfill hasn't reached."""
+    at = order.completed_at or order.updated_at or order.created_at
+    return (at + PH_OFFSET).date() if at else None
 
 def premade_unit_cost(item):
     """Cost per piece saved with the sale; older sales didn't save one, so they
@@ -8341,66 +10889,117 @@ def premade_unit_cost(item):
     product = PremadeProduct.query.get(item.get('productId')) if item.get('productId') else None
     return float(product.cost or 0) if product else 0.0
 
+def premade_line_branch(order, item):
+    """The branch a premade sale line belongs to: the one whose stock it came from.
+    New sales always sell the selling branch's own stock; older multi-branch
+    orders could draw lines from other branches."""
+    try:
+        return int(item.get('sourceBranchId') or order.branch_id or 0) or None
+    except (TypeError, ValueError):
+        return order.branch_id
+
+def premade_sale_share(order, branch_id=None):
+    """(amount the customer pays incl. VAT, production cost) of a premade sale:
+    the whole order, or only the lines that belong to one branch."""
+    if not branch_id:
+        lines, gross = order.items or [], float(order.total_amount or 0)
+    else:
+        lines = [it for it in (order.items or []) if premade_line_branch(order, it) == branch_id]
+        gross = sum(float(it['total']) if it.get('total') is not None
+                    else float(it.get('unitPrice') or 0) * float(it.get('quantity') or 0) for it in lines)
+    cost = sum(premade_unit_cost(it) * float(it.get('quantity') or 0) for it in lines)
+    return gross, cost
+
+def earned_sales(start, end, branch_id=None):
+    """Sales earned between two Philippine dates (inclusive), optionally for one
+    branch. The single definition behind the Owner Dashboard, the main Dashboard
+    and the Sales report, so they always agree:
+      job orders   earned on the day their work was finished (completed, or
+                   delivered); drafts, cancelled and voided orders never count
+      premade      earned on the day the sale was completed
+    Each entry carries the amount the customer pays (gross, incl. VAT), the VAT
+    inside it and the net sale."""
+    jobs = []
+    q = JobOrder.query.filter(JobOrder.status.in_(EARNED_STATUSES))
+    if branch_id:
+        q = q.filter(JobOrder.branch_id == branch_id)
+    for o in q.all():
+        d = job_order_finished_on(o)
+        if d and start <= d <= end:
+            split = vat_breakdown(o.total_price, o.vat_percent)
+            jobs.append({'order': o, 'date': d, 'gross': split['gross'], 'net': split['net'], 'vat': split['vat']})
+    premade = []
+    for o in ProductOrder.query.filter(ProductOrder.status == 'completed').all():
+        d = product_order_completed_on(o)
+        if not d or not (start <= d <= end):
+            continue
+        gross, cost = premade_sale_share(o, branch_id)
+        if branch_id and gross <= 0 and cost <= 0:
+            continue  # nothing in this order belongs to the branch
+        rate = o.vat_percent if o.vat_percent is not None else DEFAULT_VAT_PERCENT
+        split = vat_breakdown(gross, rate)
+        premade.append({'order': o, 'date': d, 'gross': split['gross'], 'net': split['net'],
+                        'vat': split['vat'], 'cost': cost})
+    return jobs, premade
+
 def owner_financials(start, end, branch_id=None):
     """Earned sales and their costs between two dates (inclusive), by month.
 
-    Sales are what finished orders earned, without the VAT inside them: job
-    orders when completed or delivered, premade orders when completed. Cost of
-    goods sold is each job's materials, labor and other job costs (the same
-    figures as Job Order Costing) plus the production cost of premade items
-    sold. Operating expenses are the logged expenses plus material written off
-    as waste."""
+    Sales are what finished orders earned, without the VAT inside them
+    (earned_sales). Cost of goods sold is each job's materials, labor and other
+    job costs (the same figures as Job Order Costing) plus the production cost of
+    premade items sold. Operating expenses are the logged expenses plus material
+    written off as waste.
+
+    With a branch, everything follows the branch that earned or spent it: a job
+    order's extra material counts against that job's branch even though it was
+    issued from the warehouse's stock."""
     months = {}
     def month(d):
         key = d.strftime('%Y-%m')
         return months.setdefault(key, {'month': key, 'sales': 0.0, 'cogs': 0.0, 'opex': 0.0})
 
-    jo_q = JobOrder.query.filter(JobOrder.status.in_(EARNED_STATUSES))
-    po_q = ProductOrder.query.filter(ProductOrder.status == 'completed')
-    ex_q = Expense.query.filter(Expense.expense_date >= start, Expense.expense_date <= end)
-    if branch_id:
-        jo_q, po_q = jo_q.filter(JobOrder.branch_id == branch_id), po_q.filter(ProductOrder.branch_id == branch_id)
-        ex_q = ex_q.filter(Expense.branch_id == branch_id)
-
     t = {'jobSales': 0.0, 'premadeSales': 0.0, 'materials': 0.0, 'labor': 0.0, 'jobOther': 0.0, 'premadeCost': 0.0,
-         'vatCollected': 0.0, 'jobOrders': 0, 'premadeOrders': 0}
-    earned = jo_q.all()
-    extras = extras_by_order([o.id for o in earned])
-    for o in earned:
-        d = job_order_finished_on(o)
-        if not d or not (start <= d <= end):
-            continue
+         'vatCollected': 0.0, 'grossReceipts': 0.0, 'jobOrders': 0, 'premadeOrders': 0}
+    jobs, premade = earned_sales(start, end, branch_id)
+    extras = extras_by_order([j['order'].id for j in jobs])
+    for j in jobs:
+        o = j['order']
         c = job_order_costing(o, extras.get(o.id, []))
         t['jobSales'] += c['revenue']
         t['materials'] += c['materials']; t['labor'] += c['labor']; t['jobOther'] += c['expenses']
-        t['vatCollected'] += vat_breakdown(o.total_price, o.vat_percent)['vat']
+        t['vatCollected'] += j['vat']; t['grossReceipts'] += j['gross']
         t['jobOrders'] += 1
-        m = month(d); m['sales'] += c['revenue']; m['cogs'] += c['totalCost']
-    for o in po_q.all():
-        d = ((o.updated_at or o.created_at) + PH_OFFSET).date()
-        if not (start <= d <= end):
-            continue
-        rate = o.vat_percent if o.vat_percent is not None else DEFAULT_VAT_PERCENT
-        split = vat_breakdown(o.total_amount, rate)
-        cost = sum(premade_unit_cost(it) * float(it.get('quantity') or 0) for it in (o.items or []))
-        t['premadeSales'] += split['net']; t['vatCollected'] += split['vat']; t['premadeCost'] += cost
+        m = month(j['date']); m['sales'] += c['revenue']; m['cogs'] += c['totalCost']
+    for p in premade:
+        t['premadeSales'] += p['net']; t['vatCollected'] += p['vat']; t['grossReceipts'] += p['gross']
+        t['premadeCost'] += p['cost']
         t['premadeOrders'] += 1
-        m = month(d); m['sales'] += split['net']; m['cogs'] += cost
+        m = month(p['date']); m['sales'] += p['net']; m['cogs'] += p['cost']
 
     by_category = {}
+    # Supplier payments buy stock: their cost counts as cost of goods sold when the
+    # material is used, so counting the payment here too would count it twice
+    ex_q = Expense.query.filter(Expense.expense_date >= start, Expense.expense_date <= end,
+                                Expense.purchase_order_payment_id.is_(None))
+    if branch_id:
+        ex_q = ex_q.filter(Expense.branch_id == branch_id)
     for e in ex_q.all():
         by_category[e.category] = by_category.get(e.category, 0.0) + float(e.amount or 0)
         month(e.expense_date)['opex'] += float(e.amount or 0)
-    waste_q = db.session.query(MaterialWasteLog, InventoryMaterial).join(
-        InventoryMaterial, InventoryMaterial.id == MaterialWasteLog.material_id)
-    if branch_id:
-        waste_q = waste_q.filter(MaterialWasteLog.branch_id == branch_id)
-    # Extra material issued for a finished job is part of that job's cost (above),
-    # in the period the job finished; only the rest is written off here as waste
-    finished_ids = {o.id for o in earned}
+
+    # Extra material issued for a finished job is part of that job's cost (above,
+    # in the period the job finished), whichever branch or period is being viewed;
+    # only the rest is written off here as waste
+    earned_ids = {i for (i,) in db.session.query(JobOrder.id).filter(JobOrder.status.in_(EARNED_STATUSES)).all()}
+    waste_q = (db.session.query(MaterialWasteLog, InventoryMaterial, JobOrder.branch_id)
+               .join(InventoryMaterial, InventoryMaterial.id == MaterialWasteLog.material_id)
+               .outerjoin(JobOrder, JobOrder.id == MaterialWasteLog.job_order_id))
     waste = 0.0
-    for w, mat in waste_q.all():
-        if w.job_order_id and w.job_order_id in finished_ids:
+    for w, mat, job_branch in waste_q.all():
+        if w.job_order_id and w.job_order_id in earned_ids:
+            continue
+        if branch_id and (job_branch or w.branch_id) != branch_id:
             continue
         d = ((w.created_at or datetime.utcnow()) + PH_OFFSET).date()
         if start <= d <= end:
@@ -8431,53 +11030,89 @@ def owner_financials(start, end, branch_id=None):
         'totalExpenses': money(cogs + opex),
         'netIncome': money(net),
         'profitMargin': round(net / sales * 100, 1) if sales else 0.0,
+        # What customers paid for those sales = sales + VAT; the VAT is owed to the government
+        'grossReceipts': money(t['grossReceipts']),
         'vatCollected': money(t['vatCollected']),
         'orderCounts': {'jobOrders': t['jobOrders'], 'premadeOrders': t['premadeOrders']},
         'monthly': monthly,
     }
 
-def money_by_method(start, end):
+def money_by_method(start, end, branch_id=None):
     """Cash actually received and spent between two dates, by mode of payment."""
     money_in, money_out = {}, {}
-    for p in PaymentRecord.query.all():
+    pay_q = (db.session.query(PaymentRecord).join(JobOrder, JobOrder.id == PaymentRecord.job_order_id)
+             .filter(JobOrder.status != 'draft'))
+    if branch_id:
+        pay_q = pay_q.filter(JobOrder.branch_id == branch_id)
+    for p in pay_q.all():
         d = ((p.created_at or datetime.utcnow()) + PH_OFFSET).date()
-        if start <= d <= end and p.job_order and p.job_order.status not in ('draft',):
+        if start <= d <= end:
             key = p.payment_method or 'cash'
             money_in[key] = money_in.get(key, 0.0) + float(p.amount or 0)
-    for o in ProductOrder.query.filter(ProductOrder.amount_paid > 0).all():
+    po_q = ProductOrder.query.filter(ProductOrder.amount_paid > 0)
+    if branch_id:
+        po_q = po_q.filter(ProductOrder.branch_id == branch_id)
+    for o in po_q.all():
         d = ((o.created_at or datetime.utcnow()) + PH_OFFSET).date()
         if start <= d <= end:
             # Premade orders don't record how they were paid
             money_in['not_recorded'] = money_in.get('not_recorded', 0.0) + float(o.amount_paid or 0)
-    for e in Expense.query.filter(Expense.expense_date >= start, Expense.expense_date <= end).all():
+    ex_q = Expense.query.filter(Expense.expense_date >= start, Expense.expense_date <= end)
+    if branch_id:
+        ex_q = ex_q.filter(Expense.branch_id == branch_id)
+    for e in ex_q.all():
         money_out[e.payment_method] = money_out.get(e.payment_method, 0.0) + float(e.amount or 0)
     as_list = lambda d: [{'method': k, 'amount': money(v)} for k, v in sorted(d.items(), key=lambda kv: -kv[1])]
     return {'in': as_list(money_in), 'out': as_list(money_out),
             'totalIn': money(sum(money_in.values())), 'totalOut': money(sum(money_out.values()))}
+
+def owner_branch_arg():
+    """?branchId= for the Owner Dashboard: (branch id or None for all, error response)."""
+    raw = request.args.get('branchId')
+    if not raw:
+        return None, None
+    try:
+        branch = Branch.query.get(int(raw))
+    except (TypeError, ValueError):
+        branch = None
+    if not branch:
+        return None, (jsonify({'status': 'error', 'message': 'Unknown branch'}), 400)
+    return branch.id, None
+
+def owner_filters():
+    """(start, end, branch id, error response) from ?startDate=&endDate=&branchId=."""
+    start, end, error = parse_period()
+    if error:
+        return None, None, None, error
+    branch_id, error = owner_branch_arg()
+    return start, end, branch_id, error
 
 @app.route('/api/owner/summary', methods=['GET'])
 @require_auth
 @require_permission('owner.view')
 @require_permission('branches.all')
 def owner_summary():
-    """Executive dashboard: this year so far."""
-    today = manila_today()
-    start = today.replace(month=1, day=1)
-    f = owner_financials(start, today)
-    cash = money_by_method(start, today)
-    month_start = today.replace(day=1)
-    this_month = owner_financials(month_start, today)
-    receivable = sum(max(float(o.total_price or 0) - float(o.down_payment or 0), 0) for o in
-                     JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided'))).all()) + \
-        sum(max(float(o.total_amount or 0) - float(o.amount_paid or 0), 0) for o in
-            ProductOrder.query.filter(ProductOrder.status != 'cancelled').all())
+    """Overview for a period (default: this year so far), all branches or one."""
+    start, end, branch_id, error = owner_filters()
+    if error:
+        return error
+    f = owner_financials(start, end, branch_id)
+    jo_q = JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided')))
+    po_q = ProductOrder.query.filter(ProductOrder.status != 'cancelled')
+    if branch_id:
+        jo_q, po_q = jo_q.filter(JobOrder.branch_id == branch_id), po_q.filter(ProductOrder.branch_id == branch_id)
+    # What customers owe today (not limited to the period), as on the Receivables tab
+    receivable = sum(max(float(o.total_price or 0) - float(o.down_payment or 0), 0) for o in jo_q.all()) + \
+        sum(max(float(o.total_amount or 0) - float(o.amount_paid or 0), 0) for o in po_q.all())
     return jsonify({'status': 'success', 'data': {
-        'period': {'startDate': start.isoformat(), 'endDate': today.isoformat()},
-        'ytd': {k: f[k] for k in ('sales', 'totalExpenses', 'netIncome', 'profitMargin', 'grossProfit', 'vatCollected')},
-        'thisMonth': {k: this_month[k] for k in ('sales', 'totalExpenses', 'netIncome')},
+        'period': {'startDate': start.isoformat(), 'endDate': end.isoformat(), 'branchId': branch_id},
+        'totals': {k: f[k] for k in ('sales', 'grossReceipts', 'vatCollected', 'grossProfit', 'totalExpenses',
+                                     'netIncome', 'profitMargin', 'orderCounts')},
         'receivables': money(receivable),
+        # What the shop still owes suppliers today, and how much of it is due soon / overdue
+        'payables': purchase_order_payables(branch_id),
         'monthly': f['monthly'],
-        'cashflowByMethod': cash,
+        'cashflowByMethod': money_by_method(start, end, branch_id),
     }})
 
 @app.route('/api/owner/pnl', methods=['GET'])
@@ -8485,10 +11120,9 @@ def owner_summary():
 @require_permission('owner.view')
 @require_permission('branches.all')
 def owner_pnl():
-    start, end, error = parse_period()
+    start, end, branch_id, error = owner_filters()
     if error:
         return error
-    branch_id = request.args.get('branchId', type=int)
     data = owner_financials(start, end, branch_id)
     data['period'] = {'startDate': start.isoformat(), 'endDate': end.isoformat(), 'branchId': branch_id}
     return jsonify({'status': 'success', 'data': data})
@@ -8499,16 +11133,14 @@ def owner_pnl():
 @require_permission('branches.all')
 def owner_job_costing():
     """Every finished job order in the period with its margin, least profitable first."""
-    start, end, error = parse_period()
+    start, end, branch_id, error = owner_filters()
     if error:
         return error
     rows = []
-    earned = JobOrder.query.filter(JobOrder.status.in_(EARNED_STATUSES)).all()
-    extras = extras_by_order([o.id for o in earned])
-    for o in earned:
-        d = job_order_finished_on(o)
-        if not d or not (start <= d <= end):
-            continue
+    jobs, _ = earned_sales(start, end, branch_id)
+    extras = extras_by_order([j['order'].id for j in jobs])
+    for j in jobs:
+        o, d = j['order'], j['date']
         c = job_order_costing(o, extras.get(o.id, []))
         lines = []
         for it in o.items or []:
@@ -8525,12 +11157,11 @@ def owner_job_costing():
             lines.append({'name': f"Extra: {w.material.material_type if w.material else 'material'} ({w.reason})",
                           'category': 'material', 'quantity': float(w.quantity or 0), 'unitCost': unit,
                           'cost': money(float(w.quantity or 0) * unit), 'extra': True})
-        split = vat_breakdown(o.total_price, o.vat_percent)
         rows.append({
             'id': o.id, 'jobOrderId': o.job_order_id, 'customerName': o.customer_name,
             'description': o.description, 'branchName': o.branch.name if o.branch else None,
             'finishedOn': d.isoformat(), 'status': o.status,
-            'customerPrice': split['gross'], 'vat': split['vat'], 'sellingPrice': c['revenue'],
+            'customerPrice': j['gross'], 'vat': j['vat'], 'sellingPrice': c['revenue'],
             'materials': c['materials'], 'labor': c['labor'], 'otherCosts': c['expenses'],
             'estimatedCost': c['estimatedCost'], 'actualCost': c['totalCost'],
             'extraMaterials': c['extraMaterials'],
@@ -8544,6 +11175,7 @@ def owner_job_costing():
         'totals': {'sellingPrice': money(total_sell), 'materials': money(sum(r['materials'] for r in rows)),
                    'labor': money(sum(r['labor'] for r in rows)), 'otherCosts': money(sum(r['otherCosts'] for r in rows)),
                    'grossMargin': money(total_margin),
+                   'vat': money(sum(r['vat'] for r in rows)),
                    'marginPercent': round(total_margin / total_sell * 100, 1) if total_sell else 0.0},
     }})
 
@@ -8553,8 +11185,15 @@ def owner_job_costing():
 @require_permission('branches.all')
 def owner_receivables():
     """Every customer invoice (job orders and premade orders) with what is still owed."""
+    branch_id, error = owner_branch_arg()
+    if error:
+        return error
+    jo_q = JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided')))
+    po_q = ProductOrder.query.filter(ProductOrder.status != 'cancelled')
+    if branch_id:
+        jo_q, po_q = jo_q.filter(JobOrder.branch_id == branch_id), po_q.filter(ProductOrder.branch_id == branch_id)
     invoices = []
-    for o in JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided'))).all():
+    for o in jo_q.all():
         total, paid = float(o.total_price or 0), float(o.down_payment or 0)
         invoices.append({
             'type': 'job_order', 'id': o.id, 'reference': o.job_order_id, 'customerName': o.customer_name,
@@ -8568,7 +11207,7 @@ def owner_receivables():
                           'recordedBy': p.recorder.full_name if p.recorder else None}
                          for p in sorted(o.payment_records, key=lambda p: p.created_at or datetime.min)],
         })
-    for o in ProductOrder.query.filter(ProductOrder.status != 'cancelled').all():
+    for o in po_q.all():
         total, paid = float(o.total_amount or 0), float(o.amount_paid or 0)
         rate = o.vat_percent if o.vat_percent is not None else DEFAULT_VAT_PERCENT
         invoices.append({
@@ -8598,49 +11237,91 @@ def owner_receivables():
 @require_permission('owner.view')
 @require_permission('branches.all')
 def owner_inventory():
-    """Where capital sits in stock, what was used up, and what needs restocking."""
-    today = manila_today()
+    """Where capital sits in stock (today), what was used up in the period, and what
+    needs restocking; all branches or one."""
+    from sqlalchemy.orm import joinedload
+    start, end, branch_id, error = owner_filters()
+    if error:
+        return error
+    # A stock or cost saved before inputs were validated may not be a real number
+    # (NaN / Infinity). It is valued at 0 and counted, so it can be found and fixed
+    # instead of failing the whole tab.
+    invalid = []
+    def num(value, label):
+        n = finite_number(value, 0.0)
+        if n is None:
+            invalid.append(label)
+            return 0.0
+        return n
+
     global_threshold = global_low_stock_threshold()
-    materials = InventoryMaterial.query.filter(InventoryMaterial.is_archived.is_(False)).all()
+    mat_q = InventoryMaterial.query.options(joinedload(InventoryMaterial.branch)).filter(InventoryMaterial.is_archived.is_(False))
+    if branch_id:
+        mat_q = mat_q.filter(InventoryMaterial.branch_id == branch_id)
     restock, materials_value = [], 0.0
-    for m in materials:
-        unit_cost = float(m.cost_per_unit or 0) or float(m.unit_price or 0)
-        stock = float(m.stock_quantity or 0)
+    for m in mat_q.all():
+        label = f"{m.material_type}{f' ({m.color})' if m.color else ''}"
+        stock = num(m.stock_quantity, label)
+        unit_cost = num(m.cost_per_unit, label) or num(m.unit_price, label)
         materials_value += max(stock, 0) * unit_cost
-        threshold = effective_reorder_level(m, global_threshold)
-        state = low_stock_state(m, global_threshold)
+        state = low_stock_state(m, global_threshold) if math.isfinite(stock) else None
         if state:
             restock.append({'id': m.id, 'name': m.material_type, 'color': m.color, 'branchName': m.branch.name if m.branch else None,
-                            'stock': stock, 'threshold': threshold, 'status': state})
-    premade = PremadeProduct.query.filter(PremadeProduct.is_archived.is_(False)).all()
-    premade_value = sum(max(float(p.quantity or 0), 0) * float(p.cost or 0) for p in premade)
+                            'stock': stock, 'threshold': num(effective_reorder_level(m, global_threshold), label), 'status': state})
+    premade_q = PremadeProduct.query.filter(PremadeProduct.is_archived.is_(False))
+    if branch_id:
+        premade_q = premade_q.filter(PremadeProduct.branch_id == branch_id)
+    premade_value = 0.0
+    for p in premade_q.all():
+        premade_value += max(num(p.quantity, p.name), 0) * num(p.cost, p.name)
 
     movements = []
-    for log in MaterialUsageLog.query.order_by(MaterialUsageLog.created_at.desc()).limit(40).all():
-        movements.append({'date': to_pht(log.created_at) if log.created_at else None, 'direction': 'out' if log.quantity_used >= 0 else 'in',
-                          'item': log.material.material_type if log.material else '', 'quantity': abs(float(log.quantity_used)),
+    usage_q = MaterialUsageLog.query.options(joinedload(MaterialUsageLog.material), joinedload(MaterialUsageLog.branch))
+    waste_q = MaterialWasteLog.query.options(joinedload(MaterialWasteLog.material), joinedload(MaterialWasteLog.branch))
+    if branch_id:
+        usage_q = usage_q.filter(MaterialUsageLog.branch_id == branch_id)
+        waste_q = waste_q.filter(MaterialWasteLog.branch_id == branch_id)
+    for log in usage_q.order_by(MaterialUsageLog.created_at.desc()).limit(40).all():
+        qty = num(log.quantity_used, 'stock movement')
+        movements.append({'date': to_pht(log.created_at) if log.created_at else None, 'direction': 'out' if qty >= 0 else 'in',
+                          'item': log.material.material_type if log.material else '', 'quantity': abs(qty),
                           'reason': log.notes or log.used_in_reference, 'branchName': log.branch.name if log.branch else None})
-    for w in MaterialWasteLog.query.order_by(MaterialWasteLog.created_at.desc()).limit(20).all():
+    for w in waste_q.order_by(MaterialWasteLog.created_at.desc()).limit(20).all():
         movements.append({'date': to_pht(w.created_at) if w.created_at else None, 'direction': 'out',
-                          'item': w.material.material_type if w.material else '', 'quantity': float(w.quantity),
+                          'item': w.material.material_type if w.material else '', 'quantity': num(w.quantity, 'waste entry'),
                           'reason': f'Waste: {w.reason}', 'branchName': w.branch.name if w.branch else None})
-    for po in PurchaseOrder.query.filter(PurchaseOrder.status == 'received').order_by(PurchaseOrder.received_at.desc()).limit(20).all():
-        for it in po.items or []:
-            movements.append({'date': to_pht(po.received_at) if po.received_at else None, 'direction': 'in',
-                              'item': it.get('name') or '', 'quantity': float(it.get('quantity') or 0),
-                              'reason': f'Received {po.po_number} from {po.supplier_name}', 'branchName': None})
+    recent_pos = (PurchaseOrder.query.filter(PurchaseOrder.status.in_(('partially_received', 'received')))
+                  .order_by(PurchaseOrder.created_at.desc()).limit(40).all())
+    receipts = [(po, r) for po in recent_pos for r in purchase_order_receipts(po)]
+    # A delivery goes into the stock of the material it was ordered for
+    mat_ids = {it.get('materialId') for _, r in receipts for it in r['items'] if it.get('materialId')}
+    mat_branch = {m.id: m.branch for m in InventoryMaterial.query.options(joinedload(InventoryMaterial.branch))
+                  .filter(InventoryMaterial.id.in_(mat_ids)).all()} if mat_ids else {}
+    for po, receipt in receipts:
+        for it in receipt['items']:
+            branch = mat_branch.get(it.get('materialId'))
+            if branch_id and (not branch or branch.id != branch_id):
+                continue
+            returned = receipt['kind'] == 'return'
+            movements.append({'date': to_pht(receipt['at']) if receipt['at'] else None,
+                              'direction': 'out' if returned else 'in',
+                              'item': it.get('name') or '', 'quantity': num(it.get('quantity'), 'PO delivery'),
+                              'reason': (f"Returned to {po.supplier_name} ({receipt.get('returnReason') or 'return'}), {po.po_number}"
+                                         if returned else f'Received {po.po_number} from {po.supplier_name}'),
+                              'branchName': branch.name if branch else None})
     movements.sort(key=lambda m: m['date'] or '', reverse=True)
 
-    cogs = owner_financials(today.replace(month=1, day=1), today)['cogs']
+    cogs = owner_financials(start, end, branch_id)['cogs']
     restock.sort(key=lambda r: (r['status'] != 'out', r['name']))
     return jsonify({'status': 'success', 'data': {
         'materialsValue': money(materials_value), 'premadeValue': money(premade_value),
         'totalValue': money(materials_value + premade_value),
-        'cogsYtd': cogs,
+        'cogs': cogs,
         'restock': restock,
         'outOfStock': sum(1 for r in restock if r['status'] == 'out'),
         'lowStock': sum(1 for r in restock if r['status'] == 'low'),
         'movements': movements[:50],
+        'invalidValues': sorted(set(invalid))[:20],
     }})
 
 @app.route('/api/reports/audit-trail', methods=['GET'])
@@ -8687,7 +11368,16 @@ def get_users():
         query = query.filter(User.is_active == True)
 
     users_list = query.all()
-    return jsonify({'status': 'success', 'data': [user_to_dict(u) for u in users_list]})
+    me = request.current_user
+    data = []
+    for u in users_list:
+        d = user_to_dict(u)
+        # Same rule the server applies to every change: the page locks what it refuses
+        reason = target_account_error(me, u)
+        d['canManage'] = reason is None
+        d['manageBlockedReason'] = reason
+        data.append(d)
+    return jsonify({'status': 'success', 'data': data})
 
 @app.route('/api/settings/users', methods=['POST'])
 @require_auth
@@ -8698,9 +11388,9 @@ def create_user():
     required = ['username', 'password', 'email', 'fullName', 'role']
     if not all(f in data for f in required):
         return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
-    if not isinstance(data['password'], str) or len(data['password']) < MIN_PASSWORD_LENGTH:
-        return jsonify({'status': 'error',
-                        'message': f'Password must be at least {MIN_PASSWORD_LENGTH} characters'}), 400
+    error = password_error(data['password'])
+    if error:
+        return jsonify({'status': 'error', 'message': error, 'code': 'weak_password'}), 400
     
     # The same rule My Profile applies: no spaces or other characters
     data['username'] = str(data['username'] or '').strip()
@@ -8710,7 +11400,12 @@ def create_user():
     if User.query.filter(db.func.lower(User.username) == data['username'].lower()).first():
         return jsonify({'status': 'error', 'message': 'Username already exists'}), 400
     
-    if User.query.filter_by(email=data['email']).first():
+    # The email also signs in, so it must be valid and belong to one account only
+    # (compared ignoring capitals, as login does)
+    data['email'] = str(data['email'] or '').strip()
+    if not EMAIL_PATTERN.match(data['email']):
+        return jsonify({'status': 'error', 'message': 'Enter a valid email address'}), 400
+    if _email_taken(data['email'], None):
         return jsonify({'status': 'error', 'message': 'Email already exists'}), 400
     
     role = Role.query.filter_by(key=data['role']).first()
@@ -8718,7 +11413,7 @@ def create_user():
         return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
     error = delegation_error(request.current_user, set(), ROLE_DEFAULT_PERMISSIONS.get(role.key, ()), role.key)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"create account {data['username']} ({role.name})", error)
 
     # Handle branch - support both branchId and branch (string)
     branch_id = data.get('branchId')
@@ -8785,7 +11480,7 @@ def update_user(user_id):
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
     error = target_account_error(request.current_user, user)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"edit {user.username}", error)
 
     data = request.get_json()
 
@@ -8793,9 +11488,9 @@ def update_user(user_id):
     # before anything else changes, since a wrong guess is saved (lockout count).
     resetting_password = bool(data.get('password'))
     if resetting_password:
-        if len(data['password']) < MIN_PASSWORD_LENGTH:
-            return jsonify({'status': 'error',
-                            'message': f'New password must be at least {MIN_PASSWORD_LENGTH} characters.'}), 400
+        error = password_error(data['password'])
+        if error:
+            return jsonify({'status': 'error', 'message': error, 'code': 'weak_password'}), 400
         admin = User.query.get(request.current_user['id'])
         error = check_current_password(admin, data.get('adminPassword'))
         if error:
@@ -8809,7 +11504,14 @@ def update_user(user_id):
     old_role_key = user.role.key if user.role else None
     
     if 'email' in data:
-        user.email = data['email']
+        new_email = str(data['email'] or '').strip()
+        if not EMAIL_PATTERN.match(new_email):
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': 'Enter a valid email address'}), 400
+        if _email_taken(new_email, user.id):
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': 'That email is already used by another account.'}), 400
+        user.email = new_email
     if 'fullName' in data:
         user.full_name = data['fullName']
     if 'branchId' in data:
@@ -8836,7 +11538,7 @@ def update_user(user_id):
             error = delegation_error(request.current_user, effective_permissions(user.id, old_role_key),
                                      perms_after, role.key)
             if error:
-                return jsonify({'status': 'error', 'message': error}), 403
+                return refuse_account_change(f"change the role of {user.username} to {role.name}", error)
         if user.id == request.current_user['id'] and 'users.manage' not in perms_after:
             return jsonify({'status': 'error', 'message': "You can't remove your own access to user management"}), 400
         if user.is_active and would_leave_no_user_manager(user.id, perms_after):
@@ -8918,7 +11620,7 @@ def archive_user(user_id):
         return jsonify({'status': 'error', 'message': 'Cannot archive yourself'}), 400
     error = target_account_error(request.current_user, user)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"archive {user.username}", error)
 
     # Archiving blocks login, so the last administrator must stay active.
     if user.role and user.role.key == 'administrator' and last_active_administrator(user):
@@ -8945,7 +11647,7 @@ def restore_user(user_id):
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
     error = target_account_error(request.current_user, user)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"restore {user.username}", error)
 
     user.is_active = True
     bump_auth_version(user)
@@ -9061,8 +11763,10 @@ def user_permissions_payload(user, actor):
         'userId': user.id,
         'role': role_key,
         'roleDefaults': sorted(ROLE_DEFAULT_PERMISSIONS.get(role_key, ())),
-        'grants': sorted(o.permission for o in overrides if o.effect == 'grant'),
-        'revokes': sorted(o.permission for o in overrides if o.effect == 'revoke'),
+        # Only permissions that still exist: an obsolete one has no effect and would
+        # be refused when the dialog sends it back
+        'grants': sorted(o.permission for o in overrides if o.effect == 'grant' and o.permission in PERMISSIONS),
+        'revokes': sorted(o.permission for o in overrides if o.effect == 'revoke' and o.permission in PERMISSIONS),
         'effective': sorted(effective_permissions(user.id, role_key, overrides)),
         'version': permissions_version(role_key, overrides),
         'editable': read_only_reason is None,
@@ -9116,7 +11820,7 @@ def set_user_permissions(user_id):
         return jsonify({'status': 'error', 'message': 'Customer accounts cannot be given staff permissions'}), 400
     error = target_account_error(me, user)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"change the permissions of {user.username}", error)
 
     data = request.get_json(silent=True) or {}
     current = UserPermissionOverride.query.filter_by(user_id=user.id).all()
@@ -9130,6 +11834,10 @@ def set_user_permissions(user_id):
     if not isinstance(grants, list) or not isinstance(revokes, list):
         return jsonify({'status': 'error', 'message': 'grants and revokes must be lists'}), 400
     grants, revokes = {str(g) for g in grants}, {str(r) for r in revokes}
+    # An obsolete permission this user already had stored (from a retired module)
+    # is dropped on save rather than refused; anything else unknown is an error
+    obsolete = {o.permission for o in current if o.permission not in PERMISSIONS}
+    grants, revokes = grants - obsolete, revokes - obsolete
     unknown = (grants | revokes) - set(PERMISSIONS)
     if unknown:
         return jsonify({'status': 'error', 'message': f"Unknown permission(s): {', '.join(sorted(unknown))}"}), 400
@@ -9143,7 +11851,7 @@ def set_user_permissions(user_id):
     perms_after = (set(defaults) | grants) - revokes
     error = delegation_error(me, effective_permissions(user.id, role_key, current), perms_after)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"change the permissions of {user.username}", error)
 
     if user.id == me['id'] and 'users.manage' not in perms_after:
         return jsonify({'status': 'error', 'message': "You can't remove your own access to user management"}), 400
@@ -9204,7 +11912,7 @@ def delete_user(user_id):
         return jsonify({'status': 'error', 'message': 'You cannot delete your own account'}), 400
     error = target_account_error(request.current_user, user)
     if error:
-        return jsonify({'status': 'error', 'message': error}), 403
+        return refuse_account_change(f"delete {user.username}", error)
 
     if user.role and user.role.key == 'administrator' and last_active_administrator(user):
         return jsonify({'status': 'error',
@@ -9267,13 +11975,17 @@ def delete_user(user_id):
 @require_permission('users.manage')
 def get_roles():
     roles = Role.query.filter(Role.key != 'customer').all()
+    me = request.current_user
     role_list = [
         {
             'id': role.key,
             'name': role.name,
-            'description': ''
+            'description': '',
+            'rank': role_rank(role.key),
+            # Whether the signed-in user may give this role out (see role_assign_error)
+            'assignable': role_assign_error(me, role.key) is None,
         }
-        for role in roles
+        for role in sorted(roles, key=lambda r: -role_rank(r.key))
     ]
     return jsonify({'status': 'success', 'data': role_list})
 
@@ -9294,6 +12006,90 @@ def get_branches():
     branches_list = query.all()
     
     return jsonify({'status': 'success', 'data': [branch_to_dict(b) for b in branches_list]})
+
+# ── Appearance: the logo (browser tab icon and sidebar) and custom sidebar icons ──
+# Kept as image data URLs in system_settings. The page shrinks pictures before
+# sending them, so each stays small.
+BRANDING_LOGO_KEY = 'branding_logo'
+BRANDING_NAV_ICONS_KEY = 'branding_nav_icons'
+BRANDING_MAX_IMAGE_CHARS = 200_000
+BRANDING_IMAGE_PREFIXES = ('data:image/png;base64,', 'data:image/jpeg;base64,', 'data:image/webp;base64,',
+                           'data:image/svg+xml;base64,', 'data:image/x-icon;base64,', 'data:image/gif;base64,')
+
+def _branding_setting(key, default):
+    row = SystemSetting.query.filter_by(key=key).first()
+    if not row or not row.value:
+        return default
+    if key == BRANDING_NAV_ICONS_KEY:
+        try:
+            value = json.loads(row.value)
+            return value if isinstance(value, dict) else default
+        except ValueError:
+            return default
+    return row.value
+
+def _save_branding_setting(key, value):
+    row = SystemSetting.query.filter_by(key=key).first()
+    if not row:
+        row = SystemSetting(key=key)
+        db.session.add(row)
+    row.value = value
+
+def _branding_image_error(value):
+    if not isinstance(value, str) or not value.startswith(BRANDING_IMAGE_PREFIXES):
+        return 'Use a PNG, JPG, WebP, GIF, ICO or SVG image'
+    if len(value) > BRANDING_MAX_IMAGE_CHARS:
+        return 'That image is too large; use one under 150 KB'
+    return None
+
+def branding_dict():
+    return {'logo': _branding_setting(BRANDING_LOGO_KEY, None) or None,
+            'navIcons': _branding_setting(BRANDING_NAV_ICONS_KEY, {})}
+
+@app.route('/api/settings/branding', methods=['GET'])
+def get_branding():
+    """Public: the sign-in page and the browser tab show the logo too."""
+    return jsonify({'status': 'success', 'data': branding_dict()})
+
+@app.route('/api/settings/branding', methods=['PUT'])
+@require_auth
+@require_permission('settings.edit')
+def update_branding():
+    """{logo: data URL | null} and/or {navIcons: {key: data URL | null}}; null
+    puts back the built-in one."""
+    data = request.get_json(silent=True) or {}
+    changed = []
+    if 'logo' in data:
+        if data['logo'] is None:
+            _save_branding_setting(BRANDING_LOGO_KEY, '')
+        else:
+            error = _branding_image_error(data['logo'])
+            if error:
+                return jsonify({'status': 'error', 'message': error}), 400
+            _save_branding_setting(BRANDING_LOGO_KEY, data['logo'])
+        changed.append('logo')
+    if 'navIcons' in data:
+        if not isinstance(data['navIcons'], dict):
+            return jsonify({'status': 'error', 'message': 'Icons are not in the right format'}), 400
+        icons = dict(_branding_setting(BRANDING_NAV_ICONS_KEY, {}))
+        for key, value in data['navIcons'].items():
+            key = str(key)[:100]
+            if value is None:
+                icons.pop(key, None)
+                continue
+            error = _branding_image_error(value)
+            if error:
+                return jsonify({'status': 'error', 'message': error}), 400
+            icons[key] = value
+        if len(icons) > 60:
+            return jsonify({'status': 'error', 'message': 'Too many custom icons'}), 400
+        _save_branding_setting(BRANDING_NAV_ICONS_KEY, json.dumps(icons))
+        changed.append('sidebar icons')
+    db.session.commit()
+    if changed:
+        log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Settings',
+                   f"Changed the {' and '.join(changed)}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': branding_dict()})
 
 @app.route('/api/settings/branches/public', methods=['GET'])
 def get_branches_public():
@@ -9552,6 +12348,15 @@ def update_system_setting(key):
             return jsonify({'status': 'error', 'message': error}), 400
         # '12.00' -> '12'; plain digits, since normalize() alone turns 10 into '1E+1'
         value = format(Decimal(value).normalize(), 'f') if Decimal(value) != 0 else '0'
+    elif key == 'po_term_presets':
+        error = term_presets_error(value)
+        if error:
+            return jsonify({'status': 'error', 'message': error}), 400
+        value = ','.join(str(d) for d in sorted({int(x) for x in value.split(',') if x.strip()}))
+    elif key == 'po_due_reminder_days':
+        if not re.fullmatch(r'\d{1,2}', value) or int(value) > MAX_DUE_REMINDER_DAYS:
+            return jsonify({'status': 'error', 'message': f'Enter a whole number of days from 0 to {MAX_DUE_REMINDER_DAYS}'}), 400
+        value = str(int(value))
     setting = SystemSetting.query.filter_by(key=key).first()
     if not setting:
         setting = SystemSetting(key=key, value=value)
@@ -9681,6 +12486,7 @@ def get_my_work():
     rows = WorkerAssignment.query.filter_by(worker_id=worker.id).order_by(WorkerAssignment.created_at.desc()).all()
     order_ids = {a.job_order_db_id for a in rows if a.job_order_db_id}
     orders = {o.id: o for o in JobOrder.query.filter(JobOrder.id.in_(order_ids))} if order_ids else {}
+    waits = waiting_on_map(rows)
     return jsonify({'status': 'success', 'data': {
         'linked': True,
         'worker': {'name': worker.name, 'workType': worker.work_type, 'payMode': worker.pay_mode or 'per_hour'},
@@ -9697,6 +12503,7 @@ def get_my_work():
             'hoursWorked': a.hours_worked,
             'pay': a.pay if a.status == 'completed' else None,
             'endTime': fmt_dt(a.end_time),
+            'waitingOn': waiting_on_dict(waits.get(a.id)),
         } for a in rows],
     }})
 
@@ -9710,6 +12517,50 @@ def deactivate_managed_worker(worker_id):
     worker.is_active = False
     db.session.commit()
     return jsonify({'status': 'success', 'message': 'Worker deactivated'})
+
+def task_base_name(description):
+    """The kind of work a task is, without the "(2)" / "(Rework: ...)" added to repeats."""
+    name = (description or '').strip()
+    cut = name.find(' (')
+    return (name[:cut] if cut > 0 else name).strip().lower()
+
+
+def _job_order_task_filter():
+    """Assignments that are work on a job order (not special tasks; older rows may have no type)."""
+    return db.or_(WorkerAssignment.assignment_type.is_(None), WorkerAssignment.assignment_type != 'special_task')
+
+
+def waiting_on_map(assignments):
+    """{assignment id: the earlier unfinished task it waits on}, for pending job order tasks.
+
+    Work on a job order goes in the order it was given out: a task can't start
+    until every task assigned to the job order before it is finished."""
+    pending = [a for a in assignments if a.status == 'pending' and a.job_order_db_id
+               and a.assignment_type != 'special_task']
+    if not pending:
+        return {}
+    unfinished = WorkerAssignment.query.filter(
+        WorkerAssignment.job_order_db_id.in_({a.job_order_db_id for a in pending}),
+        _job_order_task_filter(),
+        WorkerAssignment.status != 'completed',
+    ).order_by(WorkerAssignment.id).all()
+    by_order = {}
+    for t in unfinished:
+        by_order.setdefault(t.job_order_db_id, []).append(t)
+    waits = {}
+    for a in pending:
+        blocker = next((t for t in by_order.get(a.job_order_db_id, []) if t.id < a.id), None)
+        if blocker:
+            waits[a.id] = blocker
+    return waits
+
+
+def waiting_on_dict(blocker):
+    if not blocker:
+        return None
+    return {'assignmentId': blocker.id, 'workerName': blocker.worker.name if blocker.worker else '',
+            'description': blocker.description, 'status': blocker.status}
+
 
 def assignment_in_branch(user):
     """Predicate: is this assignment the user's to see in full? Workers are shared
@@ -9739,6 +12590,7 @@ def list_worker_assignments():
     order_ids = {a.job_order_db_id for a in assignments if a.job_order_db_id}
     priorities = dict(db.session.query(JobOrder.id, JobOrder.priority).filter(JobOrder.id.in_(order_ids))) \
         if order_ids else {}
+    waits = waiting_on_map(assignments)
     result = []
     for a in assignments:
         is_overdue = False
@@ -9774,6 +12626,8 @@ def list_worker_assignments():
             'createdAt': fmt_dt(a.created_at),
             'isOverdue': is_overdue,
             'overdueByHours': overdue_by_hours,
+            # The earlier task on the job order this one can't start before
+            'waitingOn': waiting_on_dict(waits.get(a.id)),
         })
     return jsonify({'status': 'success', 'data': {'assignments': result}})
 
@@ -9790,6 +12644,15 @@ def create_worker_assignment():
     if not worker:
         return jsonify({'error': 'Worker not found'}), 404
     description = (data.get('description', '') or '').strip()
+    # A task name sent by the caller is a specific task; without one, the worker's
+    # trade is used and any task this worker has on the job order counts as theirs
+    explicit_description = bool(description)
+    # Rework: doing a job order again after already finishing it (recut, fixing a mistake...)
+    rework = bool(data.get('rework'))
+    rework_reason = (data.get('reworkReason') or '').strip()[:150]
+    # Another task for a worker who already has open work on the job order (asked for
+    # on purpose; otherwise assigning again reuses the open task)
+    another = bool(data.get('another'))
     assignment_type = data.get('assignmentType', 'job_order')
     if assignment_type not in ('job_order', 'special_task'):
         assignment_type = 'job_order'
@@ -9810,11 +12673,34 @@ def create_worker_assignment():
 
     # Prevent exact duplicates (same worker + job order + task). Special tasks all
     # share one reference, so their title is part of what makes them different.
+    # The task name alone isn't enough: a task moved over from another worker keeps
+    # that worker's trade as its name, so it would be missed and a second copy made.
     existing = None
     if assignment_type == 'job_order':
-        existing = WorkerAssignment.query.filter_by(
-            worker_id=worker_id, job_order_db_id=order.id, description=description,
-        ).first()
+        query = WorkerAssignment.query.filter(
+            WorkerAssignment.worker_id == worker_id,
+            WorkerAssignment.job_order_db_id == order.id,
+            WorkerAssignment.assignment_type != 'special_task',
+        )
+        if explicit_description:
+            query = query.filter(WorkerAssignment.description == description)
+        mine = query.order_by(WorkerAssignment.id).all()
+        still_open = [a for a in mine if a.status != 'completed']
+        # Open work first. Otherwise, only the same work finished by them makes this a
+        # rework: a finished task from another step (e.g. cutting moved over to them,
+        # with the sewing still to do) is the normal flow, so it's just assigned.
+        same_done = [a for a in mine if a.status == 'completed'
+                     and task_base_name(a.description) == task_base_name(description)]
+        existing = still_open[0] if still_open else (same_done[-1] if same_done else None)
+        if another and still_open:
+            # A separate task, numbered so it reads apart from the first on the job order
+            names = {(a.description or '').strip() for a in mine}
+            n = 2
+            while f'{description} ({n})' in names:
+                n += 1
+            if description in names:
+                description = f'{description} ({n})'
+            existing = None
     scheduled_date = None
     if data.get('scheduledDate'):
         try:
@@ -9822,6 +12708,31 @@ def create_worker_assignment():
             scheduled_date = _date.fromisoformat(data['scheduledDate'])
         except Exception:
             pass
+    if scheduled_date and scheduled_date < manila_today():
+        msg = 'Work can only be scheduled for today or a later day.'
+        return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
+    if existing and existing.status == 'completed':
+        if not rework:
+            # A second copy would pay the worker twice by accident, so ask first: the
+            # page offers to give it to them again as rework, with the reason why.
+            finished = existing.end_time or existing.updated_at
+            msg = f'{worker.name} already completed {existing.description or "this task"} on {existing.job_order_ref}.'
+            return jsonify({
+                'status': 'error', 'error': msg, 'message': msg, 'code': 'already_completed',
+                'data': {
+                    'assignmentId': existing.id,
+                    'description': existing.description,
+                    'completedAt': finished.isoformat() if finished else None,
+                    'pay': existing.pay,
+                },
+            }), 409
+        if not rework_reason:
+            msg = 'Give the reason for the rework (for example additional cutting or a mistake to fix).'
+            return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
+        # A new task of its own: the first one keeps its pay, this one is paid when done
+        base = existing.description or description
+        description = f'{base} (Rework: {rework_reason})'[:255]
+        existing = None
     if existing:
         # Assigning it again with a date (dropped on the calendar) schedules the
         # existing assignment for that day instead of being silently ignored
@@ -9854,7 +12765,8 @@ def create_worker_assignment():
         special_task_title=special_task_title,
         scheduled_date=scheduled_date,
         status='pending',
-        notes=data.get('notes', ''),
+        notes=(f'Rework: {rework_reason}' + (f' — {data["notes"]}' if data.get('notes') else '')
+               if rework and rework_reason else data.get('notes', '')),
     )
     db.session.add(assignment)
     db.session.flush()
@@ -9893,6 +12805,17 @@ def update_worker_assignment(assignment_id):
         msg = 'Status must be pending, in progress or completed'
         return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
 
+    # Work on a job order goes in the order it was given out: this task can't start
+    # (or be marked done) while one assigned before it is still unfinished
+    if new_status in ('in_progress', 'completed') and assignment.status == 'pending':
+        blocker = waiting_on_map([assignment]).get(assignment.id)
+        if blocker:
+            who = blocker.worker.name if blocker.worker else 'another worker'
+            msg = (f"{assignment.job_order_ref} can't start yet: {who} must finish "
+                   f"{blocker.description or 'their part'} first.")
+            return jsonify({'status': 'error', 'error': msg, 'message': msg, 'code': 'waiting_on_earlier',
+                            'data': waiting_on_dict(blocker)}), 400
+
     # Move a task that hasn't started to another worker
     if data.get('workerId') and finite_number(data['workerId']) and int(data['workerId']) != assignment.worker_id:
         if assignment.status != 'pending':
@@ -9902,6 +12825,7 @@ def update_worker_assignment(assignment_id):
         if not new_worker or not new_worker.is_active:
             msg = 'Worker not found'
             return jsonify({'status': 'error', 'error': msg, 'message': msg}), 404
+        # A worker may hold several tasks on one job order, just not the same task twice
         if order and WorkerAssignment.query.filter(
                 WorkerAssignment.worker_id == new_worker.id, WorkerAssignment.job_order_db_id == order.id,
                 WorkerAssignment.description == assignment.description, WorkerAssignment.id != assignment.id).first():
@@ -9932,6 +12856,7 @@ def update_worker_assignment(assignment_id):
         assignment.pay = None
         assignment.pay_override = None
         assignment.materials_used = None
+        undo_assignment_cuts(assignment, order)
         if new_status == 'pending':
             assignment.start_time = None
         log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Workers',
@@ -9960,6 +12885,16 @@ def update_worker_assignment(assignment_id):
             # too counted it again for every worker on the job.
             if data.get('materialsUsed') is not None:
                 assignment.materials_used = data['materialsUsed']
+            # What they cut from stock and how much of it went into the job
+            if order and (data.get('materialCuts') or data.get('consumables')):
+                error = (record_assignment_cuts(assignment, order, data.get('materialCuts') or [])
+                         or record_assignment_consumables(assignment, order, data.get('consumables') or []))
+                if error:
+                    db.session.rollback()
+                    payload, code = error
+                    body = payload.get_json()
+                    body['error'] = body.get('message')
+                    return jsonify(body), code
             # Pay: explicit override wins; otherwise compute from pay_mode
             if data.get('payOverride') is not None:
                 assignment.pay = float(data['payOverride'])
@@ -9982,9 +12917,15 @@ def update_worker_assignment(assignment_id):
         if data['scheduledDate']:
             try:
                 from datetime import date as _date
-                assignment.scheduled_date = _date.fromisoformat(data['scheduledDate'])
+                new_date = _date.fromisoformat(data['scheduledDate'])
             except Exception:
-                pass
+                new_date = None
+            # Only a change of date is checked, so work already on a past day can still be updated
+            if new_date and new_date != assignment.scheduled_date:
+                if new_date < manila_today():
+                    msg = 'Work can only be scheduled for today or a later day.'
+                    return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
+                assignment.scheduled_date = new_date
         else:
             assignment.scheduled_date = None
     if 'notes' in data:
@@ -10019,6 +12960,52 @@ def update_worker_assignment(assignment_id):
             }
         }
     })
+
+@app.route('/api/worker-assignments/<int:assignment_id>/cut-materials', methods=['GET'])
+@require_auth
+@require_permission('workers.assign')
+def get_assignment_cut_materials(assignment_id):
+    """The job order's materials a worker can record cuts of when finishing this
+    task (lines matched to Inventory by id, or by name for older lines)."""
+    assignment = WorkerAssignment.query.get(assignment_id)
+    if not assignment:
+        return jsonify({'status': 'error', 'message': 'Assignment not found'}), 404
+    order = (JobOrder.query.get(assignment.job_order_db_id) if assignment.job_order_db_id
+             else JobOrder.query.filter_by(job_order_id=assignment.job_order_ref).first())
+    if not order:
+        return jsonify({'status': 'success', 'data': {'materials': [], 'notInInventory': [],
+                                                      'extraMaterials': [], 'consumables': []}})
+    if branch_access_error(request.current_user, order.branch_id):
+        return jsonify({'status': 'error', 'message': 'This job order belongs to another branch'}), 403
+    lines, missing = order_cut_lines(order)
+    # What other tasks on this order already cut of each material (used + excess),
+    # so the form starts from what is still left of the planned amount
+    cut_before = defaultdict(float)
+    for mid, qty in db.session.query(MaterialUsageLog.material_id, MaterialUsageLog.quantity_used).filter(
+            MaterialUsageLog.used_in_type == 'job_order_cut', MaterialUsageLog.used_in_reference == order.job_order_id,
+            MaterialUsageLog.worker_assignment_id != assignment.id).all():
+        cut_before[mid] += float(qty or 0)
+    for mid, qty in db.session.query(MaterialWasteLog.material_id, MaterialWasteLog.quantity).filter(
+            MaterialWasteLog.job_order_id == order.id, MaterialWasteLog.reason == CUT_EXCESS_REASON,
+            MaterialWasteLog.worker_assignment_id != assignment.id).all():
+        cut_before[mid] += float(qty or 0)
+    return jsonify({'status': 'success', 'data': {
+        'materials': [{
+            'line': l['line'],
+            'lineName': l['item'].get('name'),
+            'plannedQuantity': float(l['item'].get('quantity') or 0),
+            # Already cut by other tasks on this order (linked lines; an older unlinked
+            # line gets linked by its first cut)
+            'alreadyCut': round(cut_before.get(l['options'][0].id, 0.0), 4) if l['linked'] else 0.0,
+            # False: an older line saved without its material; one of the options is chosen
+            'linked': l['linked'],
+            'options': [material_to_dict(m) for m in l['options']],
+        } for l in lines],
+        'notInInventory': missing,
+        # For "+ Add material": any length material the order's branch or the warehouse has
+        'extraMaterials': [material_to_dict(m) for m in extra_cut_materials(order)],
+        'consumables': [material_to_dict(m) for m in order_consumables(order)],
+    }})
 
 @app.route('/api/worker-assignments/calendar', methods=['GET'])
 @require_auth
@@ -10096,8 +13083,16 @@ def delete_worker_assignment(assignment_id):
         items = [dict(it) for it in order.items if it.get('assignmentId') != assignment.id]
         order.items = items
         order.actual_cost = job_order_actual_cost(order, items)
+    # Only the assignment goes: the job order keeps its status, priority and details,
+    # so it simply shows up again as available work
+    worker_name = assignment.worker.name if assignment.worker else 'a worker'
+    task_label = (assignment.special_task_title or 'special task') if assignment.assignment_type == 'special_task'         else assignment.job_order_ref
+    task_desc = assignment.description or 'task'
     db.session.delete(assignment)
     db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'DELETE', 'Workers',
+               f"Unassigned {task_label} ({task_desc}) from {worker_name}",
+               request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'message': 'Assignment deleted'})
 
 # ============================================
@@ -10204,105 +13199,6 @@ def set_worker_availability():
 # ============================================
 # HEALTH CHECK
 # ============================================
-
-# ============================================
-# PUBLIC ORDER TRACKING (no account needed)
-# ============================================
-# A customer enters the number on their receipt and sees only where the order
-# is: no names, prices, items, materials, contact or staff details. Wrong
-# numbers count toward a per-visitor limit, to slow down guessing.
-
-TRACK_MAX_FAILURES = 10                 # wrong lookups allowed per visitor...
-TRACK_WINDOW_SECONDS = 15 * 60          # ...in this many seconds
-_track_failures = {}                    # visitor -> [failure timestamps] (per worker)
-
-TRACK_NOT_FOUND = ("We couldn't find an order with that number. "
-                   "Check your receipt, or contact the branch that took your order.")
-
-JOB_ORDER_TRACK_STATUS = {
-    'pending': ('received', 'Order received'),
-    'in_progress': ('in_progress', 'Being worked on'),
-    'completed': ('ready', 'Completed - ready for pickup'),
-    'delivered': ('done', 'Delivered'),
-    'cancelled': ('cancelled', 'Cancelled'),
-    'voided': ('cancelled', 'Cancelled'),
-}
-PRODUCT_ORDER_TRACK_STATUS = {
-    'pending': ('received', 'Order received'),
-    'processing': ('in_progress', 'Being prepared'),
-    'ready': ('ready', 'Ready for pickup'),
-    'completed': ('done', 'Picked up / completed'),
-    'cancelled': ('cancelled', 'Cancelled'),
-}
-PAYMENT_TRACK_LABELS = {'paid': 'Fully paid', 'partial': 'Partly paid', 'unpaid': 'Not yet paid'}
-
-def _visitor_key():
-    """The visitor's address. Behind Render's proxy remote_addr is the proxy, so
-    the first X-Forwarded-For entry (the client) is used when present."""
-    forwarded = request.headers.get('X-Forwarded-For', '')
-    return (forwarded.split(',')[0].strip() if forwarded else '') or request.remote_addr or 'unknown'
-
-def _recent_track_failures(key, now):
-    recent = [t for t in _track_failures.get(key, []) if now - t < TRACK_WINDOW_SECONDS]
-    if recent:
-        _track_failures[key] = recent
-    else:
-        _track_failures.pop(key, None)
-    if len(_track_failures) > 5000:  # keep the table small
-        for k in [k for k, v in _track_failures.items() if not v or now - v[-1] >= TRACK_WINDOW_SECONDS]:
-            _track_failures.pop(k, None)
-    return recent
-
-@app.route('/api/track-order', methods=['POST'])
-def track_order():
-    now = time.time()
-    key = _visitor_key()
-    if len(_recent_track_failures(key, now)) >= TRACK_MAX_FAILURES:
-        return jsonify({'status': 'error',
-                        'message': 'Too many attempts. Please wait 15 minutes, or contact the branch.'}), 429
-
-    data = request.get_json(silent=True) or {}
-    reference = str(data.get('reference') or '').strip().upper()
-    if not reference or len(reference) > 50:
-        return jsonify({'status': 'error', 'message': 'Enter your order number.'}), 400
-
-    result = None
-    job = JobOrder.query.filter(db.func.upper(JobOrder.job_order_id) == reference).first()
-    # Drafts are not orders yet, so they can't be tracked
-    if job and job.status != 'draft':
-        key_status, label = JOB_ORDER_TRACK_STATUS.get(job.status, ('received', job.status.replace('_', ' ').title()))
-        result = {
-            'reference': job.job_order_id, 'kind': 'job_order', 'kindLabel': 'Job order',
-            'description': job.description or '',
-            'status': key_status, 'statusLabel': label,
-            'branchName': job.branch.name if job.branch else None,
-            'branchPhone': job.branch.phone if job.branch else None,
-            'recordedOn': (job.created_at + PH_OFFSET).strftime('%Y-%m-%d') if job.created_at else None,
-            'estimatedCompletion': job.estimated_completion.isoformat() if job.estimated_completion else None,
-            'completedOn': job.completed_at.isoformat() if job.completed_at else None,
-            'paymentStatus': PAYMENT_TRACK_LABELS.get(job.payment_status, job.payment_status),
-        }
-    if result is None:
-        order = ProductOrder.query.filter(db.func.upper(ProductOrder.order_number) == reference).first()
-        if order:
-            key_status, label = PRODUCT_ORDER_TRACK_STATUS.get(order.status, ('received', order.status.title()))
-            count = sum(int(it.get('quantity') or 0) for it in (order.items or []))
-            result = {
-                'reference': order.order_number, 'kind': 'product_order', 'kindLabel': 'Premade order',
-                'description': f"{count} premade item{'s' if count != 1 else ''}",
-                'status': key_status, 'statusLabel': label,
-                'branchName': order.branch.name if order.branch else None,
-                'branchPhone': order.branch.phone if order.branch else None,
-                'recordedOn': (order.created_at + PH_OFFSET).strftime('%Y-%m-%d') if order.created_at else None,
-                'estimatedCompletion': None,
-                'completedOn': None,
-                'paymentStatus': PAYMENT_TRACK_LABELS.get(order.payment_status, order.payment_status),
-            }
-
-    if result is None:
-        _track_failures.setdefault(key, []).append(now)
-        return jsonify({'status': 'error', 'message': TRACK_NOT_FOUND}), 404
-    return jsonify({'status': 'success', 'data': result})
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -10652,9 +13548,13 @@ def _run_predictions_background(app_obj):
         if not cache:
             return
         try:
-            item_ids = [
-                r[0] for r in db.session.query(HistoricalInventoryData.item_id).distinct().all()
-            ]
+            # Items in the uploaded history, and materials with live usage (the ones
+            # the per-material refresh also forecasts, so a full run keeps them)
+            item_ids = sorted(
+                {r[0] for r in db.session.query(HistoricalInventoryData.item_id).distinct().all()}
+                | {r[0] for r in db.session.query(InventoryMaterial.item_id).join(
+                    MaterialUsageLog, MaterialUsageLog.material_id == InventoryMaterial.id).filter(
+                    InventoryMaterial.item_id.isnot(None), InventoryMaterial.is_archived.is_(False)).distinct().all()})
             cache.total_items = len(item_ids)
             cache.processed_items = 0
             db.session.commit()
@@ -10679,6 +13579,77 @@ def _run_predictions_background(app_obj):
             cache.status = 'error'
             cache.error_message = str(e)
             db.session.commit()
+
+# ── Refresh the forecast of just the materials that were used ──
+# After a job order or a premade batch takes stock, those materials' forecasts are
+# redone in the background (the request doesn't wait). Uses within a few seconds
+# of each other are handled in one go; the full Recompute still redoes everything.
+FORECAST_REFRESH_DELAY_SECONDS = 5
+_forecast_refresh_lock = threading.Lock()
+_forecast_refresh_pending = set()
+_forecast_refresh_timer = None
+
+def queue_forecast_refresh(material_ids):
+    """Have the forecasts of these materials (InventoryMaterial ids) redone shortly."""
+    global _forecast_refresh_timer
+    ids = {int(m) for m in material_ids if m}
+    if not ids:
+        return
+    with _forecast_refresh_lock:
+        _forecast_refresh_pending.update(ids)
+        if _forecast_refresh_timer is None:
+            _forecast_refresh_timer = threading.Timer(FORECAST_REFRESH_DELAY_SECONDS, _run_forecast_refresh, args=(app,))
+            _forecast_refresh_timer.daemon = True
+            _forecast_refresh_timer.start()
+
+def _run_forecast_refresh(app_obj):
+    global _forecast_refresh_timer
+    with _forecast_refresh_lock:
+        ids = set(_forecast_refresh_pending)
+        _forecast_refresh_pending.clear()
+        _forecast_refresh_timer = None
+    with app_obj.app_context():
+        try:
+            item_ids = sorted({r[0] for r in db.session.query(InventoryMaterial.item_id).filter(
+                InventoryMaterial.id.in_(ids), InventoryMaterial.item_id.isnot(None)).all()})
+            if not item_ids:
+                return
+            fresh, gone = {}, set()
+            for item_id in item_ids:
+                try:
+                    pred = _compute_prediction_for_item(item_id)
+                except Exception:
+                    continue  # keep the forecast it had
+                if pred:
+                    fresh[item_id] = pred
+                else:
+                    gone.add(item_id)
+
+            # Lock the row so a refresh in another worker doesn't overwrite this one
+            cache = AIPredictionCache.query.with_for_update().first()
+            if cache and cache.status == 'computing':
+                # A full recompute is running and will save over this; try again after it
+                db.session.rollback()
+                queue_forecast_refresh(ids)
+                return
+            if not cache:
+                cache = AIPredictionCache(status='done', predictions_json='[]')
+                db.session.add(cache)
+            try:
+                predictions = json.loads(cache.predictions_json or '[]')
+            except Exception:
+                predictions = []
+            predictions = [p for p in predictions if p.get('itemId') not in fresh and p.get('itemId') not in gone]
+            predictions.extend(fresh.values())
+            cache.predictions_json = json.dumps(predictions)
+            cache.total_items = cache.processed_items = len(predictions)
+            if cache.status != 'error':
+                cache.status = 'done'
+            cache.computed_at = datetime.utcnow()
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            app_obj.logger.exception('Forecast refresh failed')
 
 @app.route('/api/inventory/ai/upload-historical', methods=['POST'])
 @require_auth

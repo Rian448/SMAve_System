@@ -1,7 +1,11 @@
 ﻿'use client';
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { api, SalesReport, InventoryReport, BranchSettlementReport, type ExtraMaterialsReport } from '@/lib/api';
+import Paginated from '@/components/Paginated';
+import Amount from '@/components/Amount';
+import { exactNumber, exactPeso } from '@/lib/format';
+import { api, SalesReport, InventoryReport, BranchSettlementReport, type ExtraMaterialsReport, type PurchaseReturnsReport } from '@/lib/api';
+import { formatLength } from '@/lib/length';
 import { formatShortDate, formatDayLabel, manilaDateString } from '@/lib/dateUtils';
 
 function getDateRange(range: string): { startDate: string; endDate: string } {
@@ -24,7 +28,7 @@ function csvCell(value: unknown): string {
 }
 
 const formatCurrency = (amount: number) =>
-  new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(amount);
+  exactPeso(amount);
 
 const formatDate = (dateStr: string) => formatShortDate(dateStr);
 
@@ -41,11 +45,11 @@ function SkeletonCard() {
   return <div className="h-32 bg-gray-200 rounded-xl animate-pulse" />;
 }
 
-function SummaryCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color: string }) {
+function SummaryCard({ label, value, sub, color }: { label: string; value: React.ReactNode; sub?: string; color: string }) {
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 min-w-0">
       <p className="text-sm font-medium text-gray-500 mb-1">{label}</p>
-      <p className="text-2xl font-bold text-gray-900">{value}</p>
+      <p className="text-xl sm:text-2xl font-bold text-gray-900 min-w-0 tabular-nums">{value}</p>
       {sub && <p className={`text-xs mt-1 ${color}`}>{sub}</p>}
     </div>
   );
@@ -63,6 +67,7 @@ export default function ReportsPage() {
   const [inventoryData, setInventoryData]   = useState<InventoryReport | null>(null);
   const [settlementData, setSettlementData] = useState<BranchSettlementReport | null>(null);
   const [extraData, setExtraData]           = useState<ExtraMaterialsReport | null>(null);
+  const [returnsData, setReturnsData]       = useState<PurchaseReturnsReport | null>(null);
   // '' means all branches; only administrators can pick (the server pins everyone else to their own branch)
   const [salesBranchId, setSalesBranchId]   = useState('');
   const [branches, setBranches]             = useState<{ id: number; name: string; isWarehouse: boolean }[]>([]);
@@ -70,11 +75,12 @@ export default function ReportsPage() {
   // Cross-branch staff pick a branch; everyone else sees their own
   const isAdmin        = can('branches.all');
   const canViewInventory = can('reports.inventory');
+  const canViewReturns = can('reports.inventory', 'purchase_orders.view');
 
   useEffect(() => {
     if (!isAdmin) return;
     api.settings.getBranches().then(r => {
-      if (r.data) setBranches(r.data.filter((b: any) => b.isActive));
+      if (r.data) setBranches(r.data.filter((b) => b.isActive));
     }).catch(() => {});
   }, [isAdmin]);
 
@@ -106,13 +112,16 @@ export default function ReportsPage() {
           ...(isAdmin && salesBranchId ? { branchId: Number(salesBranchId) } : {}),
         });
         setExtraData(res.data || null);
+      } else if (reportType === 'returns' && canViewReturns) {
+        const res = await api.reports.getPurchaseReturnsReport(dates);
+        setReturnsData(res.data || null);
       }
     } catch {
       setError('Failed to load report data. Please try again.');
     } finally {
       setLoading(false);
     }
-  }, [reportType, dateRange, customStart, customEnd, salesBranchId, canViewInventory, isAdmin]);
+  }, [reportType, dateRange, customStart, customEnd, salesBranchId, canViewInventory, canViewReturns, isAdmin]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -143,6 +152,14 @@ export default function ReportsPage() {
           csvCell(e.createdAt?.slice(0, 10) || ''), csvCell(e.jobOrderNumber), csvCell(e.workerName || ''),
           csvCell(`${e.materialName || ''}${e.materialColor ? ` - ${e.materialColor}` : ''}`), e.quantity,
           csvCell(e.reason), csvCell(e.notes || ''), e.value ?? 0, csvCell(e.loggedByName || ''),
+        ].join(',')).join('\n');
+    } else if (reportType === 'returns' && returnsData) {
+      filename = `purchase-returns-${returnsData.period.startDate}-to-${returnsData.period.endDate}.csv`;
+      csv = 'Date,PO,Supplier,Item,Quantity,Unit,Unit Price,Value,Reason,Replacement,Return Slip / Memo No.,Notes,Recorded By\n' +
+        returnsData.entries.map(e => [
+          csvCell(e.date?.slice(0, 10) || ''), csvCell(e.poNumber), csvCell(e.supplierName), csvCell(e.item), e.quantity,
+          csvCell(e.unit), e.unitPrice, e.value, csvCell(e.reason), e.replacement ? 'Yes' : 'No',
+          csvCell(e.documentNumber || ''), csvCell(e.notes || ''), csvCell(e.byName || ''),
         ].join(',')).join('\n');
     } else if (reportType === 'settlement' && settlementData) {
       filename = 'branch-settlement.csv';
@@ -191,11 +208,11 @@ export default function ReportsPage() {
         </svg>
       ),
     }] : []),
-    ...(can('reports.settlement') ? [{
-      id: 'settlement', name: 'Branch Settlement',
+    ...(canViewReturns ? [{
+      id: 'returns', name: 'Purchase Returns',
       icon: (
         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
         </svg>
       ),
     }] : []),
@@ -354,24 +371,25 @@ export default function ReportsPage() {
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                     <SummaryCard
                       label="Job Order Revenue"
-                      value={formatCurrency(salesData.summary.totalRevenue)}
-                      sub={`Period: ${formatDate(salesData.period.startDate)} – ${formatDate(salesData.period.endDate)}`}
+                      value={<Amount value={salesData.summary.totalRevenue} />}
+                      sub={`Finished ${formatDate(salesData.period.startDate)} – ${formatDate(salesData.period.endDate)}, excl. VAT`}
                       color="text-green-600"
                     />
                     <SummaryCard
-                      label="Total Job Orders"
-                      value={salesData.summary.totalOrders.toString()}
-                      sub={`${salesData.summary.completedOrders} completed`}
+                      label="Job Orders Placed"
+                      value={exactNumber(salesData.summary.totalOrders)}
+                      sub={`${salesData.summary.completedOrders} finished in this period`}
                       color="text-blue-600"
                     />
                     <SummaryCard
                       label="Avg. Order Value"
-                      value={formatCurrency(salesData.summary.averageOrderValue)}
+                      value={<Amount value={salesData.summary.averageOrderValue} />}
+                      sub="Per finished job order"
                       color="text-[#011c72]"
                     />
                     <SummaryCard
                       label="Pending Balances"
-                      value={formatCurrency(salesData.summary.pendingRevenue)}
+                      value={<Amount value={salesData.summary.pendingRevenue} />}
                       sub="Unpaid job orders"
                       color="text-red-600"
                     />
@@ -385,25 +403,27 @@ export default function ReportsPage() {
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                       <SummaryCard
                         label="Premade Revenue"
-                        value={formatCurrency(salesData.premadeSummary.completedRevenue)}
-                        sub="Completed premade orders"
+                        value={<Amount value={salesData.premadeSummary.completedRevenue} />}
+                        sub="Completed in this period, excl. VAT"
                         color="text-teal-600"
                       />
                       <SummaryCard
-                        label="Premade Orders"
-                        value={salesData.premadeSummary.totalOrders.toString()}
+                        label="Premade Orders Placed"
+                        value={exactNumber(salesData.premadeSummary.totalOrders)}
                         sub="Orders with your items"
                         color="text-teal-600"
                       />
                       <SummaryCard
                         label="Combined Revenue"
-                        value={formatCurrency(salesData.summary.totalRevenue + salesData.premadeSummary.completedRevenue)}
-                        sub="Job orders + premade"
+                        value={<Amount value={salesData.summary.totalRevenue + salesData.premadeSummary.completedRevenue} />}
+                        sub={salesData.summary.vatCollected
+                          ? `Excl. ${formatCurrency(salesData.summary.vatCollected)} VAT · same as Owner Dashboard sales`
+                          : 'Job orders + premade, excl. VAT'}
                         color="text-green-600"
                       />
                       <SummaryCard
                         label="Premade Pending"
-                        value={formatCurrency(salesData.premadeSummary.pendingRevenue)}
+                        value={<Amount value={salesData.premadeSummary.pendingRevenue} />}
                         sub="In-progress premade"
                         color="text-orange-600"
                       />
@@ -476,25 +496,25 @@ export default function ReportsPage() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
                   <SummaryCard
                     label="Raw Materials"
-                    value={inventoryData.summary.totalRawMaterials.toString()}
+                    value={exactNumber(inventoryData.summary.totalRawMaterials)}
                     sub={`Value: ${formatCurrency(inventoryData.summary.rawMaterialsValue)}`}
                     color="text-blue-600"
                   />
                   <SummaryCard
                     label="Finished Goods"
-                    value={inventoryData.summary.totalFinishedGoods.toString()}
+                    value={exactNumber(inventoryData.summary.totalFinishedGoods)}
                     sub={`Value: ${formatCurrency(inventoryData.summary.finishedGoodsValue)}`}
                     color="text-purple-600"
                   />
                   <SummaryCard
                     label="Potential Profit"
-                    value={formatCurrency(inventoryData.summary.potentialProfit)}
+                    value={<Amount value={inventoryData.summary.potentialProfit} />}
                     sub="From finished goods"
                     color="text-green-600"
                   />
                   <SummaryCard
                     label="Low Stock Items"
-                    value={inventoryData.summary.lowStockItemsCount.toString()}
+                    value={exactNumber(inventoryData.summary.lowStockItemsCount)}
                     sub={inventoryData.summary.lowStockItemsCount > 0 ? 'Needs restocking' : 'All stocked'}
                     color={inventoryData.summary.lowStockItemsCount > 0 ? 'text-red-600' : 'text-green-600'}
                   />
@@ -521,22 +541,26 @@ export default function ReportsPage() {
                       <h2 className="text-base font-semibold text-gray-900">Low Stock Alert</h2>
                       <p className="text-xs text-gray-500 mt-0.5">Items at or below reorder point</p>
                     </div>
-                    <div className="divide-y divide-gray-100 max-h-80 overflow-y-auto">
-                      {inventoryData.lowStockItems.length === 0 ? (
-                        <p className="text-center text-gray-400 py-12 text-sm">All items are sufficiently stocked</p>
-                      ) : inventoryData.lowStockItems.map((item) => (
+                    {inventoryData.lowStockItems.length === 0 ? (
+                      <p className="text-center text-gray-400 py-12 text-sm">All items are sufficiently stocked</p>
+                    ) : (
+                    <Paginated items={inventoryData.lowStockItems} label="items">{rows => (
+                    <div className="divide-y divide-gray-100">
+                      {rows.map((item) => (
                         <div key={item.id} className="px-6 py-3 flex items-center justify-between hover:bg-gray-50">
                           <div>
                             <p className="text-sm font-medium text-gray-900">{item.name}</p>
-                            <p className="text-xs text-gray-500">Reorder at: {item.reorderPoint} {item.unit}</p>
+                            <p className="text-xs text-gray-500">Reorder at: {exactNumber(item.reorderPoint)} {item.unit}</p>
                           </div>
                           <div className="text-right">
-                            <p className="text-sm font-bold text-red-600">{item.currentStock} {item.unit}</p>
+                            <p className="text-sm font-bold text-red-600 tabular-nums">{exactNumber(item.currentStock)} {item.unit}</p>
                             <p className="text-xs text-gray-500">current stock</p>
                           </div>
                         </div>
                       ))}
                     </div>
+                    )}</Paginated>
+                    )}
                   </div>
                 </div>
               </>
@@ -553,13 +577,13 @@ export default function ReportsPage() {
           ) : extraData ? (
             <>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                <SummaryCard label="Extra Material Cost" value={formatCurrency(extraData.summary.totalValue)}
+                <SummaryCard label="Extra Material Cost" value={<Amount value={extraData.summary.totalValue} />}
                   sub="Added to job costs, not billed" color="text-red-600" />
-                <SummaryCard label="Entries" value={extraData.summary.count.toString()}
+                <SummaryCard label="Entries" value={exactNumber(extraData.summary.count)}
                   sub={`${extraData.summary.jobOrders} job order${extraData.summary.jobOrders === 1 ? '' : 's'}`} color="text-gray-500" />
-                <SummaryCard label="Workers Named" value={extraData.byWorker.filter(w => w.key).length.toString()}
+                <SummaryCard label="Workers Named" value={exactNumber(extraData.byWorker.filter(w => w.key).length)}
                   sub="With at least one entry" color="text-gray-500" />
-                <SummaryCard label="No Worker Named" value={extraData.summary.unassigned.toString()}
+                <SummaryCard label="No Worker Named" value={exactNumber(extraData.summary.unassigned)}
                   sub={extraData.summary.unassigned > 0 ? 'Entries without a worker' : 'Every entry names a worker'}
                   color={extraData.summary.unassigned > 0 ? 'text-amber-600' : 'text-green-600'} />
               </div>
@@ -598,6 +622,7 @@ export default function ReportsPage() {
                     <div className="px-6 py-4 border-b border-gray-200">
                       <h2 className="text-base font-semibold text-gray-900">Entries</h2>
                     </div>
+                    <Paginated items={extraData.entries} resetKey={[dateRange, customStart, customEnd]} label="entries">{rows => (
                     <div className="overflow-x-auto">
                       <table className="w-full min-w-[720px] text-sm">
                         <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
@@ -612,7 +637,7 @@ export default function ReportsPage() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
-                          {extraData.entries.map(e => (
+                          {rows.map(e => (
                             <tr key={e.id} className="hover:bg-gray-50">
                               <td className="px-4 py-2 text-gray-600 whitespace-nowrap">{formatDate(e.createdAt)}</td>
                               <td className="px-4 py-2">
@@ -624,18 +649,116 @@ export default function ReportsPage() {
                               <td className="px-4 py-2 text-gray-900">{e.materialName}{e.materialColor ? ` - ${e.materialColor}` : ''}</td>
                               <td className="px-4 py-2 text-right text-gray-700">{e.quantity}</td>
                               <td className="px-4 py-2 text-gray-700">{e.reason}</td>
-                              <td className="px-4 py-2 text-right font-medium text-red-600">{formatCurrency(e.value || 0)}</td>
+                              <td className="px-4 py-2 text-right font-medium text-red-600">{exactPeso(e.value || 0)}</td>
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
+                    )}</Paginated>
                   </div>
                 </>
               )}
             </>
           ) : (
             <EmptyState message="No extra material data available." />
+          )
+        )}
+
+        {/* ── PURCHASE RETURNS ── */}
+        {reportType === 'returns' && (
+          loading ? (
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">{[...Array(4)].map((_, i) => <SkeletonCard key={i} />)}</div>
+          ) : returnsData ? (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <SummaryCard label="Value Returned" value={<Amount value={returnsData.summary.totalValue} />}
+                  sub="Taken off accounts payable" color="text-orange-600" />
+                <SummaryCard label="Returns" value={exactNumber(returnsData.summary.returns)}
+                  sub={`${returnsData.summary.lines} item line${returnsData.summary.lines === 1 ? '' : 's'}`} color="text-gray-500" />
+                <SummaryCard label="Suppliers" value={exactNumber(returnsData.summary.suppliers)}
+                  sub="With at least one return" color="text-gray-500" />
+                <SummaryCard label="To Be Replaced" value={<Amount value={returnsData.summary.replacedValue} />}
+                  sub="Supplier sends replacements" color="text-blue-600" />
+              </div>
+
+              {returnsData.summary.lines === 0 ? (
+                <EmptyState message="Nothing was returned to suppliers in this period." />
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                    {([['By Supplier', returnsData.bySupplier], ['By Reason', returnsData.byReason]] as const).map(([title, rows]) => {
+                      const max = Math.max(...rows.map(r => r.value), 1);
+                      return (
+                        <div key={title} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                          <div className="px-6 py-4 border-b border-gray-200">
+                            <h2 className="text-base font-semibold text-gray-900">{title}</h2>
+                          </div>
+                          <div className="p-6 space-y-3">
+                            {rows.map(r => (
+                              <div key={String(r.key)}>
+                                <div className="flex items-center justify-between text-sm mb-1 gap-3">
+                                  <span className="font-medium text-gray-900 min-w-0 truncate">
+                                    {r.label}
+                                    {title === 'By Supplier' && r.topReason && <span className="font-normal text-gray-500"> · mostly {r.topReason}</span>}
+                                  </span>
+                                  <span className="text-gray-600 shrink-0">{r.returns} return{r.returns === 1 ? '' : 's'} · <span className="font-semibold text-gray-900">{formatCurrency(r.value)}</span></span>
+                                </div>
+                                <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
+                                  <div className="h-full rounded-full bg-orange-400" style={{ width: `${(r.value / max) * 100}%` }} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-200">
+                      <h2 className="text-base font-semibold text-gray-900">Items Returned</h2>
+                    </div>
+                    <Paginated items={returnsData.entries} resetKey={[dateRange, customStart, customEnd]} label="items">{rows => (
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[860px] text-sm">
+                        <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
+                          <tr>
+                            <th className="px-4 py-2 text-left font-medium">Date</th>
+                            <th className="px-4 py-2 text-left font-medium">PO</th>
+                            <th className="px-4 py-2 text-left font-medium">Supplier</th>
+                            <th className="px-4 py-2 text-left font-medium">Item</th>
+                            <th className="px-4 py-2 text-right font-medium">Qty</th>
+                            <th className="px-4 py-2 text-left font-medium">Reason</th>
+                            <th className="px-4 py-2 text-left font-medium">Replaced</th>
+                            <th className="px-4 py-2 text-left font-medium">Slip / Memo</th>
+                            <th className="px-4 py-2 text-right font-medium">Value</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {rows.map(e => (
+                            <tr key={e.id} className="hover:bg-gray-50">
+                              <td className="px-4 py-2 text-gray-600 whitespace-nowrap">{e.date ? formatDate(e.date) : '—'}</td>
+                              <td className="px-4 py-2"><a href={`/purchase-orders/${e.purchaseOrderId}`} className="font-mono text-[#011c72] hover:underline">{e.poNumber}</a></td>
+                              <td className="px-4 py-2 text-gray-700">{e.supplierName}</td>
+                              <td className="px-4 py-2 text-gray-900">{e.item}</td>
+                              <td className="px-4 py-2 text-right text-gray-700 whitespace-nowrap">{e.unit === 'yd' ? formatLength(e.quantity) : `${e.quantity} ${e.unit}`}</td>
+                              <td className="px-4 py-2 text-gray-700">{e.reason}{e.notes ? <span className="block text-xs text-gray-500">{e.notes}</span> : null}</td>
+                              <td className="px-4 py-2 text-gray-700">{e.replacement ? 'Yes' : 'No'}</td>
+                              <td className="px-4 py-2 text-gray-600">{e.documentNumber || '—'}</td>
+                              <td className="px-4 py-2 text-right font-medium text-orange-600">{exactPeso(e.value)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    )}</Paginated>
+                  </div>
+                </>
+              )}
+            </>
+          ) : (
+            <EmptyState message="No purchase return data available." />
           )
         )}
 
@@ -677,11 +800,11 @@ export default function ReportsPage() {
                               <tr key={i} className="hover:bg-gray-50">
                                 <td className="px-5 py-3 font-medium text-gray-900">{row.sourceBranchName}</td>
                                 <td className="px-5 py-3 text-gray-700">{row.pickupBranchName}</td>
-                                <td className="px-5 py-3 text-right text-gray-900">₱{row.totalOwed.toLocaleString()}</td>
-                                <td className="px-5 py-3 text-right text-green-600">₱{row.totalSettled.toLocaleString()}</td>
+                                <td className="px-5 py-3 text-right text-gray-900">₱{row.totalOwed.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                <td className="px-5 py-3 text-right text-green-600">₱{row.totalSettled.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                                 <td className="px-5 py-3 text-right">
                                   <span className={`font-semibold ${row.outstandingBalance > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                                    ₱{row.outstandingBalance.toLocaleString()}
+                                    ₱{row.outstandingBalance.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                   </span>
                                 </td>
                                 <td className="px-5 py-3 text-center text-gray-500">
@@ -700,6 +823,7 @@ export default function ReportsPage() {
                         <h2 className="text-base font-semibold text-gray-900">Order-Level Ledger</h2>
                         <p className="text-xs text-gray-500 mt-0.5">{settlementData.entries.length} entries</p>
                       </div>
+                      <Paginated items={settlementData.entries} resetKey={[dateRange, customStart, customEnd]} label="entries">{rows => (
                       <div className="overflow-x-auto">
                         <table className="w-full text-sm">
                           <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
@@ -714,7 +838,7 @@ export default function ReportsPage() {
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-100">
-                            {settlementData.entries.map((e, i) => (
+                            {rows.map((e, i) => (
                               <tr key={i} className="hover:bg-gray-50">
                                 <td className="px-5 py-3">
                                   <p className="font-medium text-[#011c72]">{e.orderNumber}</p>
@@ -723,7 +847,7 @@ export default function ReportsPage() {
                                 <td className="px-5 py-3 text-gray-700">{e.customerName}</td>
                                 <td className="px-5 py-3 text-gray-700">{e.sourceBranchName}</td>
                                 <td className="px-5 py-3 text-gray-700">{e.pickupBranchName}</td>
-                                <td className="px-5 py-3 text-right font-medium text-gray-900">₱{e.itemsValue.toLocaleString()}</td>
+                                <td className="px-5 py-3 text-right font-medium text-gray-900">₱{e.itemsValue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                                 <td className="px-5 py-3 text-center">
                                   <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
                                     e.transferStatus === 'received' ? 'bg-green-100 text-green-700' :
@@ -741,6 +865,7 @@ export default function ReportsPage() {
                           </tbody>
                         </table>
                       </div>
+                      )}</Paginated>
                     </div>
                   </>
                 )}
@@ -788,7 +913,7 @@ function DailyBarChart({ data, color = 'amber' }: { data: Array<{ date: string; 
             {/* Tooltip */}
             <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-gray-100 text-white text-xs rounded px-2 py-1 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
               <p>{formatDate(d.date)}</p>
-              <p>₱{d.revenue.toLocaleString()}</p>
+              <p>₱{d.revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
               <p>{d.orders} orders</p>
             </div>
             <span className="text-[9px] text-gray-400 mt-1 hidden sm:block">
@@ -820,7 +945,7 @@ function StatusBreakdown({ breakdown, total }: {
               <div className="flex items-center gap-2">
                 <span className="text-xs text-gray-500">{item.count} orders</span>
                 <span className="text-xs font-medium text-gray-900">
-                  ₱{item.value.toLocaleString()}
+                  ₱{item.value.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
             </div>

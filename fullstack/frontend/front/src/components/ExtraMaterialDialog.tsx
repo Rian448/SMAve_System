@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { api, type RawMaterial, type MaterialWasteLog, type ManagedWorker } from '@/lib/api';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 
-const REASONS = ['Cutting mistake', 'Sewing error', 'Defective material', 'Wrong measurement', 'Rework requested'];
+const REASONS = ['Actually needed', 'Cutting mistake', 'Sewing error', 'Defective material', 'Wrong measurement', 'Rework requested'];
 
 /**
  * Issue extra material for a job order: it leaves stock now, is added to the
@@ -87,7 +87,7 @@ export default function ExtraMaterialDialog({ jobOrderId, jobOrderRef, workerId,
             <FieldError message={fe.errors['extra-material']} />
           </label>
           <label className="block" {...fe.field('extra-quantity')}>
-            <span className="text-sm font-medium text-gray-700">Quantity *</span>
+            <span className="text-sm font-medium text-gray-700">Quantity (yards) *</span>
             <input type="number" min="0.01" step="0.01" inputMode="decimal" value={form.quantity}
               onChange={e => setForm(f => ({ ...f, quantity: e.target.value }))} className={inputCls} />
             <FieldError message={fe.errors['extra-quantity']} />

@@ -13,6 +13,10 @@ interface ComboboxProps {
   className?: string;
   /** Message shown when there are no matches and custom values are allowed. */
   emptyLabel?: string;
+  /** Only digits can be typed or pasted (anything else is dropped); phones show the number pad */
+  numeric?: boolean;
+  /** Longest value that can be typed */
+  maxLength?: number;
 }
 
 /**
@@ -30,6 +34,8 @@ export default function Combobox({
   allowCustom = true,
   className = '',
   emptyLabel = 'No matches — press Enter to use what you typed',
+  numeric = false,
+  maxLength,
 }: ComboboxProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -104,11 +110,14 @@ export default function Combobox({
           value={display}
           disabled={disabled}
           placeholder={disabled ? '' : placeholder}
+          inputMode={numeric ? 'numeric' : undefined}
+          maxLength={maxLength}
           onChange={(e) => {
-            setQuery(e.target.value);
+            const typed = numeric ? e.target.value.replace(/\D/g, '') : e.target.value;
+            setQuery(typed);
             setHighlight(0);
             if (!open) setOpen(true);
-            if (allowCustom) onChange(e.target.value); // keep typed value in sync
+            if (allowCustom) onChange(typed); // keep typed value in sync
           }}
           onFocus={openMenu}
           onKeyDown={onKeyDown}

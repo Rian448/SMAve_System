@@ -3,8 +3,18 @@ import { formatDate } from '@/lib/dateUtils';
 import { useState, useEffect } from 'react';
 import { api, InventoryForecastData } from '@/lib/api';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '@/context/AuthContext';
+import Paginated from '@/components/Paginated';
+import Amount from '@/components/Amount';
+import { exactNumber, exactPeso } from '@/lib/format';
 
 export default function ForecastingPage() {
+  const { can } = useAuth();
+  const router = useRouter();
+  const canOrder = can('purchase_orders.add');
+  // Recommended items picked for a purchase order (by item code)
+  const [picked, setPicked] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState('month');
   const [data, setData] = useState<InventoryForecastData | null>(null);
@@ -20,15 +30,33 @@ export default function ForecastingPage() {
     try {
       const res = await api.forecasting.getInventoryForecast({ period });
       if (res.data) setData(res.data);
-    } catch (err: any) {
-      setError(err?.message || 'Failed to load forecast data.');
+      // A new period lists different items
+      setPicked(new Set());
+    } catch (err) {
+      setError((err as Error)?.message || 'Failed to load forecast data.');
     } finally {
       setLoading(false);
     }
   };
 
+  // Only items that are in Inventory can go on a purchase order (forecasts from an
+  // uploaded file may name items that aren't)
+  const orderable = (data?.restockItems || []).filter(i => i.hasCurrentInventory && i.suggestedRestockQty > 0);
+  const togglePick = (id: string) => setPicked(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const allPicked = orderable.length > 0 && orderable.every(i => picked.has(i.itemId));
+  /** Open a new purchase order with the picked items and their suggested quantities, to review */
+  const orderPicked = () => {
+    const lines = orderable.filter(i => picked.has(i.itemId))
+      .map(i => `${encodeURIComponent(i.itemId)}:${Math.ceil(i.suggestedRestockQty * 100) / 100}`);
+    if (lines.length) router.push(`/purchase-orders/new?restock=${lines.join(',')}`);
+  };
+
   const formatCurrency = (n: number) =>
-    new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(n);
+    exactPeso(n);
 
   const periodLabel = period === 'week' ? 'Next 7 Days' : period === 'month' ? 'Next 30 Days' : 'Next 90 Days';
 
@@ -99,9 +127,9 @@ export default function ForecastingPage() {
             <div>
               <p className="text-sm font-medium text-[#011c72]">No AI predictions available yet</p>
               <p className="text-xs text-[#011c72] mt-1">
-                Upload your historical XLSX data in the{' '}
-                <Link href="/inventory" className="underline font-medium">Inventory → AI Predictions</Link>{' '}
-                tab to enable forecasting.
+                Use Recompute in the{' '}
+                <Link href="/inventory?tab=ai-predictions" className="underline font-medium">Inventory → AI Predictions</Link>{' '}
+                tab to generate them.
                 {data.predictionStatus === 'computing' && ' Predictions are currently computing...'}
               </p>
             </div>
@@ -142,7 +170,7 @@ export default function ForecastingPage() {
                   </div>
                 </div>
                 <p className="text-sm font-medium text-gray-500">Items to Restock</p>
-                <p className="text-3xl font-bold text-gray-900 mt-1">{data.periodItemCount}</p>
+                <p className="text-3xl font-bold text-gray-900 mt-1 tabular-nums">{exactNumber(data.periodItemCount)}</p>
                 <p className="text-xs text-gray-500 mt-2">{periodLabel} · {data.totalPredictedItems} total tracked</p>
               </div>
 
@@ -181,7 +209,7 @@ export default function ForecastingPage() {
                 </div>
                 <p className="text-sm font-medium text-gray-500">Estimated Restock Cost</p>
                 <p className="text-3xl font-bold text-gray-900 mt-1">
-                  {formatCurrency(data.estimatedRestockCost)}
+                  <Amount value={data.estimatedRestockCost} />
                 </p>
                 <p className="text-xs text-[#011c72] mt-2">{periodLabel}</p>
               </div>
@@ -246,8 +274,17 @@ export default function ForecastingPage() {
                     {data.periodItemCount} item{data.periodItemCount !== 1 ? 's' : ''} need restocking · sorted by urgency
                   </p>
                 </div>
+                {canOrder && (picked.size > 0 ? (
+                  <button type="button" onClick={orderPicked}
+                    className="inline-flex items-center px-3 py-1.5 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg text-sm font-medium transition-colors">
+                    <svg className="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                    Create PO with {picked.size} selected
+                  </button>
+                ) : (
                 <Link
-                  href="/inventory/purchase-orders/new"
+                  href="/purchase-orders/new"
                   className="inline-flex items-center px-3 py-1.5 bg-[#011c72] hover:bg-[#01268c] text-white rounded-lg text-sm font-medium transition-colors"
                 >
                   <svg className="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -255,7 +292,14 @@ export default function ForecastingPage() {
                   </svg>
                   Create PO
                 </Link>
+                ))}
               </div>
+              {canOrder && orderable.length > 0 && (
+                <p className="px-6 py-2 text-xs text-gray-500 border-b border-gray-100 bg-gray-50/50">
+                  Tick the items to restock, then <b>Create PO</b>: you can review the quantities, remove items and choose the supplier before saving.
+                  {orderable.length < data.restockItems.length && ' Items not in Inventory can’t be ordered and have no tick box.'}
+                </p>
+              )}
 
               {data.restockItems.length === 0 ? (
                 <div className="p-10 text-center">
@@ -266,10 +310,19 @@ export default function ForecastingPage() {
                   <p className="text-xs text-gray-500 mt-1">No restocking needed within this period based on AI predictions</p>
                 </div>
               ) : (
+                <Paginated items={data.restockItems} resetKey={period} label="items">{rows => (
                 <div className="overflow-x-auto">
                   <table className="w-full">
                     <thead className="bg-gray-50">
                       <tr>
+                        {canOrder && (
+                          <th className="pl-5 py-3 w-8">
+                            <input type="checkbox" aria-label="Select all items that can be ordered (every page)" title="Select all items that can be ordered, on every page"
+                              checked={allPicked} disabled={orderable.length === 0}
+                              onChange={() => setPicked(allPicked ? new Set() : new Set(orderable.map(i => i.itemId)))}
+                              className="w-4 h-4 rounded border-gray-300 text-[#011c72] cursor-pointer disabled:opacity-30" />
+                          </th>
+                        )}
                         <th className="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Item</th>
                         <th className="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Stock Left</th>
                         <th className="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Avg Usage</th>
@@ -281,18 +334,27 @@ export default function ForecastingPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {data.restockItems.map(item => {
+                      {rows.map(item => {
                         const priority = getPriority(item.daysUntilStockout);
                         const isUrgent = item.daysUntilStockout <= 7;
                         return (
                           <tr key={item.itemId} className={`hover:bg-gray-50 transition-colors ${isUrgent ? 'bg-red-50/30' : ''}`}>
+                            {canOrder && (
+                              <td className="pl-5 py-3">
+                                {orderable.includes(item) && (
+                                  <input type="checkbox" aria-label={`Select ${item.itemId}`}
+                                    checked={picked.has(item.itemId)} onChange={() => togglePick(item.itemId)}
+                                    className="w-4 h-4 rounded border-gray-300 text-[#011c72] cursor-pointer" />
+                                )}
+                              </td>
+                            )}
                             <td className="px-5 py-3">
                               <div className="text-sm font-semibold text-gray-900">{item.itemId}</div>
                               <div className="text-xs text-gray-500">
                                 {item.materialType}{item.color ? ` · ${item.color}` : ''}{item.pattern ? ` · ${item.pattern}` : ''}
                               </div>
                             </td>
-                            <td className="px-5 py-3 text-sm text-gray-700">{item.currentStock}</td>
+                            <td className="px-5 py-3 text-sm text-gray-700 tabular-nums">{exactNumber(item.currentStock)}</td>
                             <td className="px-5 py-3 text-sm text-gray-700">{item.avgDailyUsage}/day</td>
                             <td className="px-5 py-3">
                               <span className={`text-sm font-semibold ${isUrgent ? 'text-red-600' : item.daysUntilStockout <= 14 ? 'text-orange-600' : 'text-gray-700'}`}>
@@ -304,9 +366,9 @@ export default function ForecastingPage() {
                                 ? formatDate(item.restockByDate)
                                 : '—'}
                             </td>
-                            <td className="px-5 py-3 text-sm font-medium text-gray-900">{item.suggestedRestockQty} units</td>
+                            <td className="px-5 py-3 text-sm font-medium text-gray-900">{exactNumber(item.suggestedRestockQty)} units</td>
                             <td className="px-5 py-3 text-sm text-gray-700">
-                              {item.estimatedCost > 0 ? formatCurrency(item.estimatedCost) : '—'}
+                              {item.estimatedCost > 0 ? <Amount variant="record" value={item.estimatedCost} /> : '—'}
                             </td>
                             <td className="px-5 py-3">
                               <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${priority.cls}`}>{priority.label}</span>
@@ -317,14 +379,15 @@ export default function ForecastingPage() {
                     </tbody>
                     <tfoot className="bg-gray-50">
                       <tr>
-                        <td colSpan={6} className="px-5 py-3 text-sm font-medium text-gray-700">Total Estimated Restock Cost</td>
+                        <td colSpan={canOrder ? 7 : 6} className="px-5 py-3 text-sm font-medium text-gray-700">Total Estimated Restock Cost</td>
                         <td colSpan={2} className="px-5 py-3 text-sm font-bold text-[#011c72]">
-                          {formatCurrency(data.estimatedRestockCost)}
+                          <Amount value={data.estimatedRestockCost} />
                         </td>
                       </tr>
                     </tfoot>
                   </table>
                 </div>
+                )}</Paginated>
               )}
             </div>
 
@@ -347,7 +410,7 @@ export default function ForecastingPage() {
                     {data.topConsuming && ` Your highest-consuming material is ${data.topConsuming.materialType} at ${data.topConsuming.avgDailyUsage} units/day.`}
                   </p>
                 ) : (
-                  <p className="text-amber-100 text-sm">Upload historical data in the Inventory AI Predictions tab to get personalized insights.</p>
+                  <p className="text-amber-100 text-sm">Use Recompute in the Inventory AI Predictions tab to get personalized insights.</p>
                 )}
               </div>
 
@@ -389,7 +452,7 @@ export default function ForecastingPage() {
                     </svg>
                     {data.hasPredictions
                       ? `AI predictions based on ${data.totalPredictedItems} tracked materials`
-                      : 'Upload historical data to unlock AI-based recommendations'}
+                      : 'Use Recompute in Inventory AI Predictions to unlock AI-based recommendations'}
                   </li>
                 </ul>
               </div>

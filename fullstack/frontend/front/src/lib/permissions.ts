@@ -10,7 +10,7 @@ export function userCan(permissions: string[] | undefined, ...wanted: string[]):
 
 /**
  * Pages and the permissions that open them (any one is enough). The longest
- * matching path wins, so /inventory/purchase-orders overrides /inventory.
+ * matching path wins, so /purchase-orders/new overrides /purchase-orders.
  * Pages not listed (home, shop, My Orders, My Profile, the dashboard, which
  * shows customers and workers a simple view) need no permission.
  */
@@ -21,20 +21,33 @@ const PAGE_PERMISSIONS: [string, string[]][] = [
   ['/payments', ['payments.view']],
   ['/owner', ['owner.view']],
   ['/expenses', ['expenses.view', 'expenses.add']],
-  ['/inventory/purchase-orders/new', ['purchase_orders.add']],
-  ['/inventory/purchase-orders', ['purchase_orders.view']],
-  ['/inventory', ['inventory.view', 'premade.view', 'premade.receive', 'suppliers.view']],
+  ['/purchase-orders/new', ['purchase_orders.add']],
+  ['/purchase-orders/receiving', ['purchase_orders.receive']],
+  ['/purchase-orders', ['purchase_orders.view']],
+  ['/suppliers', ['suppliers.view']],
+  ['/inventory', ['inventory.view', 'premade.view', 'premade.receive']],
   ['/product-orders', ['product_orders.view']],
   ['/customer-orders', ['custom_requests.view']],
   ['/costing', ['costing.view']],
   ['/forecasting', ['forecasting.view']],
   ['/delivery/new', ['item_trail.add']],
   ['/delivery', ['item_trail.view']],
-  ['/reports', ['reports.sales', 'reports.inventory', 'reports.settlement', 'reports.audit_trail']],
+  ['/item-history', ['inventory.view', 'premade.view']],
+  ['/reports', ['reports.sales', 'reports.inventory', 'reports.settlement']],
+  ['/audit-trail', ['reports.audit_trail']],
   ['/settings', ['settings.edit', 'users.manage', 'branches.manage']],
   ['/announcements', ['announcements.view']],
   ['/worker-dashboard', ['workers.add', 'workers.edit', 'workers.delete']],
 ];
+
+/**
+ * Where an account starts (after login, "Back to Dashboard", fallbacks): the
+ * Owner Dashboard for an account that has it but not the day-to-day Dashboard,
+ * otherwise the Dashboard.
+ */
+export function homePath(can: (...permissions: string[]) => boolean): string {
+  return can('owner.view') && !can('dashboard.view') ? '/owner' : '/dashboard';
+}
 
 /** Permissions that open this page, or null when it needs none. */
 export function pagePermissions(pathname: string): string[] | null {

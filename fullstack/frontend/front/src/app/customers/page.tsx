@@ -4,9 +4,11 @@ import { useRouter } from 'next/navigation';
 import { api, type Customer } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
+import Paginated from '@/components/Paginated';
+import { exactPeso } from '@/lib/format';
 
 const peso = (n: number) =>
-  new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', minimumFractionDigits: 0 }).format(n || 0);
+  exactPeso(n || 0);
 
 export default function CustomersPage() {
   const router = useRouter();
@@ -87,7 +89,7 @@ export default function CustomersPage() {
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Customers</h1>
-            <p className="text-sm text-gray-500 mt-1">Customers recorded on job orders and sales, including former online accounts</p>
+            <p className="text-sm text-gray-500 mt-1">Customers recorded on job orders and sales</p>
           </div>
           {canCreate && (
             <button onClick={() => { setShowCreate(true); setCreateError(''); }}
@@ -118,7 +120,8 @@ export default function CustomersPage() {
             aria-label="Filter by account"
             className="px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
             <option value="all">All customers</option>
-            <option value="online">Former online account</option>
+            {/* No "Former online account" option: online ordering was retired. Those customers
+                and their records stay, and still show under All customers. */}
             <option value="walkin">Walk-in only</option>
           </select>
           <select value={orderFilter} onChange={(e) => setOrderFilter(e.target.value as typeof orderFilter)}
@@ -166,6 +169,7 @@ export default function CustomersPage() {
           </div>
         ) : (
           <div className="bg-white rounded-2xl border border-gray-200 overflow-x-auto">
+            <Paginated items={filtered} resetKey={[query, accountFilter, orderFilter, balanceFilter]} label="customers">{rows => (
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
@@ -181,7 +185,7 @@ export default function CustomersPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {filtered.map((c) => (
+                {rows.map((c) => (
                   <tr
                     key={c.id}
                     onClick={() => router.push(`/customers/${c.id}`)}
@@ -239,6 +243,7 @@ export default function CustomersPage() {
                 ))}
               </tbody>
             </table>
+            )}</Paginated>
           </div>
         )}
 

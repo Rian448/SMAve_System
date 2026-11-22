@@ -1,16 +1,21 @@
 'use client';
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { homePath } from '@/lib/permissions';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import {
   api, type ManagedWorker, type WorkerAssignment, type WorkerAvailabilityEntry, type JobOrder,
   type JobOrderPriority, PRIORITY_RANK, PRIORITY_LABELS, type MaterialWasteLog, type CalendarAssignment,
-  type LinkableWorkerAccount,
+  type LinkableWorkerAccount, ApiError, type RawMaterial,
 } from '@/lib/api';
+import MaterialPicker, { materialLabel } from '@/components/MaterialPicker';
+import LengthInput from '@/components/LengthInput';
+import { formatLength, formatMaterialQty } from '@/lib/length';
 import { useConfirm } from '@/components/ConfirmDialog';
 import { formatDate } from '@/lib/dateUtils';
 import ExtraMaterialDialog from '@/components/ExtraMaterialDialog';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
+import Paginated from '@/components/Paginated';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const WORK_TYPES = ['Seat Maker', 'Sewer', 'Upholstery', 'Installer', 'Cutter', 'Finisher', 'Other'];
@@ -33,6 +38,9 @@ function todayYMD() {
   const t = new Date();
   return toYMD(t.getFullYear(), t.getMonth(), t.getDate());
 }
+/** Work can't be put on a day that has already passed (YYYY-MM-DD compares as text) */
+const isPastDay = (dateStr: string) => dateStr < todayYMD();
+const PAST_DAY_MSG = 'That day has passed. Work can only be scheduled for today or a later day.';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const fc = (v?: number | null) =>
@@ -68,6 +76,31 @@ const tasksByPriority = (
 /** Calendar "worker" value for the team view (everyone's schedule) */
 const TEAM_VIEW = 0;
 
+/** Picked to place by clicking: a job order from the list, or a task already assigned */
+type Picked = { kind: 'job'; jo: JobOrder } | { kind: 'task'; id: number };
+/** another: give a worker who already has the job order a second task instead of moving theirs */
+type AssignForm = { date: string; jobId: number | null; workerId: number | null; search: string; another: boolean };
+/** Giving a worker a job order they already finished: asks if it is rework, and why */
+type ReworkPrompt = {
+  workerId: number; workerName: string; jobId: number; jobRef: string; date: string | null;
+  previous?: string; completedAt?: string | null;
+  reason: string; other: string; saving: boolean; error: string;
+};
+const REWORK_REASONS = ['Additional cutting', 'Mistake in previous work', 'Defective material', 'Customer requested changes', 'Other'];
+/** The kind of work a task is, without the "(2)" / "(Rework: ...)" added to repeats (as the server does) */
+const taskBase = (name?: string | null) => {
+  const n = (name || '').trim();
+  const cut = n.indexOf(' (');
+  return (cut > 0 ? n.slice(0, cut) : n).trim().toLowerCase();
+};
+/** The server's answer when the worker already completed this job order */
+const alreadyCompleted = (err: unknown) =>
+  err instanceof ApiError && err.status === 409 && err.body?.code === 'already_completed'
+    ? (err.body?.data || {}) as { description?: string; completedAt?: string | null }
+    : null;
+const pickedRef = (p: Picked, tasks: WorkerAssignment[]) =>
+  p.kind === 'job' ? p.jo.jobOrderId : (tasks.find(a => a.id === p.id)?.jobOrderRef || 'this task');
+
 /** The job order's priority; normal ones get no badge to keep the list quiet */
 function PriorityBadge({ priority }: { priority?: JobOrderPriority }) {
   if (!priority || priority === 'normal') return null;
@@ -91,13 +124,18 @@ type CompletionTarget = {
   assignment: WorkerAssignment;
   jobOrder: JobOrder | null;
 };
+type MaterialCut = { line?: number; materialId: number; cut: number; used: number; reason?: string };
+/** Suggested reasons for material added on top of the job order's (same as the Extra material form) */
+const EXTRA_REASONS = ['Actually needed', 'Cutting mistake', 'Wrong measurement', 'Sewing error', 'Defective material', 'Rework requested'];
+type ConsumableUse = { materialId: number; kind: 'full' | 'partial'; quantity?: number };
 
 function CompletionModal({
   target, onClose, onConfirm,
 }: {
   target: CompletionTarget;
   onClose: () => void;
-  onConfirm: (hoursWorked: number, unitsWorked: number, payOverride: number | null, materialsUsed: object[]) => void;
+  onConfirm: (hoursWorked: number, unitsWorked: number, payOverride: number | null, materialsUsed: object[],
+    materialCuts: MaterialCut[], consumables: ConsumableUse[]) => Promise<boolean>;
 }) {
   const { assignment } = target;
   const mode = assignment.payMode || 'per_hour';
@@ -114,26 +152,173 @@ function CompletionModal({
     ? (parseFloat(overridePay) || 0)
     : computePay(mode, rate, qtyNum || 1);
 
-  // Extra material this worker needed on this job (the planned materials belong to
-  // the job order and leave stock when it is completed)
-  const [extras, setExtras] = useState<MaterialWasteLog[] | null>(assignment.jobOrderDbId ? null : []);
-  const [addingExtra, setAddingExtra] = useState(false);
-  const loadExtras = useCallback(() => {
+  // Extra material issued earlier for this worker on this job (before cuts were
+  // recorded here); shown for reference
+  const [extras, setExtras] = useState<MaterialWasteLog[]>([]);
+  useEffect(() => {
     if (!assignment.jobOrderDbId) return;
     api.managedWorkers.extraMaterials({ workerId: assignment.workerId, jobOrderId: assignment.jobOrderDbId })
-      .then(res => setExtras(res.data || []))
+      .then(res => setExtras((res.data || []).filter(x => x.reason !== 'Cutting excess')))
       .catch(() => setExtras([]));
   }, [assignment.workerId, assignment.jobOrderDbId]);
-  useEffect(() => { loadExtras(); }, [loadExtras]);
-  const materials = (extras || []).map(x => ({ name: x.materialName || 'Material', qty: x.quantity, reason: x.reason }));
 
   const qtyLabel = mode === 'per_hour' ? 'Hours worked' : mode === 'per_day' ? 'Days worked' : 'Pieces / projects';
 
+  // Materials cut for the job: one row per job order material (its material filled
+  // in), plus any the worker adds. The whole cut leaves stock; what was used is
+  // material usage, the rest cutting excess in the waste log.
+  type CutRow = {
+    key: string; line: number | null; lineName: string; planned: number | null; linked: boolean;
+    options: RawMaterial[]; materialId: number | ''; cut: number; used: number;
+    /** Cut by other tasks on this job order already */
+    alreadyCut: number;
+    /** Why an added material was needed (rows the worker adds) */
+    reason: string;
+  };
+  type ConsumableRow = { key: string; materialId: number | ''; kind: 'full' | 'partial'; quantity: string };
+  const [rows, setRows] = useState<CutRow[] | null>(assignment.assignmentType === 'special_task' ? [] : null);
+  const [notInInventory, setNotInInventory] = useState<string[]>([]);
+  const [extraOptions, setExtraOptions] = useState<RawMaterial[]>([]);
+  const [consumableOptions, setConsumableOptions] = useState<RawMaterial[]>([]);
+  const [consumables, setConsumables] = useState<ConsumableRow[]>([]);
+  const rowSeq = useRef(0);
+  useEffect(() => {
+    if (assignment.assignmentType === 'special_task') return;
+    api.workerAssignments.cutMaterials(assignment.id)
+      .then((res) => {
+        const d = res.data;
+        setRows((d?.materials || []).map((l) => ({
+          key: `line-${l.line}`, line: l.line, lineName: l.lineName, planned: l.plannedQuantity, linked: l.linked,
+          // Starts at the planned amount still left to cut (others on the job may have
+          // cut some), all of it used; staff change it to what really happened
+          options: l.options, materialId: l.options[0]?.id ?? '', reason: '', alreadyCut: l.alreadyCut || 0,
+          cut: Math.max(0, Math.round((l.plannedQuantity - (l.alreadyCut || 0)) * 1e6) / 1e6),
+          used: Math.max(0, Math.round((l.plannedQuantity - (l.alreadyCut || 0)) * 1e6) / 1e6),
+        })));
+        setNotInInventory(d?.notInInventory || []);
+        setExtraOptions(d?.extraMaterials || []);
+        setConsumableOptions(d?.consumables || []);
+      })
+      .catch(() => setRows([]));
+  }, [assignment.id, assignment.assignmentType]);
+  const updateRow = (key: string, patch: Partial<CutRow>) =>
+    setRows((prev) => (prev || []).map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  const addRow = () => {
+    rowSeq.current += 1;
+    setRows((prev) => [...(prev || []), {
+      key: `extra-${rowSeq.current}`, line: null, lineName: '', planned: null, linked: false,
+      options: extraOptions, materialId: '', cut: 0, used: 0, reason: '', alreadyCut: 0,
+    }]);
+  };
+  const removeRow = (key: string) => setRows((prev) => (prev || []).filter((r) => r.key !== key));
+  const addConsumable = () => {
+    rowSeq.current += 1;
+    setConsumables((prev) => [...prev, { key: `con-${rowSeq.current}`, materialId: '', kind: 'full', quantity: '1' }]);
+  };
+  const updateConsumable = (key: string, patch: Partial<ConsumableRow>) =>
+    setConsumables((prev) => prev.map((c) => (c.key === key ? { ...c, ...patch } : c)));
+
+  const rowProblems = Object.fromEntries((rows || []).map((r) => [`cut-${r.key}`,
+    (r.cut > 0 || r.used > 0 || r.line === null) && (
+      !r.materialId ? 'Choose the material.'
+      : r.line === null && !(r.cut > 0) ? 'Enter how much was cut, or remove this row.'
+      : r.line === null && !r.reason.trim() ? 'Give the reason it was needed.'
+      : r.used > r.cut + 1e-9 && 'Used can\'t be more than what was cut.')]));
+  const consumableProblems = Object.fromEntries(consumables.map((c) => {
+    const opt = consumableOptions.find((o) => o.id === c.materialId);
+    const n = Number(c.quantity);
+    return [`con-${c.key}`, !c.materialId ? 'Choose the consumable.'
+      : c.kind === 'full' && !(n > 0) ? 'Enter how many were used up.'
+      : c.kind === 'full' && opt && n > opt.stockQuantity + 1e-9 && `Only ${formatMaterialQty(opt.stockQuantity, opt)} in stock.`];
+  }));
+
   const confirm = async () => {
-    if (fe.show({ 'complete-qty': (!qty || qtyNum <= 0) && `Enter ${qtyLabel.toLowerCase()}.` })) return;
+    if (fe.show({ 'complete-qty': (!qty || qtyNum <= 0) && `Enter ${qtyLabel.toLowerCase()}.`, ...rowProblems, ...consumableProblems })) return;
     setSaving(true);
     const hours = mode === 'per_hour' ? qtyNum : (qtyNum * (mode === 'per_day' ? 8 : 1));
-    onConfirm(hours, qtyNum, override ? computedPay : null, materials);
+    const materialCuts: MaterialCut[] = (rows || [])
+      .filter((r) => r.materialId && (r.cut > 0 || r.used > 0))
+      .map((r) => ({ ...(r.line !== null ? { line: r.line } : { reason: r.reason.trim() }),
+        materialId: Number(r.materialId), cut: r.cut, used: r.used }));
+    const consumableUses = consumables.filter((c) => c.materialId).map((c) => ({
+      materialId: Number(c.materialId), kind: c.kind, ...(c.kind === 'full' ? { quantity: Number(c.quantity) } : {}),
+    }));
+    const nameOf = (id: number, list: RawMaterial[]) => {
+      const m = list.find((o) => o.id === id);
+      return m ? [m.materialType, m.color, m.pattern].filter(Boolean).join(' - ') : 'Material';
+    };
+    const snapshot = [
+      ...materialCuts.map((c) => ({ name: nameOf(c.materialId, (rows || []).flatMap((r) => r.options)), qty: c.used, cut: c.cut, unit: 'yd',
+        ...(c.reason ? { reason: c.reason } : {}) })),
+      ...consumableUses.map((c) => ({ name: nameOf(c.materialId, consumableOptions), qty: c.quantity ?? 0,
+        unit: consumableOptions.find((o) => o.id === c.materialId)?.unit || 'pcs', reason: c.kind === 'full' ? 'Fully used' : 'Partially used' })),
+      ...extras.map((x) => ({ name: x.materialName || 'Material', qty: x.quantity, reason: x.reason })),
+    ];
+    const ok = await onConfirm(hours, qtyNum, override ? computedPay : null, snapshot, materialCuts, consumableUses);
+    if (!ok) setSaving(false);
+  };
+
+  const lineRows = (rows || []).filter((r) => r.line !== null);
+  const addedRows = (rows || []).filter((r) => r.line === null);
+
+  const renderCutRow = (r: CutRow) => {
+    const chosen = r.options.find((o) => o.id === r.materialId);
+    const excess = Math.max(0, r.cut - r.used);
+    const isExtra = r.line === null;
+    return (
+      <li key={r.key} className="px-4 py-3 space-y-2" {...fe.field(`cut-${r.key}`)}>
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-sm font-medium text-gray-800">
+            {isExtra ? (chosen ? materialLabel(chosen) : 'Material') : r.linked && chosen ? materialLabel(chosen) : r.lineName}
+            {r.planned !== null && <span className="text-xs text-gray-400 font-normal"> · planned {formatLength(r.planned)}</span>}
+            {r.alreadyCut > 0 && <span className="text-xs text-gray-400 font-normal"> · {formatLength(r.alreadyCut)} already cut by others</span>}          </p>
+          {isExtra && (
+            <button type="button" onClick={() => removeRow(r.key)}
+              className="text-xs text-red-600 hover:underline shrink-0">Remove</button>
+          )}
+        </div>
+        {(!r.linked || r.options.length > 1) && (
+          <div>
+            <p className="text-[11px] font-medium text-gray-500 mb-0.5">Material</p>
+            <MaterialPicker materials={r.options} value={r.materialId}
+              onSelect={(id) => updateRow(r.key, { materialId: id })}
+              takenIds={isExtra ? new Set((rows || []).filter((x) => x.key !== r.key && x.materialId).map((x) => Number(x.materialId))) : undefined}
+              invalid={!!fe.errors[`cut-${r.key}`] && !r.materialId} />
+          </div>
+        )}
+        {chosen && (
+          <p className="text-[11px] text-gray-500">
+            {formatLength(chosen.stockQuantity)} in stock{chosen.branchName ? ` · ${chosen.branchName}` : ''}
+          </p>
+        )}
+        {isExtra && (
+          <div>
+            <p className="text-[11px] font-medium text-gray-500 mb-0.5">Reason it was needed *</p>
+            <input type="text" list="cut-extra-reasons" maxLength={200} value={r.reason}
+              onChange={(e) => updateRow(r.key, { reason: e.target.value })}
+              placeholder="e.g. Cutting mistake"
+              className={`w-full px-2 py-1.5 rounded-lg border bg-white text-sm text-gray-900 ${
+                fe.errors[`cut-${r.key}`] && !r.reason.trim() ? 'border-red-400' : 'border-[#c7d2f5]'}`} />
+          </div>
+        )}
+        <div>
+          <p className="text-[11px] font-medium text-gray-500 mb-0.5">Cut from stock</p>
+          <LengthInput compact value={r.cut} ariaLabel="Cut from stock" onChange={(y) => updateRow(r.key, { cut: y })} />
+        </div>
+        <div>
+          <p className="text-[11px] font-medium text-gray-500 mb-0.5">Actually used</p>
+          <LengthInput compact value={r.used} ariaLabel="Actually used" invalid={r.used > r.cut + 1e-9}
+            onChange={(y) => updateRow(r.key, { used: y })} />
+        </div>
+        {r.cut > 0 && (
+          <p className="text-xs text-gray-600">
+            Leaves stock: <b>{formatLength(r.cut)}</b> · used <b>{formatLength(Math.min(r.used, r.cut))}</b>
+            {excess > 0 && <> · <span className="text-amber-700">excess to waste <b>{formatLength(excess)}</b></span></>}
+          </p>
+        )}
+        <FieldError message={fe.errors[`cut-${r.key}`]} />
+      </li>
+    );
   };
 
   return (
@@ -189,39 +374,129 @@ function CompletionModal({
             )}
           </div>
 
-          {/* Extra materials this worker needed */}
-          {assignment.jobOrderDbId && (
+          {/* Materials cut for this job: the job order's own materials */}
+          {rows === null && (
+            <p className="text-xs text-gray-400 text-center">Loading materials…</p>
+          )}
+          {rows !== null && assignment.assignmentType !== 'special_task' && (
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+              <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-200">
+                <p className="text-xs font-semibold text-gray-600">Materials cut by {assignment.workerName}</p>
+                <p className="text-[11px] text-gray-500 mt-0.5">
+                  The whole amount cut leaves stock. What was actually used is recorded as material usage; the rest goes
+                  to the waste log as cutting excess. Leave blank what they didn&apos;t cut.
+                </p>
+              </div>
+              {notInInventory.length > 0 && (
+                <p className="text-xs text-amber-700 bg-amber-50 border-b border-amber-200 px-4 py-2">
+                  Not in Inventory, so nothing to take from stock: {notInInventory.join(', ')}.
+                </p>
+              )}
+              {lineRows.length === 0 ? (
+                <p className="text-xs text-gray-500 px-4 py-3">No materials on this job order.</p>
+              ) : (
+                <ul className="divide-y divide-gray-100">{lineRows.map(renderCutRow)}</ul>
+              )}
+            </div>
+          )}
+
+          {/* Consumables used on this job */}
+          {rows !== null && assignment.assignmentType !== 'special_task' && (
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+              <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-200">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold text-gray-600">Consumables used</p>
+                  {consumableOptions.length > 0 && (
+                    <button type="button" onClick={addConsumable}
+                      className="text-xs font-medium text-[#011c72] hover:underline shrink-0">+ Add consumable</button>
+                  )}
+                </div>
+                <p className="text-[11px] text-gray-500 mt-0.5">
+                  Glue, thread, staples… <b>Fully used</b> takes them out of stock; <b>Partially used</b> only records that one was opened.
+                </p>
+              </div>
+              {consumableOptions.length === 0 ? (
+                <p className="text-xs text-gray-500 px-4 py-3">
+                  No consumables in Inventory yet. Mark items like glue or thread as <b>Consumable</b> in Inventory (Edit),
+                  or tick Consumable on a purchase order line.
+                </p>
+              ) : consumables.length === 0 ? (
+                <p className="text-xs text-gray-500 px-4 py-3">None. Use + Add consumable for anything used up or opened on this job.</p>
+              ) : (
+                <ul className="divide-y divide-gray-100">
+                  {consumables.map((c) => {
+                    const opt = consumableOptions.find((o) => o.id === c.materialId);
+                    return (
+                      <li key={c.key} className="px-4 py-3 space-y-2" {...fe.field(`con-${c.key}`)}>
+                        <div className="flex items-center gap-2">
+                          <select value={c.materialId} aria-label="Consumable"
+                            onChange={(e) => updateConsumable(c.key, { materialId: e.target.value ? Number(e.target.value) : '' })}
+                            className="flex-1 min-w-0 px-2 py-1.5 rounded-lg border border-[#c7d2f5] bg-white text-sm text-gray-900">
+                            <option value="">Choose the consumable…</option>
+                            {consumableOptions.map((o) => (
+                              <option key={o.id} value={o.id}>{materialLabel(o)} — {formatMaterialQty(o.stockQuantity, o)} in stock</option>
+                            ))}
+                          </select>
+                          <button type="button" onClick={() => setConsumables((prev) => prev.filter((x) => x.key !== c.key))}
+                            className="text-xs text-red-600 hover:underline shrink-0">Remove</button>
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs">
+                            {(['full', 'partial'] as const).map((k) => (
+                              <button key={k} type="button" onClick={() => updateConsumable(c.key, { kind: k })}
+                                className={`px-3 py-1.5 ${c.kind === k ? 'bg-[#011c72] text-white' : 'bg-white text-gray-600'}`}>
+                                {k === 'full' ? 'Fully used' : 'Partially used'}
+                              </button>
+                            ))}
+                          </div>
+                          {c.kind === 'full' ? (
+                            <label className="flex items-center gap-1.5 text-xs text-gray-600">
+                              <input type="number" min="1" step="1" value={c.quantity} aria-label="How many used up"
+                                onChange={(e) => updateConsumable(c.key, { quantity: e.target.value })}
+                                className="w-16 px-2 py-1 rounded-lg border border-[#c7d2f5] bg-white text-sm text-gray-900" />
+                              {opt?.unit || 'pcs'} used up
+                            </label>
+                          ) : (
+                            <span className="text-xs text-gray-500">Recorded only; stock stays the same.</span>
+                          )}
+                        </div>
+                        <FieldError message={fe.errors[`con-${c.key}`]} />
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {/* Other materials needed beyond the job order's (a recut, a wrong measurement...) */}
+          {rows !== null && assignment.assignmentType !== 'special_task' && (
             <div className="border border-gray-200 rounded-xl overflow-hidden">
               <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-200 flex items-center justify-between gap-2">
-                <p className="text-xs font-semibold text-gray-600">Extra materials used by {assignment.workerName}</p>
-                <button type="button" onClick={() => setAddingExtra(true)}
-                  className="text-xs font-medium text-[#011c72] hover:underline">+ Add extra material</button>
+                <p className="text-xs font-semibold text-gray-600">Other materials used by {assignment.workerName}</p>
+                <button type="button" onClick={addRow}
+                  className="text-xs font-medium text-[#011c72] hover:underline shrink-0">+ Add material</button>
               </div>
-              {extras === null ? (
-                <p className="text-xs text-gray-400 text-center py-3">Loading…</p>
-              ) : materials.length === 0 ? (
+              <datalist id="cut-extra-reasons">
+                {EXTRA_REASONS.map((x) => <option key={x} value={x} />)}
+              </datalist>
+              {addedRows.length === 0 && extras.length === 0 ? (
                 <p className="text-xs text-gray-500 px-4 py-3">
-                  None. If they needed more than planned (e.g. a recut), add it so stock and the job&apos;s cost stay right.
+                  None. If they needed more than the job order lists (e.g. a recut after a cutting mistake), add it with the reason
+                  so stock and the job&apos;s cost stay right.
                 </p>
               ) : (
                 <ul className="divide-y divide-gray-100">
-                  {materials.map((m, i) => (
-                    <li key={i} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
-                      <span className="text-gray-800">{m.name}<span className="text-gray-400 text-xs"> · {m.reason}</span></span>
-                      <span className="text-gray-500 font-medium shrink-0">{m.qty}</span>
+                  {addedRows.map(renderCutRow)}
+                  {extras.map((x) => (
+                    <li key={`issued-${x.id}`} className="px-4 py-2.5 flex items-center justify-between gap-3 text-sm">
+                      <span className="text-gray-800">{x.materialName || 'Material'}<span className="text-gray-400 text-xs"> · {x.reason} (recorded earlier)</span></span>
+                      <span className="text-gray-500 font-medium shrink-0">{formatLength(x.quantity)}</span>
                     </li>
                   ))}
                 </ul>
               )}
             </div>
-          )}
-          {addingExtra && assignment.jobOrderDbId && (
-            <ExtraMaterialDialog
-              jobOrderId={assignment.jobOrderDbId} jobOrderRef={assignment.jobOrderRef}
-              workerId={assignment.workerId} workerName={assignment.workerName}
-              onClose={() => setAddingExtra(false)}
-              onSaved={() => { setAddingExtra(false); loadExtras(); }}
-            />
           )}
         </div>
 
@@ -260,23 +535,26 @@ export default function WorkerDashboard() {
   const [loading, setLoading]       = useState(true);
   const [loadingJO, setLoadingJO]   = useState(false);
 
-  // Drag state: a job order from the list, or an assignment already made (calendar)
-  const dragJob = useRef<{ id: number; ref: string } | null>(null);
-  const dragTask = useRef<number | null>(null);
+  // Click-to-assign: what was picked to place (a job order, or a task already assigned);
+  // clicking a worker (Assign tab) or a day (Calendar) then puts it there
+  const [picked, setPicked] = useState<Picked | null>(null);
+  // "Assign to this day" form, from a day's + button or a day clicked with a job order picked
+  const [assignForm, setAssignForm] = useState<AssignForm | null>(null);
+  const [savingAssign, setSavingAssign] = useState(false);
+  const [rework, setRework] = useState<ReworkPrompt | null>(null);
 
   // Job order filter
   const [joSearch, setJoSearch] = useState('');
   const [joStatus, setJoStatus] = useState<'pending' | 'in_progress'>('pending');
+  const [showAssignedJO, setShowAssignedJO] = useState(false);
+  // One assignment at a time, so a double click can't create the same assignment twice
+  const assigning = useRef(false);
 
-  // Assign panel: which worker card is the drop-target highlight
-  const [dropTarget, setDropTarget]       = useState<number | null>(null);
   const [actionError, setActionError]     = useState('');
   const showError = (err: unknown, fallback: string) => {
     setActionError(err instanceof Error && err.message ? err.message : fallback);
     setTimeout(() => setActionError(''), 6000);
   };
-  // Calendar tab: which date cell is the drop-target highlight
-  const [calDropTarget, setCalDropTarget] = useState<string | null>(null);
 
   // Worker modal
   const [showWorkerModal, setShowWorkerModal] = useState(false);
@@ -313,7 +591,7 @@ export default function WorkerDashboard() {
   useEffect(() => {
     if (!authLoading) {
       if (!user) router.push('/login');
-      else if (!can('workers.add', 'workers.edit', 'workers.delete')) router.push('/dashboard');
+      else if (!can('workers.add', 'workers.edit', 'workers.delete')) router.push(homePath(can));
       else { fetchWorkers(); fetchJobOrders(); fetchAssignments(); }
     }
   }, [user, authLoading]);
@@ -386,6 +664,7 @@ export default function WorkerDashboard() {
 
   /** Move an assignment to a date, or take its date off (null) */
   const scheduleTask = async (a: { id: number; workerId: number; workerName: string; jobOrderRef: string }, dateStr: string | null) => {
+    if (dateStr && isPastDay(dateStr)) { showError(null, PAST_DAY_MSG); return; }
     if (dateStr && !(await okToSchedule(a.workerId, a.workerName, dateStr, a.jobOrderRef))) return;
     try {
       await api.workerAssignments.update(a.id, { scheduledDate: dateStr || '' });
@@ -418,59 +697,149 @@ export default function WorkerDashboard() {
     } catch (err) { showError(err, 'Could not undo the extra material.'); }
   };
   /** Extra material can be added once the worker has started on a job order task */
+  /** Work on a job order goes in the order it was given out: an earlier task is still unfinished */
+  const blocked = (a: WorkerAssignment) => a.status === 'pending' && !!a.waitingOn;
+  const waitMsg = (a: WorkerAssignment) => (a.status === 'pending' && a.waitingOn
+    ? `Waiting for ${a.waitingOn.workerName} to finish ${a.waitingOn.description || 'their part'} first`
+    : '');
   const canAddExtra = (a: WorkerAssignment) =>
     a.status === 'in_progress' && a.assignmentType !== 'special_task' && !!a.jobOrderDbId;
 
-  // ── Drag helpers ──
-  const onDragStart = (jo: JobOrder) => {
-    dragJob.current = { id: jo.id, ref: jo.jobOrderId };
-  };
+  // ── Click-to-assign ──
+  // Picking is per tab (worker vs day), and Esc lets go of it
+  useEffect(() => { setPicked(null); }, [activeTab]);
+  useEffect(() => {
+    if (!picked) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPicked(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [picked]);
 
-  const onDrop = async (worker: ManagedWorker) => {
-    setDropTarget(null);
-    const taskId = dragTask.current;
-    dragTask.current = null;
-    if (taskId) {
-      const task = assignments.find(a => a.id === taskId);
+  /** Click a job order to pick it; click it again to let go */
+  const togglePickJob = (jo: JobOrder) =>
+    setPicked(p => (p?.kind === 'job' && p.jo.id === jo.id ? null : { kind: 'job', jo }));
+  const togglePickTask = (id: number) =>
+    setPicked(p => (p?.kind === 'task' && p.id === id ? null : { kind: 'task', id }));
+
+  /** The worker's open assignment on this job order, if any (one without a date first,
+   *  so dated work isn't moved by accident) */
+  const openAssignmentFor = (workerId: number, jobId: number) => assignments
+    .filter(a => a.workerId === workerId && a.jobOrderDbId === jobId
+      && a.status !== 'completed' && a.assignmentType !== 'special_task')
+    .sort((a, b) => Number(!!a.scheduledDate) - Number(!!b.scheduledDate))[0];
+
+  /** Assign tab: give the picked job order to a worker, or move the picked task to them */
+  const assignPickedToWorker = async (worker: ManagedWorker, another = false) => {
+    const p = picked;
+    if (!p) return;
+    if (p.kind === 'task') {
+      const task = assignments.find(a => a.id === p.id);
+      setPicked(null);
       if (task) await moveTaskToWorker(task, worker);
       return;
     }
-    const job = dragJob.current;
-    dragJob.current = null;
-    if (!job) return;
+    if (assigning.current) return;
+    assigning.current = true;
     try {
-      await api.workerAssignments.create({ workerId: worker.id, jobOrderRef: job.ref, jobOrderDbId: job.id });
-      fetchAssignments();
-    } catch (err) { showError(err, `Couldn't assign ${job.ref} to ${worker.name}.`); }
+      // The server returns the existing assignment instead of a copy if the worker already has it.
+      // Work handed out here starts today, so it shows on the calendar right away.
+      await api.workerAssignments.create({ workerId: worker.id, jobOrderRef: p.jo.jobOrderId, jobOrderDbId: p.jo.id, scheduledDate: todayYMD(), ...(another ? { another: true } : {}) });
+      setPicked(null);
+      await fetchAssignments();
+    } catch (err) {
+      const done = alreadyCompleted(err);
+      if (done) { setPicked(null); askRework(worker.id, worker.name, p.jo, todayYMD(), done); }
+      else showError(err, `Couldn't assign ${p.jo.jobOrderId} to ${worker.name}.`);
+    }
+    finally { assigning.current = false; }
   };
 
-  const onDropCalendar = async (dateStr: string) => {
-    setCalDropTarget(null);
-    const taskId = dragTask.current;
-    dragTask.current = null;
-    if (taskId) {
-      const task = assignments.find(a => a.id === taskId);
-      if (task && task.scheduledDate !== dateStr) await scheduleTask(task, dateStr);
-      return;
-    }
-    const job = dragJob.current;
-    dragJob.current = null;
-    if (!job || !calWorker || teamView) return;
-    const worker = workers.find(w => w.id === calWorker);
-    if (!(await okToSchedule(calWorker, worker?.name || 'This worker', dateStr, job.ref))) return;
+  const askRework = (workerId: number, workerName: string, jo: JobOrder, date: string | null,
+    done: { description?: string; completedAt?: string | null }) =>
+    setRework({
+      workerId, workerName, jobId: jo.id, jobRef: jo.jobOrderId, date,
+      previous: done.description, completedAt: done.completedAt,
+      reason: '', other: '', saving: false, error: '',
+    });
 
-    // Already on this job: move that assignment to the day instead of adding a
-    // second one (one without a date first, so dated work isn't moved by accident)
-    const current = assignments
-      .filter(a => a.workerId === calWorker && a.jobOrderDbId === job.id
-        && a.status !== 'completed' && a.assignmentType !== 'special_task')
-      .sort((a, b) => Number(!!a.scheduledDate) - Number(!!b.scheduledDate))[0];
+  /** Give the finished job order back to the worker as a new, separately paid task */
+  const submitRework = async () => {
+    const r = rework;
+    if (!r || r.saving) return;
+    const reason = (r.reason === 'Other' ? r.other : r.reason).trim();
+    if (!reason) { setRework({ ...r, error: r.reason === 'Other' ? 'Write the reason for the rework.' : 'Choose the reason for the rework.' }); return; }
+    setRework({ ...r, saving: true, error: '' });
+    try {
+      await api.workerAssignments.create({
+        workerId: r.workerId, jobOrderRef: r.jobRef, jobOrderDbId: r.jobId,
+        ...(r.date ? { scheduledDate: r.date } : {}), rework: true, reworkReason: reason,
+      });
+      setRework(null);
+      refreshAssignments();
+    } catch (err) {
+      setRework(prev => prev && { ...prev, saving: false, error: err instanceof Error && err.message ? err.message : "Couldn't assign the rework." });
+    }
+  };
+
+  /** Put a job order on a worker's day: what both the + button and pick-then-click do.
+   *  A worker already on the job has that assignment moved to the day, not a second one made. */
+  const assignJobToDate = async (job: JobOrder, workerId: number, dateStr: string, another = false) => {
+    if (assigning.current) return false;
+    const worker = workers.find(w => w.id === workerId);
+    if (!(await okToSchedule(workerId, worker?.name || 'This worker', dateStr, job.jobOrderId))) return false;
+    // "Another task" adds a second one; otherwise their open task moves to the day
+    const current = another ? undefined : openAssignmentFor(workerId, job.id);
+    assigning.current = true;
     try {
       if (current) await api.workerAssignments.update(current.id, { scheduledDate: dateStr });
-      else await api.workerAssignments.create({ workerId: calWorker, jobOrderRef: job.ref, jobOrderDbId: job.id, scheduledDate: dateStr });
+      else await api.workerAssignments.create({
+        workerId, jobOrderRef: job.jobOrderId, jobOrderDbId: job.id, scheduledDate: dateStr,
+        ...(another ? { another: true } : {}),
+      });
       refreshAssignments();
-      fetchCalendar();
-    } catch (err) { showError(err, `Couldn't schedule ${job.ref}.`); }
+      return true;
+    } catch (err) {
+      const done = alreadyCompleted(err);
+      if (done) {
+        // The rework pop-up takes over from the assign form
+        setAssignForm(null); setPicked(null);
+        askRework(workerId, worker?.name || 'This worker', job, dateStr, done);
+      } else showError(err, `Couldn't schedule ${job.jobOrderId}.`);
+      return false;
+    }
+    finally { assigning.current = false; }
+  };
+
+  const openAssignForm = (date: string, jobId: number | null = null) =>
+    setAssignForm({ date, jobId, workerId: teamView ? null : calWorker, search: '', another: false });
+
+  /** Calendar day clicked: place what is picked there, or else show the day's work */
+  const onDayClick = (dateStr: string) => {
+    const p = picked;
+    if (!p) { setDayPanel(dateStr); return; }
+    if (isPastDay(dateStr)) { showError(null, PAST_DAY_MSG); return; }
+    if (p.kind === 'task') {
+      const task = assignments.find(a => a.id === p.id);
+      setPicked(null);
+      if (task && task.scheduledDate !== dateStr) scheduleTask(task, dateStr);
+      return;
+    }
+    // A job order still needs its worker confirmed (and chosen, in the team view)
+    openAssignForm(dateStr, p.jo.id);
+  };
+
+  const submitAssignForm = async () => {
+    const f = assignForm;
+    const jo = f && jobOrders.find(j => j.id === f.jobId);
+    if (!f || !jo || !f.workerId) return;
+    if (isPastDay(f.date)) { showError(null, PAST_DAY_MSG); return; }
+    setSavingAssign(true);
+    // Already on that day: the only thing left to do is add another task
+    const sameDay = assignments.some(a => a.workerId === f.workerId && a.jobOrderDbId === jo.id
+      && a.status !== 'completed' && a.assignmentType !== 'special_task' && a.scheduledDate === f.date);
+    const ok = await assignJobToDate(jo, f.workerId, f.date, f.another || sameDay);
+    setSavingAssign(false);
+    if (ok) { setAssignForm(null); setPicked(null); }
   };
 
   const removeAssignment = async (a: WorkerAssignment) => {
@@ -482,7 +851,12 @@ export default function WorkerDashboard() {
       variant: 'danger',
     });
     if (!ok) return;
-    try { await api.workerAssignments.delete(a.id); refreshAssignments(); }
+    try {
+      await api.workerAssignments.delete(a.id);
+      // Drop it right away so the job order is back in Available work without waiting for the reload
+      setAssignments(prev => prev.filter(x => x.id !== a.id));
+      refreshAssignments();
+    }
     catch (err) { showError(err, "Couldn't remove the assignment."); }
   };
 
@@ -500,8 +874,9 @@ export default function WorkerDashboard() {
     setCompletionTarget({ assignment: a, jobOrder: jo });
   };
 
-  const confirmComplete = async (hoursWorked: number, unitsWorked: number, payOverride: number | null, materialsUsed: object[]) => {
-    if (!completionTarget) return;
+  const confirmComplete = async (hoursWorked: number, unitsWorked: number, payOverride: number | null,
+    materialsUsed: object[], materialCuts: MaterialCut[], consumables: ConsumableUse[]) => {
+    if (!completionTarget) return false;
     const a = completionTarget.assignment;
     try {
       await api.workerAssignments.update(a.id, {
@@ -510,10 +885,13 @@ export default function WorkerDashboard() {
         unitsWorked,
         ...(payOverride != null ? { payOverride } : {}),
         materialsUsed,
+        ...(materialCuts.length ? { materialCuts } : {}),
+        ...(consumables.length ? { consumables } : {}),
       });
       setCompletionTarget(null);
       refreshAssignments();
-    } catch (err) { showError(err, "Couldn't mark the task complete."); }
+      return true;
+    } catch (err) { showError(err, "Couldn't mark the task complete."); return false; }
   };
 
   // ── Worker modal ──
@@ -608,6 +986,60 @@ export default function WorkerDashboard() {
     return matchStatus && matchQ;
   }).sort(byPriority);
 
+  // Job orders someone is actively working on (or queued to): worker names per job order.
+  // A job order with none of these is available work; removing its last assignment puts it back.
+  const activeAssignees = assignments.reduce((acc, a) => {
+    if (a.assignmentType !== 'special_task' && a.status !== 'completed' && a.jobOrderDbId) {
+      acc.set(a.jobOrderDbId, [...(acc.get(a.jobOrderDbId) || []), a.workerName]);
+    }
+    return acc;
+  }, new Map<number, string[]>());
+  const availableJO = filteredJO.filter(jo => !activeAssignees.has(jo.id));
+  const assignedJO  = filteredJO.filter(jo => activeAssignees.has(jo.id));
+  const isPickedJob = (jo: JobOrder) => picked?.kind === 'job' && picked.jo.id === jo.id;
+  const renderJobCard = (jo: JobOrder, compact = false) => {
+    const on = isPickedJob(jo);
+    return (
+      <button
+        key={jo.id}
+        type="button"
+        onClick={() => togglePickJob(jo)}
+        aria-pressed={on}
+        title={on ? 'Selected. Click again to unselect.' : 'Select, then click where it goes'}
+        className={`w-full text-left rounded-xl border transition-colors ${compact ? 'p-2.5' : 'p-3'} ${on
+          ? 'border-[#011c72] bg-[#eef1fb] ring-2 ring-[#011c72]'
+          : 'border-gray-200 bg-gray-50 hover:bg-[#eef1fb] hover:border-[#c7d2f5]'}`}
+      >
+        <div className="flex items-start justify-between gap-1">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <p className="text-xs font-bold text-[#011c72] font-mono">{jo.jobOrderId}</p>
+            <PriorityBadge priority={jo.priority} />
+          </div>
+          {on && <span className="shrink-0 text-[10px] font-semibold text-white bg-[#011c72] px-1.5 py-0.5 rounded-full">Selected</span>}
+        </div>
+        <p className="text-xs text-gray-700 font-medium mt-0.5 truncate">{jo.customerName}</p>
+        {!compact && <p className="text-xs text-gray-500 truncate">{jo.description}</p>}
+        {activeAssignees.has(jo.id) && (
+          <p className="text-[11px] text-[#011c72] font-medium truncate mt-1">
+            Assigned to {activeAssignees.get(jo.id)!.join(', ')}
+          </p>
+        )}
+      </button>
+    );
+  };
+
+  /** "Placing X: click a … · Cancel", shown while something is picked */
+  const pickedBanner = (where: string) => picked && (
+    <div role="status" className="mb-4 flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 rounded-xl border border-[#011c72] bg-[#eef1fb] text-sm text-[#011c72]">
+      <span>
+        <span className="font-mono font-bold">{pickedRef(picked, assignments)}</span> selected.{' '}
+        {picked.kind === 'task' ? `Click ${where} to move it there.` : `Click ${where} to assign it.`}
+      </span>
+      <button type="button" onClick={() => setPicked(null)}
+        className="px-3 py-1 rounded-lg border border-[#011c72]/30 bg-white text-xs font-semibold hover:bg-gray-50">Cancel (Esc)</button>
+    </div>
+  );
+
   const workerAssignmentsMap = assignments.reduce((acc, a) => {
     acc[a.workerId] = [...(acc[a.workerId] || []), a];
     return acc;
@@ -622,6 +1054,16 @@ export default function WorkerDashboard() {
     .filter(a => !a.scheduledDate && a.status !== 'completed' && a.assignmentType !== 'special_task'
       && (teamView || a.workerId === calWorker))
     .sort(tasksByPriority);
+  /** Open job orders that can go on the calendar, matching the search; ones nobody has yet first */
+  const openJO = jobOrders.filter(jo => jo.status === 'pending' || jo.status === 'in_progress');
+  const matchesJO = (jo: JobOrder, q: string) => {
+    q = q.trim().toLowerCase();
+    return !q || jo.jobOrderId.toLowerCase().includes(q) || jo.customerName.toLowerCase().includes(q)
+      || (jo.description || '').toLowerCase().includes(q);
+  };
+  const availableFirst = (a: JobOrder, b: JobOrder) =>
+    Number(activeAssignees.has(a.id)) - Number(activeAssignees.has(b.id)) || byPriority(a, b);
+  const schedulableJO = openJO.filter(jo => matchesJO(jo, joSearch)).sort(availableFirst);
 
   if (authLoading || loading) {
     return (
@@ -693,49 +1135,45 @@ export default function WorkerDashboard() {
                   <div className="py-8 flex justify-center"><div className="w-6 h-6 border-2 border-[#011c72] border-t-transparent rounded-full animate-spin" /></div>
                 ) : filteredJO.length === 0 ? (
                   <p className="text-center text-gray-400 text-xs py-8">No {joStatus.replace('_',' ')} orders.</p>
-                ) : filteredJO.map(jo => (
-                  <div
-                    key={jo.id}
-                    draggable
-                    onDragStart={() => onDragStart(jo)}
-                    className="group p-3 rounded-xl border border-gray-200 bg-gray-50 hover:bg-[#eef1fb] hover:border-[#c7d2f5] cursor-grab active:cursor-grabbing transition-colors select-none"
-                  >
-                    <div className="flex items-start justify-between gap-1">
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <p className="text-xs font-bold text-[#011c72] font-mono">{jo.jobOrderId}</p>
-                        <PriorityBadge priority={jo.priority} />
-                      </div>
-                      <svg className="w-3.5 h-3.5 text-gray-400 shrink-0 mt-0.5 group-hover:text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16"/>
-                      </svg>
-                    </div>
-                    <p className="text-xs text-gray-700 font-medium mt-0.5 truncate">{jo.customerName}</p>
-                    <p className="text-xs text-gray-500 truncate">{jo.description}</p>
-                  </div>
-                ))}
+                ) : (<>
+                  <p className="px-1 pt-1 text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Available ({availableJO.length})</p>
+                  {availableJO.length === 0
+                    ? <p className="text-center text-gray-400 text-xs py-4">Every {joStatus.replace('_',' ')} order has a worker.</p>
+                    : availableJO.map(jo => renderJobCard(jo))}
+                  {assignedJO.length > 0 && (<>
+                    {/* Still assignable: a job order can need more than one trade (e.g. a sewer and a seat maker) */}
+                    <button type="button" onClick={() => setShowAssignedJO(v => !v)}
+                      className="w-full flex items-center justify-between px-1 pt-3 text-[11px] font-semibold text-gray-500 uppercase tracking-wider hover:text-gray-700">
+                      <span>Already assigned ({assignedJO.length})</span>
+                      <span>{showAssignedJO ? '▲' : '▼'}</span>
+                    </button>
+                    {showAssignedJO && assignedJO.map(jo => renderJobCard(jo))}
+                  </>)}
+                </>)}
               </div>
               <div className="p-3 border-t border-gray-100 text-xs text-gray-400 text-center">
-                Drag a job order onto a worker
+                Click a job order, then &quot;Assign here&quot; on a worker. It goes on today in the Calendar. Removing a worker puts it back in Available.
               </div>
             </div>
 
-            {/* Right — Worker drop zones */}
+            {/* Right — Workers */}
             <div className="flex-1 space-y-4">
+              {pickedBanner('"Assign here" on a worker')}
               {activeWorkers.length === 0 ? (
                 <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 text-sm">
-                  No active workers. Click "Add Worker" to get started.
+                  No active workers. Click &quot;Add Worker&quot; to get started.
                 </div>
               ) : activeWorkers.map(w => {
                 const workerAsgns = (workerAssignmentsMap[w.id]?.filter(a => a.status !== 'completed') || [])
                   .sort(tasksByPriority);
-                const isDrop = dropTarget === w.id;
+                // A picked task can't "move" to the worker it already belongs to
+                const pickedTask = picked?.kind === 'task' ? assignments.find(a => a.id === picked.id) : undefined;
+                const canTake = !!picked && (picked.kind === 'job' || (!!pickedTask && pickedTask.workerId !== w.id));
+                const hasPickedJob = picked?.kind === 'job' && !!openAssignmentFor(w.id, picked.jo.id);
                 return (
                   <div
                     key={w.id}
-                    onDragOver={e => { e.preventDefault(); setDropTarget(w.id); }}
-                    onDragLeave={() => setDropTarget(null)}
-                    onDrop={() => onDrop(w)}
-                    className={`bg-white rounded-2xl border-2 shadow-sm transition-colors ${isDrop ? 'border-[#011c72] bg-[#eef1fb]' : 'border-gray-200'}`}
+                    className={`bg-white rounded-2xl border-2 shadow-sm transition-colors ${canTake ? 'border-[#c7d2f5]' : 'border-gray-200'}`}
                   >
                     {/* Worker header */}
                     <div className="flex items-center justify-between p-4 border-b border-gray-100">
@@ -752,21 +1190,30 @@ export default function WorkerDashboard() {
 
                     {/* Assignments */}
                     <div className="p-3">
-                      {isDrop && (
-                        <div className="mb-2 flex items-center justify-center h-12 rounded-xl border-2 border-dashed border-[#011c72] text-[#011c72] text-xs font-semibold animate-pulse">
-                          Drop to assign
-                        </div>
+                      {canTake && (
+                        hasPickedJob ? (
+                          <div className="mb-2 text-center text-xs text-gray-500 py-2 rounded-xl border border-dashed border-gray-300">
+                            Already working on {pickedRef(picked!, assignments)}.{' '}
+                            <button type="button" onClick={() => assignPickedToWorker(w, true)}
+                              className="font-semibold text-[#011c72] hover:underline">+ Give another task</button>
+                            <p className="text-[10px] text-gray-400 mt-0.5">It can start once their first task is finished.</p>
+                          </div>
+                        ) : (
+                          <button type="button" onClick={() => assignPickedToWorker(w)}
+                            className="mb-2 w-full flex items-center justify-center gap-1.5 h-11 rounded-xl border-2 border-dashed border-[#011c72] text-[#011c72] text-xs font-semibold hover:bg-[#eef1fb]">
+                            <span className="text-base leading-none">+</span>
+                            {picked!.kind === 'task' ? 'Move' : 'Assign'} <span className="font-mono">{pickedRef(picked!, assignments)}</span> here
+                          </button>
+                        )
                       )}
-                      {workerAsgns.length === 0 && !isDrop ? (
-                        <p className="text-xs text-gray-400 text-center py-4">No active assignments. Drag a job order here.</p>
+                      {workerAsgns.length === 0 && !canTake ? (
+                        <p className="text-xs text-gray-400 text-center py-4">No active assignments. Click a job order to assign it here.</p>
                       ) : (
                         <div className="flex flex-wrap gap-2">
                           {workerAsgns.map(a => (
                             <div key={a.id}
-                              draggable={a.status === 'pending'}
-                              onDragStart={() => { dragTask.current = a.id; }}
-                              title={a.status === 'pending' ? 'Drag onto another worker to move this task' : undefined}
-                              className={`group relative flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-medium transition-colors ${a.status === 'pending' ? 'cursor-grab' : ''}
+                              className={`group relative flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-medium transition-colors
+                                ${picked?.kind === 'task' && picked.id === a.id ? 'ring-2 ring-[#011c72]' : ''}
                                 ${a.assignmentType === 'special_task' ? 'bg-purple-50 border-purple-200 text-purple-800' : 'bg-gray-50 border-gray-200 text-gray-800'}`}>
                               <div>
                                 <p className="font-bold flex items-center gap-1.5">
@@ -774,15 +1221,22 @@ export default function WorkerDashboard() {
                                   <PriorityBadge priority={a.jobOrderPriority} />
                                 </p>
                                 {a.description && <p className="text-gray-400 font-normal truncate max-w-30">{a.description}</p>}
+                                {blocked(a) && <p className="text-amber-700 font-normal text-[10px] max-w-40 truncate" title={waitMsg(a)}>⏳ {waitMsg(a)}</p>}
                               </div>
                               <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${statusBadge(a.status)}`}>
                                 {a.status.replace('_',' ')}
                               </span>
                               {/* Actions */}
-                              <div className="hidden group-hover:flex items-center gap-1 ml-1">
+                              <div className="hidden group-hover:flex group-focus-within:flex items-center gap-1 ml-1">
+                                {a.status === 'pending' && a.assignmentType !== 'special_task' && (
+                                  <button onClick={() => togglePickTask(a.id)} title="Move to another worker"
+                                    className="p-1 rounded-lg bg-[#eef1fb] text-[#011c72] hover:bg-[#dde6ff]">
+                                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/></svg>
+                                  </button>
+                                )}
                                 {a.status === 'pending' && (
-                                  <button onClick={() => startWork(a)} disabled={updatingId === a.id}
-                                    title="Start"
+                                  <button onClick={() => startWork(a)} disabled={updatingId === a.id || !!a.waitingOn}
+                                    title={waitMsg(a) || "Start"}
                                     className="p-1 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
                                     <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                                   </button>
@@ -794,8 +1248,8 @@ export default function WorkerDashboard() {
                                   </button>
                                 )}
                                 {a.status !== 'completed' && (
-                                  <button onClick={() => openCompletion(a)} title={a.status === 'pending' ? 'Complete (already done)' : 'Complete'}
-                                    className="p-1 rounded-lg bg-green-600 text-white hover:bg-green-700">
+                                  <button onClick={() => openCompletion(a)} disabled={blocked(a)} title={blocked(a) ? waitMsg(a) : a.status === "pending" ? "Complete (already done)" : "Complete"}
+                                    className="p-1 rounded-lg bg-green-600 text-white hover:bg-green-700 disabled:opacity-50">
                                     <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/></svg>
                                   </button>
                                 )}
@@ -942,6 +1396,7 @@ export default function WorkerDashboard() {
               {assignments.length === 0 ? (
                 <p className="p-10 text-center text-gray-400 text-sm">No assignments yet.</p>
               ) : (
+                <Paginated items={assignments} label="assignments">{rows => (
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-200 text-sm">
                     <thead className="bg-gray-50">
@@ -952,7 +1407,7 @@ export default function WorkerDashboard() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {assignments.map(a => (
+                      {rows.map(a => (
                         <tr key={a.id} className="hover:bg-gray-50">
                           <td className="px-5 py-4 font-medium text-gray-900">{a.workerName}</td>
                           <td className="px-5 py-4">
@@ -973,7 +1428,7 @@ export default function WorkerDashboard() {
                           <td className="px-5 py-4 text-right font-semibold text-green-600">{a.status === 'completed' ? fc(a.pay) : '—'}</td>
                           <td className="px-5 py-4 text-right">
                             {a.status === 'pending' && (
-                              <button onClick={() => startWork(a)} disabled={updatingId === a.id}
+                              <button onClick={() => startWork(a)} disabled={updatingId === a.id || !!a.waitingOn} title={waitMsg(a) || undefined}
                                 className="px-3 py-1.5 text-xs bg-[#011c72] text-white rounded-lg hover:bg-[#022a9e] disabled:opacity-50">Start</button>
                             )}
                             {canAddExtra(a) && (
@@ -981,8 +1436,8 @@ export default function WorkerDashboard() {
                                 className="mr-1 px-3 py-1.5 text-xs border border-amber-200 text-amber-700 rounded-lg hover:bg-amber-50">Extra material</button>
                             )}
                             {a.status !== 'completed' && (
-                              <button onClick={() => openCompletion(a)}
-                                className="ml-1 px-3 py-1.5 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700">Complete</button>
+                              <button onClick={() => openCompletion(a)} disabled={blocked(a)} title={waitMsg(a) || undefined}
+                                className="ml-1 px-3 py-1.5 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50">Complete</button>
                             )}
                             {a.status === 'completed' && (
                               <button onClick={() => reopenTask(a)}
@@ -998,6 +1453,7 @@ export default function WorkerDashboard() {
                     </tbody>
                   </table>
                 </div>
+                )}</Paginated>
               )}
             </div>
           </>
@@ -1008,63 +1464,49 @@ export default function WorkerDashboard() {
           <div className="flex flex-col lg:flex-row gap-6 items-stretch lg:items-start">
 
             <div className="w-full lg:w-64 shrink-0 space-y-4">
-              {/* Job orders to drag onto a day */}
+              {/* Job orders: pick one, then click a day */}
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col" style={{ maxHeight: 'calc(60vh - 80px)' }}>
                 <div className="p-4 border-b border-gray-100">
-                  <h3 className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">Drag to Date</h3>
-                  {teamView ? (
-                    <p className="text-[11px] text-gray-400">Choose a worker above to schedule a job order for them.</p>
-                  ) : (
-                    <>
-                      <input type="text" value={joSearch} onChange={e => setJoSearch(e.target.value)}
-                        placeholder="Search job orders…"
-                        className="w-full px-3 py-1.5 rounded-lg border border-gray-200 bg-gray-50 text-xs text-gray-900" />
-                      <p className="md:hidden text-[11px] text-gray-400 mt-2">
-                        On a phone, assign in the Assign &amp; Tasks tab, then set the date from the task&apos;s details.
-                      </p>
-                    </>
-                  )}
+                  <h3 className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-1">Job Orders</h3>
+                  <p className="text-[11px] text-gray-400 mb-2">Click one, then click a day. Or use a day&apos;s + button.</p>
+                  <input type="text" value={joSearch} onChange={e => setJoSearch(e.target.value)}
+                    placeholder="Search job orders…"
+                    className="w-full px-3 py-1.5 rounded-lg border border-gray-200 bg-gray-50 text-xs text-gray-900" />
                 </div>
-                {!teamView && (
-                  <div className="hidden md:block overflow-y-auto flex-1 p-2 space-y-1.5">
-                    {jobOrders.filter(jo => {
-                      const q = joSearch.toLowerCase();
-                      return !q || jo.jobOrderId.toLowerCase().includes(q) || jo.customerName.toLowerCase().includes(q);
-                    }).filter(jo => jo.status === 'pending' || jo.status === 'in_progress')
-                      .sort(byPriority).map(jo => (
-                      <div key={jo.id} draggable onDragStart={() => onDragStart(jo)}
-                        className="p-2.5 rounded-xl border border-gray-200 bg-gray-50 hover:bg-[#eef1fb] hover:border-[#c7d2f5] cursor-grab active:cursor-grabbing text-xs select-none">
-                        <div className="flex items-center gap-1.5">
-                          <p className="font-bold text-[#011c72] font-mono">{jo.jobOrderId}</p>
-                          <PriorityBadge priority={jo.priority} />
-                        </div>
-                        <p className="text-gray-500 truncate">{jo.customerName}</p>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                <div className="overflow-y-auto flex-1 p-2 space-y-1.5">
+                  {schedulableJO.length === 0
+                    ? <p className="text-center text-gray-400 text-xs py-4">No pending or in-progress job orders.</p>
+                    : schedulableJO.map(jo => renderJobCard(jo, true))}
+                </div>
               </div>
 
               {/* Work already assigned but not on a day yet */}
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col" style={{ maxHeight: '40vh' }}>
                 <div className="p-4 border-b border-gray-100">
                   <h3 className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Unscheduled Work ({unscheduled.length})</h3>
-                  <p className="text-[11px] text-gray-400 mt-1">Assigned without a date. Drag onto a day, or click for details.</p>
+                  <p className="text-[11px] text-gray-400 mt-1">Assigned without a date. Click one, then click a day.</p>
                 </div>
                 <div className="overflow-y-auto flex-1 p-2 space-y-1.5">
                   {unscheduled.length === 0 ? (
                     <p className="text-center text-gray-400 text-xs py-4">Everything assigned has a date.</p>
-                  ) : unscheduled.map(a => (
-                    <div key={a.id} draggable onDragStart={() => { dragTask.current = a.id; }}
-                      onClick={() => setTaskPanel(a.id)}
-                      className="p-2.5 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 cursor-grab active:cursor-grabbing text-xs select-none">
-                      <div className="flex items-center gap-1.5">
-                        <p className="font-bold text-[#011c72] font-mono">{a.jobOrderRef}</p>
-                        <PriorityBadge priority={a.jobOrderPriority} />
+                  ) : unscheduled.map(a => {
+                    const on = picked?.kind === 'task' && picked.id === a.id;
+                    return (
+                      <div key={a.id} className={`rounded-xl border text-xs ${on ? 'border-[#011c72] bg-[#eef1fb] ring-2 ring-[#011c72]' : 'border-amber-200 bg-amber-50 hover:bg-amber-100'}`}>
+                        <button type="button" onClick={() => togglePickTask(a.id)} aria-pressed={on}
+                          className="w-full text-left p-2.5 pb-1">
+                          <div className="flex items-center gap-1.5">
+                            <p className="font-bold text-[#011c72] font-mono">{a.jobOrderRef}</p>
+                            <PriorityBadge priority={a.jobOrderPriority} />
+                            {on && <span className="ml-auto text-[10px] font-semibold text-white bg-[#011c72] px-1.5 py-0.5 rounded-full">Selected</span>}
+                          </div>
+                          <p className="text-gray-600 truncate">{teamView ? `${a.workerName} · ` : ''}{a.description || a.workType}</p>
+                        </button>
+                        <button type="button" onClick={() => setTaskPanel(a.id)}
+                          className="px-2.5 pb-2 text-[11px] font-medium text-[#011c72] hover:underline">Details</button>
                       </div>
-                      <p className="text-gray-600 truncate">{teamView ? `${a.workerName} · ` : ''}{a.description || a.workType}</p>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </div>
@@ -1102,9 +1544,9 @@ export default function WorkerDashboard() {
                 <div className="flex items-center gap-1.5"><div className="w-3 h-3 rounded border-2 border-[#011c72]" /><span>Today</span></div>
               </div>
               <p className="text-xs text-gray-400 mb-4">
-                <span className="hidden md:inline">Click a day to see all of its work{teamView ? '' : ' or mark it off'}. Click a task for details. Drag a task to another day to move it.</span>
-                <span className="md:hidden">Tap a day to see its work{teamView ? '' : ' or mark it off'}, then tap a task to change its date.</span>
+                Press a day&apos;s + to assign a job order to it. Click a day to see its work{teamView ? '' : ' or mark it off'}; click a task for details, or to move it to another day.
               </p>
+              {pickedBanner('a day')}
 
               {/* Phones: the month as a list of days */}
               <div className="md:hidden divide-y divide-gray-100 border border-gray-200 rounded-xl">
@@ -1114,8 +1556,10 @@ export default function WorkerDashboard() {
                   const isOff = !teamView && availMap[dateStr] && !availMap[dateStr].isAvailable;
                   const isToday = dateStr === todayStr;
                   return (
-                    <button key={day} type="button" onClick={() => setDayPanel(dateStr)}
-                      className={`w-full text-left px-3 py-2.5 flex items-start gap-3 ${isOff ? 'bg-red-50' : isToday ? 'bg-[#eef1fb]' : 'bg-white'}`}>
+                    <div key={day} className={`flex items-stretch ${picked && isPastDay(dateStr) ? 'bg-gray-50 opacity-50' : picked ? 'bg-[#f5f7fe]' : isOff ? 'bg-red-50' : isToday ? 'bg-[#eef1fb]' : 'bg-white'}`}>
+                    <button type="button" onClick={() => onDayClick(dateStr)}
+                      aria-label={picked ? `Put ${pickedRef(picked, assignments)} on ${formatDate(dateStr)}` : undefined}
+                      className="flex-1 min-w-0 text-left px-3 py-2.5 flex items-start gap-3">
                       <div className="w-12 shrink-0">
                         <p className={`text-sm font-bold ${isToday ? 'text-[#011c72]' : isOff ? 'text-red-600' : 'text-gray-800'}`}>{day}</p>
                         <p className="text-[10px] text-gray-400">{DAY_LABELS[new Date(calYear, calMonth, day).getDay()]}</p>
@@ -1131,6 +1575,12 @@ export default function WorkerDashboard() {
                         ))}
                       </div>
                     </button>
+                    {isPastDay(dateStr) ? <span className="shrink-0 w-11" aria-hidden /> : (
+                      <button type="button" onClick={() => openAssignForm(dateStr)} title="Assign a job order to this day"
+                        aria-label={`Assign a job order to ${formatDate(dateStr)}`}
+                        className="shrink-0 w-11 flex items-center justify-center text-lg font-bold text-[#011c72] hover:bg-[#eef1fb]">+</button>
+                    )}
+                    </div>
                   );
                 })}
               </div>
@@ -1150,41 +1600,46 @@ export default function WorkerDashboard() {
                     const isSaving = savingDate === dateStr;
                     const dayAsgns = calAssignments[dateStr] || [];
                     const hasAsgns = dayAsgns.length > 0;
-                    const isDropTarget = calDropTarget === dateStr;
-
+                    const isPast = isPastDay(dateStr);
                     return (
                       <div key={day}
-                        onDragOver={e => { e.preventDefault(); setCalDropTarget(dateStr); }}
-                        onDragLeave={() => setCalDropTarget(null)}
-                        onDrop={() => onDropCalendar(dateStr)}
-                        className={`relative min-h-20 rounded-lg border p-1 flex flex-col transition-colors cursor-pointer
-                          ${isDropTarget ? 'bg-[#dde6ff] border-[#011c72] border-2' : ''}
-                          ${isUnavail && !isDropTarget ? 'bg-red-50 border-red-200' : ''}
-                          ${!isUnavail && !isDropTarget ? 'bg-white border-gray-200 hover:bg-gray-50' : ''}
-                          ${hasAsgns && !isUnavail && !isDropTarget ? 'bg-blue-50 border-blue-200' : ''}
+                        role="button" tabIndex={0}
+                        aria-label={picked ? `Put ${pickedRef(picked, assignments)} on ${formatDate(dateStr)}` : `${formatDate(dateStr)}: see the day's work`}
+                        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onDayClick(dateStr); } }}
+                        className={`group relative min-h-20 rounded-lg border p-1 flex flex-col transition-colors cursor-pointer
+                          ${isUnavail ? 'bg-red-50 border-red-200' : ''}
+                          ${!isUnavail ? 'bg-white border-gray-200 hover:bg-gray-50' : ''}
+                          ${hasAsgns && !isUnavail ? 'bg-blue-50 border-blue-200' : ''}
+                          ${picked && !isPast ? 'hover:bg-[#dde6ff]! hover:border-[#011c72]! hover:ring-1 hover:ring-[#011c72]' : ''}
+                          ${picked && isPast ? 'opacity-40 cursor-not-allowed' : ''}
                           ${isToday ? 'border-2 border-[#011c72]' : ''}
                         `}
-                        onClick={() => setDayPanel(dateStr)}
+                        onClick={() => onDayClick(dateStr)}
                       >
-                        <span className={`text-xs font-semibold ${isUnavail ? 'text-red-600' : isToday ? 'text-[#011c72]' : 'text-gray-700'}`}>{day}</span>
+                        <div className="flex items-center justify-between">
+                          <span className={`text-xs font-semibold ${isUnavail ? 'text-red-600' : isToday ? 'text-[#011c72]' : 'text-gray-700'}`}>{day}</span>
+                          {!picked && !isPast && (
+                            <button type="button" onClick={e => { e.stopPropagation(); openAssignForm(dateStr); }}
+                              title="Assign a job order to this day" aria-label={`Assign a job order to ${formatDate(dateStr)}`}
+                              className="w-5 h-5 flex items-center justify-center rounded-md text-sm font-bold leading-none text-[#011c72] opacity-40 group-hover:opacity-100 focus:opacity-100 hover:bg-[#011c72] hover:text-white">+</button>
+                          )}
+                        </div>
                         {isUnavail && <div className="text-[9px] text-red-500 leading-tight">Off</div>}
                         {isSaving && <div className="absolute inset-0 flex items-center justify-center bg-white/60 rounded-lg"><div className="w-3 h-3 border-2 border-[#011c72] border-t-transparent rounded-full animate-spin" /></div>}
                         {dayAsgns.slice(0, 3).map(a => (
                           <div key={a.id}
-                            draggable={a.status !== 'completed' && a.assignmentType !== 'other_branch'}
-                            onDragStart={e => { e.stopPropagation(); dragTask.current = a.id; }}
-                            onClick={e => { e.stopPropagation(); setTaskPanel(a.id); }}
+                            // With something picked, a click anywhere on the day places it there
+                            onClick={e => { if (picked) return; e.stopPropagation(); setTaskPanel(a.id); }}
                             title={`${a.jobOrderRef}${a.description ? ' – ' + a.description : ''}${teamView ? ' · ' + a.workerName : ''}`}
                             className={`mt-0.5 text-[9px] leading-tight px-1 py-0.5 rounded truncate font-medium hover:ring-1 hover:ring-[#011c72]
                               ${a.status === 'completed' ? 'bg-green-100 text-green-700' : a.assignmentType === 'special_task' ? 'bg-purple-100 text-purple-700'
                                 : a.jobOrderPriority === 'urgent' ? 'bg-red-100 text-red-700' : a.jobOrderPriority === 'high' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-700'}
-                              ${a.status !== 'completed' ? 'cursor-grab' : ''}`}>
+                              ${picked?.kind === 'task' && picked.id === a.id ? 'ring-2 ring-[#011c72]' : ''}`}>
                             {teamView ? `${a.workerName.split(' ')[0]}: ` : ''}
                             {a.assignmentType === 'special_task' ? (a.specialTaskTitle || 'Task') : a.jobOrderRef}
                           </div>
                         ))}
                         {dayAsgns.length > 3 && <div className="text-[9px] text-[#011c72] font-medium mt-0.5">+{dayAsgns.length - 3} more</div>}
-                        {isDropTarget && <div className="absolute inset-0 flex items-center justify-center rounded-lg text-[10px] font-bold text-[#011c72]">Drop here</div>}
                       </div>
                     );
                   })}
@@ -1275,7 +1730,7 @@ export default function WorkerDashboard() {
                   <div>
                     <label className="block text-xs font-medium text-gray-600 mb-1">Scheduled date</label>
                     <div className="flex items-center gap-2">
-                      <input type="date" value={a.scheduledDate || ''}
+                      <input type="date" value={a.scheduledDate || ''} min={todayStr}
                         onChange={e => e.target.value && scheduleTask(a, e.target.value)}
                         className="flex-1 px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
                       {a.scheduledDate && (
@@ -1284,6 +1739,12 @@ export default function WorkerDashboard() {
                       )}
                     </div>
                     {!a.scheduledDate && <p className="text-[11px] text-gray-400 mt-1">Not on the calendar yet.</p>}
+                    {activeTab === 'calendar' && (
+                      <button type="button" onClick={() => { close(); setPicked({ kind: 'task', id: a.id }); }}
+                        className="mt-2 text-xs font-medium text-[#011c72] hover:underline">
+                        {a.scheduledDate ? 'Move to another day on the calendar' : 'Pick a day on the calendar'}
+                      </button>
+                    )}
                   </div>
                 )}
                 {a.status === 'pending' && a.assignmentType !== 'special_task' && (
@@ -1300,14 +1761,19 @@ export default function WorkerDashboard() {
                 {a.isOverdue && (
                   <p className="text-xs text-red-600">Running {a.overdueByHours}h over the expected time.</p>
                 )}
+                {blocked(a) && (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                    {waitMsg(a)}. Work on a job order goes in the order it was assigned.
+                  </p>
+                )}
                 <div className="flex flex-wrap gap-2 pt-1">
                   {a.status === 'pending' && (
-                    <button type="button" onClick={() => { startWork(a); close(); }}
-                      className="px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700">Start</button>
+                    <button type="button" onClick={() => { startWork(a); close(); }} disabled={blocked(a)}
+                      className="px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 disabled:opacity-50">Start</button>
                   )}
                   {a.status !== 'completed' && (
-                    <button type="button" onClick={() => { close(); openCompletion(a); }}
-                      className="px-3 py-2 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700">Complete</button>
+                    <button type="button" onClick={() => { close(); openCompletion(a); }} disabled={blocked(a)}
+                      className="px-3 py-2 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700 disabled:opacity-50">Complete</button>
                   )}
                   {canAddExtra(a) && (
                     <button type="button" onClick={() => { close(); setExtraFor(a); }}
@@ -1326,6 +1792,198 @@ export default function WorkerDashboard() {
                       className="ml-auto px-3 py-2 rounded-lg border border-red-200 text-red-600 text-xs font-semibold hover:bg-red-50">Remove</button>
                   )}
                 </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Calendar: assign a job order to a day (+ button, or picked then day clicked) ── */}
+      {assignForm && (() => {
+        const f = assignForm;
+        const close = () => setAssignForm(null);
+        const jo = f.jobId != null ? jobOrders.find(j => j.id === f.jobId) : undefined;
+        const worker = f.workerId ? workers.find(w => w.id === f.workerId) : undefined;
+        // Look for one already on this day first, so it isn't mistaken for a move
+        const existing = jo && f.workerId
+          ? (assignments.find(a => a.workerId === f.workerId && a.jobOrderDbId === jo.id && a.status !== 'completed'
+              && a.assignmentType !== 'special_task' && a.scheduledDate === f.date) || openAssignmentFor(f.workerId, jo.id))
+          : undefined;
+        const alreadyThere = existing?.scheduledDate === f.date;
+        // Only the same work finished by them is a rework; a finished task from another
+        // step (cutting before sewing) is the normal flow, so there's nothing to warn about
+        const trade = taskBase(worker?.workType.replace(/_/g, ' '));
+        const finishedBefore = !existing && jo && f.workerId
+          ? assignments.some(a => a.workerId === f.workerId && a.jobOrderDbId === jo.id && a.status === 'completed'
+              && a.assignmentType !== 'special_task' && taskBase(a.description) === trade)
+          : false;
+        const isOff = !!f.workerId && f.workerId === calWorker && availability.some(e => e.date === f.date && !e.isAvailable);
+        const choices = openJO.filter(j => matchesJO(j, f.search)).sort(availableFirst);
+        const set = (patch: Partial<AssignForm>) => setAssignForm(prev => (prev ? { ...prev, ...patch } : prev));
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={close}>
+            <div role="dialog" aria-modal="true" aria-labelledby="assign-form-title"
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+              <div className="p-5 border-b border-gray-200 flex items-start justify-between gap-3">
+                <div>
+                  <h2 id="assign-form-title" className="text-base font-semibold text-gray-900">Assign work for {formatDate(f.date)}</h2>
+                  <p className="text-xs text-gray-500">Choose the job order and the worker, then confirm.</p>
+                </div>
+                <button onClick={close} aria-label="Close" className="text-gray-400 hover:text-gray-600 text-xl leading-none">✕</button>
+              </div>
+
+              <div className="p-5 overflow-y-auto flex-1 space-y-4">
+                {/* Job order */}
+                {jo ? (
+                  <div className="rounded-xl border border-[#011c72] bg-[#eef1fb] p-3 text-sm">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono font-bold text-[#011c72]">{jo.jobOrderId}</span>
+                        <PriorityBadge priority={jo.priority} />
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${statusBadge(jo.status)}`}>{jo.status.replace('_', ' ')}</span>
+                      </div>
+                      <button type="button" onClick={() => set({ jobId: null })}
+                        className="shrink-0 text-xs font-medium text-[#011c72] hover:underline">Change</button>
+                    </div>
+                    <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                      <dt className="text-gray-500">Customer</dt><dd className="text-gray-900">{jo.customerName}</dd>
+                      {jo.description && <><dt className="text-gray-500">Work</dt><dd className="text-gray-900">{jo.description}</dd></>}
+                      {jo.branchName && <><dt className="text-gray-500">Branch</dt><dd className="text-gray-900">{jo.branchName}</dd></>}
+                      {jo.estimatedCompletion && <><dt className="text-gray-500">Due</dt><dd className="text-gray-900">{formatDate(jo.estimatedCompletion)}</dd></>}
+                      <dt className="text-gray-500">Assigned to</dt>
+                      <dd className="text-gray-900">{activeAssignees.get(jo.id)?.join(', ') || 'Nobody yet'}</dd>
+                    </dl>
+                  </div>
+                ) : (
+                  <div>
+                    <label htmlFor="assign-jo-search" className="block text-xs font-medium text-gray-600 mb-1">Job order</label>
+                    <input id="assign-jo-search" type="text" value={f.search} onChange={e => set({ search: e.target.value })}
+                      placeholder="Search by number, customer or work…" autoFocus
+                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-900 mb-2" />
+                    <div className="max-h-64 overflow-y-auto space-y-1.5 pr-1">
+                      {choices.length === 0 ? (
+                        <p className="text-center text-gray-400 text-xs py-4">No pending or in-progress job orders{f.search ? ' match' : ''}.</p>
+                      ) : choices.map(j => (
+                        <button key={j.id} type="button" onClick={() => set({ jobId: j.id })}
+                          className="w-full text-left p-2.5 rounded-xl border border-gray-200 bg-gray-50 hover:bg-[#eef1fb] hover:border-[#c7d2f5] text-xs">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono font-bold text-[#011c72]">{j.jobOrderId}</span>
+                            <PriorityBadge priority={j.priority} />
+                            <span className="ml-auto text-[10px] text-gray-400">{j.status.replace('_', ' ')}</span>
+                          </div>
+                          <p className="text-gray-700 truncate">{j.customerName}{j.description ? ` · ${j.description}` : ''}</p>
+                          <p className={`text-[11px] ${activeAssignees.has(j.id) ? 'text-[#011c72] font-medium' : 'text-gray-400'}`}>
+                            {activeAssignees.has(j.id) ? `Assigned to ${activeAssignees.get(j.id)!.join(', ')}` : 'Available'}
+                          </p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Worker */}
+                <div>
+                  <label htmlFor="assign-worker" className="block text-xs font-medium text-gray-600 mb-1">Worker</label>
+                  <select id="assign-worker" value={f.workerId ?? ''} onChange={e => set({ workerId: e.target.value ? Number(e.target.value) : null })}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900">
+                    <option value="">Choose a worker…</option>
+                    {activeWorkers.map(w => <option key={w.id} value={w.id}>{w.name} ({w.workType})</option>)}
+                  </select>
+                  {isOff && <p className="text-xs text-red-600 mt-1">{worker?.name} is marked off on this day.</p>}
+                  {finishedBefore && (
+                    <p className="text-xs text-amber-700 mt-1">
+                      {worker?.name} already finished {jo!.jobOrderId}. You&apos;ll be asked if this is rework, and why.
+                    </p>
+                  )}
+                  {existing && (alreadyThere ? (
+                    <p className="text-xs text-gray-600 mt-1">
+                      {worker?.name} already has {jo!.jobOrderId} on this day. Assigning adds another task, which can
+                      start once their first one is finished.
+                    </p>
+                  ) : (
+                    <fieldset className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                      <legend className="px-1 text-xs text-amber-800">
+                        {worker?.name} already has {jo!.jobOrderId}{existing.scheduledDate ? ` on ${formatDate(existing.scheduledDate)}` : ' without a date'}.
+                      </legend>
+                      <label className="flex items-start gap-2 text-xs text-gray-800 cursor-pointer">
+                        <input type="radio" name="assign-mode" checked={!f.another} onChange={() => set({ another: false })} className="mt-0.5 accent-[#011c72]" />
+                        Move that task to this day
+                      </label>
+                      <label className="mt-1.5 flex items-start gap-2 text-xs text-gray-800 cursor-pointer">
+                        <input type="radio" name="assign-mode" checked={f.another} onChange={() => set({ another: true })} className="mt-0.5 accent-[#011c72]" />
+                        Add another task on this day (it can start once their first one is finished)
+                      </label>
+                    </fieldset>
+                  ))}
+                </div>
+                <p className="text-[11px] text-gray-400">The job order&apos;s status and priority stay as they are.</p>
+              </div>
+
+              <div className="p-5 border-t border-gray-200 flex gap-3">
+                <button type="button" onClick={submitAssignForm} disabled={!jo || !f.workerId || savingAssign}
+                  className="flex-1 py-2.5 bg-[#011c72] hover:bg-[#022a9e] text-white text-sm font-medium rounded-xl disabled:opacity-50">
+                  {savingAssign ? 'Saving…' : existing && !alreadyThere && !f.another ? 'Move to this day' : existing ? 'Add another task' : 'Assign'}
+                </button>
+                <button type="button" onClick={close}
+                  className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl hover:bg-gray-200 text-sm">Cancel</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Rework: the worker already finished this job order ─────────────────── */}
+      {rework && (() => {
+        const r = rework;
+        const close = () => { if (!r.saving) setRework(null); };
+        const set = (patch: Partial<ReworkPrompt>) => setRework(prev => (prev ? { ...prev, ...patch, error: '' } : prev));
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={close}>
+            <div role="dialog" aria-modal="true" aria-labelledby="rework-title"
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
+              <div className="p-5 border-b border-gray-200 flex items-start justify-between gap-3">
+                <div>
+                  <h2 id="rework-title" className="text-base font-semibold text-gray-900">
+                    {r.workerName} already finished <span className="font-mono">{r.jobRef}</span>
+                  </h2>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {r.previous ? `${r.previous}, ` : ''}completed{r.completedAt ? ` on ${formatDate(r.completedAt)}` : ''}.
+                  </p>
+                </div>
+                <button onClick={close} aria-label="Close" className="text-gray-400 hover:text-gray-600 text-xl leading-none">✕</button>
+              </div>
+              <div className="p-5 space-y-4">
+                <p className="text-sm text-gray-700">
+                  Do they need to work on it again? It is added as a new rework task
+                  {r.date ? <> on <span className="font-medium">{formatDate(r.date)}</span></> : null}, paid separately when it is completed.
+                  Their finished task and its pay stay as they are.
+                </p>
+                <fieldset>
+                  <legend className="block text-xs font-medium text-gray-600 mb-2">Reason for the rework *</legend>
+                  <div className="space-y-1.5">
+                    {REWORK_REASONS.map(reason => (
+                      <label key={reason} className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm cursor-pointer ${r.reason === reason ? 'border-[#011c72] bg-[#eef1fb]' : 'border-gray-200 hover:bg-gray-50'}`}>
+                        <input type="radio" name="rework-reason" value={reason} checked={r.reason === reason}
+                          onChange={() => set({ reason })} className="accent-[#011c72]" />
+                        {reason}
+                      </label>
+                    ))}
+                  </div>
+                  {r.reason === 'Other' && (
+                    <input type="text" value={r.other} onChange={e => set({ other: e.target.value })} maxLength={150} autoFocus
+                      aria-label="Other reason" placeholder="Write the reason…"
+                      className="mt-2 w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+                  )}
+                </fieldset>
+                {r.error && <p role="alert" className="text-sm text-red-600">{r.error}</p>}
+              </div>
+              <div className="p-5 border-t border-gray-200 flex gap-3">
+                <button type="button" onClick={submitRework} disabled={r.saving}
+                  className="flex-1 py-2.5 bg-[#011c72] hover:bg-[#022a9e] text-white text-sm font-medium rounded-xl disabled:opacity-50">
+                  {r.saving ? 'Saving…' : 'Yes, assign as rework'}
+                </button>
+                <button type="button" onClick={close} disabled={r.saving}
+                  className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl hover:bg-gray-200 text-sm disabled:opacity-50">No</button>
               </div>
             </div>
           </div>
