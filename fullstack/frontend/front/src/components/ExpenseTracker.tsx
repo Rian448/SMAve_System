@@ -223,7 +223,8 @@ export default function ExpenseTracker({ startOfYear = false, showPaymentBreakdo
             </label>
           )}
           <div className="ml-auto text-right">
-            <p className="text-xs text-gray-500">Total spent</p>
+            {/* On the Owner Dashboard, named as cash so it isn't read as the P&L's operating expenses */}
+            <p className="text-xs text-gray-500">{showPaymentBreakdown ? 'Cash paid out' : 'Total spent'}</p>
             <p className="text-xl font-bold text-gray-900 min-w-0"><Amount value={total} /></p>
           </div>
         </div>

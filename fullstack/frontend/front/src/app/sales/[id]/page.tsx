@@ -207,8 +207,6 @@ export default function JobOrderDetailPage() {
   const [slipPockets, setSlipPockets] = useState('');
   const [slipLogo, setSlipLogo] = useState('');
   const [slipSpec, setSlipSpec] = useState('');
-  const [slipCutter, setSlipCutter] = useState('');
-  const [slipSewer, setSlipSewer] = useState('');
   const [savingSlip, setSavingSlip] = useState(false);
   const [slipMessage, setSlipMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -225,9 +223,24 @@ export default function JobOrderDetailPage() {
     setSlipPockets(sd.pockets || '');
     setSlipLogo(sd.logo || '');
     setSlipSpec(sd.specification || '');
-    setSlipCutter(sd.cutterName || '');
-    setSlipSewer(sd.sewerName || '');
   }, [jobOrder?.slipData]);
+
+  /** The slip's Cutter / Sewer: the workers on the order's Cutting / Sewing labor lines
+      (the line picked on the slip, a line named for the task, or a worker of that type) */
+  const slipWorkerNames = (role: 'cutter' | 'sewer') => {
+    const task = role === 'cutter' ? 'cutting' : 'sewing';
+    const names = (jobOrder?.items || [])
+      .filter(it => (it.category === 'labor' || (!it.category && it.workerId)) && it.workerId)
+      .filter(it => {
+        if (it.slipRole) return it.slipRole === role;
+        if ((it.name || '').trim().toLowerCase() === task) return true;
+        const w = managedWorkers.find(m => m.id === it.workerId);
+        return (w?.workType || '').toLowerCase() === role;
+      })
+      .map(it => it.workerName || managedWorkers.find(m => m.id === it.workerId)?.name || '')
+      .filter(Boolean);
+    return Array.from(new Set(names)).join(', ');
+  };
 
   const saveSlip = async () => {
     if (!jobOrder) return;
@@ -236,9 +249,8 @@ export default function JobOrderDetailPage() {
     try {
       await api.sales.updateJobOrder(jobOrder.id, {
         slipData: {
-          // Keeps what this user can't see (cutter/sewer are for those who manage labor)
+          // Keeps the cutter / sewer as they are: those are changed in Workers & Labor
           ...jobOrder.slipData,
-          ...(seesLaborCost ? { cutterName: slipCutter, sewerName: slipSewer } : {}),
           rows: toSavedSlipRows(slipRows),
           materialCenter: slipCenter,
           materialSides: slipSides,
@@ -251,7 +263,6 @@ export default function JobOrderDetailPage() {
         }
       });
       setSlipMessage({ ok: true, text: 'Slip saved.' });
-      // The Cutter / Sewer may have added, moved or removed a worker on the order
       await reloadJobOrder();
     } catch (err) {
       setSlipMessage({ ok: false, text: err instanceof Error && err.message ? err.message : 'Could not save the slip.' });
@@ -1113,19 +1124,22 @@ export default function JobOrderDetailPage() {
 
           {/* Detail fields */}
           <div className="mb-5">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {[
-                { label: 'D.STITCH', value: slipDStitch, set: setSlipDStitch },
-                { label: 'PIPING', value: slipPiping, set: setSlipPiping },
-                { label: 'POCKETS', value: slipPockets, set: setSlipPockets },
-                { label: 'LOGO', value: slipLogo, set: setSlipLogo },
-              ].map(({ label, value, set }) => (
-                <div key={label}>
-                  <label className="block text-xs text-gray-500 mb-1">{label}</label>
-                  <input type="text" value={value} onChange={(e) => set(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
-                </div>
-              ))}
+            {/* Same as the New Job Order slip: pockets (a count) and whether the job has a
+                logo. D.Stitch / Piping are no longer asked; older values are kept on save. */}
+            <div className="grid grid-cols-2 gap-3 items-end">
+              <div>
+                <label htmlFor="detail-slip-pockets" className="block text-xs text-gray-500 mb-1">POCKETS</label>
+                <input id="detail-slip-pockets" type="text" inputMode="numeric" value={slipPockets}
+                  onChange={(e) => setSlipPockets(e.target.value.replace(/\D/g, '').slice(0, 3))}
+                  placeholder="0"
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+              </div>
+              <label className="inline-flex items-center gap-2 py-2 text-sm text-gray-700 cursor-pointer select-none">
+                <input type="checkbox" checked={!!slipLogo && slipLogo.toLowerCase() !== 'no'}
+                  onChange={(e) => setSlipLogo(e.target.checked ? 'Yes' : '')}
+                  className="w-4 h-4 rounded border-gray-300 text-[#011c72]" />
+                LOGO
+              </label>
             </div>
           </div>
 
@@ -1141,27 +1155,24 @@ export default function JobOrderDetailPage() {
             />
           </div>
 
-          {/* Cutter & Sewer: picked from the workers of that type */}
+          {/* Cutter & Sewer: read from the Cutting / Sewing lines in Workers & Labor below,
+              which is the one place to change them (so the slip and the tasks always agree) */}
           {seesLaborCost && (
             <div className="grid grid-cols-2 gap-4">
               {[
-                { label: 'CUTTER', type: 'cutter', value: slipCutter, set: setSlipCutter },
-                { label: 'SEWER', type: 'sewer', value: slipSewer, set: setSlipSewer },
-              ].map(({ label, type, value, set }) => {
-                const choices = managedWorkers.filter(w => w.workType.toLowerCase() === type);
-                return (
-                  <div key={label}>
-                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">{label}</label>
-                    <select value={value} onChange={(e) => set(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
-                      <option value="">{choices.length ? '— Select —' : `No active ${type}s`}</option>
-                      {choices.map(w => <option key={w.id} value={w.name}>{w.name}</option>)}
-                      {/* A name saved earlier (typed in, or a since-deactivated worker) stays selectable */}
-                      {value && !choices.some(w => w.name === value) && <option value={value}>{value}</option>}
-                    </select>
-                  </div>
-                );
-              })}
+                { label: 'CUTTER', names: slipWorkerNames('cutter') },
+                { label: 'SEWER', names: slipWorkerNames('sewer') },
+              ].map(({ label, names }) => (
+                <div key={label}>
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">{label}</p>
+                  <p className="px-3 py-2 rounded-lg border border-gray-100 bg-gray-50 text-sm text-gray-900 min-h-[38px]">
+                    {names || <span className="text-gray-400">Not assigned</span>}
+                  </p>
+                </div>
+              ))}
+              <p className="no-print col-span-2 text-xs text-gray-400 -mt-2">
+                Change the cutter or sewer in Workers &amp; Labor below.
+              </p>
             </div>
           )}
         </div>
@@ -1263,13 +1274,12 @@ export default function JobOrderDetailPage() {
                               onChange={(e) => {
                                 const wid = parseInt(e.target.value) || undefined;
                                 const found = managedWorkers.find(w => w.id === wid);
-                                // Use the new worker's rate unless a custom rate was typed in
-                                const rateIsDefault = !Number(part.laborCost) || Number(part.laborCost) === lineWorker?.ratePerHour;
+                                // The rate is always the worker's own (set in Worker Management)
                                 setEditingParts(prev => prev.map((p, i) => i !== globalIndex ? p : {
                                   ...p,
                                   workerId: wid,
                                   workerName: found?.name ?? '',
-                                  ...(found && rateIsDefault ? { laborCost: found.ratePerHour } : {}),
+                                  laborCost: found ? found.ratePerHour : 0,
                                 }));
                               }}
                               className={inputClass}
@@ -1306,15 +1316,9 @@ export default function JobOrderDetailPage() {
                               )}
                               <p className="text-[10px] text-gray-400 mt-0.5">{unit.qty.toLowerCase()}</p>
                             </td>
-                            <td className="px-3 py-3 text-right">
-                              {editable ? (
-                                <input type="number" min="0" step="0.01" value={part.laborCost || 0}
-                                  onChange={(e) => updateOrderPart(globalIndex, 'laborCost', e.target.value)}
-                                  className="w-24 px-2 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 text-right"
-                                  aria-label={unit.rate} />
-                              ) : (
-                                <p className="text-sm text-gray-900">{formatCurrency(Number(part.laborCost) || 0)}</p>
-                              )}
+                            {/* The worker's rate from Worker Management: changed there, not here */}
+                            <td className="px-3 py-3 text-right" title="Set in Worker Management">
+                              <p className="text-sm text-gray-900">{formatCurrency(Number(part.laborCost) || 0)}</p>
                               <p className="text-[10px] text-gray-400 mt-0.5">{unit.rate.toLowerCase()}</p>
                             </td>
                             <td className="px-3 py-3 text-right text-sm">
