@@ -216,8 +216,8 @@ export default function ForecastingPage() {
             </div>
 
             {/* Material Usage Trend Chart */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-              <div className="flex items-center justify-between mb-6">
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6 mb-6">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-6">
                 <div>
                   <h3 className="text-lg font-semibold text-gray-900">Material Usage Trend</h3>
                   <p className="text-xs text-gray-500 mt-0.5">Historical consumption + AI-projected future usage</p>
@@ -241,12 +241,13 @@ export default function ForecastingPage() {
               ) : (() => {
                 const maxVal = Math.max(...data.monthlyUsageTrend.map(m => m.total), 1);
                 return (
-                  <div className="h-56 flex items-end gap-2">
+                  // Columns may shrink below their labels' width, so all months fit on a phone
+                  <div className="h-56 flex items-end gap-1 sm:gap-2">
                     {data.monthlyUsageTrend.map((m, i) => {
                       const heightPct = (m.total / maxVal) * 100;
                       return (
-                        <div key={i} className="flex-1 flex flex-col items-center gap-1">
-                          <span className="text-xs text-gray-400 truncate w-full text-center">
+                        <div key={i} className="flex-1 min-w-0 flex flex-col items-center gap-1">
+                          <span className="text-[10px] sm:text-xs text-gray-400 truncate w-full text-center">
                             {m.total > 0 ? Math.round(m.total) : ''}
                           </span>
                           <div className="w-full flex items-end" style={{ height: '160px' }}>
@@ -255,7 +256,7 @@ export default function ForecastingPage() {
                               style={{ height: `${Math.max(heightPct * 1.6, m.total > 0 ? 4 : 0)}px` }}
                             />
                           </div>
-                          <span className="text-xs text-gray-500 truncate w-full text-center">{formatMonth(m.month)}</span>
+                          <span className="text-[10px] sm:text-xs text-gray-500 truncate w-full text-center">{formatMonth(m.month)}</span>
                           {m.projected && <span className="text-xs text-amber-500 leading-none">~</span>}
                         </div>
                       );

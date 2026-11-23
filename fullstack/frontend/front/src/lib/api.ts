@@ -369,6 +369,25 @@ export interface Branding {
   navIcons: Record<string, string>;
 }
 
+/** A material open job orders need more of than is in stock (Inventory → Needed for job orders) */
+export interface NeededMaterial {
+  id: number;
+  itemId: string;
+  name: string;
+  branchId: number;
+  branchName: string | null;
+  unit: string;
+  stock: number;
+  needed: number;
+  short: number;
+  /** Typed in on a job order (not picked from Inventory) */
+  typedIn: boolean;
+  supplierId: number | null;
+  orders: { id: number; jobOrderId: string; customerName: string; status: string; quantity: number }[];
+  /** Existing materials with a similar name (a likely typo); typed-in materials only */
+  similar: { id: number; name: string; branchName: string | null; stock: number; unit: string }[];
+}
+
 export interface RawMaterial {
   id: number;
   itemId: string;
@@ -400,6 +419,8 @@ export interface RawMaterial {
   /** A consumable marked partly used since it was last marked fully used */
   partialUseAt?: string | null;
   lastUpdated: string;
+  /** Full time of the last change (stock used or received, edited) */
+  updatedAt?: string | null;
 }
 
 export interface Supplier {
@@ -480,6 +501,32 @@ export interface AIPrediction {
   /** Its error on held-back weeks (WAPE %), and the plain moving average's; null with too little history */
   errorPercent?: number | null;
   baselineErrorPercent?: number | null;
+}
+
+/** A worker's finished work for a period: GET /api/managed-workers/:id/work-summary */
+export interface WorkerWorkSummary {
+  worker: ManagedWorker;
+  start: string;
+  end: string;
+  /** pay is null for roles that may not see labor cost */
+  totals: { tasks: number; jobOrders: number; hours: number; pay: number | null; yardsUsed: number; yardsExcess: number; openTasks: number };
+  days: { date: string; tasks: number; hours: number; pay: number | null }[];
+  tasks: {
+    id: number;
+    date: string;
+    finishedAt: string | null;
+    jobOrderRef: string;
+    jobOrderDbId: number | null;
+    task: string | null;
+    customerName: string | null;
+    vehicle: string | null;
+    branchName: string | null;
+    hours: number;
+    pay: number | null;
+    payOverridden: boolean;
+    cuts: { material: string; unit: string; used: number; excess: number }[];
+    consumables: { material: string; unit: string; quantity: number; partial: boolean }[];
+  }[];
 }
 
 export const FORECAST_METHOD_LABELS: Record<NonNullable<AIPrediction['method']>, string> = {
@@ -692,6 +739,20 @@ export interface MaterialUsageLog {
   usedAt: string;
 }
 
+/** Earlier work on a car / model, for suggesting materials on a new job order */
+export interface VehicleHistory {
+  sameCar: {
+    id: number; jobOrderId: string; date: string | null; status: string; services: string; year?: number | string | null;
+    plateNumber?: string | null; branchName?: string | null;
+    materials: { materialId: number; name: string; quantity: number }[];
+  }[];
+  sameModelCount?: number;
+  suggestion: {
+    basedOnJobs: number; sameService: boolean; similarYear: boolean;
+    items: { materialId: number; name: string; quantity: number; usedInJobs: number; share: number }[];
+  } | null;
+}
+
 export interface JobOrderItem {
   name: string;
   quantity: number;
@@ -712,6 +773,8 @@ export interface JobOrderItem {
   category?: 'material' | 'labor' | 'expense';
   /** Worker assignment this labor line is linked to (managed by the server) */
   assignmentId?: number;
+  /** The slip's Cutter or Sewer this labor line was made for (managed by the server) */
+  slipRole?: 'cutter' | 'sewer';
   /** What the worker was actually paid for this whole line, once their assignment is completed */
   actualLaborCost?: number;
   /** Read-only, from the linked worker assignment (not stored on the order) */
@@ -885,6 +948,8 @@ export interface WorkerAssignment {
   overdueByHours?: number;
   /** The earlier unfinished task on the job order this one must wait for */
   waitingOn?: WaitingOn | null;
+  /** A sewing task whose job order's materials aren't cut yet: a warning, nothing is blocked */
+  cuttingNotDone?: string | null;
 }
 
 export interface WorkerAvailabilityEntry {
@@ -1708,6 +1773,17 @@ export const api = {
       return fetchApi<RawMaterial[]>(`/api/inventory/raw-materials?${query}`);
     },
 
+    /** Materials open job orders need more of than is in stock */
+    getNeededMaterials: (params?: { branchId?: number }) =>
+      fetchApi<NeededMaterial[]>(`/api/inventory/needed-materials${params?.branchId ? `?branchId=${params.branchId}` : ''}`),
+
+    /** A typed-in material that is really an existing one: move its job order lines there */
+    mergeMaterial: (id: number, targetId: number) =>
+      fetchApi<{ target: RawMaterial; jobOrders: string[] }>(`/api/inventory/raw-materials/${id}/merge`, {
+        method: 'POST',
+        body: JSON.stringify({ targetId }),
+      }),
+
     createRawMaterial: (material: RawMaterialInput) =>
       fetchApi<RawMaterial>('/api/inventory/raw-materials', {
         method: 'POST',
@@ -1893,6 +1969,12 @@ export const api = {
   // SALES
   // ==================
   sales: {
+    /** Earlier jobs on the same car (plate) and materials usually used on the same model (suggestions) */
+    getVehicleHistory: (params: { make?: string; model?: string; year?: string; plate?: string; services?: string; excludeId?: number }) => {
+      const q = new URLSearchParams();
+      Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== '') q.set(k, String(v)); });
+      return fetchApi<VehicleHistory>(`/api/sales/job-orders/vehicle-history?${q}`);
+    },
     // Job Orders
     getJobOrders: (params?: { status?: string; branchId?: number }) => {
       const query = new URLSearchParams();
@@ -2421,6 +2503,12 @@ export const api = {
     linkableAccounts: () => fetchApi<LinkableWorkerAccount[]>('/api/managed-workers/linkable-accounts'),
     /** The signed-in worker's own assignments */
     myWork: () => fetchApi<MyWork>('/api/my-work'),
+    /** What a worker finished in a period (Philippine dates, YYYY-MM-DD), with hours and pay */
+    workSummary: (workerId: number, start: string, end: string) =>
+      fetchApi<WorkerWorkSummary>(`/api/managed-workers/${workerId}/work-summary?start=${start}&end=${end}`),
+    /** The same, for the signed-in worker's own work */
+    myWorkSummary: (start: string, end: string) =>
+      fetchApi<WorkerWorkSummary>(`/api/my-work/summary?start=${start}&end=${end}`),
     /** Extra material issued under workers' names (filter by worker and/or job order) */
     extraMaterials: (params: { workerId?: number; jobOrderId?: number } = {}) => {
       const q = new URLSearchParams();
@@ -2451,7 +2539,7 @@ export const api = {
         `/api/worker-assignments/calendar?month=${params.month}${params.workerId ? `&workerId=${params.workerId}` : ''}`
       ),
     create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string; scheduledDate?: string; assignmentType?: string; specialTaskTitle?: string; rework?: boolean; reworkReason?: string; another?: boolean }) =>
-      fetchApi<{ assignment: WorkerAssignment }>('/api/worker-assignments', {
+      fetchApi<{ assignment: WorkerAssignment; warning?: string | null }>('/api/worker-assignments', {
         method: 'POST',
         body: JSON.stringify(data),
       }),

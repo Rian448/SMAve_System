@@ -350,7 +350,7 @@ export default function SalesPage() {
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-600">{formatDate(order.createdAt)}</td>
                           <td className="px-4 py-3">
-                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadge(order.displayStatus)}`}>
+                            <span className={`inline-block px-2 py-1 text-xs font-medium rounded-full whitespace-nowrap ${getStatusBadge(order.displayStatus)}`}>
                               {order.displayStatus.replace('_', ' ').toUpperCase()}
                             </span>
                           </td>
@@ -447,7 +447,7 @@ export default function SalesPage() {
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-600">{formatDate(order.createdAt)}</td>
                           <td className="px-4 py-3">
-                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadge(order.displayStatus)}`}>
+                            <span className={`inline-block px-2 py-1 text-xs font-medium rounded-full whitespace-nowrap ${getStatusBadge(order.displayStatus)}`}>
                               {order.displayStatus.replace('_', ' ').toUpperCase()}
                             </span>
                           </td>
@@ -535,7 +535,7 @@ export default function SalesPage() {
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-600">{formatDate(order.createdAt)}</td>
                           <td className="px-4 py-3">
-                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadge(order.displayStatus)}`}>
+                            <span className={`inline-block px-2 py-1 text-xs font-medium rounded-full whitespace-nowrap ${getStatusBadge(order.displayStatus)}`}>
                               {order.displayStatus.replace('_', ' ').toUpperCase()}
                             </span>
                           </td>

@@ -3,7 +3,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/context/AuthContext';
 import { usePathname } from 'next/navigation';
-import { homePath, pagePermissions } from '@/lib/permissions';
+import { homePath, pageDisabled, pagePermissions } from '@/lib/permissions';
 import Navigation from './Navigation';
 import ChatBubble from './ChatBubble';
 
@@ -24,7 +24,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
 
   // A signed-in user opening a page their permissions don't cover (e.g. from an old link)
   const required = pagePermissions(pathname);
-  const denied = isAuthenticated && !isLoading && required !== null && !can(...required);
+  const denied = isAuthenticated && !isLoading && (pageDisabled(pathname) || (required !== null && !can(...required)));
 
   return (
     <div className="flex min-h-screen bg-gray-50">

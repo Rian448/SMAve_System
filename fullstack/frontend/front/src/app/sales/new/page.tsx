@@ -11,7 +11,9 @@ import {
 import Combobox from '@/components/Combobox';
 import MaterialPicker from '@/components/MaterialPicker';
 import LengthInput from '@/components/LengthInput';
+import { useConfirm } from '@/components/ConfirmDialog';
 import { formatLength } from '@/lib/length';
+import type { VehicleHistory } from '@/lib/api';
 import PremadeItemPicker from '@/components/PremadeItemPicker';
 import { useVatRate } from '@/lib/useVatRate';
 import { useFieldErrors, FieldError, emailProblem, phoneProblem, cleanPhoneInput, PHONE_DIGITS } from '@/lib/useFieldErrors';
@@ -91,6 +93,21 @@ export default function NewJobOrderPage() {
   );
 }
 
+/** How alike two names are, 0 to 1 (1 - edit distance / longer length): catches typos */
+function similarity(a: string, b: string): number {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return 1 - prev[b.length] / Math.max(a.length, b.length);
+}
+
 function NewJobOrderForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -112,6 +129,7 @@ function NewJobOrderForm() {
   const [error, setError] = useState('');
   // Problems with a specific field are shown next to it; `error` is for the rest
   const fe = useFieldErrors();
+  const { confirm, confirmDialog } = useConfirm();
   // ?premadeDraftId=… : editing a saved premade draft (no stock is taken until it is confirmed)
   const premadeDraftParam = searchParams.get('premadeDraftId');
   const editingPremadeDraftId = premadeDraftParam ? Number(premadeDraftParam) : null;
@@ -206,7 +224,8 @@ function NewJobOrderForm() {
   const [linkedCustomerDiscount, setLinkedCustomerDiscount] = useState<number | null>(null);
   const [orderDiscount, setOrderDiscount] = useState<string>('');  // editable per-order discount %
   // Prices include VAT by default; untick for a sale without VAT
-  const [vatOn, setVatOn] = useState(true);
+  // The price always includes VAT (no longer a choice on the form)
+  const vatOn = true;
   const vatRate = useVatRate();
   const [customerSuggestions, setCustomerSuggestions] = useState<Customer[]>([]);
   const [searchingCustomer, setSearchingCustomer] = useState(false);
@@ -443,6 +462,44 @@ function NewJobOrderForm() {
     setMaterials((prev) => prev.filter((m) => m.id !== id));
   };
 
+  /** Step 2 services whose chosen material is this Materials line */
+  const servicesUsingMaterial = (line: MaterialItem): string[] => {
+    const norm = (v: string) => v.split(/\s+/).filter(Boolean).join(' ').toLowerCase();
+    const inv = line.materialSource === 'inventory' && line.materialId
+      ? inventoryMaterials.find((i) => i.id === Number(line.materialId)) : undefined;
+    const names = inv
+      ? [norm([inv.materialType, inv.color, inv.pattern].map((v) => (v || '').trim()).filter(Boolean).join(' - ')), norm(inv.materialType)]
+      : [norm(line.name)];
+    return ([
+      ['flooring', 'Flooring', flooring], ['reupholstery', 'Reupholstery', reupholstery], ['ceiling', 'Ceiling', ceiling],
+      ['sidings', 'Sidings', sidings], ['seatCovers', 'Seat Covers', seatCovers],
+    ] as [string, string, { selected: boolean; material: string }][])
+      .filter(([key, , s]) => {
+        if (!s.selected || !s.material.trim()) return false;
+        if (serviceLinesRef.current.get(key)?.lineId === line.id) return true;
+        const wanted = norm(s.material);
+        return names.some((n) => n && n === wanted);
+      })
+      .map(([, label]) => label);
+  };
+
+  /** Removing a line a Step 2 service is using asks first */
+  const confirmRemoveMaterial = async (line: MaterialItem) => {
+    const services = servicesUsingMaterial(line);
+    if (services.length) {
+      const name = line.name.trim() || 'This material';
+      const ok = await confirm({
+        title: 'Remove a material used by a service?',
+        message: <><span className="font-medium text-gray-900">{name}</span> was chosen in Step 2 (Service) for {services.join(', ')}.</>,
+        warning: 'Removing it here leaves the service without this material on the job order. To change the service material, go back to Step 2.',
+        confirmLabel: 'Remove anyway',
+        variant: 'warning',
+      });
+      if (!ok) return;
+    }
+    removeMaterial(line.id);
+  };
+
   const updateMaterial = (id: string, field: keyof MaterialItem, value: string | number | '') => {
     setMaterials((prev) =>
       prev.map((m) => {
@@ -461,6 +518,38 @@ function NewJobOrderForm() {
         return updated;
       })
     );
+  };
+
+  /** Short of stock or not in Inventory: shown under the line. Saving is never
+   *  blocked; Inventory lists these under "Needed for job orders" to be ordered. */
+  const materialLineNote = (m: MaterialItem): { kind: 'short' | 'typed'; text: string; similar: RawMaterial[] } | null => {
+    if (m.materialSource === 'inventory') {
+      const inv = m.materialId ? inventoryMaterials.find((i) => i.id === Number(m.materialId)) : undefined;
+      if (!inv || inv.isConsumable) return null;
+      const want = Number(m.quantity) || 0;
+      const stock = Math.max(Number(inv.stockQuantity) || 0, 0);
+      if (want <= stock + 0.0001) return null;
+      return {
+        kind: 'short', similar: [],
+        text: stock <= 0
+          ? `Out of stock: ${formatLength(want)} needed.`
+          : `Not enough stock: ${formatLength(stock)} in stock, ${formatLength(want - stock)} short.`,
+      };
+    }
+    const name = m.name.trim();
+    if (!name) return null;
+    const key = (v: string) => v.toLowerCase().replace(/-/g, ' ').split(/\s+/).filter(Boolean).join(' ');
+    const usable = inventoryMaterials.filter((i) => !i.isArchived);
+    // The same name as an Inventory material is linked to it when saved
+    if (usable.some((i) => key(i.materialType) === key(name))) return null;
+    const label = (i: RawMaterial) => [i.materialType, i.color, i.pattern].filter(Boolean).join(' - ');
+    const similar = usable
+      .map((i) => ({ i, score: Math.max(similarity(key(name), key(label(i))), similarity(key(name), key(i.materialType))) }))
+      .filter((x) => x.score >= 0.75 && !(x.i.status === 'needed' && x.i.stockQuantity <= 0))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .map((x) => x.i);
+    return { kind: 'typed', similar, text: 'Not in Inventory: it is added with no stock when the job order is saved.' };
   };
 
   // A draft keeps every line, even one that sold out since it was saved: it is
@@ -620,6 +709,50 @@ function NewJobOrderForm() {
     return {};
   };
 
+  // ── Earlier work on this car / model: suggestions for the Materials step ──
+  const [vehicleHistory, setVehicleHistory] = useState<VehicleHistory | null>(null);
+  const [historyDismissed, setHistoryDismissed] = useState(false);
+  const [historyApplied, setHistoryApplied] = useState('');
+  const historyServices = [
+    flooring.selected && 'flooring', reupholstery.selected && 'reupholstery', ceiling.selected && 'ceiling',
+    sidings.selected && 'sidings', seatCovers.selected && 'seat_covers', otherServices.selected && 'other',
+  ].filter(Boolean).join(', ');
+  useEffect(() => {
+    if (orderType !== 'normal' || step < 3 || skipVehicle) { setVehicleHistory(null); return; }
+    const make = vehicleMake.trim(), model = vehicleModel.trim(), plate = vehiclePlate.trim();
+    if (!(make && model) && plate.replace(/[^A-Za-z0-9]/g, '').length < 4) { setVehicleHistory(null); return; }
+    const timer = setTimeout(() => {
+      api.sales.getVehicleHistory({
+        make, model, year: vehicleYear, plate, services: historyServices,
+        ...(editingDraftId ? { excludeId: editingDraftId } : {}),
+      }).then((res) => setVehicleHistory(res.data || null)).catch(() => setVehicleHistory(null));
+    }, 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderType, step >= 3, skipVehicle, vehicleMake, vehicleModel, vehicleYear, vehiclePlate, historyServices]);
+
+  /** Put suggested materials on the Materials step: a line already there gets the
+   *  suggested amount, others are added. Nothing else is removed; staff can still edit. */
+  const applySuggestion = (items: { materialId: number; name: string; quantity: number }[], from: string) => {
+    let next = [...materials];
+    const skipped: string[] = [];
+    for (const it of items) {
+      const inv = inventoryMaterials.find((x) => x.id === it.materialId && !x.isArchived);
+      if (!inv) { skipped.push(it.name); continue; }
+      const existing = next.find((x) => Number(x.materialId) === inv.id);
+      if (existing) {
+        next = next.map((x) => (x.id === existing.id ? { ...x, quantity: it.quantity } : x));
+      } else {
+        materialIdRef.current += 1;
+        next.push({ id: `mat-${materialIdRef.current}`, materialSource: 'inventory', materialId: inv.id,
+          name: inv.materialType, quantity: it.quantity, unitPrice: inv.unitPrice ?? 0 });
+      }
+    }
+    setMaterials(next);
+    setHistoryApplied(`Added from ${from}.${skipped.length ? ` Not in stock here any more: ${skipped.join(', ')}.` : ''}`);
+  };
+  const inStockHere = (id: number) => inventoryMaterials.some((x) => x.id === id && !x.isArchived && x.stockQuantity > 0);
+
   // Lines on the Materials step that came from a service card's material, by service,
   // so changing or clearing that material replaces or removes its line (once)
   const serviceLinesRef = useRef<Map<string, { lineId: string | null; label: string }>>(new Map());
@@ -752,7 +885,6 @@ function NewJobOrderForm() {
         if (d.branchId) setOrderBranchId(d.branchId);
         setExistingNumber(d.jobOrderId || '');
         if (d.discountPercent != null) setOrderDiscount(String(d.discountPercent));
-        setVatOn(Number(d.vatPercent) > 0);
         // Restore the price (it used to be lost when reopening a draft)
         // As a VAT-inclusive price, so saving keeps the draft's total (older drafts too)
         if (Number(d.totalPrice) > 0) {
@@ -1107,9 +1239,10 @@ function NewJobOrderForm() {
 
     const estimatedCompletion = estimatedCompletionDate || new Date().toISOString().slice(0, 10);
 
-    const hasSlipData = slipRows.some((r) => r.description || r.hr) ||
+    // Nothing typed on the slip is kept for a reupholstery-only job (the slip isn't shown)
+    const hasSlipData = !reupholsteryOnly && (slipRows.some((r) => r.description || r.hr) ||
       materialCenter || materialSides || materialBack ||
-      dStitch || piping || pockets || logo || specification || cutterName || sewerName;
+      dStitch || piping || pockets || logo || specification || cutterName || sewerName);
 
     const slipData = hasSlipData ? buildSlipData() : { serviceDetails: serviceDetails() };
 
@@ -1684,6 +1817,26 @@ function NewJobOrderForm() {
                   className={inputCls} placeholder="ABC 1234" />
               </div>
             </div>
+            {vehicleHistory && vehicleHistory.sameCar.length > 0 && (
+              <div className="mt-4 rounded-xl border border-[#c7d2f5] bg-[#eef1fb] px-4 py-3 text-sm text-[#011c72]">
+                <p className="font-semibold">This car was done before</p>
+                <ul className="mt-1 space-y-0.5">
+                  {vehicleHistory.sameCar.map((j) => (
+                    <li key={j.id}>
+                      <a href={`/sales/${j.id}`} target="_blank" rel="noreferrer" className="font-mono hover:underline">{j.jobOrderId}</a>
+                      {' · '}{j.services.replace(/_/g, ' ')}{j.date ? ` · ${formatDate(j.date)}` : ''}{j.branchName ? ` · ${j.branchName}` : ''}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-1 text-xs text-[#011c72]/80">Its materials are suggested on the Materials step.</p>
+              </div>
+            )}
+            {vehicleHistory && vehicleHistory.sameCar.length === 0 && (vehicleHistory.sameModelCount || 0) > 0 && (
+              <p className="mt-4 text-sm text-gray-600">
+                {vehicleMake} {vehicleModel}: done {vehicleHistory.sameModelCount} time{vehicleHistory.sameModelCount === 1 ? '' : 's'} before.
+                Usual materials are suggested on the Materials step.
+              </p>
+            )}
           </div>
         );
 
@@ -1891,10 +2044,14 @@ function NewJobOrderForm() {
           <div className="space-y-6">
             <div>
               <h3 className="text-xl font-bold text-gray-900">Material Breakdown</h3>
-              <p className="text-sm text-gray-500 mt-1">Fill in the job order slip details and add materials</p>
+              <p className="text-sm text-gray-500 mt-1">
+                {reupholsteryOnly ? 'Add the materials for the reupholstery' : 'Fill in the job order slip details and add materials'}
+              </p>
             </div>
 
-            {/* Job Order Slip Fields */}
+            {/* Job Order Slip Fields: the seat-row slip is for vehicle work, so not
+                shown when Reupholstery is the only service */}
+            {!reupholsteryOnly && (
             <div className="bg-gray-50 rounded-xl border border-gray-200 p-5 space-y-5">
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Job Order Slip Details</p>
 
@@ -1904,42 +2061,21 @@ function NewJobOrderForm() {
                 <SeatRowsEditor rows={slipRows} onChange={setSlipRows} />
               </div>
 
-              {/* Material Descriptions */}
-              <div>
-                <p className="text-sm font-medium text-gray-700 mb-3">Material Description</p>
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">CENTER</label>
-                    <input type="text" value={materialCenter} onChange={(e) => setMaterialCenter(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">SIDES</label>
-                    <input type="text" value={materialSides} onChange={(e) => setMaterialSides(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">BACK</label>
-                    <input type="text" value={materialBack} onChange={(e) => setMaterialBack(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
-                  </div>
+              {/* Pockets (a count) and whether the job has a logo */}
+              <div className="grid grid-cols-2 gap-3 items-end">
+                <div>
+                  <label htmlFor="slip-pockets" className="block text-xs text-gray-500 mb-1">POCKETS</label>
+                  <input id="slip-pockets" type="text" inputMode="numeric" value={pockets}
+                    onChange={(e) => setPockets(e.target.value.replace(/\D/g, '').slice(0, 3))}
+                    placeholder="0"
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
                 </div>
-              </div>
-
-              {/* Details Row */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                {[
-                  { label: 'D.STITCH', value: dStitch, set: setDStitch },
-                  { label: 'PIPING', value: piping, set: setPiping },
-                  { label: 'POCKETS', value: pockets, set: setPockets },
-                  { label: 'LOGO', value: logo, set: setLogo },
-                ].map(({ label, value, set }) => (
-                  <div key={label}>
-                    <label className="block text-xs text-gray-500 mb-1">{label}</label>
-                    <input type="text" value={value} onChange={(e) => set(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
-                  </div>
-                ))}
+                <label className="inline-flex items-center gap-2 py-2 text-sm text-gray-700 cursor-pointer select-none">
+                  <input type="checkbox" checked={!!logo && logo.toLowerCase() !== 'no'}
+                    onChange={(e) => setLogo(e.target.checked ? 'Yes' : '')}
+                    className="w-4 h-4 rounded border-gray-300 text-[#011c72]" />
+                  LOGO
+                </label>
               </div>
 
               {/* Specification */}
@@ -1969,9 +2105,13 @@ function NewJobOrderForm() {
                       </div>
                     );
                   })}
+                  <p className="col-span-2 text-xs text-gray-400 -mt-1">
+                    The cutter and sewer picked here get the Cutting and Sewing tasks for this job order.
+                  </p>
                 </div>
               )}
             </div>
+            )}
 
             {/* Material Items List */}
             <div>
@@ -1989,6 +2129,62 @@ function NewJobOrderForm() {
                 </button>
               </div>
 
+              {/* Suggestions from earlier jobs on this car / model (nothing changes until applied) */}
+              {vehicleHistory && !historyDismissed && (vehicleHistory.sameCar.some((j) => j.materials.length) || vehicleHistory.suggestion) && (
+                <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="text-sm font-semibold text-amber-900">Suggested materials from earlier jobs</p>
+                    <button type="button" onClick={() => setHistoryDismissed(true)} className="text-xs text-amber-800 hover:underline shrink-0">Hide</button>
+                  </div>
+                  {(() => {
+                    const last = vehicleHistory.sameCar.find((j) => j.materials.length);
+                    if (!last) return null;
+                    return (
+                      <div className="text-sm">
+                        <p className="text-amber-900">
+                          <b>Same car</b> ({last.plateNumber || vehiclePlate}) — <span className="font-mono">{last.jobOrderId}</span>
+                          {last.date ? `, ${formatDate(last.date)}` : ''}, actually used:
+                        </p>
+                        <ul className="mt-1 text-amber-900">
+                          {last.materials.map((it) => (
+                            <li key={it.materialId}>
+                              {formatLength(it.quantity)} {it.name}
+                              {!inStockHere(it.materialId) && <span className="text-red-700"> (not in stock here)</span>}
+                            </li>
+                          ))}
+                        </ul>
+                        <button type="button" onClick={() => applySuggestion(last.materials, last.jobOrderId)}
+                          className="mt-2 px-3 py-1.5 rounded-lg bg-[#011c72] hover:bg-[#01268c] text-white text-xs font-medium">
+                          Use same as last time
+                        </button>
+                      </div>
+                    );
+                  })()}
+                  {vehicleHistory.suggestion && (
+                    <div className="text-sm border-t border-amber-200 pt-3 first:border-0 first:pt-0">
+                      <p className="text-amber-900">
+                        <b>{vehicleMake} {vehicleModel}</b> usually takes (from {vehicleHistory.suggestion.basedOnJobs} earlier job{vehicleHistory.suggestion.basedOnJobs === 1 ? '' : 's'}
+                        {vehicleHistory.suggestion.sameService ? ', same service' : ''}{vehicleHistory.suggestion.similarYear ? ', similar year' : ''}):
+                      </p>
+                      <ul className="mt-1 text-amber-900">
+                        {vehicleHistory.suggestion.items.map((it) => (
+                          <li key={it.materialId}>
+                            {formatLength(it.quantity)} {it.name}
+                            <span className="text-amber-700 text-xs"> · used in {it.share}% of those jobs</span>
+                            {!inStockHere(it.materialId) && <span className="text-red-700"> (not in stock here)</span>}
+                          </li>
+                        ))}
+                      </ul>
+                      <button type="button" onClick={() => applySuggestion(vehicleHistory.suggestion!.items, `earlier ${vehicleMake} ${vehicleModel} jobs`)}
+                        className="mt-2 px-3 py-1.5 rounded-lg border border-[#011c72] text-[#011c72] hover:bg-white text-xs font-medium">
+                        Use suggested materials
+                      </button>
+                    </div>
+                  )}
+                  <p className="text-xs text-amber-800">Only a suggestion: amounts can be changed and lines removed below.</p>
+                  {historyApplied && <p className="text-xs font-medium text-green-700">✓ {historyApplied}</p>}
+                </div>
+              )}
               {materials.length === 0 ? (
                 <div {...fe.field('materialsList', true)}
                   className={`text-center py-6 border-2 border-dashed rounded-xl text-sm ${fe.errors.materialsList ? 'border-red-300 text-red-600' : 'border-gray-200 text-gray-400'}`}>
@@ -2036,7 +2232,7 @@ function NewJobOrderForm() {
                           className="w-full px-2 py-1.5 rounded-md border border-gray-200 bg-white text-xs text-gray-900 text-right focus:ring-1 focus:ring-[#011c72]" />
                       </div>
                       <div className="col-span-1 flex justify-end">
-                        <button type="button" onClick={() => removeMaterial(m.id)}
+                        <button type="button" onClick={() => confirmRemoveMaterial(m)}
                           className="p-1 text-red-400 hover:bg-red-100 rounded transition-colors">
                           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -2049,6 +2245,33 @@ function NewJobOrderForm() {
                         <LengthInput compact value={m.quantity} ariaLabel="Quantity"
                           onChange={(yards) => updateMaterial(m.id, 'quantity', yards)} />
                       </div>
+                      {(() => {
+                        const note = materialLineNote(m);
+                        if (!note) return null;
+                        return (
+                          <div className="col-span-12 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                            <p>
+                              <span className="font-semibold">{note.text}</span>{' '}
+                              The job order can still be saved. It will show in Inventory under
+                              &ldquo;Needed for job orders&rdquo; so it can be ordered before the workers cut.
+                            </p>
+                            {note.similar.length > 0 && (
+                              <p className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                <span>Did you mean</span>
+                                {note.similar.map((inv) => (
+                                  <button key={inv.id} type="button"
+                                    onClick={() => { updateMaterial(m.id, 'materialSource', 'inventory'); updateMaterial(m.id, 'materialId', inv.id); }}
+                                    className="rounded-full border border-amber-300 bg-white px-2 py-0.5 font-medium text-[#011c72] hover:bg-[#eef1fb]">
+                                    {[inv.materialType, inv.color, inv.pattern].filter(Boolean).join(' - ')}
+                                    <span className="font-normal text-gray-500"> ({formatLength(inv.stockQuantity)} in stock)</span>
+                                  </button>
+                                ))}
+                                <span>?</span>
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })()}
                       <FieldError message={fe.errors[`material-${m.id}`]} className="col-span-12 mt-0" />
                     </div>
                   ))}
@@ -2227,12 +2450,6 @@ function NewJobOrderForm() {
                 <FieldError message={fe.errors.discount} />
               </div>
 
-              <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
-                <input type="checkbox" checked={vatOn} onChange={(e) => setVatOn(e.target.checked)}
-                  className="w-4 h-4 rounded border-gray-300 text-[#011c72]" />
-                Price includes {vatRate}% VAT
-              </label>
-
               {estimatedTotal > 0 && (orderDiscountPct > 0 || vatPct > 0) && (
                 <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-1 text-sm">
                   <div className="flex items-center justify-between text-gray-600">
@@ -2334,6 +2551,7 @@ function NewJobOrderForm() {
 
   return (
     <div className="min-h-screen bg-gray-50">
+      {confirmDialog}
       <main className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="mb-8">
@@ -2488,7 +2706,7 @@ function NewJobOrderForm() {
               </button>
               <div className="flex items-center gap-3">
                 <button type="button" onClick={saveDraft} disabled={loading}
-                  className="inline-flex items-center gap-2.5 px-6 py-3 rounded-xl text-base font-semibold bg-white border-2 border-[#011c72] text-[#011c72] hover:bg-[#eef1fb] transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-2 sm:gap-2.5 px-3 sm:px-6 py-3 rounded-xl text-sm sm:text-base font-semibold whitespace-nowrap bg-white border-2 border-[#011c72] text-[#011c72] hover:bg-[#eef1fb] transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                   title={editingDraftId ? 'Save your changes to this draft' : 'Save this order as a draft to finish later'}>
                   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h8l4 4v10a2 2 0 01-2 2H7a2 2 0 01-2-2V5z M9 3v4h6" />

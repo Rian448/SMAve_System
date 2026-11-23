@@ -296,7 +296,8 @@ export default function SuppliersPage() {
                           {editing ? (
                             <span className="text-xs text-gray-500">Edit below</span>
                           ) : s.materials && s.materials.length > 0 ? (
-                            <div className="flex flex-wrap gap-1 max-w-64 whitespace-normal">
+                            // A minimum width, so on phones the table scrolls instead of stacking one tag per line
+                            <div className="flex flex-wrap gap-1 min-w-56 max-w-64 whitespace-normal">
                               {s.materials.slice(0, 4).map(m => (
                                 <span key={m.id} title={`${formatMaterialQty(m.stockQuantity, { isConsumable: m.unit !== 'yd', unit: m.unit })} in stock`}
                                   className="px-2 py-0.5 rounded-full bg-gray-100 text-xs text-gray-700">{m.name}</span>

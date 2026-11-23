@@ -386,7 +386,7 @@ function PaymentsContent() {
                         <Amount variant="record" value={record.amount} />
                       </td>
                       <td className="px-5 py-3.5">
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700 capitalize">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700 capitalize whitespace-nowrap">
                           {methodLabel(record.paymentMethod)}
                         </span>
                       </td>

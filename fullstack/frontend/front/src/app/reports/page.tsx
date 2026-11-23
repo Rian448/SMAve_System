@@ -894,24 +894,28 @@ function EmptyState({ message }: { message: string }) {
 }
 
 function DailyBarChart({ data, color = 'amber' }: { data: Array<{ date: string; orders: number; revenue: number }>; color?: 'amber' | 'teal' }) {
-  const maxRevenue = Math.max(...data.map(d => d.revenue), 1);
   const slice = data.length > 14 ? data.slice(data.length - 14) : data;
+  // Scaled to the days shown, so the tallest visible day fills the chart
+  const maxRevenue = Math.max(...slice.map(d => d.revenue), 1);
   const barClass = color === 'teal'
     ? 'bg-gradient-to-t from-teal-500 to-teal-400 hover:from-teal-400 hover:to-teal-300'
     : 'bg-gradient-to-t from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300';
 
   return (
-    <div className="h-48 flex items-end gap-1">
+    <div className="h-48 flex items-stretch gap-1">
       {slice.map((d, i) => {
         const h = Math.max((d.revenue / maxRevenue) * 100, d.revenue > 0 ? 4 : 0);
         return (
-          <div key={i} className="flex-1 flex flex-col items-center group relative">
-            <div
-              className={`w-full ${barClass} rounded-t transition-colors cursor-pointer`}
-              style={{ height: `${h}%`, minHeight: d.revenue > 0 ? '4px' : '0' }}
-            />
+          <div key={i} className="flex-1 min-w-0 flex flex-col items-center group relative">
+            {/* The bar area has a real height, so the bar's % height has something to be a % of */}
+            <div className="flex-1 w-full flex items-end">
+              <div
+                className={`w-full ${barClass} rounded-t transition-colors cursor-pointer`}
+                style={{ height: `${h}%`, minHeight: d.revenue > 0 ? '4px' : '0' }}
+              />
+            </div>
             {/* Tooltip */}
-            <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-gray-100 text-white text-xs rounded px-2 py-1 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
+            <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-gray-900 text-white text-xs rounded px-2 py-1 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
               <p>{formatDate(d.date)}</p>
               <p>₱{d.revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
               <p>{d.orders} orders</p>

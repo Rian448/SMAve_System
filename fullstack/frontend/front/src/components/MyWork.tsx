@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { api, PRIORITY_RANK, PRIORITY_LABELS, type MyWork as MyWorkData } from '@/lib/api';
 import { formatDate, manilaDateString } from '@/lib/dateUtils';
 import { exactPeso } from '@/lib/format';
+import WorkerWorkSummary from '@/components/WorkerWorkSummary';
 
 const peso = (n: number) =>
   exactPeso(n || 0);
@@ -116,6 +117,11 @@ export default function MyWork() {
           </div>
         </div>
       )}
+
+      <div className="mt-8 pt-6 border-t border-gray-200">
+        <h2 className="text-lg font-semibold text-gray-900 mb-3">My finished work &amp; pay</h2>
+        <WorkerWorkSummary />
+      </div>
 
       <p className="text-xs text-gray-400 mt-4">
         Tell your supervisor when you start and finish a task so your hours and pay are recorded.

@@ -1111,10 +1111,13 @@ PERMISSIONS = {
     for action, label in actions
 }
 
+# Supervisors are based at the main warehouse and oversee every branch
+# (branches.all), with full control of Purchasing like an administrator:
+# purchase orders (create, approve, receive, supplier payments) and suppliers
 _SUPERVISOR_EXCLUDED = {
-    'payments.approve_override', 'purchase_orders.approve', 'purchase_orders.pay', 'reports.audit_trail',
+    'payments.approve_override', 'reports.audit_trail',
     'workers.add', 'workers.edit', 'workers.delete', 'workers.delete_assignment',
-    'catalog.manage', 'blacklist.manage', 'branches.manage', 'branches.all', 'users.manage',
+    'catalog.manage', 'blacklist.manage', 'branches.manage', 'users.manage',
     'owner.view', 'expenses.delete',
     # Correcting stock by hand is for administrators (or whoever they give it to)
     'inventory.adjust_stock', 'premade.adjust_stock',
@@ -1195,13 +1198,16 @@ def all_branches(user):
     return has_perm(user, 'branches.all')
 
 # Roles limited to one shop. They can't be based at the warehouse.
-BRANCH_LIMITED_ROLES = ('supervisor', 'sales_manager')
+BRANCH_LIMITED_ROLES = ('sales_manager',)
+# Roles always based at the main warehouse (and never at a shop branch)
+WAREHOUSE_ROLES = ('supervisor',)
 
 def warehouse_role_error(role_key, branch):
     """Why an account with this role can't be based at this branch, or None."""
     if role_key in BRANCH_LIMITED_ROLES and branch is not None and branch.is_warehouse:
-        return ('The warehouse is run by administrators: supervisors and sales managers '
-                'must be assigned to a shop branch.')
+        return 'Sales managers must be assigned to a shop branch, not the main warehouse.'
+    if role_key in WAREHOUSE_ROLES and (branch is None or not branch.is_warehouse):
+        return "Supervisors are based at the main warehouse and can't be assigned to a shop branch."
     return None
 
 def inventory_branch_error(user, branch_id):
@@ -1315,7 +1321,7 @@ def user_to_dict(user):
         'branch': user.branch,
         'branchId': user.branch_id,
         'branchName': user.branch_rel.name if user.branch_rel else user.branch,
-        # Based at the warehouse (administrators only); grants no extra access
+        # Based at the warehouse (administrators and supervisors); grants no extra access
         'atWarehouse': bool(user.branch_rel and user.branch_rel.is_warehouse),
         'isActive': user.is_active,
         'phone': user.phone,
@@ -1399,6 +1405,24 @@ def retire_staff_role():
     except Exception as e:
         db.session.rollback()
         print(f"[migration] Retiring 'staff' role skipped: {e}")
+
+def move_supervisors_to_warehouse():
+    """Supervisors are now based at the main warehouse (and see every branch from
+    there): move any still assigned to a shop branch. Idempotent."""
+    role = Role.query.filter_by(key='supervisor').first()
+    warehouse = get_warehouse_branch()
+    if not role or not warehouse:
+        return
+    try:
+        moved = User.query.filter(User.role_id == role.id,
+                                  db.or_(User.branch_id.is_(None), User.branch_id != warehouse.id)).update(
+            {'branch_id': warehouse.id, 'branch': None}, synchronize_session=False)
+        db.session.commit()
+        if moved:
+            print(f"[migration] {moved} supervisor(s) moved to the main warehouse")
+    except Exception as e:
+        db.session.rollback()
+        print(f"[migration] Moving supervisors to the warehouse skipped: {e}")
 
 def seed_first_administrator():
     """On a brand-new database (no staff accounts at all) create one
@@ -1647,6 +1671,7 @@ def init_db():
     # Accounts: only a first administrator on a brand-new database
     seed_first_administrator()
     warn_about_demo_passwords()
+    move_supervisors_to_warehouse()  # after the warehouse exists
     normalize_premade_units()
 
     # Seed default catalog items
@@ -2756,7 +2781,8 @@ def get_alerts():
             'type': 'low_stock',
             'severity': 'warning' if (material.stock_quantity or 0) > 0 else 'critical',
             'title': f"Low Stock: {name}",
-            'description': f"Current: {float(material.stock_quantity or 0)} (Reorder at: {threshold})",
+            'description': f"Current: {format_material_qty(material.stock_quantity, material)} "
+                           f"(Reorder at: {format_material_qty(threshold, material)})",
             'itemId': material.id,
             # Lets the dashboard deep-link straight to this material in inventory.
             'itemName': material.material_type or name,
@@ -2820,13 +2846,32 @@ def material_to_dict(material):
         'unit': material_unit(material),
         # A consumable opened and partly used since it was last marked fully used
         'partialUseAt': fmt_dt(consumable_partial_since(material)) if material.is_consumable else None,
-        'lastUpdated': material.updated_at.strftime('%Y-%m-%d') if material.updated_at else None
+        'lastUpdated': material.updated_at.strftime('%Y-%m-%d') if material.updated_at else None,
+        # Full time of the last change (stock used or received, edited), for newest-first lists
+        'updatedAt': material.updated_at.isoformat() + 'Z' if material.updated_at else None
     }
 
 # Stock is kept to 4 decimals (0.0001 yd is under 0.1 mm). A length typed in feet or
 # inches (1 ft = 0.333333... yd) can land a hair over a stored amount, so limits allow
 # this much, and the amount is then capped at the limit.
 QTY_TOLERANCE = 0.0001
+
+def format_length(yards):
+    """"39 yd 2 ft 1 in", as the pages show lengths (inches to 0.1)."""
+    total_in = round(abs(float(yards or 0)) * 36, 1)
+    yd = int(total_in // 36 + 1e-9)
+    rest = round(total_in - yd * 36, 1)
+    ft = int(rest // 12 + 1e-9)
+    inches = round(rest - ft * 12, 1)
+    parts = [f'{yd} yd' if yd else '', f'{ft} ft' if ft else '', f'{inches:g} in' if inches else '']
+    text = ' '.join(p for p in parts if p) or '0 yd'
+    return ('-' if float(yards or 0) < 0 else '') + text
+
+def format_material_qty(qty, material):
+    """A quantity in the material's terms: a length for yard stock, "5 cans" for consumables."""
+    if material is not None and material.is_consumable:
+        return f'{float(qty or 0):g} {material_unit(material)}'
+    return format_length(qty)
 
 def material_unit(material):
     """'yd' for length stock; a consumable's own count unit (pcs by default)."""
@@ -3191,6 +3236,175 @@ def get_raw_materials_summary():
     summaries = [raw_material_group_to_dict(group_items, include_components=include_components) for _, group_items in grouped.items()]
     summaries.sort(key=lambda x: x['name'])
     return jsonify({'status': 'success', 'data': summaries})
+
+# ============================================
+# MATERIALS NEEDED FOR JOB ORDERS
+# ============================================
+# A job order can be saved with a material that isn't in stock (typed in, or an
+# Inventory one with too little). Nothing is blocked: these lists show what open
+# job orders still need, so it can be ordered before the workers cut.
+CLOSED_JOB_STATUSES = ('completed', 'delivered', 'cancelled', 'voided', 'draft')
+
+def _material_label(m):
+    return ' - '.join(v.strip() for v in (m.material_type, m.color, m.pattern) if v and v.strip())
+
+def _label_key(text):
+    return ' '.join(str(text or '').lower().replace('-', ' ').split())
+
+def job_order_material_needs():
+    """{material id: [{order, remaining}]}: what each open job order still has to
+    cut of each linked material (planned amount less what workers already cut)."""
+    orders = JobOrder.query.filter(~JobOrder.status.in_(CLOSED_JOB_STATUSES)).all()
+    if not orders:
+        return {}
+    refs = [o.job_order_id for o in orders]
+    cut = {}
+    for ref, mid, used in db.session.query(
+            MaterialUsageLog.used_in_reference, MaterialUsageLog.material_id,
+            db.func.sum(MaterialUsageLog.quantity_used)).filter(
+            MaterialUsageLog.used_in_type == 'job_order_cut',
+            MaterialUsageLog.used_in_reference.in_(refs)).group_by(
+            MaterialUsageLog.used_in_reference, MaterialUsageLog.material_id).all():
+        cut[(ref, mid)] = float(used or 0)
+    needs = {}
+    for order in orders:
+        if order.quote_status == 'rejected':
+            continue
+        planned = {}
+        for it in order.items or []:
+            mid = _int_or_none(it.get('materialId'))
+            if not mid or item_category(it) != 'material':
+                continue
+            qty = finite_number(it.get('quantity'), 0.0) or 0.0
+            planned[mid] = planned.get(mid, 0.0) + max(qty, 0.0)
+        for mid, qty in planned.items():
+            remaining = round(qty - cut.get((order.job_order_id, mid), 0.0), 4)
+            if remaining > QTY_TOLERANCE:
+                needs.setdefault(mid, []).append({'order': order, 'remaining': remaining})
+    return needs
+
+def similar_materials(material, allowed_branch_ids, limit=3):
+    """Existing Inventory materials whose name is close to this one (a likely typo),
+    at branches the job orders may take stock from."""
+    import difflib
+    own = _label_key(_material_label(material))
+    own_type = _label_key(material.material_type)
+    out = []
+    for m in InventoryMaterial.query.filter(
+            InventoryMaterial.id != material.id,
+            InventoryMaterial.is_archived.is_(False),
+            InventoryMaterial.branch_id.in_(list(allowed_branch_ids) or [-1])).all():
+        if (m.status or 'available') == 'needed' and float(m.stock_quantity or 0) <= QTY_TOLERANCE:
+            continue  # another typed-in placeholder, not a real material
+        label = _material_label(m)
+        score = max(difflib.SequenceMatcher(None, own, _label_key(label)).ratio(),
+                    difflib.SequenceMatcher(None, own_type, _label_key(m.material_type)).ratio())
+        if score >= 0.75:
+            out.append((score, m))
+    out.sort(key=lambda x: (-x[0], x[1].id))
+    return [{'id': m.id, 'name': _material_label(m), 'branchName': m.branch.name if m.branch else None,
+             'stock': round(float(m.stock_quantity or 0), 4), 'unit': material_unit(m)}
+            for _, m in out[:limit]]
+
+def _allowed_stock_branches(orders):
+    """Branches every one of these orders may take stock from: its own and the warehouse."""
+    warehouse_ids = {b.id for b in Branch.query.filter_by(is_warehouse=True).all()}
+    allowed = None
+    for o in orders:
+        ids = {o.branch_id} | warehouse_ids
+        allowed = ids if allowed is None else allowed & ids
+    return allowed or warehouse_ids
+
+@app.route('/api/inventory/needed-materials', methods=['GET'])
+@require_auth
+@require_permission('inventory.view')
+def get_needed_materials():
+    """Materials open job orders need more of than is in stock, with the orders
+    waiting on each. Typed-in materials also get existing ones with a similar name."""
+    branch_ids, error = inventory_read_branches(request.current_user, request.args.get('branchId'),
+                                                include_warehouse=True)
+    if error:
+        return error
+    needs = job_order_material_needs()
+    if not needs:
+        return jsonify({'status': 'success', 'data': []})
+    query = InventoryMaterial.query.filter(InventoryMaterial.id.in_(list(needs)),
+                                           InventoryMaterial.is_archived.is_(False))
+    if branch_ids is not None:
+        query = query.filter(InventoryMaterial.branch_id.in_(branch_ids or [-1]))
+    data = []
+    for m in query.all():
+        entries = needs[m.id]
+        needed = round(sum(e['remaining'] for e in entries), 4)
+        stock = round(max(float(m.stock_quantity or 0), 0.0), 4)
+        short = round(needed - stock, 4)
+        if short <= QTY_TOLERANCE:
+            continue
+        typed_in = (m.status or 'available') == 'needed'
+        orders = sorted({e['order'].id: e['order'] for e in entries}.values(), key=lambda o: o.id)
+        data.append({
+            'id': m.id, 'itemId': m.item_id or str(m.id), 'name': _material_label(m),
+            'branchId': m.branch_id, 'branchName': m.branch.name if m.branch else None,
+            'unit': material_unit(m), 'stock': stock, 'needed': needed, 'short': short,
+            'typedIn': typed_in, 'supplierId': m.supplier_id,
+            'orders': [{'id': e['order'].id, 'jobOrderId': e['order'].job_order_id,
+                        'customerName': e['order'].customer_name, 'status': e['order'].status,
+                        'quantity': e['remaining']} for e in sorted(entries, key=lambda e: e['order'].id)],
+            'similar': similar_materials(m, _allowed_stock_branches(orders)) if typed_in else [],
+        })
+    data.sort(key=lambda d: (not d['typedIn'], -d['short'], d['name'].lower()))
+    return jsonify({'status': 'success', 'data': data})
+
+@app.route('/api/inventory/raw-materials/<int:material_id>/merge', methods=['POST'])
+@require_auth
+@require_permission('inventory.edit')
+def merge_needed_material(material_id):
+    """A material typed in on a job order turned out to be an existing one (a typo):
+    move the job orders' lines onto the existing material and archive the typed-in
+    one. Only for a typed-in material nothing has been ordered, received or cut of."""
+    user = request.current_user
+    source = InventoryMaterial.query.get(material_id)
+    if not source or source.is_archived:
+        return _error('Material not found', 404)
+    error = inventory_branch_error(user, source.branch_id)
+    if error:
+        return error
+    if (source.status or 'available') != 'needed' or float(source.stock_quantity or 0) > QTY_TOLERANCE:
+        return _error('Only a material typed in on a job order, with no stock yet, can be merged')
+    if MaterialUsageLog.query.filter_by(material_id=source.id).first():
+        return _error('Stock of this material has already been used, so it can no longer be merged')
+    for po in PurchaseOrder.query.filter(PurchaseOrder.status != 'cancelled').all():
+        if any(_int_or_none(it.get('materialId')) == source.id for it in (po.items or [])):
+            return _error(f'{po.po_number} already orders this material. Cancel that purchase order first.')
+
+    target = InventoryMaterial.query.get(_int_or_none((request.get_json(silent=True) or {}).get('targetId')))
+    if not target or target.is_archived or target.id == source.id:
+        return _error('Choose the existing material to use instead')
+
+    orders = [o for o in JobOrder.query.filter(JobOrder.status.notin_(('cancelled', 'voided'))).all()
+              if any(_int_or_none(it.get('materialId')) == source.id for it in (o.items or []))]
+    allowed = _allowed_stock_branches(orders) if orders else None
+    if allowed is not None and target.branch_id not in allowed:
+        return _error(f'{_material_label(target)} is stock of another branch. Choose one from the job order\'s '
+                      f'branch or the warehouse.')
+
+    for order in orders:
+        items = [dict(it) for it in (order.items or [])]
+        for it in items:
+            if _int_or_none(it.get('materialId')) == source.id:
+                it['materialId'] = target.id
+                it['name'] = target.material_type
+        order.items = items
+        order.actual_cost = job_order_actual_cost(order, items)
+    source.is_archived = True
+    db.session.commit()
+
+    refs = ', '.join(o.job_order_id for o in orders) or 'no job orders'
+    log_action(user['id'], user['fullName'], 'UPDATE', 'Inventory',
+               f"Merged typed-in material \"{_material_label(source)}\" into \"{_material_label(target)}\" ({refs})",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': {'target': material_to_dict(target),
+                                                  'jobOrders': [o.job_order_id for o in orders]}})
 
 @app.route('/api/inventory/raw-materials/group-detail', methods=['GET'])
 @require_auth
@@ -5408,6 +5622,99 @@ def sync_labor_assignments(order, previous_items):
     order.items = items
 
 
+# The Cutter and Sewer picked on the job order slip each get a labor line (tagged
+# slipRole), so sync_labor_assignments books them like any worker on the order.
+SLIP_WORKER_ROLES = (('cutterName', 'cutter', 'Cutting'), ('sewerName', 'sewer', 'Sewing'))
+
+
+def _slip_worker(name, role):
+    """The active worker the slip names for this role (cutter / sewer), or None."""
+    name = str(name or '').strip()
+    if not name:
+        return None
+    found = ManagedWorker.query.filter(db.func.lower(ManagedWorker.name) == name.lower(),
+                                       ManagedWorker.is_active.is_(True)).all()
+    return (next((w for w in found if (w.work_type or '').lower() == role), None)
+            or (found[0] if found else None))
+
+
+def apply_slip_workers(order):
+    """Make the order's labor lines match the slip's Cutter and Sewer: add a
+    line for a newly picked worker, move a not-yet-started line to another
+    worker, and drop it when the slip no longer names one. A line whose work
+    has started is left as a record. Booking the worker (the assignment) is
+    then done by sync_labor_assignments. Returns True if the lines changed."""
+    slip = order.slip_data or {}
+    items = [dict(it) for it in (order.items or [])]
+    assignments = {a.id: a for a in _assignments_for_order(order)} if order.id else {}
+    changed = False
+    for key, role, task in SLIP_WORKER_ROLES:
+        worker = _slip_worker(slip.get(key), role)
+        line = next((it for it in items if item_category(it) == 'labor' and it.get('slipRole') == role), None)
+        if line is None and worker is not None:
+            # Its tag can be lost when the order is edited elsewhere: the same task for this worker
+            line = next((it for it in items if item_category(it) == 'labor' and not it.get('slipRole')
+                         and _int_or_none(it.get('workerId')) == worker.id
+                         and (it.get('name') or '').strip().lower() == task.lower()), None)
+        a = assignments.get(line.get('assignmentId')) if line is not None else None
+        if line is not None and a is not None and a.status != 'pending' \
+                and (worker is None or _int_or_none(line.get('workerId')) != worker.id):
+            # Work already started: keep that line as it is, as a record
+            line.pop('slipRole', None)
+            line, changed = None, True
+        if worker is None:
+            if line is not None:
+                items.remove(line)  # its pending assignment is released by the sync
+                changed = True
+            continue
+        if line is not None:
+            if _int_or_none(line.get('workerId')) != worker.id:
+                line.update({'workerId': worker.id, 'workerName': worker.name,
+                             'laborCost': float(worker.rate_per_hour or 0)})
+                changed = True
+            if line.get('slipRole') != role:
+                line['slipRole'] = role
+                changed = True
+            continue
+        items.append({
+            'category': 'labor', 'name': task, 'quantity': 1,
+            'unitPrice': 0, 'materialCost': 0, 'laborCost': float(worker.rate_per_hour or 0),
+            'workerId': worker.id, 'workerName': worker.name, 'slipRole': role,
+        })
+        changed = True
+    if changed:
+        order.items = items
+        order.estimated_cost = sum(
+            (finite_number(it.get('quantity'), 0.0) or 0.0)
+            * ((finite_number(it.get('materialCost'), 0.0) or 0.0) + (finite_number(it.get('laborCost'), 0.0) or 0.0))
+            for it in items)
+    return changed
+
+
+def clear_removed_slip_workers(order, previous_items):
+    """A Cutting / Sewing line made from the slip was deleted by hand: take that
+    name off the slip too, so the slip and the workers' tasks still agree."""
+    slip = dict(order.slip_data or {})
+    current = [it for it in (order.items or []) if item_category(it) == 'labor']
+    changed = False
+    for key, role, task in SLIP_WORKER_ROLES:
+        prev = next((it for it in previous_items or []
+                     if item_category(it) == 'labor' and it.get('slipRole') == role), None)
+        if prev is None or not slip.get(key):
+            continue
+        still_there = any(
+            it.get('slipRole') == role
+            or (prev.get('assignmentId') and it.get('assignmentId') == prev.get('assignmentId'))
+            or (_int_or_none(it.get('workerId')) == _int_or_none(prev.get('workerId'))
+                and (it.get('name') or '').strip().lower() == task.lower())
+            for it in current)
+        if not still_there:
+            slip[key] = ''
+            changed = True
+    if changed:
+        order.slip_data = slip
+
+
 def release_pending_assignments(order):
     """Free the workers booked on an order that will no longer be worked on:
     delete the assignments that never started and unlink their labor lines, so
@@ -5737,6 +6044,113 @@ def job_order_pricing(data, order=None):
         'vat_inclusive': True,
     }, None
 
+# ── Vehicle history: suggest materials from earlier jobs on the same car / model ──
+def _norm_plate(plate):
+    return re.sub(r'[^A-Z0-9]', '', str(plate or '').upper())
+
+def _norm_text(value):
+    return ' '.join(str(value or '').split()).lower()
+
+def _service_set(description):
+    """{'seat_covers', 'flooring', ...} from a job order's description ("reupholstery (sofa)" -> reupholstery)."""
+    return {part.strip().split(' (')[0] for part in str(description or '').lower().split(',') if part.strip()}
+
+def _job_materials(order):
+    """[(material id, name, quantity)] of an order's Inventory material lines, using what
+    workers recorded as used (actualQuantity) when there is one, else the planned amount."""
+    out = []
+    for it in order.items or []:
+        if item_category(it) != 'material':
+            continue
+        mid = _int_or_none(it.get('materialId'))
+        qty = it.get('actualQuantity') if it.get('actualQuantity') is not None else it.get('quantity')
+        qty = finite_number(qty, 0.0) or 0.0
+        if mid and qty > 0:
+            out.append((mid, it.get('name') or '', round(qty, 4)))
+    return out
+
+def _snap_yards(qty):
+    """Suggested lengths to the nearest foot (1/3 yd), at least one foot."""
+    return round(max(round(qty * 3), 1) / 3, 4)
+
+@app.route('/api/sales/job-orders/vehicle-history', methods=['GET'])
+@require_auth
+@require_permission('sales.add', 'sales.edit')
+def get_vehicle_history():
+    """Earlier job orders on the same car (plate) and the materials usually used for the
+    same make and model (and service), to suggest on a new job order. Suggestions only:
+    nothing is changed. ?make=&model=&year=&plate=&services=&excludeId="""
+    make, model = _norm_text(request.args.get('make')), _norm_text(request.args.get('model'))
+    plate = _norm_plate(request.args.get('plate'))
+    year = _int_or_none(request.args.get('year'))
+    services = _service_set(request.args.get('services'))
+    exclude = _int_or_none(request.args.get('excludeId'))
+    if not (make and model) and not plate:
+        return jsonify({'status': 'success', 'data': {'sameCar': [], 'suggestion': None}})
+
+    orders = (JobOrder.query.filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided')))
+              .order_by(JobOrder.created_at.desc()).limit(3000).all())
+    same_car, same_model = [], []
+    for o in orders:
+        if o.id == exclude:
+            continue
+        v = o.vehicle_info or {}
+        if plate and len(plate) >= 4 and _norm_plate(v.get('plateNumber')) == plate:
+            same_car.append(o)
+        if make and model and _norm_text(v.get('make')) == make and _norm_text(v.get('model')) == model:
+            same_model.append(o)
+
+    names = {m.id: m for m in InventoryMaterial.query.filter(InventoryMaterial.id.in_(
+        {mid for o in same_car + same_model for mid, _, _ in _job_materials(o)} or {-1})).all()}
+    label = lambda mid, fallback: (' - '.join(filter(None, [names[mid].material_type, names[mid].color, names[mid].pattern]))
+                                   if mid in names else fallback)
+
+    def car_entry(o):
+        v = o.vehicle_info or {}
+        return {'id': o.id, 'jobOrderId': o.job_order_id, 'date': fmt_dt(o.created_at), 'status': o.status,
+                'services': o.description, 'year': v.get('year'), 'plateNumber': v.get('plateNumber'),
+                'branchName': o.branch.name if o.branch else None,
+                'materials': [{'materialId': mid, 'name': label(mid, name), 'quantity': qty}
+                              for mid, name, qty in _job_materials(o)]}
+
+    # Same model: the jobs closest to this one (same service, similar year) when there are enough
+    pool = same_model
+    narrowed = {'service': False, 'year': False}
+    if services:
+        same_service = [o for o in pool if _service_set(o.description) == services]
+        if len(same_service) >= 2:
+            pool, narrowed['service'] = same_service, True
+    if year:
+        near_year = [o for o in pool if abs((_int_or_none((o.vehicle_info or {}).get('year')) or year) - year) <= 3]
+        if len(near_year) >= 2:
+            pool, narrowed['year'] = near_year, True
+    with_materials = [o for o in pool if _job_materials(o)]
+
+    suggestion = None
+    if with_materials:
+        seen = {}
+        for o in with_materials:
+            for mid, name, qty in _job_materials(o):
+                seen.setdefault(mid, {'name': label(mid, name), 'quantities': []})['quantities'].append(qty)
+        total = len(with_materials)
+        ranked = sorted(seen.items(), key=lambda kv: -len(kv[1]['quantities']))
+        # Materials used on at least a quarter of these jobs (the most common one always)
+        picked = [kv for i, kv in enumerate(ranked) if i == 0 or len(kv[1]['quantities']) / total >= 0.25][:4]
+        items = []
+        for mid, info in picked:
+            q = sorted(info['quantities'])
+            median = q[len(q) // 2] if len(q) % 2 else (q[len(q) // 2 - 1] + q[len(q) // 2]) / 2
+            items.append({'materialId': mid, 'name': info['name'], 'quantity': _snap_yards(median),
+                          'usedInJobs': len(q), 'share': round(len(q) / total * 100)})
+        suggestion = {'basedOnJobs': total, 'sameService': narrowed['service'], 'similarYear': narrowed['year'],
+                      'items': items}
+
+    return jsonify({'status': 'success', 'data': {
+        'sameCar': [car_entry(o) for o in same_car[:5]],
+        'sameModelCount': len(same_model),
+        'suggestion': suggestion,
+    }})
+
 @app.route('/api/sales/job-orders', methods=['POST'])
 @require_auth
 @require_permission('sales.add')
@@ -5889,6 +6303,9 @@ def create_job_order():
         # Two saves picked the same number at the same moment
         db.session.rollback()
         return jsonify({'status': 'error', 'message': clash_message, 'code': 'order_number'}), 409
+    # The slip's Cutter and Sewer become labor lines, booked with the rest
+    if sees_labor_cost(request.current_user):
+        apply_slip_workers(new_order)
     if not is_draft:
         sync_labor_assignments(new_order, [])
     new_order.actual_cost = job_order_cost(new_order.items)
@@ -6378,6 +6795,10 @@ def update_job_order(order_id):
         # cancelled/voided orders no longer need anyone.
         if order.status not in ('draft', 'cancelled', 'voided'):
             sync_labor_assignments(order, previous_items)
+        # A slip Cutter / Sewer line deleted here clears that name on the slip
+        # (unless this same save sends the slip, which then decides)
+        if 'slipData' not in data:
+            clear_removed_slip_workers(order, previous_items)
         apply_cut_quantities(order)
         order.actual_cost = job_order_actual_cost(order)
     elif prev_status == 'draft' and order.status not in ('draft', 'cancelled', 'voided'):
@@ -6401,6 +6822,14 @@ def update_job_order(order_id):
         if 'serviceDetails' not in slip and (order.slip_data or {}).get('serviceDetails'):
             slip['serviceDetails'] = order.slip_data['serviceDetails']
         order.slip_data = slip
+        # The slip's Cutter and Sewer are workers on the order: keep their labor
+        # lines (and so their tasks) in step with it
+        if sees_labor_cost(user):
+            before = list(order.items or [])
+            if apply_slip_workers(order):
+                if order.status not in ('draft', 'cancelled', 'voided'):
+                    sync_labor_assignments(order, before)
+                order.actual_cost = job_order_actual_cost(order)
 
     # A new price changes what is still owed
     if pricing:
@@ -7177,8 +7606,10 @@ def purchase_order_remaining_by_line(po, receipts=None):
     """Still to be received per line: ordered minus delivered, plus what was
     returned for the supplier to replace."""
     q = purchase_order_line_quantities(po, receipts)
-    return [max(float(it.get('quantity') or 0) - q['delivered'][i] + q['replace'][i], 0.0)
+    left = [max(float(it.get('quantity') or 0) - q['delivered'][i] + q['replace'][i], 0.0)
             for i, it in enumerate(po.items or [])]
+    # A rounding leftover (e.g. 1 ft ordered as 0.333333 yd, received as 0.3333) is nothing left
+    return [0.0 if r < QTY_TOLERANCE else r for r in left]
 
 
 def purchase_order_receiving_status(po, received=None):
@@ -11418,6 +11849,12 @@ def create_user():
     # Handle branch - support both branchId and branch (string)
     branch_id = data.get('branchId')
     branch_name = data.get('branch')
+    if role.key in WAREHOUSE_ROLES:
+        # Supervisors are always based at the main warehouse, whatever was sent
+        warehouse = get_warehouse_branch()
+        if not warehouse:
+            return jsonify({'status': 'error', 'message': 'Set up the main warehouse before adding a supervisor.'}), 400
+        branch_id, branch_name = warehouse.id, None
 
     if branch_id:
         branch = Branch.query.get(branch_id)
@@ -11548,6 +11985,11 @@ def update_user(user_id):
             prune_redundant_overrides(user.id, role.key)
     if 'branchId' in data or 'role' in data:
         role_after = Role.query.get(user.role_id) if user.role_id else None
+        if role_after and role_after.key in WAREHOUSE_ROLES:
+            # Supervisors are always based at the main warehouse
+            warehouse = get_warehouse_branch()
+            if warehouse:
+                user.branch_id = warehouse.id
         error = warehouse_role_error(role_after.key if role_after else None,
                                      Branch.query.get(user.branch_id) if user.branch_id else None)
         if error:
@@ -12175,8 +12617,13 @@ def update_branch(branch_id):
         if data['isWarehouse'] and not branch.is_warehouse and User.query.join(Role).filter(
                 User.branch_id == branch.id, Role.key.in_(BRANCH_LIMITED_ROLES)).first():
             db.session.rollback()
-            return jsonify({'status': 'error', 'message': 'Move this branch\'s supervisors and sales managers '
-                                                          'to a shop branch before making it the warehouse.'}), 400
+            return jsonify({'status': 'error', 'message': "Move this branch's sales managers "
+                                                          'to another shop branch before making it the warehouse.'}), 400
+        if not data['isWarehouse'] and branch.is_warehouse and User.query.join(Role).filter(
+                User.branch_id == branch.id, Role.key.in_(WAREHOUSE_ROLES)).first():
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': 'Supervisors are based here. Mark another location as '
+                                                          'the warehouse and move them there first.'}), 400
         branch.is_warehouse = data['isWarehouse']
     if 'isActive' in data and bool(data['isActive']) != bool(branch.is_active):
         branch.is_active = bool(data['isActive'])
@@ -12507,6 +12954,134 @@ def get_my_work():
         } for a in rows],
     }})
 
+def worker_work_summary(worker, in_branch=None, show_pay=True):
+    """What a worker finished between ?start= and ?end= (YYYY-MM-DD, Philippine
+    dates; both default to today): each task with its job order, hours, pay and
+    the material cut / left over / consumables, plus totals and a per-day breakdown.
+    Returns (payload, None) or (None, error response)."""
+    today = manila_today()
+    try:
+        start = datetime.strptime(request.args.get('start') or today.isoformat(), '%Y-%m-%d').date()
+        end = datetime.strptime(request.args.get('end') or today.isoformat(), '%Y-%m-%d').date()
+    except ValueError:
+        return None, (jsonify({'status': 'error', 'message': 'Dates must be YYYY-MM-DD'}), 400)
+    if end < start:
+        start, end = end, start
+    if (end - start).days > 400:
+        return None, (jsonify({'status': 'error', 'message': 'Choose a period of at most a year'}), 400)
+    # end_time is stored in UTC: the Philippine day starts 8 hours earlier
+    lo = datetime.combine(start, datetime.min.time()) - PH_OFFSET
+    hi = datetime.combine(end + timedelta(days=1), datetime.min.time()) - PH_OFFSET
+    done = (WorkerAssignment.query.filter(WorkerAssignment.worker_id == worker.id,
+                                          WorkerAssignment.status == 'completed',
+                                          WorkerAssignment.end_time >= lo, WorkerAssignment.end_time < hi)
+            .order_by(WorkerAssignment.end_time).all())
+    if in_branch:
+        done = [a for a in done if in_branch(a)]
+    ids = [a.id for a in done] or [-1]
+    order_ids = {a.job_order_db_id for a in done if a.job_order_db_id}
+    orders = {o.id: o for o in JobOrder.query.filter(JobOrder.id.in_(order_ids))} if order_ids else {}
+
+    def mat_name(mat):
+        return ' - '.join(filter(None, [mat.material_type, mat.color])) if mat else 'Removed material'
+
+    cuts, extras = defaultdict(dict), defaultdict(list)
+    for log in MaterialUsageLog.query.filter(MaterialUsageLog.worker_assignment_id.in_(ids)).all():
+        if log.used_in_type == 'job_order_cut':
+            row = cuts[log.worker_assignment_id].setdefault(log.material_id, {
+                'material': mat_name(log.material), 'unit': material_unit(log.material) if log.material else 'yd',
+                'used': 0.0, 'excess': 0.0})
+            row['used'] += float(log.quantity_used or 0)
+        elif log.used_in_type in ('consumable', 'consumable_partial'):
+            extras[log.worker_assignment_id].append({
+                'material': mat_name(log.material), 'unit': material_unit(log.material) if log.material else 'pcs',
+                'quantity': float(log.quantity_used or 0), 'partial': log.used_in_type == 'consumable_partial'})
+    for w in MaterialWasteLog.query.filter(MaterialWasteLog.worker_assignment_id.in_(ids),
+                                           MaterialWasteLog.reason == CUT_EXCESS_REASON).all():
+        mat = InventoryMaterial.query.get(w.material_id)
+        row = cuts[w.worker_assignment_id].setdefault(w.material_id, {
+            'material': mat_name(mat), 'unit': material_unit(mat) if mat else 'yd', 'used': 0.0, 'excess': 0.0})
+        row['excess'] += float(w.quantity or 0)
+
+    tasks, days = [], {}
+    for a in done:
+        o = orders.get(a.job_order_db_id)
+        day = (a.end_time + PH_OFFSET).date().isoformat()
+        pay = float(a.pay or 0)
+        hours = float(a.hours_worked or 0)
+        task_cuts = [{**c, 'used': round(c['used'], 4), 'excess': round(c['excess'], 4)}
+                     for c in cuts.get(a.id, {}).values()]
+        tasks.append({
+            'id': a.id, 'date': day, 'finishedAt': fmt_dt(a.end_time),
+            'jobOrderRef': a.special_task_title if a.assignment_type == 'special_task' else a.job_order_ref,
+            'jobOrderDbId': a.job_order_db_id, 'task': a.description,
+            'customerName': o.customer_name if o else None,
+            'vehicle': ' '.join(filter(None, [(o.vehicle_info or {}).get('make'), (o.vehicle_info or {}).get('model')]))
+                       if o and isinstance(o.vehicle_info, dict) else None,
+            'branchName': o.branch.name if o and o.branch else None,
+            'hours': hours, 'pay': pay, 'payOverridden': a.pay_override is not None,
+            'cuts': task_cuts, 'consumables': extras.get(a.id, []),
+        })
+        d = days.setdefault(day, {'date': day, 'tasks': 0, 'hours': 0.0, 'pay': 0.0})
+        d['tasks'] += 1
+        d['hours'] += hours
+        d['pay'] += pay
+
+    yards_used = sum(c['used'] for t in tasks for c in t['cuts'] if c['unit'] == 'yd')
+    yards_excess = sum(c['excess'] for t in tasks for c in t['cuts'] if c['unit'] == 'yd')
+    open_q = WorkerAssignment.query.filter(WorkerAssignment.worker_id == worker.id,
+                                           WorkerAssignment.status != 'completed').all()
+    if in_branch:
+        open_q = [a for a in open_q if in_branch(a)]
+    total_pay = money(sum(t['pay'] for t in tasks))
+    if not show_pay:  # pay is payroll: only for those who see labor cost
+        for row in tasks + list(days.values()):
+            row['pay'] = None
+        total_pay = None
+    return {
+        'worker': managed_worker_to_dict(worker),
+        'start': start.isoformat(), 'end': end.isoformat(),
+        'totals': {
+            'tasks': len(tasks),
+            'jobOrders': len({t['jobOrderRef'] for t in tasks}),
+            'hours': round(sum(t['hours'] for t in tasks), 2),
+            'pay': total_pay,
+            'yardsUsed': round(yards_used, 2), 'yardsExcess': round(yards_excess, 2),
+            'openTasks': len(open_q),
+        },
+        'days': [{**d, 'hours': round(d['hours'], 2), 'pay': money(d['pay']) if d['pay'] is not None else None}
+                 for d in sorted(days.values(), key=lambda x: x['date'])],
+        'tasks': list(reversed(tasks)),  # newest first
+    }, None
+
+
+@app.route('/api/managed-workers/<int:worker_id>/work-summary', methods=['GET'])
+@require_auth
+@require_permission('workers.view')
+def managed_worker_work_summary(worker_id):
+    worker = ManagedWorker.query.get(worker_id)
+    if not worker:
+        return jsonify({'status': 'error', 'message': 'Worker not found'}), 404
+    payload, error = worker_work_summary(worker, assignment_in_branch(request.current_user),
+                                         show_pay=sees_labor_cost(request.current_user))
+    if error:
+        return error
+    return jsonify({'status': 'success', 'data': payload})
+
+
+@app.route('/api/my-work/summary', methods=['GET'])
+@require_auth
+def my_work_summary():
+    """The signed-in worker's own finished work and pay for a period."""
+    worker = ManagedWorker.query.filter_by(user_id=request.current_user['id']).first()
+    if not worker:
+        return jsonify({'status': 'error', 'message': 'Your account is not linked to a worker'}), 404
+    payload, error = worker_work_summary(worker)
+    if error:
+        return error
+    return jsonify({'status': 'success', 'data': payload})
+
+
 @app.route('/api/managed-workers/<int:worker_id>', methods=['DELETE'])
 @require_auth
 @require_permission('workers.delete')
@@ -12555,6 +13130,43 @@ def waiting_on_map(assignments):
     return waits
 
 
+def _is_cutting_task(a):
+    return ((a.worker.work_type or '').lower() == 'cutter' if a.worker else False)         or task_base_name(a.description) == 'cutting'
+
+
+def _is_sewing_task(a):
+    return ((a.worker.work_type or '').lower() == 'sewer' if a.worker else False)         or task_base_name(a.description) == 'sewing'
+
+
+def cutting_not_done_map(assignments):
+    """{assignment id: warning} for sewing tasks not started yet on job orders whose
+    materials haven't been cut. Cutting comes first in the real process; this is
+    a warning only, nothing is blocked."""
+    sewing = [a for a in assignments if a.status == 'pending' and a.job_order_db_id
+              and a.assignment_type != 'special_task' and _is_sewing_task(a)]
+    if not sewing:
+        return {}
+    order_ids = {a.job_order_db_id for a in sewing}
+    tasks = WorkerAssignment.query.filter(WorkerAssignment.job_order_db_id.in_(order_ids),
+                                          _job_order_task_filter()).order_by(WorkerAssignment.id).all()
+    refs = dict(db.session.query(JobOrder.id, JobOrder.job_order_id).filter(JobOrder.id.in_(order_ids)).all())
+    cut_refs = {ref for (ref,) in db.session.query(MaterialUsageLog.used_in_reference).filter(
+        MaterialUsageLog.used_in_type == 'job_order_cut',
+        MaterialUsageLog.used_in_reference.in_(list(refs.values()) or [''])).distinct()}
+    out = {}
+    for a in sewing:
+        cutting = [t for t in tasks if t.job_order_db_id == a.job_order_db_id and _is_cutting_task(t)]
+        if refs.get(a.job_order_db_id) in cut_refs or any(t.status == 'completed' for t in cutting):
+            continue
+        open_cut = next((t for t in cutting if t.status != 'completed'), None)
+        if open_cut:
+            who = open_cut.worker.name if open_cut.worker else 'the cutter'
+            out[a.id] = f"Cutting isn't done yet: {who} still has to cut the materials for {a.job_order_ref}."
+        else:
+            out[a.id] = f"Nobody has cut the materials for {a.job_order_ref} yet. Cutting usually comes before sewing."
+    return out
+
+
 def waiting_on_dict(blocker):
     if not blocker:
         return None
@@ -12591,6 +13203,7 @@ def list_worker_assignments():
     priorities = dict(db.session.query(JobOrder.id, JobOrder.priority).filter(JobOrder.id.in_(order_ids))) \
         if order_ids else {}
     waits = waiting_on_map(assignments)
+    not_cut = cutting_not_done_map(assignments)
     result = []
     for a in assignments:
         is_overdue = False
@@ -12628,8 +13241,20 @@ def list_worker_assignments():
             'overdueByHours': overdue_by_hours,
             # The earlier task on the job order this one can't start before
             'waitingOn': waiting_on_dict(waits.get(a.id)),
+            # A sewing task on a job order whose materials aren't cut yet (a warning only)
+            'cuttingNotDone': not_cut.get(a.id),
         })
     return jsonify({'status': 'success', 'data': {'assignments': result}})
+
+def mark_job_order_started(order):
+    """A pending job order given to a worker is being worked on: In Progress.
+    Returns True if its status changed (the caller commits)."""
+    if order is None or order.status != 'pending':
+        return False
+    order.status = 'in_progress'
+    order.updated_at = datetime.utcnow()
+    return True
+
 
 @app.route('/api/worker-assignments', methods=['POST'])
 @require_auth
@@ -12740,6 +13365,8 @@ def create_worker_assignment():
             existing.scheduled_date = scheduled_date
             existing.updated_at = datetime.utcnow()
             db.session.commit()
+        if mark_job_order_started(order):
+            db.session.commit()
         return jsonify({
             'status': 'success',
             'data': {
@@ -12751,7 +13378,8 @@ def create_worker_assignment():
                     'description': existing.description,
                     'scheduledDate': existing.scheduled_date.isoformat() if existing.scheduled_date else None,
                     'status': existing.status,
-                }
+                },
+                'warning': cutting_not_done_map([existing]).get(existing.id),
             }
         })
     special_task_title = (data.get('specialTaskTitle') or '').strip() or None
@@ -12772,7 +13400,12 @@ def create_worker_assignment():
     db.session.flush()
     if order:
         add_labor_line_for_assignment(order, assignment)
+    started = mark_job_order_started(order)
     db.session.commit()
+    if started:
+        log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Sales',
+                   f"{order.job_order_id} moved to In Progress: assigned to {worker.name}",
+                   request.remote_addr or '0.0.0.0')
     return jsonify({
         'status': 'success',
         'data': {
@@ -12783,7 +13416,9 @@ def create_worker_assignment():
                 'jobOrderRef': assignment.job_order_ref,
                 'description': assignment.description,
                 'status': assignment.status,
-            }
+            },
+            # Sewing given out before the materials are cut (a warning only)
+            'warning': cutting_not_done_map([assignment]).get(assignment.id),
         }
     }), 201
 
@@ -12815,6 +13450,21 @@ def update_worker_assignment(assignment_id):
                    f"{blocker.description or 'their part'} first.")
             return jsonify({'status': 'error', 'error': msg, 'message': msg, 'code': 'waiting_on_earlier',
                             'data': waiting_on_dict(blocker)}), 400
+
+    # A worker works on one task at a time: another can't start while one is in progress
+    if new_status == 'in_progress' and assignment.status != 'in_progress':
+        busy = (WorkerAssignment.query.filter(WorkerAssignment.worker_id == assignment.worker_id,
+                                              WorkerAssignment.status == 'in_progress',
+                                              WorkerAssignment.id != assignment.id)
+                .order_by(WorkerAssignment.start_time).first())
+        if busy:
+            who = assignment.worker.name if assignment.worker else 'This worker'
+            task = busy.special_task_title if busy.assignment_type == 'special_task' else busy.job_order_ref
+            msg = (f"{who} is already working on {task} ({busy.description or 'a task'}). "
+                   f"Mark that one complete before starting another.")
+            return jsonify({'status': 'error', 'error': msg, 'message': msg, 'code': 'worker_busy',
+                            'data': {'assignmentId': busy.id, 'jobOrderRef': busy.job_order_ref,
+                                     'description': busy.description}}), 409
 
     # Move a task that hasn't started to another worker
     if data.get('workerId') and finite_number(data['workerId']) and int(data['workerId']) != assignment.worker_id:
@@ -13806,11 +14456,19 @@ def get_ai_predictions():
 @require_auth
 @require_permission('forecasting.manage')
 def recompute_ai_predictions():
-    cache = AIPredictionCache.query.first()
-    if not cache or cache.upload_rows == 0:
-        return jsonify({'status': 'error', 'message': 'No historical data uploaded yet'}), 400
+    # Forecasts come from the uploaded history and/or the live material usage
+    # (Item Trail), so either one is enough to compute them
+    has_history = db.session.query(HistoricalInventoryData.id).first() is not None
+    has_usage = db.session.query(MaterialUsageLog.id).first() is not None
+    if not has_history and not has_usage:
+        return jsonify({'status': 'error',
+                        'message': 'Nothing to forecast yet: upload history or record some material usage'}), 400
 
-    if cache.status == 'computing':
+    cache = AIPredictionCache.query.first()
+    if not cache:
+        cache = AIPredictionCache(status='idle', predictions_json='[]')
+        db.session.add(cache)
+    elif cache.status == 'computing':
         return jsonify({'status': 'error', 'message': 'Computation already in progress'}), 400
 
     cache.status = 'computing'
