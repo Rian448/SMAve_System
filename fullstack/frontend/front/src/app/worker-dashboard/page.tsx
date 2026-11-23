@@ -783,6 +783,24 @@ export default function WorkerDashboard() {
     setActionError(err instanceof Error && err.message ? err.message : fallback);
     setTimeout(() => setActionError(''), 6000);
   };
+  // A heads-up after an action that still went through (e.g. sewing given before cutting)
+  const [actionWarning, setActionWarning] = useState('');
+  const showWarning = (res: { data?: { warning?: string | null } } | undefined) => {
+    const w = res?.data?.warning;
+    if (!w) return;
+    setActionWarning(`Assigned. ${w}`);
+    setTimeout(() => setActionWarning(''), 9000);
+  };
+  /** Starting or finishing sewing before the materials are cut: ask first (it isn't blocked) */
+  const okBeforeCutting = async (a: WorkerAssignment, doing: 'Start' | 'Complete') => {
+    if (!a.cuttingNotDone) return true;
+    return confirm({
+      title: 'Cutting not done yet',
+      message: <>{a.cuttingNotDone} {doing === 'Start' ? 'Start' : 'Mark'} {a.workerName}&apos;s sewing{doing === 'Complete' ? ' done' : ''} anyway?</>,
+      confirmLabel: doing === 'Start' ? 'Start anyway' : 'Continue anyway',
+      variant: 'warning',
+    });
+  };
 
   // Worker modal
   const [showWorkerModal, setShowWorkerModal] = useState(false);
@@ -977,7 +995,7 @@ export default function WorkerDashboard() {
     try {
       // The server returns the existing assignment instead of a copy if the worker already has it.
       // Work handed out here starts today, so it shows on the calendar right away.
-      await api.workerAssignments.create({ workerId: worker.id, jobOrderRef: p.jo.jobOrderId, jobOrderDbId: p.jo.id, scheduledDate: todayYMD(), ...(another ? { another: true } : {}) });
+      showWarning(await api.workerAssignments.create({ workerId: worker.id, jobOrderRef: p.jo.jobOrderId, jobOrderDbId: p.jo.id, scheduledDate: todayYMD(), ...(another ? { another: true } : {}) }));
       setPicked(null);
       await fetchAssignments();
     } catch (err) {
@@ -1026,10 +1044,10 @@ export default function WorkerDashboard() {
     assigning.current = true;
     try {
       if (current) await api.workerAssignments.update(current.id, { scheduledDate: dateStr });
-      else await api.workerAssignments.create({
+      else showWarning(await api.workerAssignments.create({
         workerId, jobOrderRef: job.jobOrderId, jobOrderDbId: job.id, scheduledDate: dateStr,
         ...(another ? { another: true } : {}),
-      });
+      }));
       refreshAssignments();
       return true;
     } catch (err) {
@@ -1095,12 +1113,14 @@ export default function WorkerDashboard() {
   };
 
   const startWork = async (a: WorkerAssignment) => {
+    if (!(await okBeforeCutting(a, 'Start'))) return;
     setUpdatingId(a.id);
     try { await api.workerAssignments.update(a.id, { status: 'in_progress' }); refreshAssignments(); }
     catch (err) { showError(err, "Couldn't start the task."); } finally { setUpdatingId(null); }
   };
 
   const openCompletion = async (a: WorkerAssignment) => {
+    if (a.status === 'pending' && !(await okBeforeCutting(a, 'Complete'))) return;
     let jo: JobOrder | null = null;
     if (a.jobOrderDbId) {
       try { jo = (await api.sales.getJobOrder(a.jobOrderDbId)).data || null; } catch { /* ignore */ }
@@ -1135,10 +1155,10 @@ export default function WorkerDashboard() {
     const worker = workers.find(w => w.id === workerId);
     if (!(await okToSchedule(workerId, worker?.name || 'This worker', date, done.jobOrderRef))) return 'Not assigned.';
     try {
-      await api.workerAssignments.create({
+      showWarning(await api.workerAssignments.create({
         workerId, jobOrderRef: done.jobOrderRef, jobOrderDbId: done.jobOrderDbId ?? undefined,
         description: task, scheduledDate: date,
-      });
+      }));
       refreshAssignments();
       return null;
     } catch (err) {
@@ -1347,6 +1367,9 @@ export default function WorkerDashboard() {
         {actionError && (
           <div className="mb-6 p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">{actionError}</div>
         )}
+        {actionWarning && (
+          <div className="mb-6 p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">{actionWarning}</div>
+        )}
 
         {/* Tabs */}
         <div className="flex gap-1 bg-white rounded-xl border border-gray-200 p-1 mb-6 w-fit shadow-sm">
@@ -1495,7 +1518,7 @@ export default function WorkerDashboard() {
                         <div className="flex flex-wrap gap-2">
                           {workerAsgns.map(a => (
                             <div key={a.id}
-                              className={`group relative flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-medium transition-colors
+                              className={`group relative flex items-start gap-2 px-3 py-2 rounded-xl border text-xs font-medium transition-colors
                                 ${picked?.kind === 'task' && picked.id === a.id ? 'ring-2 ring-[#011c72]' : ''}
                                 ${a.assignmentType === 'special_task' ? 'bg-purple-50 border-purple-200 text-purple-800' : 'bg-gray-50 border-gray-200 text-gray-800'}`}>
                               <div>
@@ -1509,8 +1532,12 @@ export default function WorkerDashboard() {
                                   return <span className={`inline-block mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold ${due.cls}`}>{due.text}</span>;
                                 })()}
                                 {blocked(a) && <p className="text-amber-700 font-normal text-[10px] max-w-40 truncate" title={waitMsg(a)}>⏳ {waitMsg(a)}</p>}
+                                {!blocked(a) && a.cuttingNotDone && (
+                                  <p className="text-amber-700 font-normal text-[10px] max-w-40 truncate" title={a.cuttingNotDone}>✂ Not cut yet</p>
+                                )}
                               </div>
-                              <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${statusBadge(a.status)}`}>
+                              {/* Level with the job order number, not floating in the middle of the card */}
+                              <span className={`shrink-0 whitespace-nowrap px-1.5 py-0.5 rounded-full text-[10px] font-semibold border ${statusBadge(a.status)}`}>
                                 {a.status.replace('_',' ')}
                               </span>
                               {/* Actions */}
@@ -1706,35 +1733,37 @@ export default function WorkerDashboard() {
                     <tbody className="divide-y divide-gray-100">
                       {rows.map(a => (
                         <tr key={a.id} className="hover:bg-gray-50">
-                          <td className="px-5 py-4 font-medium text-gray-900">{a.workerName}</td>
+                          <td className="px-5 py-4 font-medium text-gray-900 whitespace-nowrap">{a.workerName}</td>
                           <td className="px-5 py-4">
-                            <span className={`px-2 py-0.5 text-xs rounded-full ${a.assignmentType === 'special_task' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>
+                            <span className={`inline-block whitespace-nowrap px-2 py-0.5 text-xs rounded-full ${a.assignmentType === 'special_task' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>
                               {a.assignmentType === 'special_task' ? 'Special' : 'Job Order'}
                             </span>
                           </td>
-                          <td className="px-5 py-4 font-mono text-gray-700">
+                          <td className="px-5 py-4 font-mono text-gray-700 whitespace-nowrap">
                             {a.assignmentType === 'special_task' ? (a.specialTaskTitle || '—') : a.jobOrderRef}
                           </td>
                           <td className="px-5 py-4">
-                            <span className={`px-2.5 py-1 text-xs rounded-full border ${statusBadge(a.status)}`}>
+                            <span className={`inline-block whitespace-nowrap px-2.5 py-1 text-xs rounded-full border ${statusBadge(a.status)}`}>
                               {a.status.replace('_',' ')}
                             </span>
                           </td>
-                          <td className="px-5 py-4 text-xs text-gray-500">{PAY_MODES.find(p => p.value === (a.payMode || 'per_hour'))?.label}</td>
+                          <td className="px-5 py-4 text-xs text-gray-500 whitespace-nowrap">{PAY_MODES.find(p => p.value === (a.payMode || 'per_hour'))?.label}</td>
                           <td className="px-5 py-4 text-right text-gray-700">{a.hoursWorked != null ? `${a.hoursWorked}h` : '—'}</td>
                           <td className="px-5 py-4 text-right font-semibold text-green-600">{a.status === 'completed' ? fc(a.pay) : '—'}</td>
                           <td className="px-5 py-4 text-right">
+                            {/* One evenly spaced row, so the buttons don't stack unevenly on phones */}
+                            <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
                             {a.status === 'pending' && (
                               <button onClick={() => startWork(a)} disabled={updatingId === a.id || !!a.waitingOn} title={waitMsg(a) || undefined}
                                 className="px-3 py-1.5 text-xs bg-[#011c72] text-white rounded-lg hover:bg-[#022a9e] disabled:opacity-50">Start</button>
                             )}
                             {canAddExtra(a) && (
                               <button onClick={() => setExtraFor(a)}
-                                className="mr-1 px-3 py-1.5 text-xs border border-amber-200 text-amber-700 rounded-lg hover:bg-amber-50">Extra material</button>
+                                className="px-3 py-1.5 text-xs border border-amber-200 text-amber-700 rounded-lg hover:bg-amber-50">Extra material</button>
                             )}
                             {a.status !== 'completed' && (
                               <button onClick={() => openCompletion(a)} disabled={blocked(a)} title={waitMsg(a) || undefined}
-                                className="ml-1 px-3 py-1.5 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50">Complete</button>
+                                className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50">Complete</button>
                             )}
                             {a.status === 'completed' && (
                               <button onClick={() => reopenTask(a)}
@@ -1742,8 +1771,9 @@ export default function WorkerDashboard() {
                             )}
                             {a.status !== 'completed' && (
                               <button onClick={() => removeAssignment(a)}
-                                className="ml-1 px-2 py-1.5 text-xs border border-red-200 text-red-600 rounded-lg hover:bg-red-50">✕</button>
+                                className="px-2 py-1.5 text-xs border border-red-200 text-red-600 rounded-lg hover:bg-red-50">✕</button>
                             )}
+                            </div>
                           </td>
                         </tr>
                       ))}

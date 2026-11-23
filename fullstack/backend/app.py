@@ -5622,6 +5622,99 @@ def sync_labor_assignments(order, previous_items):
     order.items = items
 
 
+# The Cutter and Sewer picked on the job order slip each get a labor line (tagged
+# slipRole), so sync_labor_assignments books them like any worker on the order.
+SLIP_WORKER_ROLES = (('cutterName', 'cutter', 'Cutting'), ('sewerName', 'sewer', 'Sewing'))
+
+
+def _slip_worker(name, role):
+    """The active worker the slip names for this role (cutter / sewer), or None."""
+    name = str(name or '').strip()
+    if not name:
+        return None
+    found = ManagedWorker.query.filter(db.func.lower(ManagedWorker.name) == name.lower(),
+                                       ManagedWorker.is_active.is_(True)).all()
+    return (next((w for w in found if (w.work_type or '').lower() == role), None)
+            or (found[0] if found else None))
+
+
+def apply_slip_workers(order):
+    """Make the order's labor lines match the slip's Cutter and Sewer: add a
+    line for a newly picked worker, move a not-yet-started line to another
+    worker, and drop it when the slip no longer names one. A line whose work
+    has started is left as a record. Booking the worker (the assignment) is
+    then done by sync_labor_assignments. Returns True if the lines changed."""
+    slip = order.slip_data or {}
+    items = [dict(it) for it in (order.items or [])]
+    assignments = {a.id: a for a in _assignments_for_order(order)} if order.id else {}
+    changed = False
+    for key, role, task in SLIP_WORKER_ROLES:
+        worker = _slip_worker(slip.get(key), role)
+        line = next((it for it in items if item_category(it) == 'labor' and it.get('slipRole') == role), None)
+        if line is None and worker is not None:
+            # Its tag can be lost when the order is edited elsewhere: the same task for this worker
+            line = next((it for it in items if item_category(it) == 'labor' and not it.get('slipRole')
+                         and _int_or_none(it.get('workerId')) == worker.id
+                         and (it.get('name') or '').strip().lower() == task.lower()), None)
+        a = assignments.get(line.get('assignmentId')) if line is not None else None
+        if line is not None and a is not None and a.status != 'pending' \
+                and (worker is None or _int_or_none(line.get('workerId')) != worker.id):
+            # Work already started: keep that line as it is, as a record
+            line.pop('slipRole', None)
+            line, changed = None, True
+        if worker is None:
+            if line is not None:
+                items.remove(line)  # its pending assignment is released by the sync
+                changed = True
+            continue
+        if line is not None:
+            if _int_or_none(line.get('workerId')) != worker.id:
+                line.update({'workerId': worker.id, 'workerName': worker.name,
+                             'laborCost': float(worker.rate_per_hour or 0)})
+                changed = True
+            if line.get('slipRole') != role:
+                line['slipRole'] = role
+                changed = True
+            continue
+        items.append({
+            'category': 'labor', 'name': task, 'quantity': 1,
+            'unitPrice': 0, 'materialCost': 0, 'laborCost': float(worker.rate_per_hour or 0),
+            'workerId': worker.id, 'workerName': worker.name, 'slipRole': role,
+        })
+        changed = True
+    if changed:
+        order.items = items
+        order.estimated_cost = sum(
+            (finite_number(it.get('quantity'), 0.0) or 0.0)
+            * ((finite_number(it.get('materialCost'), 0.0) or 0.0) + (finite_number(it.get('laborCost'), 0.0) or 0.0))
+            for it in items)
+    return changed
+
+
+def clear_removed_slip_workers(order, previous_items):
+    """A Cutting / Sewing line made from the slip was deleted by hand: take that
+    name off the slip too, so the slip and the workers' tasks still agree."""
+    slip = dict(order.slip_data or {})
+    current = [it for it in (order.items or []) if item_category(it) == 'labor']
+    changed = False
+    for key, role, task in SLIP_WORKER_ROLES:
+        prev = next((it for it in previous_items or []
+                     if item_category(it) == 'labor' and it.get('slipRole') == role), None)
+        if prev is None or not slip.get(key):
+            continue
+        still_there = any(
+            it.get('slipRole') == role
+            or (prev.get('assignmentId') and it.get('assignmentId') == prev.get('assignmentId'))
+            or (_int_or_none(it.get('workerId')) == _int_or_none(prev.get('workerId'))
+                and (it.get('name') or '').strip().lower() == task.lower())
+            for it in current)
+        if not still_there:
+            slip[key] = ''
+            changed = True
+    if changed:
+        order.slip_data = slip
+
+
 def release_pending_assignments(order):
     """Free the workers booked on an order that will no longer be worked on:
     delete the assignments that never started and unlink their labor lines, so
@@ -6210,6 +6303,9 @@ def create_job_order():
         # Two saves picked the same number at the same moment
         db.session.rollback()
         return jsonify({'status': 'error', 'message': clash_message, 'code': 'order_number'}), 409
+    # The slip's Cutter and Sewer become labor lines, booked with the rest
+    if sees_labor_cost(request.current_user):
+        apply_slip_workers(new_order)
     if not is_draft:
         sync_labor_assignments(new_order, [])
     new_order.actual_cost = job_order_cost(new_order.items)
@@ -6699,6 +6795,10 @@ def update_job_order(order_id):
         # cancelled/voided orders no longer need anyone.
         if order.status not in ('draft', 'cancelled', 'voided'):
             sync_labor_assignments(order, previous_items)
+        # A slip Cutter / Sewer line deleted here clears that name on the slip
+        # (unless this same save sends the slip, which then decides)
+        if 'slipData' not in data:
+            clear_removed_slip_workers(order, previous_items)
         apply_cut_quantities(order)
         order.actual_cost = job_order_actual_cost(order)
     elif prev_status == 'draft' and order.status not in ('draft', 'cancelled', 'voided'):
@@ -6722,6 +6822,14 @@ def update_job_order(order_id):
         if 'serviceDetails' not in slip and (order.slip_data or {}).get('serviceDetails'):
             slip['serviceDetails'] = order.slip_data['serviceDetails']
         order.slip_data = slip
+        # The slip's Cutter and Sewer are workers on the order: keep their labor
+        # lines (and so their tasks) in step with it
+        if sees_labor_cost(user):
+            before = list(order.items or [])
+            if apply_slip_workers(order):
+                if order.status not in ('draft', 'cancelled', 'voided'):
+                    sync_labor_assignments(order, before)
+                order.actual_cost = job_order_actual_cost(order)
 
     # A new price changes what is still owed
     if pricing:
@@ -13022,6 +13130,43 @@ def waiting_on_map(assignments):
     return waits
 
 
+def _is_cutting_task(a):
+    return ((a.worker.work_type or '').lower() == 'cutter' if a.worker else False)         or task_base_name(a.description) == 'cutting'
+
+
+def _is_sewing_task(a):
+    return ((a.worker.work_type or '').lower() == 'sewer' if a.worker else False)         or task_base_name(a.description) == 'sewing'
+
+
+def cutting_not_done_map(assignments):
+    """{assignment id: warning} for sewing tasks not started yet on job orders whose
+    materials haven't been cut. Cutting comes first in the real process; this is
+    a warning only, nothing is blocked."""
+    sewing = [a for a in assignments if a.status == 'pending' and a.job_order_db_id
+              and a.assignment_type != 'special_task' and _is_sewing_task(a)]
+    if not sewing:
+        return {}
+    order_ids = {a.job_order_db_id for a in sewing}
+    tasks = WorkerAssignment.query.filter(WorkerAssignment.job_order_db_id.in_(order_ids),
+                                          _job_order_task_filter()).order_by(WorkerAssignment.id).all()
+    refs = dict(db.session.query(JobOrder.id, JobOrder.job_order_id).filter(JobOrder.id.in_(order_ids)).all())
+    cut_refs = {ref for (ref,) in db.session.query(MaterialUsageLog.used_in_reference).filter(
+        MaterialUsageLog.used_in_type == 'job_order_cut',
+        MaterialUsageLog.used_in_reference.in_(list(refs.values()) or [''])).distinct()}
+    out = {}
+    for a in sewing:
+        cutting = [t for t in tasks if t.job_order_db_id == a.job_order_db_id and _is_cutting_task(t)]
+        if refs.get(a.job_order_db_id) in cut_refs or any(t.status == 'completed' for t in cutting):
+            continue
+        open_cut = next((t for t in cutting if t.status != 'completed'), None)
+        if open_cut:
+            who = open_cut.worker.name if open_cut.worker else 'the cutter'
+            out[a.id] = f"Cutting isn't done yet: {who} still has to cut the materials for {a.job_order_ref}."
+        else:
+            out[a.id] = f"Nobody has cut the materials for {a.job_order_ref} yet. Cutting usually comes before sewing."
+    return out
+
+
 def waiting_on_dict(blocker):
     if not blocker:
         return None
@@ -13058,6 +13203,7 @@ def list_worker_assignments():
     priorities = dict(db.session.query(JobOrder.id, JobOrder.priority).filter(JobOrder.id.in_(order_ids))) \
         if order_ids else {}
     waits = waiting_on_map(assignments)
+    not_cut = cutting_not_done_map(assignments)
     result = []
     for a in assignments:
         is_overdue = False
@@ -13095,6 +13241,8 @@ def list_worker_assignments():
             'overdueByHours': overdue_by_hours,
             # The earlier task on the job order this one can't start before
             'waitingOn': waiting_on_dict(waits.get(a.id)),
+            # A sewing task on a job order whose materials aren't cut yet (a warning only)
+            'cuttingNotDone': not_cut.get(a.id),
         })
     return jsonify({'status': 'success', 'data': {'assignments': result}})
 
@@ -13230,7 +13378,8 @@ def create_worker_assignment():
                     'description': existing.description,
                     'scheduledDate': existing.scheduled_date.isoformat() if existing.scheduled_date else None,
                     'status': existing.status,
-                }
+                },
+                'warning': cutting_not_done_map([existing]).get(existing.id),
             }
         })
     special_task_title = (data.get('specialTaskTitle') or '').strip() or None
@@ -13267,7 +13416,9 @@ def create_worker_assignment():
                 'jobOrderRef': assignment.job_order_ref,
                 'description': assignment.description,
                 'status': assignment.status,
-            }
+            },
+            # Sewing given out before the materials are cut (a warning only)
+            'warning': cutting_not_done_map([assignment]).get(assignment.id),
         }
     }), 201
 

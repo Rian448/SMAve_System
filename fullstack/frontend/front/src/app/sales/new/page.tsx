@@ -2061,42 +2061,21 @@ function NewJobOrderForm() {
                 <SeatRowsEditor rows={slipRows} onChange={setSlipRows} />
               </div>
 
-              {/* Material Descriptions */}
-              <div>
-                <p className="text-sm font-medium text-gray-700 mb-3">Material Description</p>
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">CENTER</label>
-                    <input type="text" value={materialCenter} onChange={(e) => setMaterialCenter(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">SIDES</label>
-                    <input type="text" value={materialSides} onChange={(e) => setMaterialSides(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">BACK</label>
-                    <input type="text" value={materialBack} onChange={(e) => setMaterialBack(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
-                  </div>
+              {/* Pockets (a count) and whether the job has a logo */}
+              <div className="grid grid-cols-2 gap-3 items-end">
+                <div>
+                  <label htmlFor="slip-pockets" className="block text-xs text-gray-500 mb-1">POCKETS</label>
+                  <input id="slip-pockets" type="text" inputMode="numeric" value={pockets}
+                    onChange={(e) => setPockets(e.target.value.replace(/\D/g, '').slice(0, 3))}
+                    placeholder="0"
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
                 </div>
-              </div>
-
-              {/* Details Row */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                {[
-                  { label: 'D.STITCH', value: dStitch, set: setDStitch },
-                  { label: 'PIPING', value: piping, set: setPiping },
-                  { label: 'POCKETS', value: pockets, set: setPockets },
-                  { label: 'LOGO', value: logo, set: setLogo },
-                ].map(({ label, value, set }) => (
-                  <div key={label}>
-                    <label className="block text-xs text-gray-500 mb-1">{label}</label>
-                    <input type="text" value={value} onChange={(e) => set(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
-                  </div>
-                ))}
+                <label className="inline-flex items-center gap-2 py-2 text-sm text-gray-700 cursor-pointer select-none">
+                  <input type="checkbox" checked={!!logo && logo.toLowerCase() !== 'no'}
+                    onChange={(e) => setLogo(e.target.checked ? 'Yes' : '')}
+                    className="w-4 h-4 rounded border-gray-300 text-[#011c72]" />
+                  LOGO
+                </label>
               </div>
 
               {/* Specification */}
@@ -2126,6 +2105,9 @@ function NewJobOrderForm() {
                       </div>
                     );
                   })}
+                  <p className="col-span-2 text-xs text-gray-400 -mt-1">
+                    The cutter and sewer picked here get the Cutting and Sewing tasks for this job order.
+                  </p>
                 </div>
               )}
             </div>

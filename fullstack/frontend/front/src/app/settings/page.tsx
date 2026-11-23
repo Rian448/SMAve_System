@@ -717,11 +717,14 @@ export default function SettingsPage() {
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                           {can('users.manage') && (
                             <>
+                              {/* Even gaps instead of a margin on all but the last, so the links
+                                  line up when the narrow phone column stacks them */}
+                              <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
                               <button 
                                 onClick={() => handleEditUser(u)}
                                 disabled={!!offLimitsReason(u)}
                                 title={offLimitsReason(u) || undefined}
-                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300"
+                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium disabled:cursor-not-allowed disabled:text-gray-300"
                               >
                           Edit
                         </button>
@@ -729,7 +732,7 @@ export default function SettingsPage() {
                                 onClick={() => setPermTarget(u)}
                                 disabled={!!offLimitsReason(u)}
                                 title={offLimitsReason(u) || undefined}
-                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300"
+                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium disabled:cursor-not-allowed disabled:text-gray-300"
                               >
                                 Permissions
                               </button>
@@ -737,7 +740,7 @@ export default function SettingsPage() {
                                 onClick={() => handleToggleUserStatus(u)}
                                 disabled={!!protectedReason(u)}
                                 title={protectedReason(u) || undefined}
-                                className={`text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300 ${
+                                className={`text-sm font-medium disabled:cursor-not-allowed disabled:text-gray-300 ${
                                   u.isActive
                                     ? 'text-yellow-600 hover:text-yellow-700'
                                     : 'text-green-600 hover:text-green-700'
@@ -753,6 +756,7 @@ export default function SettingsPage() {
                               >
                                 Delete
                               </button>
+                              </div>
                               {/* Say why up front rather than failing after a dialog. */}
                               {protectedReason(u) && (
                                 <p className="mt-1 text-xs text-gray-400">{protectedReason(u)}</p>
