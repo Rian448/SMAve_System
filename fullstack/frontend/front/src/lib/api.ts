@@ -369,6 +369,25 @@ export interface Branding {
   navIcons: Record<string, string>;
 }
 
+/** A material open job orders need more of than is in stock (Inventory → Needed for job orders) */
+export interface NeededMaterial {
+  id: number;
+  itemId: string;
+  name: string;
+  branchId: number;
+  branchName: string | null;
+  unit: string;
+  stock: number;
+  needed: number;
+  short: number;
+  /** Typed in on a job order (not picked from Inventory) */
+  typedIn: boolean;
+  supplierId: number | null;
+  orders: { id: number; jobOrderId: string; customerName: string; status: string; quantity: number }[];
+  /** Existing materials with a similar name (a likely typo); typed-in materials only */
+  similar: { id: number; name: string; branchName: string | null; stock: number; unit: string }[];
+}
+
 export interface RawMaterial {
   id: number;
   itemId: string;
@@ -400,6 +419,8 @@ export interface RawMaterial {
   /** A consumable marked partly used since it was last marked fully used */
   partialUseAt?: string | null;
   lastUpdated: string;
+  /** Full time of the last change (stock used or received, edited) */
+  updatedAt?: string | null;
 }
 
 export interface Supplier {
@@ -1747,6 +1768,17 @@ export const api = {
       if (params?.includeWarehouse) query.append('includeWarehouse', 'true');
       return fetchApi<RawMaterial[]>(`/api/inventory/raw-materials?${query}`);
     },
+
+    /** Materials open job orders need more of than is in stock */
+    getNeededMaterials: (params?: { branchId?: number }) =>
+      fetchApi<NeededMaterial[]>(`/api/inventory/needed-materials${params?.branchId ? `?branchId=${params.branchId}` : ''}`),
+
+    /** A typed-in material that is really an existing one: move its job order lines there */
+    mergeMaterial: (id: number, targetId: number) =>
+      fetchApi<{ target: RawMaterial; jobOrders: string[] }>(`/api/inventory/raw-materials/${id}/merge`, {
+        method: 'POST',
+        body: JSON.stringify({ targetId }),
+      }),
 
     createRawMaterial: (material: RawMaterialInput) =>
       fetchApi<RawMaterial>('/api/inventory/raw-materials', {

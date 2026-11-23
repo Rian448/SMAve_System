@@ -137,6 +137,16 @@ export default function SettingsPage() {
     }
   };
 
+  // Supervisors are always based at the main warehouse (and see every branch from
+  // there); sales managers work at a shop branch, never the warehouse
+  const mainWarehouse = branches.find((b) => b.isWarehouse && b.isActive) || branches.find((b) => b.isWarehouse);
+  const shopBranches = branches.filter((b) => !b.isWarehouse);
+  const branchForRole = (role: string, current: number) => {
+    if (role === 'supervisor') return mainWarehouse?.id || 0;
+    if (role === 'sales_manager' && branches.find((b) => b.id === current)?.isWarehouse) return shopBranches[0]?.id || 0;
+    return current;
+  };
+
   const handleAddUser = () => {
     setUserFormData({ 
       username: '', 
@@ -144,7 +154,7 @@ export default function SettingsPage() {
       email: '', 
       fullName: '', 
       role: 'sales_manager',
-      branchId: branches.length > 0 ? branches[0].id : 0
+      branchId: shopBranches[0]?.id || 0
     });
     setEditingUser(null);
     setUserError('');
@@ -159,7 +169,7 @@ export default function SettingsPage() {
       email: user.email,
       fullName: user.fullName,
       role: user.role,
-      branchId: user.branchId || 0
+      branchId: branchForRole(user.role, user.branchId || 0)
     });
     setEditingUser(user);
     setUserError('');
@@ -183,7 +193,9 @@ export default function SettingsPage() {
         : password && passwordProblem(password),
       'user-adminPassword': changingPassword && !adminPassword && 'Enter your own password to confirm the password change.',
       'user-role': !userFormData.role && 'Choose a role.',
-      'user-branch': !userFormData.branchId && 'Choose a branch.',
+      'user-branch': userFormData.role === 'supervisor'
+        ? !mainWarehouse && 'Set up the main warehouse (Branches tab) before adding a supervisor.'
+        : !userFormData.branchId && 'Choose a branch.',
     })) return;
 
     if (changingPassword) {
@@ -1318,7 +1330,8 @@ export default function SettingsPage() {
                   </label>
                   <select
                     value={userFormData.role}
-                    onChange={(e) => setUserFormData({ ...userFormData, role: e.target.value })}
+                    onChange={(e) => setUserFormData({ ...userFormData, role: e.target.value,
+                      branchId: branchForRole(e.target.value, userFormData.branchId) })}
                     className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   >
                     {/* An existing account keeps its own role in the list so editing it still works */}
@@ -1340,18 +1353,29 @@ export default function SettingsPage() {
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Branch *
                   </label>
+                  {userFormData.role === 'supervisor' ? (
+                    // Not a choice: supervisors are based at the main warehouse
+                    <div className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-700">
+                      {mainWarehouse ? `${mainWarehouse.name} (${mainWarehouse.code})` : 'No main warehouse set up'}
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        Supervisors are based at the main warehouse and can see every branch.
+                      </p>
+                    </div>
+                  ) : (
                   <select
                     value={userFormData.branchId}
                     onChange={(e) => setUserFormData({ ...userFormData, branchId: Number(e.target.value) })}
                     className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   >
                     <option value={0}>Select a branch</option>
-                    {branches.map((branch) => (
+                    {/* Sales managers work at a shop branch, never the main warehouse */}
+                    {(userFormData.role === 'sales_manager' ? shopBranches : branches).map((branch) => (
                       <option key={branch.id} value={branch.id}>
                         {branch.name} ({branch.code})
                       </option>
                     ))}
                   </select>
+                  )}
                   <FieldError message={fe.errors['user-branch']} />
                 </div>
               </div>

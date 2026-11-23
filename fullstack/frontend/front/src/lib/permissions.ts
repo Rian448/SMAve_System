@@ -49,6 +49,17 @@ export function homePath(can: (...permissions: string[]) => boolean): string {
   return can('owner.view') && !can('dashboard.view') ? '/owner' : '/dashboard';
 }
 
+/**
+ * Deliveries are no longer offered. The pages and API stay in place, but no
+ * link leads to them and their URLs show Access Denied. Set to true to bring them back.
+ */
+export const DELIVERY_ENABLED = false;
+
+/** Pages switched off for everyone, whatever their permissions */
+export function pageDisabled(pathname: string): boolean {
+  return !DELIVERY_ENABLED && (pathname === '/delivery' || pathname.startsWith('/delivery/'));
+}
+
 /** Permissions that open this page, or null when it needs none. */
 export function pagePermissions(pathname: string): string[] | null {
   let best: [string, string[]] | null = null;
