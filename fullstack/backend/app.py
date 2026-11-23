@@ -6821,10 +6821,14 @@ def update_job_order(order_id):
         # on the New Job Order form; keep them
         if 'serviceDetails' not in slip and (order.slip_data or {}).get('serviceDetails'):
             slip['serviceDetails'] = order.slip_data['serviceDetails']
+        old_slip = order.slip_data or {}
+        names_changed = any((slip.get(k) or '') != (old_slip.get(k) or '') for k in ('cutterName', 'sewerName'))
         order.slip_data = slip
-        # The slip's Cutter and Sewer are workers on the order: keep their labor
-        # lines (and so their tasks) in step with it
-        if sees_labor_cost(user):
+        # The slip's Cutter and Sewer are workers on the order: when this save picks
+        # different ones, move their labor lines (and so their tasks) to match. A save
+        # that keeps the names (the job order page's slip, where workers are changed in
+        # Workers & Labor) leaves the workers as they are.
+        if names_changed and sees_labor_cost(user):
             before = list(order.items or [])
             if apply_slip_workers(order):
                 if order.status not in ('draft', 'cancelled', 'voided'):
@@ -11471,8 +11475,9 @@ def owner_financials(start, end, branch_id=None):
 def money_by_method(start, end, branch_id=None):
     """Cash actually received and spent between two dates, by mode of payment."""
     money_in, money_out = {}, {}
+    # Cancelled and voided orders are left out, as on the Receivables tab
     pay_q = (db.session.query(PaymentRecord).join(JobOrder, JobOrder.id == PaymentRecord.job_order_id)
-             .filter(JobOrder.status != 'draft'))
+             .filter(~JobOrder.status.in_(('draft', 'cancelled', 'voided'))))
     if branch_id:
         pay_q = pay_q.filter(JobOrder.branch_id == branch_id)
     for p in pay_q.all():
@@ -11480,12 +11485,17 @@ def money_by_method(start, end, branch_id=None):
         if start <= d <= end:
             key = p.payment_method or 'cash'
             money_in[key] = money_in.get(key, 0.0) + float(p.amount or 0)
-    po_q = ProductOrder.query.filter(ProductOrder.amount_paid > 0)
+    po_q = ProductOrder.query.filter(ProductOrder.amount_paid > 0, ProductOrder.status != 'cancelled')
     if branch_id:
         po_q = po_q.filter(ProductOrder.branch_id == branch_id)
     for o in po_q.all():
-        d = ((o.created_at or datetime.utcnow()) + PH_OFFSET).date()
-        if start <= d <= end:
+        # Premade orders keep only a running total, not dated payments: count it on
+        # the day the sale was completed, or the day it was ordered if still open
+        if o.status == 'completed':
+            d = product_order_completed_on(o)
+        else:
+            d = ((o.created_at or datetime.utcnow()) + PH_OFFSET).date()
+        if d and start <= d <= end:
             # Premade orders don't record how they were paid
             money_in['not_recorded'] = money_in.get('not_recorded', 0.0) + float(o.amount_paid or 0)
     ex_q = Expense.query.filter(Expense.expense_date >= start, Expense.expense_date <= end)
@@ -11537,8 +11547,10 @@ def owner_summary():
         sum(max(float(o.total_amount or 0) - float(o.amount_paid or 0), 0) for o in po_q.all())
     return jsonify({'status': 'success', 'data': {
         'period': {'startDate': start.isoformat(), 'endDate': end.isoformat(), 'branchId': branch_id},
-        'totals': {k: f[k] for k in ('sales', 'grossReceipts', 'vatCollected', 'grossProfit', 'totalExpenses',
-                                     'netIncome', 'profitMargin', 'orderCounts')},
+        'totals': {**{k: f[k] for k in ('sales', 'grossReceipts', 'vatCollected', 'grossProfit', 'totalExpenses',
+                                        'netIncome', 'profitMargin', 'orderCounts')},
+                   'cogs': f['cogs']['total'], 'operatingExpenses': f['operatingExpenses']['total'],
+                   'grossMargin': round(f['grossProfit'] / f['sales'] * 100, 1) if f['sales'] else 0.0},
         'receivables': money(receivable),
         # What the shop still owes suppliers today, and how much of it is due soon / overdue
         'payables': purchase_order_payables(branch_id),
@@ -12898,6 +12910,37 @@ def link_worker_account(worker, data):
     worker.user_id = account.id
     return None
 
+def sync_pending_labor_rates(worker):
+    """A worker's rate changed in Worker Management: their labor lines that haven't
+    started yet (on open job orders) take the new rate, so the job's estimate stays
+    right. Lines whose work started or finished keep their rate as a record; what
+    the worker is actually paid is worked out when they finish. The caller commits."""
+    rate = float(worker.rate_per_hour or 0)
+    orders = JobOrder.query.filter(JobOrder.status.in_(('draft', 'pending', 'in_progress'))).all()
+    for order in orders:
+        items = order.items or []
+        if not any(item_category(it) == 'labor' and _int_or_none(it.get('workerId')) == worker.id for it in items):
+            continue
+        status_of = {a.id: a.status for a in _assignments_for_order(order)}
+        new_items, changed = [], False
+        for it in items:
+            it = dict(it)
+            if (item_category(it) == 'labor' and _int_or_none(it.get('workerId')) == worker.id
+                    and it.get('actualLaborCost') is None
+                    and status_of.get(_int_or_none(it.get('assignmentId')), 'pending') == 'pending'
+                    and float(it.get('laborCost') or 0) != rate):
+                it['laborCost'] = rate
+                changed = True
+            new_items.append(it)
+        if changed:
+            order.items = new_items
+            order.estimated_cost = sum(
+                (finite_number(it.get('quantity'), 0.0) or 0.0)
+                * ((finite_number(it.get('materialCost'), 0.0) or 0.0) + (finite_number(it.get('laborCost'), 0.0) or 0.0))
+                for it in new_items)
+            order.actual_cost = job_order_actual_cost(order)
+
+
 @app.route('/api/managed-workers/<int:worker_id>', methods=['PUT'])
 @require_auth
 @require_permission('workers.edit')
@@ -12910,8 +12953,11 @@ def update_managed_worker(worker_id):
         worker.name = (data['name'] or '').strip()
     if 'workType' in data:
         worker.work_type = (data['workType'] or '').strip()
+    old_rate = float(worker.rate_per_hour or 0)
     if 'ratePerHour' in data:
         worker.rate_per_hour = float(data['ratePerHour'] or 0)
+    if float(worker.rate_per_hour or 0) != old_rate:
+        sync_pending_labor_rates(worker)
     if 'payMode' in data and data['payMode'] in ('per_hour', 'per_day', 'per_piece'):
         worker.pay_mode = data['payMode']
     if 'isActive' in data:
@@ -13247,8 +13293,9 @@ def list_worker_assignments():
     return jsonify({'status': 'success', 'data': {'assignments': result}})
 
 def mark_job_order_started(order):
-    """A pending job order given to a worker is being worked on: In Progress.
-    Returns True if its status changed (the caller commits)."""
+    """A pending job order whose worker has started a task is being worked on: In
+    Progress. Assigning alone leaves it Pending. Returns True if its status changed
+    (the caller commits)."""
     if order is None or order.status != 'pending':
         return False
     order.status = 'in_progress'
@@ -13278,6 +13325,10 @@ def create_worker_assignment():
     # Another task for a worker who already has open work on the job order (asked for
     # on purpose; otherwise assigning again reuses the open task)
     another = bool(data.get('another'))
+    # A second task on the same day as their open one is usually a double click or a
+    # mistake (each task is a labor line, paid separately), so it needs its own yes
+    same_day_ok = bool(data.get('sameDay'))
+    open_days = set()
     assignment_type = data.get('assignmentType', 'job_order')
     if assignment_type not in ('job_order', 'special_task'):
         assignment_type = 'job_order'
@@ -13318,6 +13369,7 @@ def create_worker_assignment():
                      and task_base_name(a.description) == task_base_name(description)]
         existing = still_open[0] if still_open else (same_done[-1] if same_done else None)
         if another and still_open:
+            open_days = {a.scheduled_date for a in still_open if a.scheduled_date}
             # A separate task, numbered so it reads apart from the first on the job order
             names = {(a.description or '').strip() for a in mine}
             n = 2
@@ -13336,6 +13388,10 @@ def create_worker_assignment():
     if scheduled_date and scheduled_date < manila_today():
         msg = 'Work can only be scheduled for today or a later day.'
         return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
+    if scheduled_date and scheduled_date in open_days and not same_day_ok:
+        msg = (f'{worker.name} already has {order.job_order_id} on this day. '
+               'Confirm that a separate task is really needed.')
+        return jsonify({'status': 'error', 'error': msg, 'message': msg, 'code': 'same_day'}), 409
     if existing and existing.status == 'completed':
         if not rework:
             # A second copy would pay the worker twice by accident, so ask first: the
@@ -13364,8 +13420,6 @@ def create_worker_assignment():
         if scheduled_date and existing.status != 'completed' and existing.scheduled_date != scheduled_date:
             existing.scheduled_date = scheduled_date
             existing.updated_at = datetime.utcnow()
-            db.session.commit()
-        if mark_job_order_started(order):
             db.session.commit()
         return jsonify({
             'status': 'success',
@@ -13400,12 +13454,8 @@ def create_worker_assignment():
     db.session.flush()
     if order:
         add_labor_line_for_assignment(order, assignment)
-    started = mark_job_order_started(order)
+    # The job order stays Pending until a worker starts a task on it
     db.session.commit()
-    if started:
-        log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Sales',
-                   f"{order.job_order_id} moved to In Progress: assigned to {worker.name}",
-                   request.remote_addr or '0.0.0.0')
     return jsonify({
         'status': 'success',
         'data': {
@@ -13521,6 +13571,9 @@ def update_worker_assignment(assignment_id):
                 return jsonify({'status': 'error', 'error': msg, 'message': msg}), 400
     if new_status:
         assignment.status = new_status
+        # A worker starting (or finishing) a task is when the job order is under way
+        if new_status in ('in_progress', 'completed') and assignment.assignment_type != 'special_task':
+            mark_job_order_started(order)
         if new_status == 'in_progress' and not assignment.start_time:
             assignment.start_time = datetime.utcnow()
         elif new_status == 'completed' and not assignment.end_time:
@@ -13733,8 +13786,15 @@ def delete_worker_assignment(assignment_id):
         items = [dict(it) for it in order.items if it.get('assignmentId') != assignment.id]
         order.items = items
         order.actual_cost = job_order_actual_cost(order, items)
-    # Only the assignment goes: the job order keeps its status, priority and details,
-    # so it simply shows up again as available work
+    # Only the assignment goes: the job order keeps its priority and details, so it
+    # shows up again as available work. In Progress means a worker started on it: if
+    # no task left on it was ever started or finished, it goes back to Pending.
+    if order and order.status == 'in_progress' and assignment.assignment_type != 'special_task':
+        worked = any(a.id != assignment.id and a.status in ('in_progress', 'completed')
+                     for a in _assignments_for_order(order))
+        if not worked:
+            order.status = 'pending'
+            order.updated_at = datetime.utcnow()
     worker_name = assignment.worker.name if assignment.worker else 'a worker'
     task_label = (assignment.special_task_title or 'special task') if assignment.assignment_type == 'special_task'         else assignment.job_order_ref
     task_desc = assignment.description or 'task'

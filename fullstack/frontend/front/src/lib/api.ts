@@ -1487,6 +1487,10 @@ export interface OwnerSummary {
   totals: {
     sales: number; grossReceipts: number; vatCollected: number; grossProfit: number; totalExpenses: number;
     netIncome: number; profitMargin: number; orderCounts: { jobOrders: number; premadeOrders: number };
+    /** Cost of goods sold and operating expenses (together they make totalExpenses) */
+    cogs: number; operatingExpenses: number;
+    /** Gross profit as a % of sales */
+    grossMargin: number;
   };
   /** What customers owe today (not limited to the period) */
   receivables: number;
@@ -2538,7 +2542,9 @@ export const api = {
       fetchApi<Record<string, CalendarAssignment[]>>(
         `/api/worker-assignments/calendar?month=${params.month}${params.workerId ? `&workerId=${params.workerId}` : ''}`
       ),
-    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string; scheduledDate?: string; assignmentType?: string; specialTaskTitle?: string; rework?: boolean; reworkReason?: string; another?: boolean }) =>
+    create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string; scheduledDate?: string; assignmentType?: string; specialTaskTitle?: string; rework?: boolean; reworkReason?: string; another?: boolean;
+      /** Confirms another task on a day the worker already has this job order */
+      sameDay?: boolean }) =>
       fetchApi<{ assignment: WorkerAssignment; warning?: string | null }>('/api/worker-assignments', {
         method: 'POST',
         body: JSON.stringify(data),

@@ -889,7 +889,8 @@ export default function WorkerDashboard() {
   /** After any change to assignments: the lists and the calendar both show them */
   const refreshAssignments = () => {
     fetchAssignments();
-    // Assigning work moves a pending job order to In Progress
+    // Starting a task moves a pending job order to In Progress; removing the last
+    // worker before anyone started puts it back to Pending
     fetchJobOrders();
     if (activeTab === 'calendar') fetchCalendar();
   };
@@ -991,11 +992,21 @@ export default function WorkerDashboard() {
       return;
     }
     if (assigning.current) return;
+    // A second task on a day they already have this job order: ask first
+    const today = todayYMD();
+    const sameDay = another && assignments.some(a => a.workerId === worker.id && a.jobOrderDbId === p.jo.id
+      && a.status !== 'completed' && a.assignmentType !== 'special_task' && a.scheduledDate === today);
+    if (sameDay && !(await confirm({
+      title: 'Add a separate task?',
+      message: <>{worker.name} already has {p.jo.jobOrderId} today.</>,
+      warning: 'The new task is paid on its own and adds to the job order\'s labor cost. Only add it if it is really separate work.',
+      confirmLabel: 'Add task',
+    }))) return;
     assigning.current = true;
     try {
       // The server returns the existing assignment instead of a copy if the worker already has it.
       // Work handed out here starts today, so it shows on the calendar right away.
-      showWarning(await api.workerAssignments.create({ workerId: worker.id, jobOrderRef: p.jo.jobOrderId, jobOrderDbId: p.jo.id, scheduledDate: todayYMD(), ...(another ? { another: true } : {}) }));
+      showWarning(await api.workerAssignments.create({ workerId: worker.id, jobOrderRef: p.jo.jobOrderId, jobOrderDbId: p.jo.id, scheduledDate: today, ...(another ? { another: true, sameDay } : {}) }));
       setPicked(null);
       await fetchAssignments();
     } catch (err) {
@@ -1046,7 +1057,8 @@ export default function WorkerDashboard() {
       if (current) await api.workerAssignments.update(current.id, { scheduledDate: dateStr });
       else showWarning(await api.workerAssignments.create({
         workerId, jobOrderRef: job.jobOrderId, jobOrderDbId: job.id, scheduledDate: dateStr,
-        ...(another ? { another: true } : {}),
+        // Only reached through a choice made on purpose (the assign form)
+        ...(another ? { another: true, sameDay: true } : {}),
       }));
       refreshAssignments();
       return true;
@@ -1085,11 +1097,13 @@ export default function WorkerDashboard() {
     const jo = f && jobOrders.find(j => j.id === f.jobId);
     if (!f || !jo || !f.workerId) return;
     if (isPastDay(f.date)) { showError(null, PAST_DAY_MSG); return; }
-    setSavingAssign(true);
-    // Already on that day: the only thing left to do is add another task
+    // Already on that day: only a separate task, and only when ticked on purpose
     const sameDay = assignments.some(a => a.workerId === f.workerId && a.jobOrderDbId === jo.id
       && a.status !== 'completed' && a.assignmentType !== 'special_task' && a.scheduledDate === f.date);
-    const ok = await assignJobToDate(jo, f.workerId, f.date, f.another || sameDay);
+    if (sameDay && !f.another) return;
+    setSavingAssign(true);
+    // Picked in this form on purpose, so it also confirms a same-day task
+    const ok = await assignJobToDate(jo, f.workerId, f.date, f.another);
     setSavingAssign(false);
     if (ok) { setAssignForm(null); setPicked(null); }
   };
@@ -1321,11 +1335,6 @@ export default function WorkerDashboard() {
   const firstDay   = firstDayOfMonth(calYear, calMonth);
   const availMap   = Object.fromEntries(availability.map(e => [e.date, e]));
   const todayStr   = todayYMD();
-  // Assigned work with no date yet, most urgent first (the calendar's side list)
-  const unscheduled = assignments
-    .filter(a => !a.scheduledDate && a.status !== 'completed' && a.assignmentType !== 'special_task'
-      && (teamView || a.workerId === calWorker))
-    .sort(tasksByPriority);
   /** Open job orders that can go on the calendar, matching the search; ones nobody has yet first */
   const openJO = jobOrders.filter(jo => jo.status === 'pending' || jo.status === 'in_progress');
   const matchesJO = (jo: JobOrder, q: string) => {
@@ -1515,8 +1524,24 @@ export default function WorkerDashboard() {
                             : 'No active assignments. Click a job order to assign it here.'}
                         </p>
                       ) : (
+                        <div className="space-y-3">
+                          {/* Tasks are already in date order (late, today, later, no date): one row per day */}
+                          {workerAsgns.reduce((groups, a) => {
+                            const key = a.scheduledDate || '';
+                            const last = groups[groups.length - 1];
+                            if (last && last.key === key) last.items.push(a);
+                            else groups.push({ key, items: [a] });
+                            return groups;
+                          }, [] as { key: string; items: WorkerAssignment[] }[]).map(group => {
+                            const due = dueOf(group.key || null, todayStr);
+                            return (
+                          <div key={group.key || 'none'}>
+                            <p className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold text-gray-500">
+                              <span className={`px-1.5 py-0.5 rounded ${due.cls}`}>{due.text}</span>
+                              <span className="font-normal text-gray-400">{group.items.length} task{group.items.length === 1 ? '' : 's'}</span>
+                            </p>
                         <div className="flex flex-wrap gap-2">
-                          {workerAsgns.map(a => (
+                          {group.items.map(a => (
                             <div key={a.id}
                               className={`group relative flex items-start gap-2 px-3 py-2 rounded-xl border text-xs font-medium transition-colors
                                 ${picked?.kind === 'task' && picked.id === a.id ? 'ring-2 ring-[#011c72]' : ''}
@@ -1527,10 +1552,6 @@ export default function WorkerDashboard() {
                                   <PriorityBadge priority={a.jobOrderPriority} />
                                 </p>
                                 {a.description && <p className="text-gray-400 font-normal truncate max-w-30">{a.description}</p>}
-                                {(() => {
-                                  const due = dueOf(a.scheduledDate, todayStr);
-                                  return <span className={`inline-block mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold ${due.cls}`}>{due.text}</span>;
-                                })()}
                                 {blocked(a) && <p className="text-amber-700 font-normal text-[10px] max-w-40 truncate" title={waitMsg(a)}>⏳ {waitMsg(a)}</p>}
                                 {!blocked(a) && a.cuttingNotDone && (
                                   <p className="text-amber-700 font-normal text-[10px] max-w-40 truncate" title={a.cuttingNotDone}>✂ Not cut yet</p>
@@ -1574,6 +1595,10 @@ export default function WorkerDashboard() {
                               </div>
                             </div>
                           ))}
+                        </div>
+                          </div>
+                            );
+                          })}
                         </div>
                       )}
                       {taskView === 'today' && hiddenCount > 0 && (
@@ -1804,36 +1829,6 @@ export default function WorkerDashboard() {
                   {schedulableJO.length === 0
                     ? <p className="text-center text-gray-400 text-xs py-4">No pending or in-progress job orders.</p>
                     : schedulableJO.map(jo => renderJobCard(jo, true))}
-                </div>
-              </div>
-
-              {/* Work already assigned but not on a day yet */}
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col" style={{ maxHeight: '40vh' }}>
-                <div className="p-4 border-b border-gray-100">
-                  <h3 className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Unscheduled Work ({unscheduled.length})</h3>
-                  <p className="text-[11px] text-gray-400 mt-1">Assigned without a date. Click one, then click a day.</p>
-                </div>
-                <div className="overflow-y-auto flex-1 p-2 space-y-1.5">
-                  {unscheduled.length === 0 ? (
-                    <p className="text-center text-gray-400 text-xs py-4">Everything assigned has a date.</p>
-                  ) : unscheduled.map(a => {
-                    const on = picked?.kind === 'task' && picked.id === a.id;
-                    return (
-                      <div key={a.id} className={`rounded-xl border text-xs ${on ? 'border-[#011c72] bg-[#eef1fb] ring-2 ring-[#011c72]' : 'border-amber-200 bg-amber-50 hover:bg-amber-100'}`}>
-                        <button type="button" onClick={() => togglePickTask(a.id)} aria-pressed={on}
-                          className="w-full text-left p-2.5 pb-1">
-                          <div className="flex items-center gap-1.5">
-                            <p className="font-bold text-[#011c72] font-mono">{a.jobOrderRef}</p>
-                            <PriorityBadge priority={a.jobOrderPriority} />
-                            {on && <span className="ml-auto text-[10px] font-semibold text-white bg-[#011c72] px-1.5 py-0.5 rounded-full">Selected</span>}
-                          </div>
-                          <p className="text-gray-600 truncate">{teamView ? `${a.workerName} · ` : ''}{a.description || a.workType}</p>
-                        </button>
-                        <button type="button" onClick={() => setTaskPanel(a.id)}
-                          className="px-2.5 pb-2 text-[11px] font-medium text-[#011c72] hover:underline">Details</button>
-                      </div>
-                    );
-                  })}
                 </div>
               </div>
             </div>
@@ -2223,10 +2218,18 @@ export default function WorkerDashboard() {
                     </p>
                   )}
                   {existing && (alreadyThere ? (
-                    <p className="text-xs text-gray-600 mt-1">
-                      {worker?.name} already has {jo!.jobOrderId} on this day. Assigning adds another task, which can
-                      start once their first one is finished.
-                    </p>
+                    // Same worker, same job order, same day: nothing to do unless a separate
+                    // task is really needed (each one is its own labor line, paid separately)
+                    <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                      <p className="text-xs text-amber-800">
+                        {worker?.name} already has {jo!.jobOrderId} on this day.
+                      </p>
+                      <label className="mt-1.5 flex items-start gap-2 text-xs text-gray-800 cursor-pointer">
+                        <input type="checkbox" checked={f.another} onChange={e => set({ another: e.target.checked })}
+                          className="mt-0.5 w-4 h-4 rounded border-gray-300 accent-[#011c72]" />
+                        Add a separate task anyway. It is paid on its own and can start once their first one is finished.
+                      </label>
+                    </div>
                   ) : (
                     <fieldset className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
                       <legend className="px-1 text-xs text-amber-800">
@@ -2247,7 +2250,7 @@ export default function WorkerDashboard() {
               </div>
 
               <div className="p-5 border-t border-gray-200 flex gap-3">
-                <button type="button" onClick={submitAssignForm} disabled={!jo || !f.workerId || savingAssign}
+                <button type="button" onClick={submitAssignForm} disabled={!jo || !f.workerId || savingAssign || (alreadyThere && !f.another)}
                   className="flex-1 py-2.5 bg-[#011c72] hover:bg-[#022a9e] text-white text-sm font-medium rounded-xl disabled:opacity-50">
                   {savingAssign ? 'Saving…' : existing && !alreadyThere && !f.another ? 'Move to this day' : existing ? 'Add another task' : 'Assign'}
                 </button>
