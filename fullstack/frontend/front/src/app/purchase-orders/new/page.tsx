@@ -74,7 +74,7 @@ export default function NewPurchaseOrderPage() {
   // Predictions) arrive as ?restock=CODE:qty,CODE:qty. A purchase order is for one
   // supplier, so they are split by each material's supplier: one order per
   // supplier, filled in one after another. Nothing is saved until each is created.
-  const [restockNote, setRestockNote] = useState<{ added: number; missing: string[] } | null>(null);
+  const [restockNote, setRestockNote] = useState<{ added: number; missing: string[]; forJobs?: boolean } | null>(null);
   const [groups, setGroups] = useState<RestockGroup[]>([]);
   const [groupIndex, setGroupIndex] = useState(0);
   const [justCreated, setJustCreated] = useState('');
@@ -121,7 +121,8 @@ export default function NewPurchaseOrderPage() {
       // A few days out by default; change it to what the supplier says
       setExpectedDate(prev => prev || manilaDateString(new Date(Date.now() + 3 * 86400000)));
     }
-    setRestockNote({ added: seen.size, missing });
+    // ?from=jobs: from Inventory → Needed for job orders (the amounts are what the jobs are short)
+    setRestockNote({ added: seen.size, missing, forJobs: new URLSearchParams(window.location.search).get('from') === 'jobs' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadingMaterials]);
   const supplierName = (id: number | null) =>
@@ -270,7 +271,7 @@ export default function NewPurchaseOrderPage() {
         {restockNote && (
           <div className="mb-6 p-4 bg-[#eef1fb] border border-[#c7d2f5] rounded-xl text-sm text-[#011c72] space-y-2">
             <p>
-              <b>{restockNote.added} item{restockNote.added === 1 ? '' : 's'}</b> added from the restock recommendations with the suggested quantities,
+              <b>{restockNote.added} item{restockNote.added === 1 ? '' : 's'}</b> added from {restockNote.forJobs ? 'the materials job orders are short of, with the amounts they are short' : 'the restock recommendations with the suggested quantities'},
               {' '}each with its supplier, cost and payment terms filled in.
               Review them and remove anything you don&apos;t need. Nothing is ordered until you create the purchase order,
               and stock only goes up when it is received.

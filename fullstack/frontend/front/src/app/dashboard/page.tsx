@@ -1,7 +1,7 @@
 ﻿'use client';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { homePath } from '@/lib/permissions';
+import { DELIVERY_ENABLED, homePath } from '@/lib/permissions';
 import { useAuth } from '@/context/AuthContext';
 import { compactPeso, exactPeso } from '@/lib/format';
 import { api, DashboardStats, Alert, Activity, type DashboardPeriod } from '@/lib/api';
@@ -235,7 +235,7 @@ export default function Dashboard() {
 
         {/* Stats Cards - For staff only */}
         {isStaff && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 xl:gap-4 2xl:gap-6 mb-8 [&>*]:min-w-0">
+        <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 ${DELIVERY_ENABLED ? 'xl:grid-cols-6' : 'xl:grid-cols-5'} gap-4 xl:gap-4 2xl:gap-6 mb-8 [&>*]:min-w-0`}>
           {/* Pending Orders */}
           <Link href="/sales" className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:border-[#011c72] hover:shadow-md transition-all block">
             <div className="flex items-center justify-between">
@@ -322,7 +322,8 @@ export default function Dashboard() {
             )}
           </Link>
 
-          {/* Pending Deliveries */}
+          {/* Pending Deliveries (hidden: deliveries are no longer offered) */}
+          {DELIVERY_ENABLED && (
           <Link href="/delivery" className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:border-blue-500 hover:shadow-md transition-all block">
             <div className="flex items-center justify-between">
               <div>
@@ -343,6 +344,7 @@ export default function Dashboard() {
               </span>
             )}
           </Link>
+          )}
 
           {/* Total Revenue */}
           <Link href="/reports" className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:border-emerald-500 hover:shadow-md transition-all block">
@@ -531,7 +533,7 @@ export default function Dashboard() {
                   </Link>
                   )}
 
-                  {can('item_trail.add') && (
+                  {DELIVERY_ENABLED && can('item_trail.add') && (
                   <Link
                     href="/delivery/new"
                     className="flex flex-col items-center justify-center p-6 bg-white rounded-xl border border-gray-200 hover:border-blue-500 hover:shadow-md transition-all group"

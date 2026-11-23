@@ -15,6 +15,7 @@ import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import ExcessPayments from '@/components/ExcessPayments';
 import ExtraMaterialDialog from '@/components/ExtraMaterialDialog';
 import JobOrderDelivery from '@/components/JobOrderDelivery';
+import { DELIVERY_ENABLED } from '@/lib/permissions';
 import { useConfirm } from '@/components/ConfirmDialog';
 import { exactPeso } from '@/lib/format';
 import SeatRowsEditor from '@/components/SeatRowsEditor';
@@ -1996,7 +1997,16 @@ export default function JobOrderDetailPage() {
                   </h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
                     <div {...fe.field('payment-amount')}>
-                      <label className="block text-xs font-medium text-gray-600 mb-1.5">Amount (₱) *</label>
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <label className="block text-xs font-medium text-gray-600">Amount (₱) *</label>
+                        {/* Fills in the whole remaining balance */}
+                        {remainingBalance > 0 && (
+                          <button type="button" onClick={() => setNewPaymentAmount(remainingBalance.toFixed(2))}
+                            className="text-xs font-medium text-[#011c72] hover:underline">
+                            Pay full balance ({formatCurrency(remainingBalance)})
+                          </button>
+                        )}
+                      </div>
                       <div className="relative">
                         <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm font-medium">₱</span>
                         <input
@@ -2164,7 +2174,7 @@ export default function JobOrderDetailPage() {
         </div>
 
         {/* ── Delivery (completed / delivered): schedule it or follow it ── */}
-        <JobOrderDelivery jobOrderId={jobOrder.id} jobOrderStatus={jobOrder.status} />
+        {DELIVERY_ENABLED && <JobOrderDelivery jobOrderId={jobOrder.id} jobOrderStatus={jobOrder.status} />}
 
         {/* ── Job Financial Summary (completed / delivered only) ── */}
         {/* Includes what each worker was paid, so only for those who see labor costs */}

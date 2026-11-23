@@ -11,6 +11,7 @@ import {
 import Combobox from '@/components/Combobox';
 import MaterialPicker from '@/components/MaterialPicker';
 import LengthInput from '@/components/LengthInput';
+import { useConfirm } from '@/components/ConfirmDialog';
 import { formatLength } from '@/lib/length';
 import type { VehicleHistory } from '@/lib/api';
 import PremadeItemPicker from '@/components/PremadeItemPicker';
@@ -92,6 +93,21 @@ export default function NewJobOrderPage() {
   );
 }
 
+/** How alike two names are, 0 to 1 (1 - edit distance / longer length): catches typos */
+function similarity(a: string, b: string): number {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return 1 - prev[b.length] / Math.max(a.length, b.length);
+}
+
 function NewJobOrderForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -113,6 +129,7 @@ function NewJobOrderForm() {
   const [error, setError] = useState('');
   // Problems with a specific field are shown next to it; `error` is for the rest
   const fe = useFieldErrors();
+  const { confirm, confirmDialog } = useConfirm();
   // ?premadeDraftId=… : editing a saved premade draft (no stock is taken until it is confirmed)
   const premadeDraftParam = searchParams.get('premadeDraftId');
   const editingPremadeDraftId = premadeDraftParam ? Number(premadeDraftParam) : null;
@@ -207,7 +224,8 @@ function NewJobOrderForm() {
   const [linkedCustomerDiscount, setLinkedCustomerDiscount] = useState<number | null>(null);
   const [orderDiscount, setOrderDiscount] = useState<string>('');  // editable per-order discount %
   // Prices include VAT by default; untick for a sale without VAT
-  const [vatOn, setVatOn] = useState(true);
+  // The price always includes VAT (no longer a choice on the form)
+  const vatOn = true;
   const vatRate = useVatRate();
   const [customerSuggestions, setCustomerSuggestions] = useState<Customer[]>([]);
   const [searchingCustomer, setSearchingCustomer] = useState(false);
@@ -444,6 +462,44 @@ function NewJobOrderForm() {
     setMaterials((prev) => prev.filter((m) => m.id !== id));
   };
 
+  /** Step 2 services whose chosen material is this Materials line */
+  const servicesUsingMaterial = (line: MaterialItem): string[] => {
+    const norm = (v: string) => v.split(/\s+/).filter(Boolean).join(' ').toLowerCase();
+    const inv = line.materialSource === 'inventory' && line.materialId
+      ? inventoryMaterials.find((i) => i.id === Number(line.materialId)) : undefined;
+    const names = inv
+      ? [norm([inv.materialType, inv.color, inv.pattern].map((v) => (v || '').trim()).filter(Boolean).join(' - ')), norm(inv.materialType)]
+      : [norm(line.name)];
+    return ([
+      ['flooring', 'Flooring', flooring], ['reupholstery', 'Reupholstery', reupholstery], ['ceiling', 'Ceiling', ceiling],
+      ['sidings', 'Sidings', sidings], ['seatCovers', 'Seat Covers', seatCovers],
+    ] as [string, string, { selected: boolean; material: string }][])
+      .filter(([key, , s]) => {
+        if (!s.selected || !s.material.trim()) return false;
+        if (serviceLinesRef.current.get(key)?.lineId === line.id) return true;
+        const wanted = norm(s.material);
+        return names.some((n) => n && n === wanted);
+      })
+      .map(([, label]) => label);
+  };
+
+  /** Removing a line a Step 2 service is using asks first */
+  const confirmRemoveMaterial = async (line: MaterialItem) => {
+    const services = servicesUsingMaterial(line);
+    if (services.length) {
+      const name = line.name.trim() || 'This material';
+      const ok = await confirm({
+        title: 'Remove a material used by a service?',
+        message: <><span className="font-medium text-gray-900">{name}</span> was chosen in Step 2 (Service) for {services.join(', ')}.</>,
+        warning: 'Removing it here leaves the service without this material on the job order. To change the service material, go back to Step 2.',
+        confirmLabel: 'Remove anyway',
+        variant: 'warning',
+      });
+      if (!ok) return;
+    }
+    removeMaterial(line.id);
+  };
+
   const updateMaterial = (id: string, field: keyof MaterialItem, value: string | number | '') => {
     setMaterials((prev) =>
       prev.map((m) => {
@@ -462,6 +518,38 @@ function NewJobOrderForm() {
         return updated;
       })
     );
+  };
+
+  /** Short of stock or not in Inventory: shown under the line. Saving is never
+   *  blocked; Inventory lists these under "Needed for job orders" to be ordered. */
+  const materialLineNote = (m: MaterialItem): { kind: 'short' | 'typed'; text: string; similar: RawMaterial[] } | null => {
+    if (m.materialSource === 'inventory') {
+      const inv = m.materialId ? inventoryMaterials.find((i) => i.id === Number(m.materialId)) : undefined;
+      if (!inv || inv.isConsumable) return null;
+      const want = Number(m.quantity) || 0;
+      const stock = Math.max(Number(inv.stockQuantity) || 0, 0);
+      if (want <= stock + 0.0001) return null;
+      return {
+        kind: 'short', similar: [],
+        text: stock <= 0
+          ? `Out of stock: ${formatLength(want)} needed.`
+          : `Not enough stock: ${formatLength(stock)} in stock, ${formatLength(want - stock)} short.`,
+      };
+    }
+    const name = m.name.trim();
+    if (!name) return null;
+    const key = (v: string) => v.toLowerCase().replace(/-/g, ' ').split(/\s+/).filter(Boolean).join(' ');
+    const usable = inventoryMaterials.filter((i) => !i.isArchived);
+    // The same name as an Inventory material is linked to it when saved
+    if (usable.some((i) => key(i.materialType) === key(name))) return null;
+    const label = (i: RawMaterial) => [i.materialType, i.color, i.pattern].filter(Boolean).join(' - ');
+    const similar = usable
+      .map((i) => ({ i, score: Math.max(similarity(key(name), key(label(i))), similarity(key(name), key(i.materialType))) }))
+      .filter((x) => x.score >= 0.75 && !(x.i.status === 'needed' && x.i.stockQuantity <= 0))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .map((x) => x.i);
+    return { kind: 'typed', similar, text: 'Not in Inventory: it is added with no stock when the job order is saved.' };
   };
 
   // A draft keeps every line, even one that sold out since it was saved: it is
@@ -797,7 +885,6 @@ function NewJobOrderForm() {
         if (d.branchId) setOrderBranchId(d.branchId);
         setExistingNumber(d.jobOrderId || '');
         if (d.discountPercent != null) setOrderDiscount(String(d.discountPercent));
-        setVatOn(Number(d.vatPercent) > 0);
         // Restore the price (it used to be lost when reopening a draft)
         // As a VAT-inclusive price, so saving keeps the draft's total (older drafts too)
         if (Number(d.totalPrice) > 0) {
@@ -1152,9 +1239,10 @@ function NewJobOrderForm() {
 
     const estimatedCompletion = estimatedCompletionDate || new Date().toISOString().slice(0, 10);
 
-    const hasSlipData = slipRows.some((r) => r.description || r.hr) ||
+    // Nothing typed on the slip is kept for a reupholstery-only job (the slip isn't shown)
+    const hasSlipData = !reupholsteryOnly && (slipRows.some((r) => r.description || r.hr) ||
       materialCenter || materialSides || materialBack ||
-      dStitch || piping || pockets || logo || specification || cutterName || sewerName;
+      dStitch || piping || pockets || logo || specification || cutterName || sewerName);
 
     const slipData = hasSlipData ? buildSlipData() : { serviceDetails: serviceDetails() };
 
@@ -1956,10 +2044,14 @@ function NewJobOrderForm() {
           <div className="space-y-6">
             <div>
               <h3 className="text-xl font-bold text-gray-900">Material Breakdown</h3>
-              <p className="text-sm text-gray-500 mt-1">Fill in the job order slip details and add materials</p>
+              <p className="text-sm text-gray-500 mt-1">
+                {reupholsteryOnly ? 'Add the materials for the reupholstery' : 'Fill in the job order slip details and add materials'}
+              </p>
             </div>
 
-            {/* Job Order Slip Fields */}
+            {/* Job Order Slip Fields: the seat-row slip is for vehicle work, so not
+                shown when Reupholstery is the only service */}
+            {!reupholsteryOnly && (
             <div className="bg-gray-50 rounded-xl border border-gray-200 p-5 space-y-5">
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Job Order Slip Details</p>
 
@@ -2037,6 +2129,7 @@ function NewJobOrderForm() {
                 </div>
               )}
             </div>
+            )}
 
             {/* Material Items List */}
             <div>
@@ -2157,7 +2250,7 @@ function NewJobOrderForm() {
                           className="w-full px-2 py-1.5 rounded-md border border-gray-200 bg-white text-xs text-gray-900 text-right focus:ring-1 focus:ring-[#011c72]" />
                       </div>
                       <div className="col-span-1 flex justify-end">
-                        <button type="button" onClick={() => removeMaterial(m.id)}
+                        <button type="button" onClick={() => confirmRemoveMaterial(m)}
                           className="p-1 text-red-400 hover:bg-red-100 rounded transition-colors">
                           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -2170,6 +2263,33 @@ function NewJobOrderForm() {
                         <LengthInput compact value={m.quantity} ariaLabel="Quantity"
                           onChange={(yards) => updateMaterial(m.id, 'quantity', yards)} />
                       </div>
+                      {(() => {
+                        const note = materialLineNote(m);
+                        if (!note) return null;
+                        return (
+                          <div className="col-span-12 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                            <p>
+                              <span className="font-semibold">{note.text}</span>{' '}
+                              The job order can still be saved. It will show in Inventory under
+                              &ldquo;Needed for job orders&rdquo; so it can be ordered before the workers cut.
+                            </p>
+                            {note.similar.length > 0 && (
+                              <p className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                <span>Did you mean</span>
+                                {note.similar.map((inv) => (
+                                  <button key={inv.id} type="button"
+                                    onClick={() => { updateMaterial(m.id, 'materialSource', 'inventory'); updateMaterial(m.id, 'materialId', inv.id); }}
+                                    className="rounded-full border border-amber-300 bg-white px-2 py-0.5 font-medium text-[#011c72] hover:bg-[#eef1fb]">
+                                    {[inv.materialType, inv.color, inv.pattern].filter(Boolean).join(' - ')}
+                                    <span className="font-normal text-gray-500"> ({formatLength(inv.stockQuantity)} in stock)</span>
+                                  </button>
+                                ))}
+                                <span>?</span>
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })()}
                       <FieldError message={fe.errors[`material-${m.id}`]} className="col-span-12 mt-0" />
                     </div>
                   ))}
@@ -2348,12 +2468,6 @@ function NewJobOrderForm() {
                 <FieldError message={fe.errors.discount} />
               </div>
 
-              <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
-                <input type="checkbox" checked={vatOn} onChange={(e) => setVatOn(e.target.checked)}
-                  className="w-4 h-4 rounded border-gray-300 text-[#011c72]" />
-                Price includes {vatRate}% VAT
-              </label>
-
               {estimatedTotal > 0 && (orderDiscountPct > 0 || vatPct > 0) && (
                 <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-1 text-sm">
                   <div className="flex items-center justify-between text-gray-600">
@@ -2455,6 +2569,7 @@ function NewJobOrderForm() {
 
   return (
     <div className="min-h-screen bg-gray-50">
+      {confirmDialog}
       <main className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
         <div className="mb-8">

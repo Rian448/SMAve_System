@@ -18,9 +18,8 @@ export default function CustomersPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
-  const [accountFilter, setAccountFilter] = useState<'all' | 'online' | 'walkin'>('all');
   const [orderFilter, setOrderFilter] = useState<'all' | 'with' | 'without'>('all');
-  const [balanceFilter, setBalanceFilter] = useState<'all' | 'unpaid' | 'excess'>('all');
+  const [balanceFilter, setBalanceFilter] = useState<'all' | 'unpaid'>('all');
 
   // Manual customer creation
   const [showCreate, setShowCreate] = useState(false);
@@ -45,16 +44,12 @@ export default function CustomersPage() {
   useEffect(() => { loadCustomers(); }, [loadCustomers]);
 
   const filtered = customers.filter((c) => {
-    if (accountFilter === 'online' && !c.hasAccount) return false;
-    if (accountFilter === 'walkin' && c.hasAccount) return false;
     if (orderFilter === 'with' && !(c.orderCount && c.orderCount > 0)) return false;
     if (orderFilter === 'without' && (c.orderCount || 0) > 0) return false;
     if (balanceFilter === 'unpaid' && !((c.unpaidTotal || 0) > 0)) return false;
-    if (balanceFilter === 'excess' && !((c.excessTotal || 0) > 0)) return false;
     return true;
   });
-  const filtersOn = accountFilter !== 'all' || orderFilter !== 'all' || balanceFilter !== 'all';
-  const withExcess = customers.filter((c) => (c.excessTotal || 0) > 0).length;
+  const filtersOn = orderFilter !== 'all' || balanceFilter !== 'all';
 
   const handleCreate = async () => {
     setCreateError('');
@@ -116,14 +111,6 @@ export default function CustomersPage() {
             className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent text-sm"
           />
         </div>
-          <select value={accountFilter} onChange={(e) => setAccountFilter(e.target.value as typeof accountFilter)}
-            aria-label="Filter by account"
-            className="px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
-            <option value="all">All customers</option>
-            {/* No "Former online account" option: online ordering was retired. Those customers
-                and their records stay, and still show under All customers. */}
-            <option value="walkin">Walk-in only</option>
-          </select>
           <select value={orderFilter} onChange={(e) => setOrderFilter(e.target.value as typeof orderFilter)}
             aria-label="Filter by orders"
             className="px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
@@ -136,21 +123,8 @@ export default function CustomersPage() {
             className="px-3 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent">
             <option value="all">Any balance</option>
             <option value="unpaid">Has unpaid balance</option>
-            <option value="excess">Has excess to return</option>
           </select>
         </div>
-
-        {/* Money the shop still has to give back */}
-        {withExcess > 0 && balanceFilter !== 'excess' && (
-          <button type="button" onClick={() => setBalanceFilter('excess')}
-            className="w-full mb-4 flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left text-sm text-amber-800 hover:bg-amber-100 transition-colors">
-            <span>
-              <span className="font-semibold">{withExcess} customer{withExcess === 1 ? ' has' : 's have'} excess payments</span>{' '}
-              to refund or apply to another order.
-            </span>
-            <span className="font-medium underline shrink-0">Show</span>
-          </button>
-        )}
 
         {!loading && customers.length > 0 && (
           <p className="text-xs text-gray-500 mb-3">
@@ -169,7 +143,7 @@ export default function CustomersPage() {
           </div>
         ) : (
           <div className="bg-white rounded-2xl border border-gray-200 overflow-x-auto">
-            <Paginated items={filtered} resetKey={[query, accountFilter, orderFilter, balanceFilter]} label="customers">{rows => (
+            <Paginated items={filtered} resetKey={[query, orderFilter, balanceFilter]} label="customers">{rows => (
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>

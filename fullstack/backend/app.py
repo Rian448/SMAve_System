@@ -1111,10 +1111,13 @@ PERMISSIONS = {
     for action, label in actions
 }
 
+# Supervisors are based at the main warehouse and oversee every branch
+# (branches.all), with full control of Purchasing like an administrator:
+# purchase orders (create, approve, receive, supplier payments) and suppliers
 _SUPERVISOR_EXCLUDED = {
-    'payments.approve_override', 'purchase_orders.approve', 'purchase_orders.pay', 'reports.audit_trail',
+    'payments.approve_override', 'reports.audit_trail',
     'workers.add', 'workers.edit', 'workers.delete', 'workers.delete_assignment',
-    'catalog.manage', 'blacklist.manage', 'branches.manage', 'branches.all', 'users.manage',
+    'catalog.manage', 'blacklist.manage', 'branches.manage', 'users.manage',
     'owner.view', 'expenses.delete',
     # Correcting stock by hand is for administrators (or whoever they give it to)
     'inventory.adjust_stock', 'premade.adjust_stock',
@@ -1195,13 +1198,16 @@ def all_branches(user):
     return has_perm(user, 'branches.all')
 
 # Roles limited to one shop. They can't be based at the warehouse.
-BRANCH_LIMITED_ROLES = ('supervisor', 'sales_manager')
+BRANCH_LIMITED_ROLES = ('sales_manager',)
+# Roles always based at the main warehouse (and never at a shop branch)
+WAREHOUSE_ROLES = ('supervisor',)
 
 def warehouse_role_error(role_key, branch):
     """Why an account with this role can't be based at this branch, or None."""
     if role_key in BRANCH_LIMITED_ROLES and branch is not None and branch.is_warehouse:
-        return ('The warehouse is run by administrators: supervisors and sales managers '
-                'must be assigned to a shop branch.')
+        return 'Sales managers must be assigned to a shop branch, not the main warehouse.'
+    if role_key in WAREHOUSE_ROLES and (branch is None or not branch.is_warehouse):
+        return "Supervisors are based at the main warehouse and can't be assigned to a shop branch."
     return None
 
 def inventory_branch_error(user, branch_id):
@@ -1315,7 +1321,7 @@ def user_to_dict(user):
         'branch': user.branch,
         'branchId': user.branch_id,
         'branchName': user.branch_rel.name if user.branch_rel else user.branch,
-        # Based at the warehouse (administrators only); grants no extra access
+        # Based at the warehouse (administrators and supervisors); grants no extra access
         'atWarehouse': bool(user.branch_rel and user.branch_rel.is_warehouse),
         'isActive': user.is_active,
         'phone': user.phone,
@@ -1399,6 +1405,24 @@ def retire_staff_role():
     except Exception as e:
         db.session.rollback()
         print(f"[migration] Retiring 'staff' role skipped: {e}")
+
+def move_supervisors_to_warehouse():
+    """Supervisors are now based at the main warehouse (and see every branch from
+    there): move any still assigned to a shop branch. Idempotent."""
+    role = Role.query.filter_by(key='supervisor').first()
+    warehouse = get_warehouse_branch()
+    if not role or not warehouse:
+        return
+    try:
+        moved = User.query.filter(User.role_id == role.id,
+                                  db.or_(User.branch_id.is_(None), User.branch_id != warehouse.id)).update(
+            {'branch_id': warehouse.id, 'branch': None}, synchronize_session=False)
+        db.session.commit()
+        if moved:
+            print(f"[migration] {moved} supervisor(s) moved to the main warehouse")
+    except Exception as e:
+        db.session.rollback()
+        print(f"[migration] Moving supervisors to the warehouse skipped: {e}")
 
 def seed_first_administrator():
     """On a brand-new database (no staff accounts at all) create one
@@ -1647,6 +1671,7 @@ def init_db():
     # Accounts: only a first administrator on a brand-new database
     seed_first_administrator()
     warn_about_demo_passwords()
+    move_supervisors_to_warehouse()  # after the warehouse exists
     normalize_premade_units()
 
     # Seed default catalog items
@@ -2821,7 +2846,9 @@ def material_to_dict(material):
         'unit': material_unit(material),
         # A consumable opened and partly used since it was last marked fully used
         'partialUseAt': fmt_dt(consumable_partial_since(material)) if material.is_consumable else None,
-        'lastUpdated': material.updated_at.strftime('%Y-%m-%d') if material.updated_at else None
+        'lastUpdated': material.updated_at.strftime('%Y-%m-%d') if material.updated_at else None,
+        # Full time of the last change (stock used or received, edited), for newest-first lists
+        'updatedAt': material.updated_at.isoformat() + 'Z' if material.updated_at else None
     }
 
 # Stock is kept to 4 decimals (0.0001 yd is under 0.1 mm). A length typed in feet or
@@ -3209,6 +3236,175 @@ def get_raw_materials_summary():
     summaries = [raw_material_group_to_dict(group_items, include_components=include_components) for _, group_items in grouped.items()]
     summaries.sort(key=lambda x: x['name'])
     return jsonify({'status': 'success', 'data': summaries})
+
+# ============================================
+# MATERIALS NEEDED FOR JOB ORDERS
+# ============================================
+# A job order can be saved with a material that isn't in stock (typed in, or an
+# Inventory one with too little). Nothing is blocked: these lists show what open
+# job orders still need, so it can be ordered before the workers cut.
+CLOSED_JOB_STATUSES = ('completed', 'delivered', 'cancelled', 'voided', 'draft')
+
+def _material_label(m):
+    return ' - '.join(v.strip() for v in (m.material_type, m.color, m.pattern) if v and v.strip())
+
+def _label_key(text):
+    return ' '.join(str(text or '').lower().replace('-', ' ').split())
+
+def job_order_material_needs():
+    """{material id: [{order, remaining}]}: what each open job order still has to
+    cut of each linked material (planned amount less what workers already cut)."""
+    orders = JobOrder.query.filter(~JobOrder.status.in_(CLOSED_JOB_STATUSES)).all()
+    if not orders:
+        return {}
+    refs = [o.job_order_id for o in orders]
+    cut = {}
+    for ref, mid, used in db.session.query(
+            MaterialUsageLog.used_in_reference, MaterialUsageLog.material_id,
+            db.func.sum(MaterialUsageLog.quantity_used)).filter(
+            MaterialUsageLog.used_in_type == 'job_order_cut',
+            MaterialUsageLog.used_in_reference.in_(refs)).group_by(
+            MaterialUsageLog.used_in_reference, MaterialUsageLog.material_id).all():
+        cut[(ref, mid)] = float(used or 0)
+    needs = {}
+    for order in orders:
+        if order.quote_status == 'rejected':
+            continue
+        planned = {}
+        for it in order.items or []:
+            mid = _int_or_none(it.get('materialId'))
+            if not mid or item_category(it) != 'material':
+                continue
+            qty = finite_number(it.get('quantity'), 0.0) or 0.0
+            planned[mid] = planned.get(mid, 0.0) + max(qty, 0.0)
+        for mid, qty in planned.items():
+            remaining = round(qty - cut.get((order.job_order_id, mid), 0.0), 4)
+            if remaining > QTY_TOLERANCE:
+                needs.setdefault(mid, []).append({'order': order, 'remaining': remaining})
+    return needs
+
+def similar_materials(material, allowed_branch_ids, limit=3):
+    """Existing Inventory materials whose name is close to this one (a likely typo),
+    at branches the job orders may take stock from."""
+    import difflib
+    own = _label_key(_material_label(material))
+    own_type = _label_key(material.material_type)
+    out = []
+    for m in InventoryMaterial.query.filter(
+            InventoryMaterial.id != material.id,
+            InventoryMaterial.is_archived.is_(False),
+            InventoryMaterial.branch_id.in_(list(allowed_branch_ids) or [-1])).all():
+        if (m.status or 'available') == 'needed' and float(m.stock_quantity or 0) <= QTY_TOLERANCE:
+            continue  # another typed-in placeholder, not a real material
+        label = _material_label(m)
+        score = max(difflib.SequenceMatcher(None, own, _label_key(label)).ratio(),
+                    difflib.SequenceMatcher(None, own_type, _label_key(m.material_type)).ratio())
+        if score >= 0.75:
+            out.append((score, m))
+    out.sort(key=lambda x: (-x[0], x[1].id))
+    return [{'id': m.id, 'name': _material_label(m), 'branchName': m.branch.name if m.branch else None,
+             'stock': round(float(m.stock_quantity or 0), 4), 'unit': material_unit(m)}
+            for _, m in out[:limit]]
+
+def _allowed_stock_branches(orders):
+    """Branches every one of these orders may take stock from: its own and the warehouse."""
+    warehouse_ids = {b.id for b in Branch.query.filter_by(is_warehouse=True).all()}
+    allowed = None
+    for o in orders:
+        ids = {o.branch_id} | warehouse_ids
+        allowed = ids if allowed is None else allowed & ids
+    return allowed or warehouse_ids
+
+@app.route('/api/inventory/needed-materials', methods=['GET'])
+@require_auth
+@require_permission('inventory.view')
+def get_needed_materials():
+    """Materials open job orders need more of than is in stock, with the orders
+    waiting on each. Typed-in materials also get existing ones with a similar name."""
+    branch_ids, error = inventory_read_branches(request.current_user, request.args.get('branchId'),
+                                                include_warehouse=True)
+    if error:
+        return error
+    needs = job_order_material_needs()
+    if not needs:
+        return jsonify({'status': 'success', 'data': []})
+    query = InventoryMaterial.query.filter(InventoryMaterial.id.in_(list(needs)),
+                                           InventoryMaterial.is_archived.is_(False))
+    if branch_ids is not None:
+        query = query.filter(InventoryMaterial.branch_id.in_(branch_ids or [-1]))
+    data = []
+    for m in query.all():
+        entries = needs[m.id]
+        needed = round(sum(e['remaining'] for e in entries), 4)
+        stock = round(max(float(m.stock_quantity or 0), 0.0), 4)
+        short = round(needed - stock, 4)
+        if short <= QTY_TOLERANCE:
+            continue
+        typed_in = (m.status or 'available') == 'needed'
+        orders = sorted({e['order'].id: e['order'] for e in entries}.values(), key=lambda o: o.id)
+        data.append({
+            'id': m.id, 'itemId': m.item_id or str(m.id), 'name': _material_label(m),
+            'branchId': m.branch_id, 'branchName': m.branch.name if m.branch else None,
+            'unit': material_unit(m), 'stock': stock, 'needed': needed, 'short': short,
+            'typedIn': typed_in, 'supplierId': m.supplier_id,
+            'orders': [{'id': e['order'].id, 'jobOrderId': e['order'].job_order_id,
+                        'customerName': e['order'].customer_name, 'status': e['order'].status,
+                        'quantity': e['remaining']} for e in sorted(entries, key=lambda e: e['order'].id)],
+            'similar': similar_materials(m, _allowed_stock_branches(orders)) if typed_in else [],
+        })
+    data.sort(key=lambda d: (not d['typedIn'], -d['short'], d['name'].lower()))
+    return jsonify({'status': 'success', 'data': data})
+
+@app.route('/api/inventory/raw-materials/<int:material_id>/merge', methods=['POST'])
+@require_auth
+@require_permission('inventory.edit')
+def merge_needed_material(material_id):
+    """A material typed in on a job order turned out to be an existing one (a typo):
+    move the job orders' lines onto the existing material and archive the typed-in
+    one. Only for a typed-in material nothing has been ordered, received or cut of."""
+    user = request.current_user
+    source = InventoryMaterial.query.get(material_id)
+    if not source or source.is_archived:
+        return _error('Material not found', 404)
+    error = inventory_branch_error(user, source.branch_id)
+    if error:
+        return error
+    if (source.status or 'available') != 'needed' or float(source.stock_quantity or 0) > QTY_TOLERANCE:
+        return _error('Only a material typed in on a job order, with no stock yet, can be merged')
+    if MaterialUsageLog.query.filter_by(material_id=source.id).first():
+        return _error('Stock of this material has already been used, so it can no longer be merged')
+    for po in PurchaseOrder.query.filter(PurchaseOrder.status != 'cancelled').all():
+        if any(_int_or_none(it.get('materialId')) == source.id for it in (po.items or [])):
+            return _error(f'{po.po_number} already orders this material. Cancel that purchase order first.')
+
+    target = InventoryMaterial.query.get(_int_or_none((request.get_json(silent=True) or {}).get('targetId')))
+    if not target or target.is_archived or target.id == source.id:
+        return _error('Choose the existing material to use instead')
+
+    orders = [o for o in JobOrder.query.filter(JobOrder.status.notin_(('cancelled', 'voided'))).all()
+              if any(_int_or_none(it.get('materialId')) == source.id for it in (o.items or []))]
+    allowed = _allowed_stock_branches(orders) if orders else None
+    if allowed is not None and target.branch_id not in allowed:
+        return _error(f'{_material_label(target)} is stock of another branch. Choose one from the job order\'s '
+                      f'branch or the warehouse.')
+
+    for order in orders:
+        items = [dict(it) for it in (order.items or [])]
+        for it in items:
+            if _int_or_none(it.get('materialId')) == source.id:
+                it['materialId'] = target.id
+                it['name'] = target.material_type
+        order.items = items
+        order.actual_cost = job_order_actual_cost(order, items)
+    source.is_archived = True
+    db.session.commit()
+
+    refs = ', '.join(o.job_order_id for o in orders) or 'no job orders'
+    log_action(user['id'], user['fullName'], 'UPDATE', 'Inventory',
+               f"Merged typed-in material \"{_material_label(source)}\" into \"{_material_label(target)}\" ({refs})",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': {'target': material_to_dict(target),
+                                                  'jobOrders': [o.job_order_id for o in orders]}})
 
 @app.route('/api/inventory/raw-materials/group-detail', methods=['GET'])
 @require_auth
@@ -11545,6 +11741,12 @@ def create_user():
     # Handle branch - support both branchId and branch (string)
     branch_id = data.get('branchId')
     branch_name = data.get('branch')
+    if role.key in WAREHOUSE_ROLES:
+        # Supervisors are always based at the main warehouse, whatever was sent
+        warehouse = get_warehouse_branch()
+        if not warehouse:
+            return jsonify({'status': 'error', 'message': 'Set up the main warehouse before adding a supervisor.'}), 400
+        branch_id, branch_name = warehouse.id, None
 
     if branch_id:
         branch = Branch.query.get(branch_id)
@@ -11675,6 +11877,11 @@ def update_user(user_id):
             prune_redundant_overrides(user.id, role.key)
     if 'branchId' in data or 'role' in data:
         role_after = Role.query.get(user.role_id) if user.role_id else None
+        if role_after and role_after.key in WAREHOUSE_ROLES:
+            # Supervisors are always based at the main warehouse
+            warehouse = get_warehouse_branch()
+            if warehouse:
+                user.branch_id = warehouse.id
         error = warehouse_role_error(role_after.key if role_after else None,
                                      Branch.query.get(user.branch_id) if user.branch_id else None)
         if error:
@@ -12302,8 +12509,13 @@ def update_branch(branch_id):
         if data['isWarehouse'] and not branch.is_warehouse and User.query.join(Role).filter(
                 User.branch_id == branch.id, Role.key.in_(BRANCH_LIMITED_ROLES)).first():
             db.session.rollback()
-            return jsonify({'status': 'error', 'message': 'Move this branch\'s supervisors and sales managers '
-                                                          'to a shop branch before making it the warehouse.'}), 400
+            return jsonify({'status': 'error', 'message': "Move this branch's sales managers "
+                                                          'to another shop branch before making it the warehouse.'}), 400
+        if not data['isWarehouse'] and branch.is_warehouse and User.query.join(Role).filter(
+                User.branch_id == branch.id, Role.key.in_(WAREHOUSE_ROLES)).first():
+            db.session.rollback()
+            return jsonify({'status': 'error', 'message': 'Supervisors are based here. Mark another location as '
+                                                          'the warehouse and move them there first.'}), 400
         branch.is_warehouse = data['isWarehouse']
     if 'isActive' in data and bool(data['isActive']) != bool(branch.is_active):
         branch.is_active = bool(data['isActive'])

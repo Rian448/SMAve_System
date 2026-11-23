@@ -6,6 +6,7 @@ import { useAuth } from '@/context/AuthContext';
 import { api, ApiError, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus, PremadeTransfer, FORECAST_METHOD_LABELS, type PremadeRecipe } from '@/lib/api';
 import PremadeItemPicker from '@/components/PremadeItemPicker';
 import { useConfirm } from '@/components/ConfirmDialog';
+import NeededMaterialsPanel from '@/components/NeededMaterialsPanel';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import Link from 'next/link';
 import Paginated from '@/components/Paginated';
@@ -237,6 +238,8 @@ function InventoryContent() {
   // their own. Premade stock is produced and sent out from the warehouse.
   const managesAllInventory = can('branches.all');
   const canDistribute = can('premade.distribute') && managesAllInventory;
+  // Ready-made table: no Actions column for someone with none of its buttons (e.g. a sales manager)
+  const premadeHasActions = can('premade.edit') || can('premade.adjust_stock') || canDistribute;
   /** Admin/supervisor approve on someone's behalf, so they get a confirm step first. */
   const confirmsViaDialog = can('branches.all', 'premade.distribute');
   // Only all-branch access sees every branch's inventory (the server enforces the
@@ -940,7 +943,10 @@ function InventoryContent() {
         (statusFilter === 'in-stock' && qty > 0 && !isLowStock(qty, m.lowStockThreshold)) ||
         (statusFilter === 'consumables' && !!m.isConsumable);
       return matchesSearch && matchesType && matchesStatus;
-    });
+    })
+      // Latest activity first: a material just added, used on a job, restocked
+      // from a purchase order or edited sits at the top
+      .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '') || b.id - a.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rawMaterials, searchTerm, statusFilter, materialTypeFilter, globalThreshold]);
 
@@ -1770,6 +1776,8 @@ function InventoryContent() {
               )}
               {activeTab === 'finished-goods' && (
                 <>
+                  {/* Sales managers only see their own branch's stock, so no location to pick */}
+                  {user?.role !== 'sales_manager' && (
                   <select
                     value={premadeBranchFilter}
                     onChange={(e) => setPremadeBranchFilter(e.target.value)}
@@ -1787,6 +1795,7 @@ function InventoryContent() {
                       </option>
                     ))}
                   </select>
+                  )}
                   {(searchTerm || premadeBranchFilter !== 'all') && (
                     <button
                       onClick={() => { setSearchTerm(''); setPremadeBranchFilter('all'); }}
@@ -1799,6 +1808,11 @@ function InventoryContent() {
               )}
             </div>
           </div>}
+
+          {/* What open job orders still need and don't have in stock */}
+          {activeTab === 'raw-materials' && !loading && (
+            <NeededMaterialsPanel branchId={listBranchId} onChanged={fetchInventory} />
+          )}
 
           {/* Content */}
           {loading && activeTab !== 'ai-predictions' ? (
@@ -2148,7 +2162,7 @@ function InventoryContent() {
                 </div>
               ) : (
                 <Paginated items={filteredFinishedGoods} resetKey={[searchTerm, premadeBranchFilter]} label="products">{rows => (
-                <table className="w-full table-sticky-actions">
+                <table className={`w-full ${premadeHasActions ? 'table-sticky-actions' : ''}`}>
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Product</th>
@@ -2157,7 +2171,7 @@ function InventoryContent() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Price</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                      <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                      {premadeHasActions && <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
@@ -2223,6 +2237,7 @@ function InventoryContent() {
                               {status.label}
                             </span>
                           </td>
+                          {premadeHasActions && (
                           <td className="px-6 py-4 whitespace-nowrap text-right">
                             {editingPremadeId === item.id ? (
                               <div className="flex items-center justify-end gap-2">
@@ -2274,6 +2289,7 @@ function InventoryContent() {
                               </button>
                             )}
                           </td>
+                          )}
                         </tr>
                       );
                     })}
