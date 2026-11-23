@@ -305,9 +305,6 @@ export default function LoginPage() {
                   <p className="text-sm text-gray-600">
                     For Seatmakers Avenue staff only. No account yet? Ask your administrator.
                   </p>
-                  <p className="text-xs text-gray-500 mt-1.5">
-                    Customers: call <a href="tel:09338540446" className="text-[#011c72] hover:underline">0933 854 0446</a> or visit any branch.
-                  </p>
                 </div>
               </div>
 
