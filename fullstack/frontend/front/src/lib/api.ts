@@ -773,6 +773,8 @@ export interface JobOrderItem {
   category?: 'material' | 'labor' | 'expense';
   /** Worker assignment this labor line is linked to (managed by the server) */
   assignmentId?: number;
+  /** The slip's Cutter or Sewer this labor line was made for (managed by the server) */
+  slipRole?: 'cutter' | 'sewer';
   /** What the worker was actually paid for this whole line, once their assignment is completed */
   actualLaborCost?: number;
   /** Read-only, from the linked worker assignment (not stored on the order) */
@@ -946,6 +948,8 @@ export interface WorkerAssignment {
   overdueByHours?: number;
   /** The earlier unfinished task on the job order this one must wait for */
   waitingOn?: WaitingOn | null;
+  /** A sewing task whose job order's materials aren't cut yet: a warning, nothing is blocked */
+  cuttingNotDone?: string | null;
 }
 
 export interface WorkerAvailabilityEntry {
@@ -2535,7 +2539,7 @@ export const api = {
         `/api/worker-assignments/calendar?month=${params.month}${params.workerId ? `&workerId=${params.workerId}` : ''}`
       ),
     create: (data: { workerId: number; jobOrderRef: string; jobOrderDbId?: number; description?: string; expectedHours?: number; notes?: string; scheduledDate?: string; assignmentType?: string; specialTaskTitle?: string; rework?: boolean; reworkReason?: string; another?: boolean }) =>
-      fetchApi<{ assignment: WorkerAssignment }>('/api/worker-assignments', {
+      fetchApi<{ assignment: WorkerAssignment; warning?: string | null }>('/api/worker-assignments', {
         method: 'POST',
         body: JSON.stringify(data),
       }),

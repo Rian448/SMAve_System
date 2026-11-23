@@ -171,11 +171,11 @@ export default function CustomersPage() {
                     <td className="px-5 py-3">
                       {c.hasAccount ? (
                         <span title={c.username ? `@${c.username}` : undefined}
-                          className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                          className="inline-flex items-center px-2 py-0.5 rounded-full whitespace-nowrap text-xs font-medium bg-blue-100 text-blue-800">
                           Online
                         </span>
                       ) : (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full whitespace-nowrap text-xs font-medium bg-gray-100 text-gray-600">
                           Walk-in
                         </span>
                       )}
@@ -200,19 +200,19 @@ export default function CustomersPage() {
                     </td>
                     <td className="px-5 py-3">
                       {c.discountPercent != null ? (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full whitespace-nowrap text-xs font-medium bg-green-100 text-green-800">
                           {c.discountPercent}%
                         </span>
                       ) : '—'}
                     </td>
                     <td className="px-5 py-3">
                       {c.promoCode ? (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full whitespace-nowrap text-xs font-medium bg-purple-100 text-purple-800">
                           {c.promoCode}
                         </span>
                       ) : '—'}
                     </td>
-                    <td className="px-5 py-3 text-gray-500">{c.createdAt || '—'}</td>
+                    <td className="px-5 py-3 text-gray-500 whitespace-nowrap">{c.createdAt || '—'}</td>
                   </tr>
                 ))}
               </tbody>

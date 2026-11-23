@@ -181,6 +181,7 @@ export default function JobOrderDetailPage() {
             notes: item.notes || '',
             category,
             assignmentId: item.assignmentId,
+            slipRole: item.slipRole,
             actualLaborCost: item.actualLaborCost,
             assignmentStatus: item.assignmentStatus,
             scheduledDate: item.scheduledDate,
@@ -250,6 +251,8 @@ export default function JobOrderDetailPage() {
         }
       });
       setSlipMessage({ ok: true, text: 'Slip saved.' });
+      // The Cutter / Sewer may have added, moved or removed a worker on the order
+      await reloadJobOrder();
     } catch (err) {
       setSlipMessage({ ok: false, text: err instanceof Error && err.message ? err.message : 'Could not save the slip.' });
     } finally {
@@ -508,6 +511,8 @@ export default function JobOrderDetailPage() {
         notes: item.notes?.trim() || '',
         // The server owns the worker assignment link and the actual pay
         ...(isLabor && item.assignmentId ? { assignmentId: item.assignmentId } : {}),
+        // Kept so the line stays the slip's Cutter / Sewer line
+        ...(isLabor && item.slipRole ? { slipRole: item.slipRole } : {}),
         ...(resolvedMaterialId ? { materialId: resolvedMaterialId } : {})
       });
     }
@@ -544,6 +549,9 @@ export default function JobOrderDetailPage() {
           ...jobOrder,
           // Use the server's copy: it carries each labor line's worker assignment
           items: updated.items ?? normalizedItems,
+          // Deleting the slip's Cutting / Sewing line clears that name on the slip
+          ...(updated.slipData && (updated.slipData.cutterName !== jobOrder.slipData?.cutterName
+            || updated.slipData.sewerName !== jobOrder.slipData?.sewerName) ? { slipData: updated.slipData } : {}),
           totalPrice: updated.totalPrice ?? totalPrice,
           discountPercent: updated.discountPercent ?? (discountPercent || null),
           vatPercent: updated.vatPercent ?? null,
@@ -822,7 +830,7 @@ export default function JobOrderDetailPage() {
             </p>
           </div>
           <div className="no-print flex flex-wrap items-center gap-3">
-            <span className={`px-3 py-1.5 text-sm font-semibold rounded-full ${getStatusColor(jobOrder.status)}`}>
+            <span className={`px-3 py-1.5 text-sm font-semibold rounded-full whitespace-nowrap ${getStatusColor(jobOrder.status)}`}>
               {jobOrder.status.replace(/_/g, ' ').toUpperCase()}
             </span>
             {canEditParts && !['cancelled', 'voided', 'completed', 'delivered'].includes(jobOrder.status) ? (
@@ -1938,7 +1946,7 @@ export default function JobOrderDetailPage() {
                         <td className="px-4 py-3 text-sm font-semibold text-green-700 text-right">
                           {formatCurrency(record.amount)}
                         </td>
-                        <td className="px-4 py-3 text-sm text-gray-700 capitalize">
+                        <td className="px-4 py-3 text-sm text-gray-700 capitalize whitespace-nowrap">
                           {record.paymentMethod.replace(/_/g, ' ')}
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-500">
