@@ -17,7 +17,7 @@ export interface User {
   username: string;
   email: string;
   fullName: string;
-  role: 'administrator' | 'supervisor' | 'sales_manager' | 'seat_maker' | 'sewer' | 'owner';
+  role: 'administrator' | 'supervisor' | 'sales_manager' | 'seat_maker' | 'sewer' | 'owner' | 'supplier';
   roleName?: string;
   branch: string;
   branchId?: number;
@@ -438,6 +438,9 @@ export interface Supplier {
   paymentTerm?: PaymentTerm | null;
   paymentTermDays?: number | null;
   paymentTermLabel?: string | null;
+  /** The supplier's own login (they set the delivery date of the POs sent to them) */
+  userId?: number | null;
+  loginUsername?: string | null;
   /** Inventory materials usually bought from this supplier */
   materials?: { id: number; name: string; stockQuantity: number; unit: string; branchName?: string | null }[];
 }
@@ -546,9 +549,35 @@ export interface AIStatus {
   error: string | null;
 }
 
+/** One material in a month of the usage chart: what was used, or (projected months)
+ *  what the AI expects to be used, with its stock outlook */
+export interface UsageTrendMaterial {
+  itemId: string | null;
+  name: string;
+  unit: string;
+  quantity: number;
+  /** Actual months: how many times it was used, on how many job orders */
+  uses?: number;
+  jobOrders?: number;
+  /** Projected months */
+  currentStock?: number;
+  stockoutDate?: string | null;
+  restockByDate?: string | null;
+  suggestedRestockQty?: number;
+  confidence?: 'low' | 'medium' | 'high';
+  runsOutThisMonth?: boolean;
+}
+
+export interface UsageTrendMonth {
+  month: string;
+  total: number;
+  projected: boolean;
+  materials?: UsageTrendMaterial[];
+}
+
 export interface InventoryForecastData {
   restockItems: (AIPrediction & { estimatedCost: number })[];
-  monthlyUsageTrend: { month: string; total: number; projected: boolean }[];
+  monthlyUsageTrend: UsageTrendMonth[];
   totalPredictedItems: number;
   urgentCount: number;
   soonCount: number;
@@ -778,7 +807,7 @@ export interface JobOrderItem {
   /** What the worker was actually paid for this whole line, once their assignment is completed */
   actualLaborCost?: number;
   /** Read-only, from the linked worker assignment (not stored on the order) */
-  assignmentStatus?: 'pending' | 'in_progress' | 'completed';
+  assignmentStatus?: AssignmentStatus;
   scheduledDate?: string | null;
 }
 
@@ -868,6 +897,37 @@ export interface ManagedWorker {
   userName?: string | null;
 }
 
+/** A purchase order as its supplier sees it in their account */
+export interface SupplierOrder {
+  id: number;
+  poNumber: string;
+  status: 'approved' | 'partially_received' | 'received';
+  receivingStatus: PurchaseOrderReceivingStatus | null;
+  items: { line: number; name: string; quantity: number; unit: string; unitPrice: number; totalPrice: number;
+    receivedQuantity: number; remainingQuantity: number; priceBySupplier?: boolean }[];
+  /** Why the prices can't be changed any more (first delivery or payment), or null */
+  pricesLocked: string | null;
+  totalAmount: number;
+  orderedAt: string | null;
+  expectedDelivery: string | null;
+  supplierNote: string | null;
+  deliverySetAt: string | null;
+  paymentTermLabel: string | null;
+}
+export interface SupplierPortalData {
+  linked: boolean;
+  supplierName?: string;
+  orders?: SupplierOrder[];
+}
+
+/** A new login made for a worker from Worker Management */
+export interface NewWorkerAccount {
+  username: string;
+  password: string;
+  /** Optional: workers sign in with their username */
+  email?: string;
+}
+
 /** A seat maker or sewer login that a worker can be linked to */
 export interface LinkableWorkerAccount {
   id: number;
@@ -889,13 +949,52 @@ export interface MyWork {
     vehicle?: { make?: string; model?: string; year?: number; plateNumber?: string } | null;
     priority: JobOrderPriority;
     scheduledDate?: string | null;
-    status: 'pending' | 'in_progress' | 'completed';
+    assignmentType?: 'job_order' | 'special_task';
+    status: AssignmentStatus;
     hoursWorked?: number | null;
     pay?: number | null;
+    startTime?: string | null;
     endTime?: string | null;
     waitingOn?: WaitingOn | null;
+    /** What they submitted (kept to correct it if it is sent back) */
+    submission?: TaskSubmission | null;
+    /** Why an administrator sent the work back */
+    reviewNote?: string | null;
   }[];
 }
+
+/** submitted = the worker finished and it waits for an administrator to approve it */
+export type AssignmentStatus = 'pending' | 'in_progress' | 'submitted' | 'completed';
+
+export type TaskMaterialCut = { line?: number; materialId: number; cut: number; used: number; reason?: string };
+export type TaskConsumableUse = { materialId: number; kind: 'full' | 'partial'; quantity?: number };
+export type TaskMaterialNote = { name: string; qty: number; cut?: number; unit?: string; reason?: string };
+
+/** What a worker filled in when they finished a task */
+export interface TaskSubmission {
+  startTime: string | null;
+  endTime: string | null;
+  hours: number | null;
+  materialCuts: TaskMaterialCut[];
+  consumables: TaskConsumableUse[];
+  /** Readable list of what was used (names and amounts) */
+  materialsUsed: TaskMaterialNote[];
+  notes: string;
+  submittedBy?: string | null;
+  submittedAt?: string | null;
+}
+
+/** Sent when a worker (or an administrator for them) submits finished work */
+export interface TaskSubmitPayload {
+  startTime: string;
+  endTime: string;
+  materialCuts: TaskMaterialCut[];
+  consumables: TaskConsumableUse[];
+  materialsUsed: TaskMaterialNote[];
+  notes?: string;
+}
+
+export type CutMaterialsData = { materials: CutMaterialLine[]; notInInventory: string[]; extraMaterials: RawMaterial[]; consumables: RawMaterial[] };
 
 /** Work on a job order goes in the order it was given out: the earlier task still to finish */
 export interface WaitingOn {
@@ -923,6 +1022,8 @@ export interface WorkerAssignment {
   id: number;
   workerId: number;
   workerName: string;
+  /** The worker has their own login, so they submit their work themselves */
+  workerHasLogin?: boolean;
   workType: string;
   ratePerHour: number;
   payMode: 'per_hour' | 'per_day' | 'per_piece';
@@ -941,9 +1042,14 @@ export interface WorkerAssignment {
   scheduledDate?: string;
   assignmentType: 'job_order' | 'special_task';
   specialTaskTitle?: string;
-  status: 'pending' | 'in_progress' | 'completed';
+  status: AssignmentStatus;
   notes?: string;
   createdAt: string;
+  /** Finished work waiting for approval (or the last one sent back) */
+  submission?: TaskSubmission | null;
+  reviewNote?: string | null;
+  reviewedBy?: string | null;
+  reviewedAt?: string | null;
   isOverdue?: boolean;
   overdueByHours?: number;
   /** The earlier unfinished task on the job order this one must wait for */
@@ -1026,6 +1132,8 @@ export interface JobOrder {
       flooring?: string; reupholstery?: string; ceiling?: string; sidings?: string; other?: string;
       seatCovers?: { design?: string; material?: string; pocket?: string; others?: string };
     };
+    /** Step 5's price as % of materials (250 = 2.5× the materials total), for the invoice */
+    markupPercent?: number;
   } | null;
   estimatedCost: number;
   /** Planned lines plus any extra material issued for the order */
@@ -1085,6 +1193,8 @@ export interface PurchaseOrderItem {
   /** Ticked on the PO: the material is a consumable (counted in plain units) */
   consumable?: boolean;
   unitPrice: number;
+  /** The supplier set this price from their account */
+  priceBySupplier?: boolean;
   totalPrice: number;
   /** Index of the line on the PO (used when receiving) */
   line: number;
@@ -1140,7 +1250,12 @@ export interface PurchaseOrder {
   /** Null while pending approval or cancelled */
   receivingStatus: PurchaseOrderReceivingStatus | null;
   receipts: PurchaseOrderReceipt[];
-  expectedDelivery: string;
+  /** Set by the supplier from their account once approved (null until then) */
+  expectedDelivery: string | null;
+  supplierNote?: string | null;
+  deliverySetAt?: string | null;
+  /** The supplier has a login and sets the delivery date themselves */
+  supplierHasLogin?: boolean;
   createdAt: string;
   createdBy: number;
   createdByName?: string | null;
@@ -1883,6 +1998,9 @@ export const api = {
       fetchApi<Supplier>('/api/inventory/suppliers', { method: 'POST', body: JSON.stringify(data) }),
     updateSupplier: (id: number, data: Partial<Omit<Supplier, 'materials'>> & { materials?: SupplierMaterialEntry[] }) =>
       fetchApi<Supplier>(`/api/inventory/suppliers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    /** Make the supplier's own login (email optional; defaults to the supplier's email) */
+    createSupplierLogin: (id: number, data: { username: string; password: string; email?: string }) =>
+      fetchApi<Supplier>(`/api/inventory/suppliers/${id}/login`, { method: 'POST', body: JSON.stringify(data) }),
 
     // Waste Logs
     getWasteLogs: (params?: { branchId?: number }) => {
@@ -2064,12 +2182,15 @@ export const api = {
     
     getById: (id: number) =>
       fetchApi<PurchaseOrder>(`/api/purchase-orders/${id}`),
+    /** The supplier's last price for each material (by material id), from earlier POs */
+    lastPrices: (supplierId: number) =>
+      fetchApi<Record<string, { price: number; poNumber: string; date: string | null; bySupplier: boolean }>>(
+        `/api/purchase-orders/last-prices?supplierId=${supplierId}`),
     
     create: (po: {
       supplierName: string;
       supplierId?: number;
       items: Array<{ materialId?: number; name: string; quantity: number; unit: string; unitPrice: number; consumable?: boolean }>;
-      expectedDelivery: string;
       /** Left out: the supplier's default. '' = no term */
       paymentTerm?: PaymentTerm | '';
       paymentTermDays?: number | null;
@@ -2507,6 +2628,13 @@ export const api = {
     linkableAccounts: () => fetchApi<LinkableWorkerAccount[]>('/api/managed-workers/linkable-accounts'),
     /** The signed-in worker's own assignments */
     myWork: () => fetchApi<MyWork>('/api/my-work'),
+    /** The signed-in worker starts one of their tasks */
+    startMyTask: (id: number) => fetchApi<WorkerAssignment>(`/api/my-work/${id}/start`, { method: 'POST' }),
+    /** The job order's materials for the worker's finish-task form (no prices) */
+    myTaskMaterials: (id: number) => fetchApi<CutMaterialsData>(`/api/my-work/${id}/cut-materials`),
+    /** The worker submits their finished task for an administrator to approve */
+    submitMyTask: (id: number, data: TaskSubmitPayload) =>
+      fetchApi<WorkerAssignment>(`/api/my-work/${id}/submit`, { method: 'POST', body: JSON.stringify(data) }),
     /** What a worker finished in a period (Philippine dates, YYYY-MM-DD), with hours and pay */
     workSummary: (workerId: number, start: string, end: string) =>
       fetchApi<WorkerWorkSummary>(`/api/managed-workers/${workerId}/work-summary?start=${start}&end=${end}`),
@@ -2520,16 +2648,29 @@ export const api = {
       if (params.jobOrderId) q.set('jobOrderId', String(params.jobOrderId));
       return fetchApi<MaterialWasteLog[]>(`/api/worker-extra-materials?${q}`);
     },
-    create: (data: { name: string; workType: string; ratePerHour: number; payMode?: string; userId?: number | null }) =>
+    /** newAccount makes a login for the worker (email optional) and links it */
+    create: (data: { name: string; workType: string; ratePerHour?: number; payMode?: string; userId?: number | null;
+      newAccount?: NewWorkerAccount }) =>
       fetchApi<{ worker: ManagedWorker }>('/api/managed-workers', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: number, data: Partial<{ name: string; workType: string; ratePerHour: number; payMode: string; isActive: boolean; userId: number | null }>) =>
+    update: (id: number, data: Partial<{ name: string; workType: string; ratePerHour: number; payMode: string; isActive: boolean; userId: number | null;
+      newAccount: NewWorkerAccount }>) =>
       fetchApi<{ worker: ManagedWorker }>(`/api/managed-workers/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
+  },
+
+  /** A supplier's own account: the purchase orders sent to them */
+  supplierPortal: {
+    orders: () => fetchApi<SupplierPortalData>('/api/supplier-portal/orders'),
+    setDelivery: (id: number, data: { expectedDelivery: string; note?: string }) =>
+      fetchApi<SupplierOrder>(`/api/supplier-portal/orders/${id}/delivery`, { method: 'PUT', body: JSON.stringify(data) }),
+    /** The supplier sets or changes the unit prices (until the first delivery or payment) */
+    setPrices: (id: number, prices: { line: number; unitPrice: number }[]) =>
+      fetchApi<SupplierOrder>(`/api/supplier-portal/orders/${id}/prices`, { method: 'PUT', body: JSON.stringify({ prices }) }),
   },
 
   workerAssignments: {
@@ -2560,8 +2701,13 @@ export const api = {
       fetchApi<{ message: string }>(`/api/worker-assignments/${id}`, { method: 'DELETE' }),
     /** The job order's materials a worker can record cuts of when finishing this task */
     cutMaterials: (id: number) =>
-      fetchApi<{ materials: CutMaterialLine[]; notInInventory: string[]; extraMaterials: RawMaterial[]; consumables: RawMaterial[] }>(
-        `/api/worker-assignments/${id}/cut-materials`),
+      fetchApi<CutMaterialsData>(`/api/worker-assignments/${id}/cut-materials`),
+    /** An administrator fills in the finished work for a worker with no login (still needs approval) */
+    submitForWorker: (id: number, data: TaskSubmitPayload) =>
+      fetchApi<WorkerAssignment>(`/api/worker-assignments/${id}/submit`, { method: 'POST', body: JSON.stringify(data) }),
+    /** Approve submitted work (unitsWorked: days or pieces for workers not paid by the hour), or send it back */
+    review: (id: number, data: { action: 'approve'; payOverride?: number; unitsWorked?: number } | { action: 'return'; note: string }) =>
+      fetchApi<WorkerAssignment & { pay?: number }>(`/api/worker-assignments/${id}/review`, { method: 'POST', body: JSON.stringify(data) }),
   },
 
   customers: {

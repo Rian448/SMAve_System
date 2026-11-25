@@ -58,6 +58,31 @@ export default function SuppliersPage() {
   // Materials Supplied: picked from Inventory (low stock first) or added as new items
   const [newMaterials, setNewMaterials] = useState<SupplierMaterialRow[]>(() => [newSupplierMaterialRow()]);
   const [editMaterials, setEditMaterials] = useState<SupplierMaterialRow[]>([]);
+  // Making a supplier's own login (they then set delivery dates of the POs sent to them)
+  const [loginFor, setLoginFor] = useState<Supplier | null>(null);
+  const [loginForm, setLoginForm] = useState({ username: '', password: '', email: '' });
+  const [loginError, setLoginError] = useState('');
+
+  const openLogin = (s: Supplier) => {
+    setLoginFor(s);
+    setLoginError('');
+    setLoginForm({ username: s.name.toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.|\.$/g, '').slice(0, 40), password: '', email: '' });
+  };
+  const saveLogin = async () => {
+    if (!loginFor) return;
+    if (!loginForm.username.trim() || !loginForm.password) { setLoginError('Enter a username and password.'); return; }
+    setSaving(true);
+    setLoginError('');
+    try {
+      await api.inventory.createSupplierLogin(loginFor.id, {
+        username: loginForm.username.trim(), password: loginForm.password,
+        ...(loginForm.email.trim() ? { email: loginForm.email.trim() } : {}),
+      });
+      setLoginFor(null);
+      await load();
+    } catch (err) { setLoginError((err instanceof Error && err.message) || 'Could not create the login.'); }
+    finally { setSaving(false); }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -267,6 +292,15 @@ export default function SuppliersPage() {
                             <div>
                               <p className="text-sm font-medium text-gray-900">{s.name}</p>
                               {s.address && <p className="text-xs text-gray-500 truncate max-w-40">{s.address}</p>}
+                              {/* The supplier's own login: shown here so the Actions column keeps one width */}
+                              {s.loginUsername ? (
+                                <span className="mt-1 inline-flex px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[11px] font-medium">Login: {s.loginUsername}</span>
+                              ) : canEdit && s.isActive ? (
+                                <button type="button" onClick={() => openLogin(s)}
+                                  className="mt-1 block text-[11px] font-medium text-[#011c72] hover:underline">+ Create login</button>
+                              ) : (
+                                <span className="mt-1 block text-[11px] text-gray-400">No login</span>
+                              )}
                             </div>
                           )}
                         </td>
@@ -316,7 +350,7 @@ export default function SuppliersPage() {
                           )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <span className={`px-2 py-1 text-xs font-medium rounded-full ${s.isActive ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                          <span className={`inline-block whitespace-nowrap px-2 py-1 text-xs font-medium rounded-full ${s.isActive ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
                             {s.isActive ? 'Active' : 'Inactive'}
                           </span>
                         </td>
@@ -358,6 +392,44 @@ export default function SuppliersPage() {
           )}
         </div>
       </main>
+
+      {loginFor && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={() => !saving && setLoginFor(null)}>
+          <div role="dialog" aria-modal="true" aria-labelledby="supplier-login-title"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
+            <div className="p-5 border-b border-gray-200">
+              <h2 id="supplier-login-title" className="text-lg font-semibold text-gray-900">Create login for {loginFor.name}</h2>
+              <p className="text-sm text-gray-500 mt-0.5">
+                The supplier signs in to see the purchase orders you send them (after approval) and set when they will deliver.
+              </p>
+            </div>
+            <div className="p-5 space-y-3">
+              <input type="text" value={loginForm.username} autoComplete="off" aria-label="Username"
+                onChange={e => setLoginForm(f => ({ ...f, username: e.target.value }))} placeholder="Username"
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+              <input type="password" value={loginForm.password} autoComplete="new-password" aria-label="Password"
+                onChange={e => setLoginForm(f => ({ ...f, password: e.target.value }))} placeholder="Password"
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+              <input type="email" value={loginForm.email} autoComplete="off" aria-label="Email"
+                onChange={e => setLoginForm(f => ({ ...f, email: e.target.value.trim() }))}
+                placeholder={loginFor.email ? `Email (blank = ${loginFor.email})` : 'Email (optional)'}
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+              <p className="text-[11px] text-gray-500">
+                Password: 8+ characters with an uppercase and a lowercase letter, a number and a symbol (e.g. Supplier@2026).
+              </p>
+              {loginError && <p role="alert" className="text-sm text-red-600">{loginError}</p>}
+            </div>
+            <div className="p-5 border-t border-gray-200 flex gap-3">
+              <button type="button" onClick={saveLogin} disabled={saving}
+                className="flex-1 py-2.5 bg-[#011c72] hover:bg-[#022a9e] text-white text-sm font-medium rounded-xl disabled:opacity-50">
+                {saving ? 'Creating…' : 'Create login'}
+              </button>
+              <button type="button" onClick={() => setLoginFor(null)} disabled={saving}
+                className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl hover:bg-gray-200 text-sm">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

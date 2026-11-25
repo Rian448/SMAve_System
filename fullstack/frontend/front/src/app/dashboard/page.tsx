@@ -8,6 +8,7 @@ import { api, DashboardStats, Alert, Activity, type DashboardPeriod } from '@/li
 import { formatDateTime as formatDate } from '@/lib/dateUtils';
 import Link from 'next/link';
 import MyWork from '@/components/MyWork';
+import SupplierOrders from '@/components/SupplierOrders';
 
 const PERIOD_OPTIONS: { value: DashboardPeriod; label: string }[] = [
   { value: 'today', label: 'Today' },
@@ -232,6 +233,9 @@ export default function Dashboard() {
 
         {/* Worker accounts: their own tasks, assigned and run from Worker Management */}
         {isWorkerAccount && <MyWork />}
+
+        {/* Supplier accounts: the purchase orders sent to them */}
+        {user?.role === 'supplier' && <SupplierOrders />}
 
         {/* Stats Cards - For staff only */}
         {isStaff && (

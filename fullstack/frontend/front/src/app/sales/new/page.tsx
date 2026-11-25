@@ -845,6 +845,8 @@ function NewJobOrderForm() {
     dStitch, piping, pockets, logo, specification,
     ...(seesLaborCost ? { cutterName, sewerName } : {}),
     serviceDetails: serviceDetails(),
+    // Step 5's markup on materials, kept for the invoice
+    markupPercent: profitMargin,
   });
 
   // Confirming a draft: once it has loaded, open the first step with something
@@ -926,6 +928,7 @@ function NewJobOrderForm() {
         setSpecification(slip.specification || '');
         if (slip.cutterName) setCutterName(slip.cutterName);
         if (slip.sewerName) setSewerName(slip.sewerName);
+        if (Number(slip.markupPercent) > 0) setProfitMargin(Number(slip.markupPercent));
         const sd = slip.serviceDetails || {};
         setFlooring(s => ({ ...s, material: sd.flooring || '' }));
         setReupholstery(s => ({ ...s, material: sd.reupholstery || '' }));
@@ -1244,7 +1247,7 @@ function NewJobOrderForm() {
       materialCenter || materialSides || materialBack ||
       dStitch || piping || pockets || logo || specification || cutterName || sewerName);
 
-    const slipData = hasSlipData ? buildSlipData() : { serviceDetails: serviceDetails() };
+    const slipData = hasSlipData ? buildSlipData() : { serviceDetails: serviceDetails(), markupPercent: profitMargin };
 
     const grossTotal = estimatedTotal > 0 ? estimatedTotal : materialTotal;
     const orderTotal = jobOrderTotalFrom(grossTotal, orderDiscountPct);

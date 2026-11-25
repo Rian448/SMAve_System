@@ -107,7 +107,7 @@ export default function ReceivingPage() {
                         <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${status.className}`}>{status.label}</span>
                         {late && <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700">Late</span>}
                       </div>
-                      <p className="text-sm text-gray-600 mt-0.5">{po.supplierName} · expected {po.expectedDelivery ? formatDate(po.expectedDelivery) : '—'}</p>
+                      <p className="text-sm text-gray-600 mt-0.5">{po.supplierName} · expected {po.expectedDelivery ? formatDate(po.expectedDelivery) : 'date not set by the supplier yet'}</p>
                       <p className="text-xs text-gray-500 mt-1 break-words">
                         {po.items.map((it) => `${it.name} ${fmtQty(it.receivedQuantity)}/${fmtQty(it.quantity)}`).join(' · ')}
                       </p>

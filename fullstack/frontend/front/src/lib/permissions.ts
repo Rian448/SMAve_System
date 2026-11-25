@@ -8,6 +8,9 @@ export function userCan(permissions: string[] | undefined, ...wanted: string[]):
   return wanted.some(p => permissions.includes(p));
 }
 
+/** Worker Management opens for administrators and supervisors (assigning work) */
+export const WORKER_MANAGEMENT_PERMS = ['workers.manage', 'workers.add', 'workers.edit', 'workers.delete'];
+
 /**
  * Pages and the permissions that open them (any one is enough). The longest
  * matching path wins, so /purchase-orders/new overrides /purchase-orders.
@@ -37,7 +40,7 @@ const PAGE_PERMISSIONS: [string, string[]][] = [
   ['/audit-trail', ['reports.audit_trail']],
   ['/settings', ['settings.edit', 'users.manage', 'branches.manage']],
   ['/announcements', ['announcements.view']],
-  ['/worker-dashboard', ['workers.add', 'workers.edit', 'workers.delete']],
+  ['/worker-dashboard', WORKER_MANAGEMENT_PERMS],
 ];
 
 /**

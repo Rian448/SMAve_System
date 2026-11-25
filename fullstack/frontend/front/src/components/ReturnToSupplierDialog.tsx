@@ -3,7 +3,6 @@ import { useEffect, useState } from 'react';
 import { api, type PurchaseOrder } from '@/lib/api';
 import { formatLength } from '@/lib/length';
 import { exactPeso } from '@/lib/format';
-import { manilaDateString, formatDate } from '@/lib/dateUtils';
 import LengthInput from './LengthInput';
 
 const REASONS = ['Bad quality', 'Damaged', 'Wrong item', 'Wrong color / pattern', 'Excess quantity', 'Other'];
@@ -30,9 +29,6 @@ export default function ReturnToSupplierDialog({ po, onClose, onSaved }: Props) 
   const [notes, setNotes] = useState('');
   const [replacement, setReplacement] = useState<boolean | null>(null);
   const [documentNumber, setDocumentNumber] = useState('');
-  // When the replacement should arrive: becomes the PO's expected delivery date
-  const [expectedReplacement, setExpectedReplacement] = useState('');
-  const today = manilaDateString();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -53,13 +49,11 @@ export default function ReturnToSupplierDialog({ po, onClose, onSaved }: Props) 
     if (!reason) { setError('Choose why the items are being returned.'); return; }
     if (reason === 'Other' && !notes.trim()) { setError('Explain the reason.'); return; }
     if (replacement === null) { setError('Say whether the supplier will replace them.'); return; }
-    if (replacement && expectedReplacement && expectedReplacement < today) { setError('The replacement date must be today or a later date.'); return; }
     setSaving(true);
     try {
       const res = await api.purchaseOrders.returnItems(po.id, {
         items: entered, reason, notes: notes.trim() || undefined, replacement,
         documentNumber: documentNumber.trim() || undefined,
-        expectedReplacement: replacement && expectedReplacement ? expectedReplacement : undefined,
       });
       if (res.data) onSaved(res.data);
     } catch (e) {
@@ -155,14 +149,9 @@ export default function ReturnToSupplierDialog({ po, onClose, onSaved }: Props) 
             </div>
           </div>
           {replacement && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Replacement expected on <span className="font-normal text-gray-400">(optional)</span></label>
-              <input type="date" min={today} value={expectedReplacement} onChange={(e) => setExpectedReplacement(e.target.value)}
-                className={`${input} max-w-xs`} />
-              <p className="mt-1 text-xs text-gray-500">
-                Becomes the PO&apos;s expected delivery date{po.expectedDelivery ? ` (now ${formatDate(po.expectedDelivery)})` : ''}, so Receiving shows when it&apos;s late.
-              </p>
-            </div>
+            <p className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+              The supplier sets when the replacement will arrive from their account.
+            </p>
           )}
           {value > 0 && (
             <p className="text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">

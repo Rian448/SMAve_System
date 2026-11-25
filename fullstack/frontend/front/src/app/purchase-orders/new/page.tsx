@@ -6,7 +6,6 @@ import { api, RawMaterial, Supplier } from '@/lib/api';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import { PaymentTermPicker, TermValue, termValueError, termExplanation, termLabel } from '@/components/PaymentTerms';
 import LengthInput from '@/components/LengthInput';
-import { manilaDateString } from '@/lib/dateUtils';
 import { formatMaterialQty } from '@/lib/length';
 
 /** Restock suggestions bought from one supplier: one purchase order */
@@ -24,7 +23,11 @@ interface POItem {
   unit: string;
   /** Glue, thread, staples...: counted in plain units, not picked on job orders */
   consumable: boolean;
+  /** Typed by hand: changing the supplier doesn't replace it with their last price */
+  priceEdited?: boolean;
 }
+
+type LastPrices = Record<string, { price: number; poNumber: string; date: string | null; bySupplier: boolean }>;
 
 export default function NewPurchaseOrderPage() {
   const router = useRouter();
@@ -39,9 +42,6 @@ export default function NewPurchaseOrderPage() {
   // A saved supplier only (add new ones under Suppliers first); its contact details come with it
   const [supplierId, setSupplierId] = useState('');
   const chosenSupplier = savedSuppliers.find(s => String(s.id) === supplierId);
-  const [expectedDate, setExpectedDate] = useState('');
-  // Today in the Philippines: the earliest expected delivery date (earlier days can't be picked)
-  const today = manilaDateString();
   // Starts as the supplier's default term; may be changed for this order only
   const [term, setTerm] = useState<TermValue>({ term: '', days: null });
   useEffect(() => {
@@ -53,6 +53,33 @@ export default function NewPurchaseOrderPage() {
   const [items, setItems] = useState<POItem[]>([
     { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd', consumable: false }
   ]);
+  // The chosen supplier's last price for each material (from their earlier POs)
+  const [lastPrices, setLastPrices] = useState<LastPrices>({});
+  /** A line's starting price: the supplier's last price, else the Inventory cost, else
+   *  blank (the supplier fills it in from their account) */
+  const startPrice = (materialId: string, prices: LastPrices = lastPrices) => {
+    const last = prices[materialId];
+    if (last) return last.price;
+    const m = materials.find(x => String(x.id) === materialId);
+    return m ? (m.costPerUnit || 0) : 0;
+  };
+  useEffect(() => {
+    if (!supplierId) { setLastPrices({}); return; }
+    let live = true;
+    api.purchaseOrders.lastPrices(Number(supplierId))
+      .then(res => {
+        if (!live) return;
+        const prices = res.data || {};
+        setLastPrices(prices);
+        // Lines not typed by hand take this supplier's prices
+        setItems(prev => prev.map(it => (it.material_id && !it.priceEdited
+          ? { ...it, unit_cost: startPrice(it.material_id, prices) } : it)));
+      })
+      .catch(() => { if (live) setLastPrices({}); });
+    return () => { live = false; };
+    // Reloaded when the supplier changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supplierId]);
 
   useEffect(() => {
     // Shops order their own stock and the warehouse's (which supplies them)
@@ -106,7 +133,8 @@ export default function NewPurchaseOrderPage() {
         material_id: String(m.id),
         material_name: [m.materialType, m.color, m.pattern].filter(Boolean).join(' - '),
         quantity: qty,
-        unit_cost: m.costPerUnit || m.unitPrice,
+        // Replaced by the supplier's last price once their prices load
+        unit_cost: m.costPerUnit || 0,
         unit: m.isConsumable ? (m.unit || 'pcs') : 'yd',
         consumable: !!m.isConsumable,
       });
@@ -118,8 +146,6 @@ export default function NewPurchaseOrderPage() {
     if (list.length) {
       setGroups(list);
       loadGroup(list, 0);
-      // A few days out by default; change it to what the supplier says
-      setExpectedDate(prev => prev || manilaDateString(new Date(Date.now() + 3 * 86400000)));
     }
     // ?from=jobs: from Inventory → Needed for job orders (the amounts are what the jobs are short)
     setRestockNote({ added: seen.size, missing, forJobs: new URLSearchParams(window.location.search).get('from') === 'jobs' });
@@ -155,8 +181,10 @@ export default function NewPurchaseOrderPage() {
           ...newItems[index],
           material_id: material.id.toString(),
           material_name: label,
-          // A purchase order pays the supplier's cost, not our selling price
-          unit_cost: material.costPerUnit || material.unitPrice,
+          // The supplier's last price, else our Inventory cost (never our selling
+          // price), else blank for the supplier to fill in
+          unit_cost: startPrice(material.id.toString()),
+          priceEdited: false,
           // Already a consumable in Inventory: stays ticked (and counted in its unit)
           consumable: !!material.isConsumable,
           unit: material.isConsumable ? (material.unit || 'pcs') : 'yd',
@@ -169,7 +197,7 @@ export default function NewPurchaseOrderPage() {
         unit: value ? (material?.isConsumable && material.unit) || 'pcs' : 'yd',
       };
     } else {
-      newItems[index] = { ...newItems[index], [field]: value };
+      newItems[index] = { ...newItems[index], [field]: value, ...(field === 'unit_cost' ? { priceEdited: true } : {}) };
     }
     setItems(newItems);
   };
@@ -187,8 +215,6 @@ export default function NewPurchaseOrderPage() {
     items.forEach((item, index) => { if (item.material_id && !firstRow.has(item.material_id)) firstRow.set(item.material_id, index); });
     if (fe.show({
       'po-supplier': !chosenSupplier && 'Choose the supplier.',
-      'po-date': !expectedDate ? 'Choose the expected delivery date.'
-        : expectedDate < today && 'The expected delivery date must be today or a later date.',
       'po-term': termValueError(term),
       ...Object.fromEntries(items.flatMap((item, index) => [
         [`po-material-${index}`, !item.material_id ? (anyMaterial ? 'Select a material, or remove this row.'
@@ -211,7 +237,6 @@ export default function NewPurchaseOrderPage() {
           unitPrice: item.unit_cost,
           consumable: item.consumable,
         })),
-        expectedDelivery: expectedDate,
         paymentTerm: term.term,
         paymentTermDays: term.term === 'net' ? term.days : null,
       };
@@ -349,19 +374,14 @@ export default function NewPurchaseOrderPage() {
                   {chosenSupplier?.email || <span className="text-gray-400">—</span>}
                 </p>
               </div>
-              <div {...fe.field('po-date')}>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Expected Delivery Date *
-                </label>
-                <input
-                  type="date"
-                  min={today}
-                  value={expectedDate}
-                  onChange={(e) => setExpectedDate(e.target.value)}
-                  className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                  required
-                />
-                <FieldError message={fe.errors['po-date']} />
+              {/* No delivery date here: once approved, the PO goes to the supplier, who sets it */}
+              <div>
+                <p className="block text-sm font-medium text-gray-700 mb-2">Expected Delivery Date</p>
+                <p className="px-4 py-2 rounded-lg border border-dashed border-gray-300 bg-gray-50 text-sm text-gray-500 min-h-10.5">
+                  {!chosenSupplier ? 'Set by the supplier after approval.'
+                    : chosenSupplier.userId ? `${chosenSupplier.name} sets it from their account once the PO is approved.`
+                    : `${chosenSupplier.name} has no login yet. Create one under Suppliers so they can set it.`}
+                </p>
               </div>
               <div {...fe.field('po-term')}>
                 <label htmlFor="po-term" className="block text-sm font-medium text-gray-700 mb-2">Payment Terms</label>
@@ -462,11 +482,19 @@ export default function NewPurchaseOrderPage() {
                           type="number"
                           min="0"
                           step="0.01"
-                          value={item.unit_cost}
-                          onChange={(e) => updateItem(index, 'unit_cost', Number(e.target.value))}
+                          value={item.unit_cost || ''}
+                          placeholder="Supplier sets"
+                          onChange={(e) => updateItem(index, 'unit_cost', Number(e.target.value) || 0)}
                           className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                          required
                         />
+                        {/* Where the starting price came from */}
+                        {item.material_id && !item.priceEdited && (
+                          <p className="mt-0.5 text-[10px] text-gray-400 leading-tight">
+                            {lastPrices[item.material_id]
+                              ? `Last price · ${lastPrices[item.material_id].poNumber}`
+                              : item.unit_cost > 0 ? 'Inventory cost' : 'No price yet: the supplier sets it'}
+                          </p>
+                        )}
                       </div>
                       <div className="col-span-5 md:col-span-2 text-right">
                         <label className="block text-xs font-medium text-gray-500 mb-1">

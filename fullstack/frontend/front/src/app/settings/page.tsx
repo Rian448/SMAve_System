@@ -15,8 +15,9 @@ import PasswordChecklist from '@/components/PasswordChecklist';
 
 type TabType = 'general' | 'users' | 'branches' | 'notifications' | 'appearance';
 
-// Roles not offered when adding a user: workers are managed in Worker Management
-const HIDDEN_ROLES = ['seat_maker', 'sewer'];
+// Roles not offered when adding a user: workers are managed in Worker Management,
+// supplier logins are made from Suppliers
+const HIDDEN_ROLES = ['seat_maker', 'sewer', 'supplier'];
 
 export default function SettingsPage() {
   const { user, can, checkAuth } = useAuth();
@@ -697,6 +698,8 @@ export default function SettingsPage() {
                               ? 'bg-purple-100 text-purple-700'
                               : u.role === 'sewer'
                               ? 'bg-pink-100 text-pink-700'
+                              : u.role === 'supplier'
+                              ? 'bg-amber-100 text-amber-800'
                             : 'bg-gray-100 text-gray-700'
                         }`}>
                             {(u.roleName || u.role.replace('_', ' ')).toUpperCase()}

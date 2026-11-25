@@ -605,6 +605,11 @@ class Supplier(db.Model):
     # each PO copies it and may change it. NULL = no term agreed.
     payment_term = db.Column(db.String(20), nullable=True)
     payment_term_days = db.Column(db.Integer, nullable=True)
+    # The supplier's own login: they see the purchase orders sent to them and set
+    # when they will deliver
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+
+    user = db.relationship('User', foreign_keys=[user_id])
 
 class VehicleMake(db.Model):
     """Reference table of vehicle makes/brands (e.g. Toyota, Honda).
@@ -819,10 +824,20 @@ class WorkerAssignment(db.Model):
     assignment_type = db.Column(db.String(20), default='job_order')
     special_task_title = db.Column(db.String(255), nullable=True)
     notes = db.Column(db.Text, nullable=True)
+    # What the worker filled in when they finished (start/end time, materials cut,
+    # consumables). Waits as status 'submitted' until an administrator approves it;
+    # only then is stock taken and pay recorded.
+    submission = db.Column(db.JSON, nullable=True)
+    submitted_at = db.Column(db.DateTime, nullable=True)
+    # Why an administrator sent the work back to the worker (cleared on approval)
+    review_note = db.Column(db.Text, nullable=True)
+    reviewed_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    reviewed_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     worker = db.relationship('ManagedWorker', backref='assignments')
+    reviewed_by = db.relationship('User', foreign_keys=[reviewed_by_id])
 
 
 class WorkerAvailabilitySchedule(db.Model):
@@ -939,7 +954,12 @@ class PurchaseOrder(db.Model):
     items = db.Column(db.JSON, nullable=False)  # [{materialId?, name, quantity, unit?, unitPrice}]
     total_amount = db.Column(db.Float, default=0)
     status = db.Column(db.String(20), default='pending')  # pending, approved, received, cancelled
+    # Set by the supplier from their account once the PO is approved and sent to them
+    # (NULL until then). A return with replacement can move it too.
     expected_delivery = db.Column(db.String(20))
+    # The supplier's note with the delivery date, and when they last set it
+    supplier_note = db.Column(db.Text, nullable=True)
+    delivery_set_at = db.Column(db.DateTime, nullable=True)
     created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     approved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
@@ -1033,6 +1053,8 @@ default_roles = [
     {'key': 'sewer', 'name': 'Sewer'},
     {'key': 'customer', 'name': 'Customer'},
     {'key': 'owner', 'name': 'Owner'},
+    # A supplier's own login (made from Suppliers): only their purchase orders
+    {'key': 'supplier', 'name': 'Supplier'},
 ]
 
 # Demo accounts the system used to create with known passwords. They are no
@@ -1094,8 +1116,10 @@ PERMISSION_MODULES = [
     ('reports', 'Reports', [('sales', 'Sales'), ('inventory', 'Inventory'), ('settlement', 'Branch settlement'),
                             ('audit_trail', 'Audit trail')]),
     ('announcements', 'Announcements', [('view', 'View'), ('manage', 'Manage')]),
-    ('workers', 'Worker Management', [('view', 'View'), ('add', 'Add'), ('edit', 'Edit'), ('delete', 'Delete'),
-                                      ('assign', 'Assign work'), ('delete_assignment', 'Delete assignments')]),
+    ('workers', 'Worker Management', [('manage', 'Open Worker Management'),
+                                      ('view', 'View'), ('add', 'Add'), ('edit', 'Edit'), ('delete', 'Delete'),
+                                      ('assign', 'Assign work'), ('delete_assignment', 'Delete assignments'),
+                                      ('approve', "Approve workers' finished work")]),
     ('catalog', 'Catalog', [('manage', 'Manage')]),
     ('blacklist', 'Spam Blacklist', [('manage', 'Manage')]),
     ('chat', 'Staff Chat', [('use', 'Use')]),
@@ -1117,6 +1141,8 @@ PERMISSIONS = {
 _SUPERVISOR_EXCLUDED = {
     'payments.approve_override', 'reports.audit_trail',
     'workers.add', 'workers.edit', 'workers.delete', 'workers.delete_assignment',
+    # Workers' finished work is checked and approved by an administrator
+    'workers.approve',
     'catalog.manage', 'blacklist.manage', 'branches.manage', 'users.manage',
     'owner.view', 'expenses.delete',
     # Correcting stock by hand is for administrators (or whoever they give it to)
@@ -1154,6 +1180,8 @@ ROLE_DEFAULT_PERMISSIONS = {
     # Worker accounts only use their profile; Worker Management tracks their work
     'seat_maker': frozenset(),
     'sewer': frozenset(),
+    # Supplier accounts only see the purchase orders sent to them (/api/supplier-portal)
+    'supplier': frozenset(),
     # Online customer accounts were retired with online ordering and can't sign in
     'customer': frozenset(),
 }
@@ -1239,6 +1267,7 @@ ROLE_RANK = {
     'sales_manager': 2,
     'seat_maker': 1,
     'sewer': 1,
+    'supplier': 1,
     'customer': 0,
 }
 
@@ -1510,6 +1539,16 @@ def run_migrations():
         # On completion: pay override + materials snapshot
         "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS pay_override REAL",
         "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS materials_used JSON",
+        # Workers submit their finished work; an administrator approves it
+        "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS submission JSON",
+        "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMP",
+        "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS review_note TEXT",
+        "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS reviewed_by_id INTEGER REFERENCES users(id)",
+        "ALTER TABLE worker_assignments ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP",
+        # Supplier logins: they set the delivery date of the purchase orders sent to them
+        "ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)",
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS supplier_note TEXT",
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS delivery_set_at TIMESTAMP",
         # Track which managed worker used materials (FK to managed_workers)
         "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS managed_worker_id INTEGER REFERENCES managed_workers(id)",
         "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS batch_id VARCHAR(36)",
@@ -1800,7 +1839,8 @@ def require_staff(f):
     def decorated(*args, **kwargs):
         if not hasattr(request, 'current_user'):
             return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
-        if request.current_user['role'] == 'customer':
+        # Customers and suppliers are outside the shop: no staff lookups
+        if request.current_user['role'] in ('customer', 'supplier'):
             return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
         return f(*args, **kwargs)
     return decorated
@@ -4481,6 +4521,9 @@ def supplier_to_dict(s):
         'paymentTerm': s.payment_term,
         'paymentTermDays': s.payment_term_days,
         'paymentTermLabel': payment_term_label(s.payment_term, s.payment_term_days),
+        # The supplier's own login, if they have one
+        'userId': s.user_id,
+        'loginUsername': s.user.username if s.user else None,
         # Inventory materials usually bought from this supplier
         'materials': [{
             'id': m.id, 'name': ' - '.join(filter(None, [m.material_type, m.color, m.pattern])),
@@ -4646,6 +4689,215 @@ def update_supplier(supplier_id):
     db.session.commit()
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated supplier: {supplier.name}{term_note}", request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': supplier_to_dict(supplier)})
+
+@app.route('/api/inventory/suppliers/<int:supplier_id>/login', methods=['POST'])
+@require_auth
+@require_permission('suppliers.edit')
+def create_supplier_login(supplier_id):
+    """Make the supplier's own login: {username, password, email?}. The email
+    defaults to the supplier's email when that isn't used by another account."""
+    supplier = Supplier.query.get(supplier_id)
+    if not supplier:
+        return _error('Supplier not found', 404)
+    if supplier.user_id:
+        return _error(f'{supplier.name} already has a login')
+    account = dict(request.get_json(silent=True) or {})
+    if not str(account.get('email') or '').strip() and supplier.email and not _email_taken(supplier.email, None):
+        account['email'] = supplier.email
+    user, error = create_outside_login(supplier.name, 'supplier', account, 'suppliers')
+    if error:
+        db.session.rollback()
+        return error
+    supplier.user_id = user.id
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'CREATE', 'Settings',
+               f"Created supplier login {user.username} for {supplier.name}", request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': supplier_to_dict(supplier)}), 201
+
+
+# ── Supplier accounts: the purchase orders sent to them ────────────────────────
+# A purchase order is sent to its supplier when it is approved. The supplier sees
+# it in their account and sets the date they will deliver; staff then see that
+# date in Purchase Orders and Receiving.
+
+PO_SENT_TO_SUPPLIER = ('approved', 'partially_received', 'received')
+
+
+def current_supplier():
+    """The supplier whose login is signed in, or None."""
+    return Supplier.query.filter_by(user_id=request.current_user['id']).first()
+
+
+def supplier_po_to_dict(po):
+    """A purchase order as its supplier sees it: what to deliver, how much is still
+    to come, and the delivery date. Nothing of the shop's own payments or staff."""
+    receipts = purchase_order_receipts(po)
+    received = purchase_order_received_by_line(po, receipts)
+    remaining = purchase_order_remaining_by_line(po, receipts)
+    return {
+        'id': po.id,
+        'poNumber': po.po_number,
+        'status': po.status,
+        'receivingStatus': purchase_order_receiving_status(po),
+        # Prices can be changed by the supplier until the first delivery or payment
+        'pricesLocked': supplier_prices_locked(po),
+        'items': [{'line': i, 'name': it.get('name'), 'quantity': float(it.get('quantity') or 0),
+                   'unit': it.get('unit') or '', 'unitPrice': float(it.get('unitPrice') or 0),
+                   'priceBySupplier': bool(it.get('priceBySupplier')),
+                   'totalPrice': round(float(it.get('quantity') or 0) * float(it.get('unitPrice') or 0), 2),
+                   'receivedQuantity': round(received[i], 4), 'remainingQuantity': round(remaining[i], 4)}
+                  for i, it in enumerate(po.items or [])],
+        'totalAmount': po.total_amount,
+        'orderedAt': po.approved_at.strftime('%Y-%m-%d') if po.approved_at else (
+            po.created_at.strftime('%Y-%m-%d') if po.created_at else None),
+        'expectedDelivery': po.expected_delivery,
+        'supplierNote': po.supplier_note,
+        'deliverySetAt': fmt_dt(po.delivery_set_at),
+        'paymentTermLabel': payment_term_label(po.payment_term, po.payment_term_days),
+    }
+
+
+def supplier_prices_locked(po):
+    """Why the supplier can no longer change this PO's prices, or None. Prices can
+    change until the first delivery or payment, since both are counted at them."""
+    if po.status != 'approved':
+        return 'Prices can only change before anything is delivered'
+    if PurchaseOrderPayment.query.filter(PurchaseOrderPayment.purchase_order_id == po.id,
+                                         PurchaseOrderPayment.voided_at.is_(None)).first():
+        return 'Seatmakers Avenue has already paid on this order, so its prices can no longer change'
+    return None
+
+
+def last_supplier_prices(supplier_id):
+    """{material id: {price, poNumber, date}}: the last price this supplier gave
+    for each material on an earlier purchase order (cancelled ones and blank
+    prices left out)."""
+    out = {}
+    pos = (PurchaseOrder.query.filter(PurchaseOrder.supplier_id == supplier_id,
+                                      PurchaseOrder.status != 'cancelled')
+           .order_by(PurchaseOrder.created_at.desc(), PurchaseOrder.id.desc()).all())
+    for po in pos:
+        for it in po.items or []:
+            mid = _int_or_none(it.get('materialId'))
+            price = finite_number(it.get('unitPrice'), 0.0) or 0.0
+            if mid and price > 0 and mid not in out:
+                out[mid] = {'price': round(price, 2), 'poNumber': po.po_number,
+                            'date': po.created_at.strftime('%Y-%m-%d') if po.created_at else None,
+                            'bySupplier': bool(it.get('priceBySupplier'))}
+    return out
+
+
+@app.route('/api/purchase-orders/last-prices', methods=['GET'])
+@require_auth
+@require_permission('purchase_orders.add')
+def purchase_order_last_prices():
+    """The supplier's last price for each material, to start a new PO's prices from."""
+    supplier_id = request.args.get('supplierId', type=int)
+    if not supplier_id:
+        return _error('Choose the supplier')
+    return jsonify({'status': 'success', 'data': {str(k): v for k, v in last_supplier_prices(supplier_id).items()}})
+
+
+@app.route('/api/supplier-portal/orders/<int:po_id>/prices', methods=['PUT'])
+@require_auth
+def supplier_set_prices(po_id):
+    """The supplier sets or changes the unit prices on their PO: {prices: [{line, unitPrice}]}."""
+    supplier = current_supplier()
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
+    if not supplier or not po or po.supplier_id != supplier.id or po.status not in PO_SENT_TO_SUPPLIER:
+        return _error('Purchase order not found', 404)
+    locked = supplier_prices_locked(po)
+    if locked:
+        return _error(locked)
+    entries = (request.get_json(silent=True) or {}).get('prices')
+    if not isinstance(entries, list) or not entries:
+        return _error('Enter the prices')
+    items = [dict(it) for it in (po.items or [])]
+    changes = []
+    for entry in entries:
+        line = _int_or_none(entry.get('line') if isinstance(entry, dict) else None)
+        if line is None or not 0 <= line < len(items):
+            return _error('That line is not on this purchase order')
+        price = finite_number(entry.get('unitPrice'))
+        if price is None or price < 0:
+            return _error('Prices must be numbers of zero or more')
+        price = round(price, 2)
+        if price > 99_999_999.99:
+            return _error('That price is too high')
+        before = float(items[line].get('unitPrice') or 0)
+        if abs(before - price) > 0.001:
+            changes.append(f"{items[line].get('name')}: ₱{before:,.2f} → ₱{price:,.2f}")
+        items[line]['unitPrice'] = price
+        items[line]['priceBySupplier'] = True
+    if not changes:
+        return jsonify({'status': 'success', 'data': supplier_po_to_dict(po)})
+    po.items = items
+    po.total_amount = round(sum(float(it.get('quantity') or 0) * float(it.get('unitPrice') or 0) for it in items), 2)
+    warehouse = get_warehouse_branch()
+    branch_ids = purchase_order_branch_ids(po)
+    branch_id = (warehouse.id if warehouse and warehouse.id in branch_ids
+                 else next(iter(branch_ids), warehouse.id if warehouse else None))
+    notify_branch_users(branch_id, 'po_delivery_set', f'{po.po_number}: prices set by {supplier.name}',
+                        f'New total ₱{po.total_amount:,.2f}. ' + '; '.join(changes)[:400],
+                        {'purchaseOrderId': po.id})
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Purchase Orders',
+               f"{supplier.name} set prices on {po.po_number}: " + '; '.join(changes), request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': supplier_po_to_dict(po)})
+
+
+@app.route('/api/supplier-portal/orders', methods=['GET'])
+@require_auth
+def supplier_portal_orders():
+    supplier = current_supplier()
+    if not supplier:
+        return jsonify({'status': 'success', 'data': {'linked': False}})
+    pos = (PurchaseOrder.query.filter(PurchaseOrder.supplier_id == supplier.id,
+                                      PurchaseOrder.status.in_(PO_SENT_TO_SUPPLIER))
+           .order_by(PurchaseOrder.approved_at.desc().nullslast(), PurchaseOrder.id.desc()).all())
+    return jsonify({'status': 'success', 'data': {
+        'linked': True, 'supplierName': supplier.name, 'orders': [supplier_po_to_dict(po) for po in pos]}})
+
+
+@app.route('/api/supplier-portal/orders/<int:po_id>/delivery', methods=['PUT'])
+@require_auth
+def supplier_set_delivery(po_id):
+    """The supplier sets (or moves) when they will deliver: {expectedDelivery, note}."""
+    supplier = current_supplier()
+    po = PurchaseOrder.query.get(po_id)
+    if not supplier or not po or po.supplier_id != supplier.id or po.status not in PO_SENT_TO_SUPPLIER:
+        return _error('Purchase order not found', 404)
+    if po.status not in PO_OPEN_FOR_RECEIVING:
+        return _error('This purchase order has already been fully received')
+    data = request.get_json(silent=True) or {}
+    try:
+        expected = datetime.strptime(str(data.get('expectedDelivery') or '')[:10], '%Y-%m-%d').date()
+    except ValueError:
+        return _error('Choose the date you will deliver')
+    if expected < manila_today():
+        return _error('The delivery date must be today or a later date')
+    note = str(data.get('note') or '').strip()[:500] or None
+    before = po.expected_delivery
+    po.expected_delivery = expected.isoformat()
+    po.supplier_note = note
+    po.delivery_set_at = datetime.utcnow()
+    when = expected.strftime('%b %d, %Y')
+    # Once, to the branch the PO restocks (cross-branch staff get it whichever it is)
+    warehouse = get_warehouse_branch()
+    branch_ids = purchase_order_branch_ids(po)
+    branch_id = (warehouse.id if warehouse and warehouse.id in branch_ids
+                 else next(iter(branch_ids), warehouse.id if warehouse else None))
+    notify_branch_users(branch_id, 'po_delivery_set',
+                        f'{po.po_number}: delivery {"moved" if before else "date set"}',
+                        f'{supplier.name} will deliver on {when}.' + (f' Note: {note}' if note else ''),
+                        {'purchaseOrderId': po.id})
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Purchase Orders',
+               f"{supplier.name} set the delivery of {po.po_number} to {expected.isoformat()}"
+               + (f" (was {before})" if before else '') + (f": {note}" if note else ''),
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': supplier_po_to_dict(po)})
+
 
 # ============================================
 # INVENTORY - WASTE LOGS
@@ -6821,6 +7073,9 @@ def update_job_order(order_id):
         # on the New Job Order form; keep them
         if 'serviceDetails' not in slip and (order.slip_data or {}).get('serviceDetails'):
             slip['serviceDetails'] = order.slip_data['serviceDetails']
+        # Nor the markup on materials chosen in step 5 (the invoice shows it)
+        if 'markupPercent' not in slip and (order.slip_data or {}).get('markupPercent') is not None:
+            slip['markupPercent'] = order.slip_data['markupPercent']
         old_slip = order.slip_data or {}
         names_changed = any((slip.get(k) or '') != (old_slip.get(k) or '') for k in ('cutterName', 'sewerName'))
         order.slip_data = slip
@@ -7659,6 +7914,12 @@ def purchase_order_to_dict(po):
         'totalAmount': po.total_amount,
         'status': po.status,
         'expectedDelivery': po.expected_delivery,
+        # From the supplier's account: their note and when they set the date
+        'supplierNote': po.supplier_note,
+        'deliverySetAt': fmt_dt(po.delivery_set_at),
+        # Whether the supplier has a login (else staff keep the delivery date themselves)
+        'supplierHasLogin': bool(Supplier.query.with_entities(Supplier.user_id).filter_by(id=po.supplier_id).scalar())
+                            if po.supplier_id else False,
         'createdAt': day(po.created_at),
         'createdBy': po.created_by,
         'createdByName': people.get(po.created_by),
@@ -8255,16 +8516,10 @@ def get_purchase_order(po_id):
 def create_purchase_order():
     data = request.get_json() or {}
 
-    required = ['supplierId', 'items', 'expectedDelivery']
-    if not all(data.get(f) for f in required):
-        return jsonify({'status': 'error', 'message': 'Supplier, at least one item and an expected delivery date are required'}), 400
-    # Delivery can be expected today or later, never on a day that has passed (Philippine date)
-    try:
-        expected = datetime.strptime(str(data['expectedDelivery'])[:10], '%Y-%m-%d').date()
-    except ValueError:
-        return jsonify({'status': 'error', 'message': 'Enter a valid expected delivery date'}), 400
-    if expected < manila_today():
-        return jsonify({'status': 'error', 'message': 'The expected delivery date must be today or a later date'}), 400
+    # No delivery date here: the PO goes to the supplier when it is approved, and the
+    # supplier sets when they will deliver from their account
+    if not data.get('supplierId') or not data.get('items'):
+        return jsonify({'status': 'error', 'message': 'Supplier and at least one item are required'}), 400
     # Only saved suppliers: add a new one under Suppliers first
     try:
         supplier = Supplier.query.get(int(data['supplierId']))
@@ -8335,7 +8590,7 @@ def create_purchase_order():
         items=items,
         total_amount=round(sum(it['quantity'] * it['unitPrice'] for it in items), 2),
         status='pending',
-        expected_delivery=str(data['expectedDelivery'])[:10],
+        expected_delivery=None,
         created_by=request.current_user['id'],
     )
     db.session.add(po)
@@ -8360,6 +8615,14 @@ def approve_purchase_order(po_id):
     po.status = 'approved'
     po.approved_at = datetime.utcnow()
     po.approved_by = request.current_user['id']
+    # Approved = sent to the supplier: with a login, they see it and set the delivery date
+    supplier = Supplier.query.get(po.supplier_id) if po.supplier_id else None
+    if supplier and supplier.user_id:
+        db.session.add(Notification(
+            user_id=supplier.user_id, type='po_sent', title=f'New purchase order {po.po_number}',
+            message=f'Seatmakers Avenue sent you {po.po_number} ({len(po.items or [])} item'
+                    f'{"" if len(po.items or []) == 1 else "s"}). Set the date you will deliver.',
+            data={'purchaseOrderId': po.id}))
     db.session.commit()
 
     log_action(request.current_user['id'], request.current_user['fullName'], 'APPROVE', 'Purchase Orders', f"Approved PO: {po.po_number}", request.remote_addr or '0.0.0.0')
@@ -8474,14 +8737,6 @@ def return_purchase_order_items(po_id):
     replacement = bool(data.get('replacement'))
     # Return slip / debit memo no. (kept in the receipt's document number)
     slip = str(data.get('documentNumber') or '').strip()[:100] or None
-    expected = None
-    if replacement and data.get('expectedReplacement'):
-        try:
-            expected = datetime.strptime(str(data['expectedReplacement'])[:10], '%Y-%m-%d').date()
-        except ValueError:
-            return jsonify({'status': 'error', 'message': 'Enter a valid date for the replacement'}), 400
-        if expected < manila_today():
-            return jsonify({'status': 'error', 'message': 'The replacement date must be today or a later date'}), 400
     lines = po.items or []
     kept = purchase_order_received_by_line(po)
     wanted = {}
@@ -8519,9 +8774,18 @@ def return_purchase_order_items(po_id):
     db.session.add(PurchaseOrderReceipt(purchase_order_id=po.id, kind='return', items=return_items, notes=notes,
                                         received_by=user['id'], return_reason=reason, replacement=replacement,
                                         invoice_number=slip))
-    if expected:
-        # The PO now waits for the replacement: its expected delivery moves to that date
-        po.expected_delivery = expected.isoformat()
+    if replacement:
+        # The PO now waits for the replacement: only the supplier sets when it comes,
+        # so the old date is cleared and they are asked for a new one
+        po.expected_delivery = None
+        po.supplier_note = None
+        supplier = Supplier.query.get(po.supplier_id) if po.supplier_id else None
+        if supplier and supplier.user_id:
+            db.session.add(Notification(
+                user_id=supplier.user_id, type='po_sent', title=f'Replacement needed for {po.po_number}',
+                message=f'Seatmakers Avenue returned items from {po.po_number} ({reason}) for replacement. '
+                        'Set the date you will deliver the replacement.',
+                data={'purchaseOrderId': po.id}))
     db.session.flush()
     # Replacements coming: the PO waits for them again
     remaining = purchase_order_remaining_by_line(po)
@@ -8538,8 +8802,8 @@ def return_purchase_order_items(po_id):
     summary = ', '.join(f"{it['name']} × {it['quantity']:g}" for it in return_items)
     log_action(user['id'], user['fullName'], 'UPDATE', 'Purchase Orders',
                f"Returned to supplier from {po.po_number} ({reason}{', replacement expected' if replacement else ''}): "
-               f"{summary} — ₱{value:,.2f} off the payable" + (f", slip {slip}" if slip else '')
-               + (f", replacement expected {expected.isoformat()}" if expected else ''), request.remote_addr or '0.0.0.0')
+               f"{summary} — ₱{value:,.2f} off the payable" + (f", slip {slip}" if slip else ''),
+               request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': purchase_order_to_dict(po)})
 
 @app.route('/api/purchase-orders/<int:po_id>/close-receiving', methods=['POST'])
@@ -8909,6 +9173,10 @@ NOTIFICATION_PERMISSIONS = {
     'order_ready': 'product_orders.view',
     'sale_completed': 'product_orders.view',
     'order_cancelled': 'product_orders.view',
+    # A worker finished a task and it waits for approval
+    'work_submitted': 'workers.approve',
+    # A supplier set or moved the delivery date of a purchase order
+    'po_delivery_set': 'purchase_orders.view',
 }
 
 def notify_branch_users(branch_id, notif_type, title, message, data=None):
@@ -10625,16 +10893,68 @@ def get_inventory_forecast():
         usage_q = usage_q.filter(MaterialUsageLog.branch_id == bid)
     rows = usage_q.group_by('month').order_by('month').all()
 
-    monthly_usage = [{'month': r.month, 'total': float(r.total or 0), 'projected': False} for r in rows]
+    # Each month's usage by material, for the chart's hover summary and month details
+    per_q = db.session.query(month_col, MaterialUsageLog.material_id,
+                             func.sum(MaterialUsageLog.quantity_used).label('total'),
+                             func.count(MaterialUsageLog.id).label('uses'),
+                             func.count(func.distinct(MaterialUsageLog.used_in_reference)).label('orders')) \
+        .filter(MaterialUsageLog.created_at >= six_months_ago)
+    if bid is not None:
+        per_q = per_q.filter(MaterialUsageLog.branch_id == bid)
+    per_rows = per_q.group_by('month', MaterialUsageLog.material_id).all()
+    mats = {m.id: m for m in InventoryMaterial.query.filter(
+        InventoryMaterial.id.in_({r.material_id for r in per_rows} or {-1})).all()}
+    by_month = defaultdict(list)
+    for r in per_rows:
+        qty = float(r.total or 0)
+        if qty <= 0:
+            continue
+        mat = mats.get(r.material_id)
+        by_month[r.month].append({
+            'itemId': mat.item_id if mat else None,
+            'name': ' - '.join(filter(None, [mat.material_type, mat.color, mat.pattern])) if mat else 'Removed material',
+            'unit': material_unit(mat) if mat else 'yd',
+            'quantity': round(qty, 2), 'uses': int(r.uses or 0), 'jobOrders': int(r.orders or 0),
+        })
+    for lst in by_month.values():
+        lst.sort(key=lambda x: -x['quantity'])
 
-    # Add 3 projected months using avg daily usage from AI
+    monthly_usage = [{'month': r.month, 'total': float(r.total or 0), 'projected': False,
+                      'materials': by_month.get(r.month, [])} for r in rows]
+
+    # Add 3 projected months using avg daily usage from AI, with each material's own
+    # projection (and whether it is forecast to run out that month)
     avg_daily_all = sum(p.get('avgDailyUsage', 0) for p in predictions) if predictions else 0
+    pred_mats = {m.item_id: m for m in InventoryMaterial.query.filter(
+        InventoryMaterial.item_id.in_([p.get('itemId') for p in predictions] or ['']),
+        InventoryMaterial.is_archived.is_(False)).all()}
     for i in range(1, 4):
         future = datetime.now() + timedelta(days=30 * i)
+        ym = future.strftime('%Y-%m')
+        projected = []
+        for p in predictions:
+            daily = float(p.get('avgDailyUsage') or 0)
+            if daily <= 0:
+                continue
+            mat = pred_mats.get(p.get('itemId'))
+            projected.append({
+                'itemId': p.get('itemId'),
+                'name': ' - '.join(filter(None, [p.get('materialType'), p.get('color'), p.get('pattern')])),
+                'unit': material_unit(mat) if mat else 'yd',
+                'quantity': round(daily * 30, 2),
+                'currentStock': p.get('currentStock'),
+                'stockoutDate': p.get('stockoutDate'),
+                'restockByDate': p.get('restockByDate'),
+                'suggestedRestockQty': p.get('suggestedRestockQty'),
+                'confidence': p.get('confidence'),
+                'runsOutThisMonth': bool(p.get('stockoutDate') and str(p.get('stockoutDate'))[:7] == ym),
+            })
+        projected.sort(key=lambda x: -x['quantity'])
         monthly_usage.append({
-            'month': future.strftime('%Y-%m'),
+            'month': ym,
             'total': round(avg_daily_all * 30, 1),
-            'projected': True
+            'projected': True,
+            'materials': projected,
         })
 
     urgent = [p for p in predictions if p.get('daysUntilStockout', 9999) <= 7]
@@ -12891,8 +13211,68 @@ def create_managed_worker():
     db.session.commit()
     return jsonify({'status': 'success', 'data': {'worker': managed_worker_to_dict(worker)}}), 201
 
+def create_worker_login(worker, account):
+    """Make a login for this worker from account = {username, password, email?} and
+    link it, so they can start and submit their own tasks. Workers often have no
+    email: one is made up from the username (they sign in with the username).
+    Error response or None. The caller commits."""
+    if worker.user_id:
+        return _error(f'{worker.name} already has a login')
+    # The two worker roles have the same access; the name just follows the trade
+    role_key = 'sewer' if 'sew' in (worker.work_type or '').lower() else 'seat_maker'
+    user, error = create_outside_login(worker.name, role_key, account, 'workers')
+    if error:
+        return error
+    worker.user_id = user.id
+    return None
+
+
+def create_outside_login(full_name, role_key, account, kind):
+    """A login for someone who isn't office staff (a worker or a supplier) from
+    account = {username, password, email?}. Without an email one is made up from
+    the username (they sign in with the username). (user, None) or (None, error
+    response). The caller commits."""
+    if not isinstance(account, dict):
+        return None, _error('The login details are not in the right format')
+    username = str(account.get('username') or '').strip()
+    if not USERNAME_PATTERN.match(username):
+        return None, _error('Username must be 3 to 50 characters: letters, numbers, dots, dashes or underscores.')
+    if User.query.filter(db.func.lower(User.username) == username.lower()).first():
+        return None, _error('That username is already taken')
+    error = password_error(account.get('password'))
+    if error:
+        return None, _error(error)
+    email = str(account.get('email') or '').strip()
+    if email:
+        if not EMAIL_PATTERN.match(email):
+            return None, _error('Enter a valid email address, or leave it blank')
+        if _email_taken(email, None):
+            return None, _error('That email is already used by another account')
+    else:
+        email = f'{username.lower()}@{kind}.seatmakers.local'
+        if _email_taken(email, None):
+            return None, _error('That username is already taken')
+    role = Role.query.filter_by(key=role_key).first()
+    if not role:
+        return None, _error('That account role is missing. Restart the server to set it up.', 500)
+    error = delegation_error(request.current_user, set(), ROLE_DEFAULT_PERMISSIONS.get(role_key, ()), role_key)
+    if error:
+        return None, _error(error, 403)
+    # They aren't based at a shop; the account sits at the main warehouse
+    branch = get_warehouse_branch() or Branch.query.filter_by(is_active=True).first()
+    user = User(username=username, password=hash_password(account['password']), email=email,
+                full_name=full_name, role_id=role.id, branch_id=branch.id if branch else None,
+                branch=branch.name if branch else None, is_active=True)
+    db.session.add(user)
+    db.session.flush()
+    return user, None
+
+
 def link_worker_account(worker, data):
-    """Set or clear the worker's login from data['userId'] (if given). Error response or None."""
+    """Set or clear the worker's login from data['userId'] (if given), or make a new
+    one from data['newAccount']. Error response or None."""
+    if data.get('newAccount'):
+        return create_worker_login(worker, data['newAccount'])
     if 'userId' not in data:
         return None
     if not data['userId']:
@@ -12992,11 +13372,15 @@ def get_my_work():
             'vehicle': orders[a.job_order_db_id].vehicle_info if a.job_order_db_id in orders else None,
             'priority': (orders[a.job_order_db_id].priority if a.job_order_db_id in orders else None) or 'normal',
             'scheduledDate': a.scheduled_date.isoformat() if a.scheduled_date else None,
+            'assignmentType': a.assignment_type or 'job_order',
             'status': a.status,
             'hoursWorked': a.hours_worked,
-            'pay': a.pay if a.status == 'completed' else None,
+            'startTime': fmt_dt(a.start_time),
             'endTime': fmt_dt(a.end_time),
             'waitingOn': waiting_on_dict(waits.get(a.id)),
+            # What they submitted (to correct it if it was sent back) and why it was sent back
+            'submission': submission_to_dict(a),
+            'reviewNote': a.review_note,
         } for a in rows],
     }})
 
@@ -13108,8 +13492,8 @@ def managed_worker_work_summary(worker_id):
     worker = ManagedWorker.query.get(worker_id)
     if not worker:
         return jsonify({'status': 'error', 'message': 'Worker not found'}), 404
-    payload, error = worker_work_summary(worker, assignment_in_branch(request.current_user),
-                                         show_pay=sees_labor_cost(request.current_user))
+    # No pay here: Worker Management isn't finance (pay stays on the job order's labor cost)
+    payload, error = worker_work_summary(worker, assignment_in_branch(request.current_user), show_pay=False)
     if error:
         return error
     return jsonify({'status': 'success', 'data': payload})
@@ -13122,7 +13506,7 @@ def my_work_summary():
     worker = ManagedWorker.query.filter_by(user_id=request.current_user['id']).first()
     if not worker:
         return jsonify({'status': 'error', 'message': 'Your account is not linked to a worker'}), 404
-    payload, error = worker_work_summary(worker)
+    payload, error = worker_work_summary(worker, show_pay=False)
     if error:
         return error
     return jsonify({'status': 'success', 'data': payload})
@@ -13160,10 +13544,11 @@ def waiting_on_map(assignments):
                and a.assignment_type != 'special_task']
     if not pending:
         return {}
+    # Work waiting for approval is done on the floor, so the next worker can go on
     unfinished = WorkerAssignment.query.filter(
         WorkerAssignment.job_order_db_id.in_({a.job_order_db_id for a in pending}),
         _job_order_task_filter(),
-        WorkerAssignment.status != 'completed',
+        WorkerAssignment.status.notin_(('completed', 'submitted')),
     ).order_by(WorkerAssignment.id).all()
     by_order = {}
     for t in unfinished:
@@ -13202,9 +13587,9 @@ def cutting_not_done_map(assignments):
     out = {}
     for a in sewing:
         cutting = [t for t in tasks if t.job_order_db_id == a.job_order_db_id and _is_cutting_task(t)]
-        if refs.get(a.job_order_db_id) in cut_refs or any(t.status == 'completed' for t in cutting):
+        if refs.get(a.job_order_db_id) in cut_refs or any(t.status in ('completed', 'submitted') for t in cutting):
             continue
-        open_cut = next((t for t in cutting if t.status != 'completed'), None)
+        open_cut = next((t for t in cutting if t.status not in ('completed', 'submitted')), None)
         if open_cut:
             who = open_cut.worker.name if open_cut.worker else 'the cutter'
             out[a.id] = f"Cutting isn't done yet: {who} still has to cut the materials for {a.job_order_ref}."
@@ -13263,6 +13648,8 @@ def list_worker_assignments():
             'id': a.id,
             'workerId': a.worker_id,
             'workerName': a.worker.name if a.worker else '',
+            # Whether the worker has their own login (then they submit their work themselves)
+            'workerHasLogin': bool(a.worker and a.worker.user_id),
             'workType': a.worker.work_type if a.worker else '',
             'ratePerHour': a.worker.rate_per_hour if a.worker else 0,
             'payMode': (a.worker.pay_mode or 'per_hour') if a.worker else 'per_hour',
@@ -13289,6 +13676,11 @@ def list_worker_assignments():
             'waitingOn': waiting_on_dict(waits.get(a.id)),
             # A sewing task on a job order whose materials aren't cut yet (a warning only)
             'cuttingNotDone': not_cut.get(a.id),
+            # Finished work waiting for approval, and why it was last sent back
+            'submission': submission_to_dict(a),
+            'reviewNote': a.review_note,
+            'reviewedBy': a.reviewed_by.full_name if a.reviewed_by else None,
+            'reviewedAt': fmt_dt(a.reviewed_at),
         })
     return jsonify({'status': 'success', 'data': {'assignments': result}})
 
@@ -13680,6 +14072,13 @@ def get_assignment_cut_materials(assignment_id):
                                                       'extraMaterials': [], 'consumables': []}})
     if branch_access_error(request.current_user, order.branch_id):
         return jsonify({'status': 'error', 'message': 'This job order belongs to another branch'}), 403
+    return jsonify({'status': 'success', 'data': cut_materials_payload(assignment, order)})
+
+
+def cut_materials_payload(assignment, order, hide_costs=False):
+    """The job order's materials for the finish-task form: its lines with what other
+    tasks already cut, materials that can be added, and the consumables.
+    hide_costs leaves out prices and costs (for the worker's own form)."""
     lines, missing = order_cut_lines(order)
     # What other tasks on this order already cut of each material (used + excess),
     # so the form starts from what is still left of the planned amount
@@ -13692,7 +14091,15 @@ def get_assignment_cut_materials(assignment_id):
             MaterialWasteLog.job_order_id == order.id, MaterialWasteLog.reason == CUT_EXCESS_REASON,
             MaterialWasteLog.worker_assignment_id != assignment.id).all():
         cut_before[mid] += float(qty or 0)
-    return jsonify({'status': 'success', 'data': {
+
+    def as_dict(m):
+        d = material_to_dict(m)
+        if hide_costs:
+            for key in ('unitPrice', 'costPerUnit', 'markupPercent', 'supplierId', 'supplierName'):
+                d.pop(key, None)
+        return d
+
+    return {
         'materials': [{
             'line': l['line'],
             'lineName': l['item'].get('name'),
@@ -13702,13 +14109,363 @@ def get_assignment_cut_materials(assignment_id):
             'alreadyCut': round(cut_before.get(l['options'][0].id, 0.0), 4) if l['linked'] else 0.0,
             # False: an older line saved without its material; one of the options is chosen
             'linked': l['linked'],
-            'options': [material_to_dict(m) for m in l['options']],
+            'options': [as_dict(m) for m in l['options']],
         } for l in lines],
         'notInInventory': missing,
         # For "+ Add material": any length material the order's branch or the warehouse has
-        'extraMaterials': [material_to_dict(m) for m in extra_cut_materials(order)],
-        'consumables': [material_to_dict(m) for m in order_consumables(order)],
-    }})
+        'extraMaterials': [as_dict(m) for m in extra_cut_materials(order)],
+        'consumables': [as_dict(m) for m in order_consumables(order)],
+    }
+
+
+# ── Workers finish their own tasks; an administrator approves the work ─────────
+# A worker starts a task, then submits what they did: when they started and
+# finished, the materials they cut and used, the consumables. The task waits as
+# 'submitted' until an administrator approves it; only then does the material leave
+# stock and the pay go onto the job order. Sent back, it returns to the worker.
+
+# The longest a single task can run, start to finish
+MAX_TASK_HOURS = 24 * 7
+
+
+def _assignment_order(assignment):
+    return (JobOrder.query.get(assignment.job_order_db_id) if assignment.job_order_db_id
+            else JobOrder.query.filter_by(job_order_id=assignment.job_order_ref).first())
+
+
+def _parse_client_time(value):
+    """An ISO time from the browser as naive UTC (how times are stored), or None.
+    A time with no offset is taken as Philippine time."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        return dt.replace(tzinfo=None) - dt.utcoffset()
+    return dt - PH_OFFSET
+
+
+def _own_assignment(assignment_id):
+    """(assignment, None) when it is the signed-in worker's own task, else (None, error)."""
+    worker = ManagedWorker.query.filter_by(user_id=request.current_user['id']).first()
+    assignment = WorkerAssignment.query.get(assignment_id)
+    if not worker or not assignment or assignment.worker_id != worker.id:
+        return None, _error('Task not found', 404)
+    return assignment, None
+
+
+def _assignment_brief(a):
+    return {
+        'id': a.id, 'workerId': a.worker_id, 'workerName': a.worker.name if a.worker else '',
+        'jobOrderRef': a.job_order_ref, 'jobOrderDbId': a.job_order_db_id,
+        'description': a.description, 'assignmentType': a.assignment_type or 'job_order',
+        'specialTaskTitle': a.special_task_title, 'status': a.status,
+        'startTime': fmt_dt(a.start_time), 'endTime': fmt_dt(a.end_time),
+        'hoursWorked': a.hours_worked, 'reviewNote': a.review_note,
+    }
+
+
+def submission_to_dict(a):
+    """What the worker submitted, for the worker's form and the administrator's review."""
+    sub = a.submission or None
+    if not sub:
+        return None
+    start, end = _parse_client_time(sub.get('startTime')), _parse_client_time(sub.get('endTime'))
+    return {
+        'startTime': fmt_dt(start), 'endTime': fmt_dt(end),
+        'hours': round((end - start).total_seconds() / 3600, 2) if start and end else None,
+        'materialCuts': sub.get('materialCuts') or [],
+        'consumables': sub.get('consumables') or [],
+        'materialsUsed': sub.get('materialsUsed') or [],
+        'notes': sub.get('notes') or '',
+        'submittedBy': sub.get('submittedBy'),
+        'submittedAt': fmt_dt(a.submitted_at),
+    }
+
+
+def check_submitted_materials(assignment, order, cuts, consumables):
+    """Check what a worker says they cut and used before it is saved for approval,
+    so mistakes show while the form is still open. Nothing leaves stock here: that
+    happens on approval (record_assignment_cuts / record_assignment_consumables),
+    which checks again against the stock at that time. Error message or None."""
+    if not isinstance(cuts, list) or not isinstance(consumables, list):
+        return 'The materials are not in the right format'
+    if not order:
+        return None
+    lines, _ = order_cut_lines(order)
+    allowed = {m.id: m for l in lines for m in l['options']}
+    allowed.update({m.id: m for m in extra_cut_materials(order)})
+    line_ids = {l['line'] for l in lines}
+    totals = {}
+    for entry in cuts:
+        if not isinstance(entry, dict):
+            return 'The materials are not in the right format'
+        mid = _int_or_none(entry.get('materialId'))
+        cut, used = finite_number(entry.get('cut'), 0.0), finite_number(entry.get('used'), 0.0)
+        if cut is None or used is None or cut < 0 or used < 0:
+            return 'Cut and used amounts must be numbers of zero or more'
+        if cut == 0 and used == 0:
+            continue
+        material = allowed.get(mid)
+        if not material:
+            return "That material can't be cut for this job order"
+        name = ' - '.join(filter(None, [material.material_type, material.color, material.pattern]))
+        if used > cut + QTY_TOLERANCE:
+            return f"{name}: used can't be more than what was cut"
+        if _int_or_none(entry.get('line')) not in line_ids and not str(entry.get('reason') or '').strip():
+            return f'{name}: give the reason the added material was needed'
+        totals[mid] = totals.get(mid, 0.0) + cut
+    for mid, cut in totals.items():
+        material = allowed[mid]
+        on_hand = float(material.stock_quantity or 0)
+        if cut > on_hand + QTY_TOLERANCE:
+            name = ' - '.join(filter(None, [material.material_type, material.color, material.pattern]))
+            return f'{name}: only {on_hand:g} {material_unit(material)} in stock, less than the {cut:g} cut'
+    usable = {m.id: m for m in order_consumables(order)}
+    for entry in consumables:
+        if not isinstance(entry, dict) or entry.get('kind') not in ('full', 'partial'):
+            return 'Mark each consumable fully or partially used'
+        material = usable.get(_int_or_none(entry.get('materialId')))
+        if not material:
+            return "That consumable can't be used for this job order"
+        if entry['kind'] == 'full':
+            qty = finite_number(entry.get('quantity'))
+            if qty is None or qty <= 0:
+                return 'Enter how many of each consumable were used up'
+            if qty > float(material.stock_quantity or 0) + QTY_TOLERANCE:
+                return f'{material.material_type}: only {float(material.stock_quantity or 0):g} in stock'
+    return None
+
+
+def start_own_task(assignment, order):
+    """A worker starts their task. Error response or None (the caller commits)."""
+    if assignment.status != 'pending':
+        return _error('This task has already been started')
+    blocker = waiting_on_map([assignment]).get(assignment.id)
+    if blocker:
+        who = blocker.worker.name if blocker.worker else 'another worker'
+        return _error(f"You can't start this yet: {who} must finish {blocker.description or 'their part'} first.")
+    busy = WorkerAssignment.query.filter(WorkerAssignment.worker_id == assignment.worker_id,
+                                         WorkerAssignment.status == 'in_progress',
+                                         WorkerAssignment.id != assignment.id).first()
+    if busy:
+        task = busy.special_task_title if busy.assignment_type == 'special_task' else busy.job_order_ref
+        return _error(f"You are still working on {task} ({busy.description or 'a task'}). "
+                      'Finish and submit that one before starting another.', 409)
+    assignment.status = 'in_progress'
+    assignment.start_time = datetime.utcnow()
+    assignment.updated_at = datetime.utcnow()
+    if assignment.assignment_type != 'special_task':
+        mark_job_order_started(order)
+    return None
+
+
+def submit_task_work(assignment, data):
+    """Save what was done on a task for an administrator to approve. Error response or None."""
+    if assignment.status == 'submitted':
+        return _error('This task is already waiting for approval')
+    if assignment.status == 'completed':
+        return _error('This task is already completed')
+    if assignment.status == 'pending':
+        blocker = waiting_on_map([assignment]).get(assignment.id)
+        if blocker:
+            who = blocker.worker.name if blocker.worker else 'another worker'
+            return _error(f"{who} must finish {blocker.description or 'their part'} first.")
+    start, end = _parse_client_time(data.get('startTime')), _parse_client_time(data.get('endTime'))
+    if not start or not end:
+        return _error('Enter the time the work started and the time it finished')
+    if end <= start:
+        return _error('The finish time must be after the start time')
+    if end > datetime.utcnow() + timedelta(minutes=5):
+        return _error("The finish time can't be later than now")
+    if (end - start).total_seconds() / 3600 > MAX_TASK_HOURS:
+        return _error('A task can run at most 7 days from start to finish. Check the dates.')
+    special = assignment.assignment_type == 'special_task'
+    order = None if special else _assignment_order(assignment)
+    cuts = [] if special else (data.get('materialCuts') or [])
+    consumables = [] if special else (data.get('consumables') or [])
+    problem = check_submitted_materials(assignment, order, cuts, consumables)
+    if problem:
+        return _error(problem)
+    assignment.submission = {
+        # Stored as UTC with a Z so they read back the same
+        'startTime': start.isoformat() + 'Z', 'endTime': end.isoformat() + 'Z',
+        'materialCuts': cuts, 'consumables': consumables,
+        'materialsUsed': data.get('materialsUsed') if isinstance(data.get('materialsUsed'), list) else [],
+        'notes': str(data.get('notes') or '').strip()[:500],
+        'submittedBy': request.current_user.get('fullName'),
+    }
+    assignment.submitted_at = datetime.utcnow()
+    assignment.start_time = start
+    assignment.status = 'submitted'
+    assignment.review_note = None
+    assignment.updated_at = datetime.utcnow()
+    if not special:
+        mark_job_order_started(order)
+    task = assignment.special_task_title if special else assignment.job_order_ref
+    who = assignment.worker.name if assignment.worker else 'A worker'
+    notify_branch_users(order.branch_id if order else (get_warehouse_branch().id if get_warehouse_branch() else None),
+                        'work_submitted', 'Work waiting for approval',
+                        f"{who} finished {task} ({assignment.description or 'task'}). Check and approve it in Worker Management.",
+                        {'assignmentId': assignment.id, 'link': '/worker-dashboard'})
+    return None
+
+
+@app.route('/api/my-work/<int:assignment_id>/start', methods=['POST'])
+@require_auth
+def start_my_task(assignment_id):
+    assignment, error = _own_assignment(assignment_id)
+    if error:
+        return error
+    error = start_own_task(assignment, _assignment_order(assignment))
+    if error:
+        db.session.rollback()
+        return error
+    db.session.commit()
+    return jsonify({'status': 'success', 'data': _assignment_brief(assignment)})
+
+
+@app.route('/api/my-work/<int:assignment_id>/cut-materials', methods=['GET'])
+@require_auth
+def my_task_cut_materials(assignment_id):
+    """The job order's materials for the worker's own finish-task form (no prices)."""
+    assignment, error = _own_assignment(assignment_id)
+    if error:
+        return error
+    order = None if assignment.assignment_type == 'special_task' else _assignment_order(assignment)
+    if not order:
+        return jsonify({'status': 'success', 'data': {'materials': [], 'notInInventory': [],
+                                                      'extraMaterials': [], 'consumables': []}})
+    return jsonify({'status': 'success', 'data': cut_materials_payload(assignment, order, hide_costs=True)})
+
+
+@app.route('/api/my-work/<int:assignment_id>/submit', methods=['POST'])
+@require_auth
+def submit_my_task(assignment_id):
+    assignment, error = _own_assignment(assignment_id)
+    if error:
+        return error
+    error = submit_task_work(assignment, request.get_json(silent=True) or {})
+    if error:
+        db.session.rollback()
+        return error
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Workers',
+               f"Submitted {assignment.job_order_ref} ({assignment.description or 'task'}) for approval",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': _assignment_brief(assignment)})
+
+
+@app.route('/api/worker-assignments/<int:assignment_id>/submit', methods=['POST'])
+@require_auth
+@require_permission('workers.approve')
+def submit_task_for_worker(assignment_id):
+    """An administrator fills in the finished work for a worker who has no login.
+    It still waits for approval like any other submission."""
+    assignment = WorkerAssignment.query.get(assignment_id)
+    if not assignment:
+        return _error('Assignment not found', 404)
+    order = _assignment_order(assignment)
+    if order and branch_access_error(request.current_user, order.branch_id):
+        return _error('This job order belongs to another branch', 403)
+    error = submit_task_work(assignment, request.get_json(silent=True) or {})
+    if error:
+        db.session.rollback()
+        return error
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Workers',
+               f"Filled in finished work on {assignment.job_order_ref} ({assignment.description or 'task'}) "
+               f"for {assignment.worker.name if assignment.worker else 'a worker'}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': _assignment_brief(assignment)})
+
+
+@app.route('/api/worker-assignments/<int:assignment_id>/review', methods=['POST'])
+@require_auth
+@require_permission('workers.approve')
+def review_worker_assignment(assignment_id):
+    """Approve a worker's submitted work (material leaves stock, pay is recorded and
+    the task is completed) or send it back to them with what to fix."""
+    assignment = WorkerAssignment.query.filter_by(id=assignment_id).with_for_update().first()
+    if not assignment:
+        return _error('Assignment not found', 404)
+    if assignment.status != 'submitted':
+        return _error('This task is not waiting for approval')
+    special = assignment.assignment_type == 'special_task'
+    order = _assignment_order(assignment)
+    if order and branch_access_error(request.current_user, order.branch_id):
+        return _error('This job order belongs to another branch', 403)
+    data = request.get_json(silent=True) or {}
+    action = data.get('action')
+    note = str(data.get('note') or '').strip()[:500]
+    who = assignment.worker.name if assignment.worker else 'a worker'
+    now = datetime.utcnow()
+
+    if action == 'return':
+        if not note:
+            return _error('Say what needs to be fixed, so the worker knows')
+        assignment.status = 'in_progress'
+        assignment.review_note = note
+        assignment.reviewed_by_id = request.current_user['id']
+        assignment.reviewed_at = now
+        assignment.updated_at = now
+        db.session.commit()
+        log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Workers',
+                   f"Sent {assignment.job_order_ref} ({assignment.description or 'task'}) back to {who}: {note}",
+                   request.remote_addr or '0.0.0.0')
+        return jsonify({'status': 'success', 'data': _assignment_brief(assignment)})
+    if action != 'approve':
+        return _error('Choose to approve the work or send it back')
+
+    sub = assignment.submission or {}
+    start, end = _parse_client_time(sub.get('startTime')), _parse_client_time(sub.get('endTime'))
+    if not start or not end or end <= start:
+        return _error('The submitted start and finish times are missing. Send it back to the worker.')
+    pay_override = None
+    if data.get('payOverride') not in (None, ''):
+        pay_override = finite_number(data['payOverride'])
+        if pay_override is None or pay_override < 0:
+            return _error('Pay must be a number of zero or more')
+    units = finite_number(data.get('unitsWorked'), 1.0)
+    if units is None or units <= 0:
+        return _error('Days or pieces worked must be more than zero')
+
+    assignment.start_time, assignment.end_time = start, end
+    assignment.hours_worked = round((end - start).total_seconds() / 3600, 2)
+    assignment.materials_used = sub.get('materialsUsed') or None
+    cuts = sub.get('materialCuts') or []
+    consumables = sub.get('consumables') or []
+    if order and not special and (cuts or consumables):
+        error = (record_assignment_cuts(assignment, order, cuts)
+                 or record_assignment_consumables(assignment, order, consumables))
+        if error:
+            db.session.rollback()
+            return error
+    if pay_override is not None:
+        assignment.pay = round(pay_override, 2)
+        assignment.pay_override = assignment.pay
+    elif assignment.worker:
+        rate = float(assignment.worker.rate_per_hour or 0)
+        mode = assignment.worker.pay_mode or 'per_hour'
+        qty = assignment.hours_worked if mode == 'per_hour' else units
+        assignment.pay = round(qty * rate, 2)
+        assignment.pay_override = None
+    assignment.status = 'completed'
+    assignment.review_note = None
+    assignment.reviewed_by_id = request.current_user['id']
+    assignment.reviewed_at = now
+    assignment.updated_at = now
+    if not special:
+        mark_job_order_started(order)
+    record_assignment_pay(assignment)
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Workers',
+               f"Approved {who}'s work on {assignment.job_order_ref} ({assignment.description or 'task'}): "
+               f"{assignment.hours_worked}h, pay {assignment.pay}",
+               request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': {**_assignment_brief(assignment), 'pay': assignment.pay}})
 
 @app.route('/api/worker-assignments/calendar', methods=['GET'])
 @require_auth
