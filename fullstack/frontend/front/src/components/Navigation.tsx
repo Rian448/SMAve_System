@@ -142,10 +142,8 @@ const NAV_ENTRIES: NavEntry[] = [
     { name: 'Receiving', path: '/purchase-orders/receiving', icon: ReceivingIcon, perms: ['purchase_orders.receive'] },
     { name: 'Suppliers', path: '/suppliers', icon: SupplierIcon, perms: ['suppliers.view'] },
   ] },
-  { name: 'Finance', icon: CostingIcon, items: [
-    { name: 'Expenses', path: '/expenses', icon: ExpensesIcon, perms: ['expenses.view', 'expenses.add'] },
-    { name: 'Costing', path: '/costing', icon: CostingIcon, perms: ['costing.view'] },
-  ] },
+  // Expenses is off the menu; /expenses still opens it
+  { name: 'Costing', path: '/costing', icon: CostingIcon, perms: ['costing.view'] },
   { name: 'Analytics', icon: ReportsIcon, items: [
     { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, perms: ['forecasting.view'] },
     { name: 'Reports', path: '/reports', icon: ReportsIcon, perms: ['reports.sales', 'reports.inventory', 'reports.settlement'] },
