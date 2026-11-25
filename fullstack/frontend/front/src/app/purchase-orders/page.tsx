@@ -238,14 +238,16 @@ export default function PurchaseOrdersPage() {
                               Approve
                             </button>
                           )}
-                          {isOpenForReceiving(po) && canReceive && (
+                          {isOpenForReceiving(po) && canReceive && (po.awaitingSupplier ? (
+                            <span className="text-gray-400 text-sm" title={po.awaitingSupplier}>Not sent yet</span>
+                          ) : (
                             <button
                               onClick={() => setReceiving(po)}
                               className="text-green-600 hover:text-green-700 text-sm font-medium"
                             >
                               Receive
                             </button>
-                          )}
+                          ))}
                         </div>
                       </td>
                     </tr>

@@ -108,6 +108,19 @@ function OrderCard({ order: o, onSaved, onError }: {
   const unpriced = o.items.filter(it => !(priceOf(it.line, it.unitPrice) > 0)).length;
   const total = o.items.reduce((s, it) => s + it.quantity * priceOf(it.line, it.unitPrice), 0);
   const [saving, setSaving] = useState(false);
+  // Marking the delivery as sent: only then can Seatmakers Avenue receive it
+  const [sendNote, setSendNote] = useState('');
+  const [confirmSend, setConfirmSend] = useState(false);
+  const markSent = async () => {
+    if (pricesChanged || deliveryChanged) { onError('Save your changes first, then mark the order as sent.'); return; }
+    setSaving(true);
+    try {
+      await api.supplierPortal.markSent(o.id, sendNote.trim() || undefined);
+      onSaved(`${o.poNumber} marked as sent. Seatmakers Avenue can now receive it.`);
+    } catch (err) {
+      onError(err instanceof Error && err.message ? err.message : 'Could not mark it as sent.');
+    } finally { setSaving(false); setConfirmSend(false); }
+  };
 
   const save = async () => {
     if (deliveryChanged && !date) { onError('Choose the date you will deliver.'); return; }
@@ -138,8 +151,9 @@ function OrderCard({ order: o, onSaved, onError }: {
             {o.status === 'partially_received' ? ' · Partly delivered' : ''}
           </p>
         </div>
-        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${o.expectedDelivery ? 'bg-blue-100 text-blue-700' : 'bg-amber-100 text-amber-800'}`}>
-          {o.expectedDelivery ? `Delivery ${formatDate(o.expectedDelivery)}` : 'Delivery date needed'}
+        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${o.sentAt ? 'bg-green-100 text-green-700'
+          : o.expectedDelivery ? 'bg-blue-100 text-blue-700' : 'bg-amber-100 text-amber-800'}`}>
+          {o.sentAt ? `Sent ${formatDate(o.sentAt)}` : o.expectedDelivery ? `Delivery ${formatDate(o.expectedDelivery)}` : 'Delivery date needed'}
         </span>
       </div>
 
@@ -209,6 +223,42 @@ function OrderCard({ order: o, onSaved, onError }: {
         </p>
         {o.deliverySetAt && (
           <p className="text-[11px] text-gray-400">Last set {formatDate(o.deliverySetAt)}</p>
+        )}
+      </div>
+
+      {/* Sending: the shop can only receive a delivery once it is marked sent here */}
+      <div className="px-4 py-3 border-t border-gray-100 bg-gray-50/60 rounded-b-xl">
+        {o.sentAt ? (
+          <p className="text-sm text-green-700">
+            Marked as sent {formatDate(o.sentAt)}{o.sentNote ? ` · ${o.sentNote}` : ''}. Waiting for Seatmakers Avenue to receive it.
+          </p>
+        ) : confirmSend ? (
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="block flex-1 min-w-48">
+              <span className="block text-xs font-medium text-gray-600 mb-1">Delivery receipt / note (optional)</span>
+              <input type="text" value={sendNote} maxLength={255} onChange={e => setSendNote(e.target.value)}
+                placeholder="e.g. DR-1001, sent via truck" autoFocus
+                className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+            </label>
+            <button type="button" onClick={markSent} disabled={saving}
+              className="px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-semibold hover:bg-green-700 disabled:opacity-50">
+              {saving ? 'Sending…' : 'Confirm sent'}
+            </button>
+            <button type="button" onClick={() => setConfirmSend(false)} disabled={saving}
+              className="px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-600 hover:bg-white">Cancel</button>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-gray-500">
+              {o.status === 'partially_received' ? 'Part of this order was received. ' : ''}
+              When you send {o.status === 'partially_received' ? 'the rest' : 'the order'}, mark it as sent so it can be received.
+              {unpriced > 0 && <span className="text-amber-700"> Set every price first.</span>}
+            </p>
+            <button type="button" onClick={() => setConfirmSend(true)} disabled={saving || unpriced > 0}
+              className="px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-semibold hover:bg-green-700 disabled:opacity-50">
+              Mark as sent
+            </button>
+          </div>
         )}
       </div>
     </div>

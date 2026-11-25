@@ -320,14 +320,24 @@ export default function PurchaseOrderDetailPage() {
 
                 {can('purchase_orders.receive') && (isOpenForReceiving(purchaseOrder) || canReturnItems) && (
                   <div className="space-y-3">
-                    {isOpenForReceiving(purchaseOrder) && (
+                    {isOpenForReceiving(purchaseOrder) && (<>
                       <button
                         onClick={() => setReceivingOpen(true)}
-                        className="w-full inline-flex items-center justify-center px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
+                        disabled={!!purchaseOrder.awaitingSupplier}
+                        className="w-full inline-flex items-center justify-center px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-600"
                       >
                         {purchaseOrder.status === 'partially_received' ? 'Receive More Items' : 'Receive Items'}
                       </button>
-                    )}
+                      {/* A supplier with a login marks each delivery sent before it can be received */}
+                      {purchaseOrder.awaitingSupplier ? (
+                        <p className="-mt-1 text-xs text-amber-700 text-center">{purchaseOrder.awaitingSupplier}</p>
+                      ) : purchaseOrder.supplierSentAt && (
+                        <p className="-mt-1 text-xs text-blue-700 text-center">
+                          Sent by the supplier {formatDate(purchaseOrder.supplierSentAt)}
+                          {purchaseOrder.supplierSentNote ? ` · ${purchaseOrder.supplierSentNote}` : ''}
+                        </p>
+                      )}
+                    </>)}
                     {/* Always under Receive Items; usable once something has been received */}
                     <button
                       onClick={() => setReturningOpen(true)}

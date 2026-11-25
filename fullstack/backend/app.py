@@ -960,6 +960,11 @@ class PurchaseOrder(db.Model):
     # The supplier's note with the delivery date, and when they last set it
     supplier_note = db.Column(db.Text, nullable=True)
     delivery_set_at = db.Column(db.DateTime, nullable=True)
+    # The supplier marked the (next) delivery as sent. For a supplier with a login,
+    # staff can only receive a delivery the supplier has sent; it clears after a
+    # partial delivery (the rest must be sent again) and after a return for replacement
+    supplier_sent_at = db.Column(db.DateTime, nullable=True)
+    supplier_sent_note = db.Column(db.String(255), nullable=True)
     created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     approved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
@@ -1549,6 +1554,8 @@ def run_migrations():
         "ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)",
         "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS supplier_note TEXT",
         "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS delivery_set_at TIMESTAMP",
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS supplier_sent_at TIMESTAMP",
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS supplier_sent_note VARCHAR(255)",
         # Track which managed worker used materials (FK to managed_workers)
         "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS managed_worker_id INTEGER REFERENCES managed_workers(id)",
         "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS batch_id VARCHAR(36)",
@@ -4754,14 +4761,33 @@ def supplier_po_to_dict(po):
         'supplierNote': po.supplier_note,
         'deliverySetAt': fmt_dt(po.delivery_set_at),
         'paymentTermLabel': payment_term_label(po.payment_term, po.payment_term_days),
+        # When they marked the current delivery sent (cleared after a partial delivery)
+        'sentAt': fmt_dt(po.supplier_sent_at),
+        'sentNote': po.supplier_sent_note,
     }
+
+
+def supplier_has_login(po):
+    """Whether the PO's supplier has their own login (then they mark deliveries sent)."""
+    return bool(po.supplier_id and Supplier.query.with_entities(Supplier.user_id)
+                .filter_by(id=po.supplier_id).scalar())
+
+
+def awaiting_supplier_send(po):
+    """Why staff can't receive this PO yet, or None: a supplier with a login must
+    mark the delivery as sent first."""
+    if po.status in PO_OPEN_FOR_RECEIVING and not po.supplier_sent_at and supplier_has_login(po):
+        return f"{po.supplier_name} hasn't marked this order as sent yet. It can be received once they send it."
+    return None
 
 
 def supplier_prices_locked(po):
     """Why the supplier can no longer change this PO's prices, or None. Prices can
-    change until the first delivery or payment, since both are counted at them."""
+    change until the order is sent, delivered or paid, since all count at them."""
     if po.status != 'approved':
         return 'Prices can only change before anything is delivered'
+    if po.supplier_sent_at:
+        return 'The order has been sent, so its prices can no longer change'
     if PurchaseOrderPayment.query.filter(PurchaseOrderPayment.purchase_order_id == po.id,
                                          PurchaseOrderPayment.voided_at.is_(None)).first():
         return 'Seatmakers Avenue has already paid on this order, so its prices can no longer change'
@@ -4843,6 +4869,43 @@ def supplier_set_prices(po_id):
     db.session.commit()
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Purchase Orders',
                f"{supplier.name} set prices on {po.po_number}: " + '; '.join(changes), request.remote_addr or '0.0.0.0')
+    return jsonify({'status': 'success', 'data': supplier_po_to_dict(po)})
+
+
+@app.route('/api/supplier-portal/orders/<int:po_id>/send', methods=['POST'])
+@require_auth
+def supplier_mark_sent(po_id):
+    """The supplier marks the order (or the rest of it) as sent: {note} (e.g. the
+    delivery receipt no.). Only then can staff receive it."""
+    supplier = current_supplier()
+    po = PurchaseOrder.query.filter_by(id=po_id).with_for_update().first()
+    if not supplier or not po or po.supplier_id != supplier.id or po.status not in PO_SENT_TO_SUPPLIER:
+        return _error('Purchase order not found', 404)
+    if po.status not in PO_OPEN_FOR_RECEIVING:
+        return _error('This purchase order has already been fully received')
+    if po.supplier_sent_at:
+        return _error('This delivery is already marked as sent')
+    unpriced = [it.get('name') for it in (po.items or []) if not float(it.get('unitPrice') or 0) > 0]
+    if unpriced:
+        return _error('Set the price of every item before sending: ' + ', '.join(unpriced[:5]))
+    note = str((request.get_json(silent=True) or {}).get('note') or '').strip()[:255] or None
+    po.supplier_sent_at = datetime.utcnow()
+    po.supplier_sent_note = note
+    if not po.expected_delivery or po.expected_delivery < manila_today().isoformat():
+        # Sent without a date (or a passed one): it is on its way now
+        po.expected_delivery = manila_today().isoformat()
+        po.delivery_set_at = datetime.utcnow()
+    warehouse = get_warehouse_branch()
+    branch_ids = purchase_order_branch_ids(po)
+    branch_id = (warehouse.id if warehouse and warehouse.id in branch_ids
+                 else next(iter(branch_ids), warehouse.id if warehouse else None))
+    notify_branch_users(branch_id, 'po_delivery_set', f'{po.po_number}: sent by {supplier.name}',
+                        f'{supplier.name} sent the order. It can now be received.' + (f' Note: {note}' if note else ''),
+                        {'purchaseOrderId': po.id})
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Purchase Orders',
+               f"{supplier.name} marked {po.po_number} as sent" + (f": {note}" if note else ''),
+               request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': supplier_po_to_dict(po)})
 
 
@@ -7918,8 +7981,12 @@ def purchase_order_to_dict(po):
         'supplierNote': po.supplier_note,
         'deliverySetAt': fmt_dt(po.delivery_set_at),
         # Whether the supplier has a login (else staff keep the delivery date themselves)
-        'supplierHasLogin': bool(Supplier.query.with_entities(Supplier.user_id).filter_by(id=po.supplier_id).scalar())
-                            if po.supplier_id else False,
+        'supplierHasLogin': supplier_has_login(po),
+        # The supplier marked the delivery sent; until then (for a supplier with a
+        # login) it can't be received, and this says why
+        'supplierSentAt': fmt_dt(po.supplier_sent_at),
+        'supplierSentNote': po.supplier_sent_note,
+        'awaitingSupplier': awaiting_supplier_send(po),
         'createdAt': day(po.created_at),
         'createdBy': po.created_by,
         'createdByName': people.get(po.created_by),
@@ -8646,6 +8713,9 @@ def receive_purchase_order(po_id):
     if po.status not in PO_OPEN_FOR_RECEIVING:
         message = 'PO must be approved first' if po.status == 'pending' else f'This PO is already {po.status.replace("_", " ")}'
         return jsonify({'status': 'error', 'message': message}), 400
+    waiting = awaiting_supplier_send(po)
+    if waiting:
+        return jsonify({'status': 'error', 'message': waiting, 'code': 'not_sent'}), 400
     error = purchase_order_materials_error(user, po.items)
     if error:
         return error
@@ -8697,6 +8767,10 @@ def receive_purchase_order(po_id):
     if complete:
         po.received_at = datetime.utcnow()
         po.received_by = user['id']
+    else:
+        # Part of it came: the supplier marks the rest sent when they send it
+        po.supplier_sent_at = None
+        po.supplier_sent_note = None
     db.session.commit()
 
     summary = ', '.join(f"{it['name']} × {it['quantity']:g}" for it in receipt_items)
@@ -8779,6 +8853,9 @@ def return_purchase_order_items(po_id):
         # so the old date is cleared and they are asked for a new one
         po.expected_delivery = None
         po.supplier_note = None
+        # The replacement has to be sent before it can be received
+        po.supplier_sent_at = None
+        po.supplier_sent_note = None
         supplier = Supplier.query.get(po.supplier_id) if po.supplier_id else None
         if supplier and supplier.user_id:
             db.session.add(Notification(

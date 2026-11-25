@@ -905,8 +905,11 @@ export interface SupplierOrder {
   receivingStatus: PurchaseOrderReceivingStatus | null;
   items: { line: number; name: string; quantity: number; unit: string; unitPrice: number; totalPrice: number;
     receivedQuantity: number; remainingQuantity: number; priceBySupplier?: boolean }[];
-  /** Why the prices can't be changed any more (first delivery or payment), or null */
+  /** Why the prices can't be changed any more (sent, delivered or paid), or null */
   pricesLocked: string | null;
+  /** When they marked the current delivery as sent (cleared after a partial delivery) */
+  sentAt: string | null;
+  sentNote: string | null;
   totalAmount: number;
   orderedAt: string | null;
   expectedDelivery: string | null;
@@ -1256,6 +1259,11 @@ export interface PurchaseOrder {
   deliverySetAt?: string | null;
   /** The supplier has a login and sets the delivery date themselves */
   supplierHasLogin?: boolean;
+  /** When the supplier marked the current delivery as sent, and their note (e.g. DR no.) */
+  supplierSentAt?: string | null;
+  supplierSentNote?: string | null;
+  /** Why it can't be received yet (the supplier hasn't sent it), or null */
+  awaitingSupplier?: string | null;
   createdAt: string;
   createdBy: number;
   createdByName?: string | null;
@@ -2668,6 +2676,9 @@ export const api = {
     orders: () => fetchApi<SupplierPortalData>('/api/supplier-portal/orders'),
     setDelivery: (id: number, data: { expectedDelivery: string; note?: string }) =>
       fetchApi<SupplierOrder>(`/api/supplier-portal/orders/${id}/delivery`, { method: 'PUT', body: JSON.stringify(data) }),
+    /** The supplier marks the order (or the rest of it) as sent; only then can it be received */
+    markSent: (id: number, note?: string) =>
+      fetchApi<SupplierOrder>(`/api/supplier-portal/orders/${id}/send`, { method: 'POST', body: JSON.stringify({ note }) }),
     /** The supplier sets or changes the unit prices (until the first delivery or payment) */
     setPrices: (id: number, prices: { line: number; unitPrice: number }[]) =>
       fetchApi<SupplierOrder>(`/api/supplier-portal/orders/${id}/prices`, { method: 'PUT', body: JSON.stringify({ prices }) }),
