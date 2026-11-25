@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 import { formatDate } from '@/lib/dateUtils';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
@@ -7,7 +7,7 @@ import Link from 'next/link';
 import {
   api, JobOrder, JobOrderItem, RawMaterial, PaymentRecord, ManagedWorker, PaymentOverride,
   type ExcessPayment, type CustomerOrderSummary, type JobOrderPriority, PRIORITY_LABELS, type MaterialWasteLog,
-  jobOrderItemCategory, jobOrderPriceBreakdown, jobOrderTotalFrom, MAX_JOB_ORDER_PRICE, isValidPriceInput, ACCEPTED_PAYMENT_METHODS, PAYMENT_METHOD_LABELS
+  jobOrderItemCategory, jobOrderPriceBreakdown, jobOrderTotalFrom, vatBreakdown, MAX_JOB_ORDER_PRICE, isValidPriceInput, ACCEPTED_PAYMENT_METHODS, PAYMENT_METHOD_LABELS
 } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useVatRate } from '@/lib/useVatRate';
@@ -15,7 +15,7 @@ import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import ExcessPayments from '@/components/ExcessPayments';
 import ExtraMaterialDialog from '@/components/ExtraMaterialDialog';
 import JobOrderDelivery from '@/components/JobOrderDelivery';
-import { DELIVERY_ENABLED } from '@/lib/permissions';
+import { DELIVERY_ENABLED, WORKER_MANAGEMENT_PERMS } from '@/lib/permissions';
 import { useConfirm } from '@/components/ConfirmDialog';
 import { exactPeso } from '@/lib/format';
 import SeatRowsEditor from '@/components/SeatRowsEditor';
@@ -119,6 +119,8 @@ export default function JobOrderDetailPage() {
   const [overrideMsg, setOverrideMsg] = useState('');
 
   const [showRevertConfirm, setShowRevertConfirm] = useState(false);
+  // Summary shown before an order is marked complete
+  const [showCompleteSummary, setShowCompleteSummary] = useState(false);
   // Money received on this order beyond its balance, and the customer's other
   // unpaid orders it can be applied to
   const [excessItems, setExcessItems] = useState<ExcessPayment[]>([]);
@@ -890,7 +892,7 @@ export default function JobOrderDetailPage() {
             )}
             {canEditParts && jobOrder.status === 'in_progress' && (
               <button
-                onClick={() => updateStatus('completed')}
+                onClick={() => setShowCompleteSummary(true)}
                 disabled={updating || !isFullySettled}
                 title={!isFullySettled ? 'Payment must be fully settled before marking as complete' : ''}
                 className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm"
@@ -953,6 +955,197 @@ export default function JobOrderDetailPage() {
             </div>
           </div>
         )}
+
+        {/* Mark-complete confirmation: a summary of the whole order to check first */}
+        {showCompleteSummary && (() => {
+          const vehicle = jobOrder.vehicleInfo;
+          const car = vehicle ? [vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(' ') : '';
+          const workLines = laborLines;
+          const installLines = workLines.filter(l => /install/i.test(`${l.name} ${l.notes || ''}`));
+          const materialItems = itemBreakdown.filter(i => i.category === 'material' && (i.name || i.materialName));
+          const expenseItems = itemBreakdown.filter(i => i.category === 'expense' && i.name);
+          const extras = jobOrder.extraMaterials || [];
+          const payments = [...paymentRecords].sort(
+            (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+          const statusChip = (s?: string) => {
+            const label = s === 'completed' ? 'Done' : s === 'submitted' ? 'Waiting for approval' : s === 'in_progress' ? 'In progress' : s === 'pending' ? 'Not started' : 'Not assigned';
+            const color = s === 'completed' ? 'bg-green-100 text-green-700'
+              : s === 'submitted' ? 'bg-amber-100 text-amber-800'
+              : s === 'in_progress' ? 'bg-blue-100 text-blue-700'
+              : s === 'pending' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500';
+            return <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap ${color}`}>{label}</span>;
+          };
+          const section = (title: string, children: React.ReactNode) => (
+            <div className="py-3 border-t border-gray-100 first:border-t-0">
+              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">{title}</h4>
+              {children}
+            </div>
+          );
+          const kv = (k: string, v: React.ReactNode) => (
+            <div className="flex justify-between gap-4 text-sm py-0.5">
+              <span className="text-gray-500">{k}</span>
+              <span className="text-gray-900 font-medium text-right">{v}</span>
+            </div>
+          );
+          const services = jobOrder.slipData?.serviceDetails;
+          const serviceNotes = services ? [
+            services.flooring && `Flooring: ${services.flooring}`,
+            services.reupholstery && `Reupholstery: ${services.reupholstery}`,
+            services.ceiling && `Ceiling: ${services.ceiling}`,
+            services.sidings && `Sidings: ${services.sidings}`,
+            services.seatCovers && Object.values(services.seatCovers).some(Boolean) && `Seat covers: ${[
+              services.seatCovers.design, services.seatCovers.material, services.seatCovers.pocket, services.seatCovers.others,
+            ].filter(Boolean).join(', ')}`,
+            services.other && `Other: ${services.other}`,
+          ].filter(Boolean) as string[] : [];
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm px-4 py-6">
+              <div className="bg-white rounded-2xl shadow-xl border border-gray-200 w-full max-w-2xl max-h-full flex flex-col">
+                <div className="flex items-center gap-3 p-5 border-b border-gray-100">
+                  <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center shrink-0">
+                    <svg className="w-5 h-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-gray-900">Complete Job Order #{jobOrder.jobOrderId}?</h3>
+                    <p className="text-sm text-gray-500">Check the summary below before marking this order as completed.</p>
+                  </div>
+                </div>
+
+                <div className="overflow-y-auto px-5 py-2">
+                  {section('Order', <>
+                    {kv('Customer', jobOrder.customerName || '—')}
+                    {kv('Vehicle', car || '—')}
+                    {kv('Branch', jobOrder.branchName || '—')}
+                    {kv('Created', formatDate(jobOrder.createdAt))}
+                    {jobOrder.description && kv('Services', jobOrder.description)}
+                    {serviceNotes.length > 0 && (
+                      <ul className="mt-1 text-xs text-gray-600 list-disc pl-5 space-y-0.5">
+                        {serviceNotes.map((s, i) => <li key={i}>{s}</li>)}
+                      </ul>
+                    )}
+                  </>)}
+
+                  {section('Work done', workLines.length === 0 ? (
+                    <p className="text-sm text-gray-400 italic">No labor lines on this order.</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {workLines.map((l, i) => (
+                        <div key={i} className="flex items-center justify-between gap-3 text-sm">
+                          <div className="min-w-0">
+                            <span className="text-gray-900">{l.name || 'Labor'}</span>
+                            <span className="text-gray-500"> — {l.workerName || 'no worker'}</span>
+                          </div>
+                          {statusChip(l.assignmentId ? l.assignmentStatus : undefined)}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+
+                  {section('Installation', installLines.length === 0 ? (
+                    <p className="text-sm text-amber-700">No installation task is recorded on this order.</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {installLines.map((l, i) => (
+                        <div key={i} className="flex items-center justify-between gap-3 text-sm">
+                          <span className="text-gray-900">{l.name} <span className="text-gray-500">— {l.workerName || 'no worker'}</span></span>
+                          {statusChip(l.assignmentId ? l.assignmentStatus : undefined)}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+
+                  {section('Materials', materialItems.length === 0 ? (
+                    <p className="text-sm text-gray-400 italic">No materials on this order.</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {materialItems.map((m, i) => (
+                        <div key={i} className="flex justify-between gap-3 text-sm">
+                          <span className="text-gray-900">{m.name || m.materialName}</span>
+                          <span className="text-gray-600 whitespace-nowrap">
+                            {m.actualQuantity != null && Number(m.actualQuantity) !== m.quantity
+                              ? <>{m.actualQuantity} used <span className="text-gray-400">(planned {m.quantity})</span></>
+                              : <>Qty {m.quantity}</>}
+                          </span>
+                        </div>
+                      ))}
+                      {expenseItems.map((m, i) => (
+                        <div key={`e${i}`} className="flex justify-between gap-3 text-sm">
+                          <span className="text-gray-900">{m.name} <span className="text-gray-400 text-xs">(other expense)</span></span>
+                          <span className="text-gray-600 whitespace-nowrap">Qty {m.quantity}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+
+                  {jobOrder.extraMaterials !== undefined && section('Extra materials', extras.length === 0 ? (
+                    <p className="text-sm text-gray-400 italic">No extra materials issued.</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {extras.map(x => (
+                        <div key={x.id} className="flex justify-between gap-3 text-sm">
+                          <span className="text-gray-900">
+                            {x.materialName || '—'}{x.materialColor ? ` - ${x.materialColor}` : ''}
+                            <span className="text-gray-400 text-xs"> ({x.reason})</span>
+                          </span>
+                          <span className="text-gray-600 whitespace-nowrap">Qty {x.quantity}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+
+                  {section('Payments', <>
+                    {payments.length === 0 ? (
+                      totalPaid > 0
+                        ? kv('Down payment', formatCurrency(totalPaid))
+                        : <p className="text-sm text-gray-400 italic">No payments recorded.</p>
+                    ) : payments.map(p => (
+                      <div key={p.id} className="flex justify-between gap-3 text-sm py-0.5">
+                        <span className="text-gray-600">
+                          {formatDate(p.createdAt)} · <span className="capitalize">{p.paymentMethod.replace(/_/g, ' ')}</span>
+                          {p.referenceNumber && <span className="text-gray-400"> · Ref {p.referenceNumber}</span>}
+                        </span>
+                        <span className="text-gray-900 font-medium whitespace-nowrap">{formatCurrency(p.amount)}</span>
+                      </div>
+                    ))}
+                    <div className="mt-2 pt-2 border-t border-dashed border-gray-200">
+                      {showPriceBreakdown && kv('Price', formatCurrency(price.subtotal))}
+                      {price.discount > 0 && kv(`Discount (${price.discountPercent}%)`, `− ${formatCurrency(price.discount)}`)}
+                      {price.vat > 0 && kv(`VAT (${price.vatPercent}%)`, formatCurrency(price.vat))}
+                      {kv('Total', formatCurrency(jobOrder.totalPrice || 0))}
+                      {kv('Amount paid', formatCurrency(totalPaid))}
+                      {kv('Balance', <span className={isFullySettled ? 'text-green-700' : 'text-red-600'}>
+                        {isFullySettled ? 'Fully paid' : formatCurrency(remainingBalance)}</span>)}
+                    </div>
+                  </>)}
+
+                  {unfinishedWorkers > 0 && (
+                    <div className="my-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                      {unfinishedWorkers} worker task{unfinishedWorkers > 1 ? 's are' : ' is'} not finished yet in Worker Management.
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex gap-3 justify-end p-5 border-t border-gray-100">
+                  <button
+                    onClick={() => setShowCompleteSummary(false)}
+                    className="px-4 py-2 rounded-lg border border-gray-200 text-gray-700 text-sm font-medium hover:bg-gray-100 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={async () => { setShowCompleteSummary(false); await updateStatus('completed'); }}
+                    disabled={updating || !isFullySettled}
+                    className="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white text-sm font-medium transition-colors disabled:opacity-50"
+                  >
+                    Yes, Mark Complete
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Info Cards Row */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-5">
@@ -1191,13 +1384,13 @@ export default function JobOrderDetailPage() {
                 <p className="text-xs text-gray-500 mt-1 max-w-2xl">
                   {seesLaborCost
                     ? <>Who is doing the work and what it costs. These are the same assignments as in Worker Management —
-                      a worker added in either place shows up in both. Workers start and finish their tasks there, and what they
-                      were actually paid is filled in here automatically.</>
+                      a worker added in either place shows up in both. Workers start and finish their tasks from their own
+                      account, and what they were actually paid is filled in here once an administrator approves the work.</>
                     : 'Who is working on this job and how far along each task is.'}
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                {can('workers.add', 'workers.edit', 'workers.delete') && (
+                {can(...WORKER_MANAGEMENT_PERMS) && (
                   <button type="button" onClick={() => router.push('/worker-dashboard')}
                     className="px-3 py-1.5 rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 text-xs font-medium transition-colors">
                     Open Worker Management
@@ -1245,7 +1438,8 @@ export default function JobOrderDetailPage() {
                     const lineWorker = managedWorkers.find(w => w.id === part.workerId);
                     const unit = PAY_UNIT[lineWorker?.payMode || 'per_hour'];
                     // Once the worker has started, the line is the record of their work
-                    const started = part.assignmentStatus === 'in_progress' || part.assignmentStatus === 'completed';
+                    const started = part.assignmentStatus === 'in_progress' || part.assignmentStatus === 'submitted'
+                      || part.assignmentStatus === 'completed';
                     const editable = canEditLabor && !started;
                     const status = !part.workerId
                       ? { label: 'No worker', cls: 'bg-gray-100 text-gray-500' }
@@ -1253,6 +1447,8 @@ export default function JobOrderDetailPage() {
                       ? { label: 'Not saved yet', cls: 'bg-amber-50 text-amber-700 border border-amber-200' }
                       : part.assignmentStatus === 'completed'
                       ? { label: 'Done', cls: 'bg-green-100 text-green-700' }
+                      : part.assignmentStatus === 'submitted'
+                      ? { label: 'To approve', cls: 'bg-amber-100 text-amber-800' }
                       : part.assignmentStatus === 'in_progress'
                       ? { label: 'In progress', cls: 'bg-blue-100 text-blue-700' }
                       : { label: 'Pending', cls: 'bg-[#eef1fb] text-[#011c72]' };
@@ -2413,91 +2609,148 @@ export default function JobOrderDetailPage() {
 
         {/* ── PRINT INVOICE (hidden on screen via CSS + inline style). Rendered under
              <body> so printing can drop the rest of the page (see globals.css).
-             Laid out like the Job Order Slip: ruled boxes, each with a small label. ── */}
+             Receipt-style layout: one narrow centered column, dashed dividers, no boxes.
+             Totals and payment transactions come from the live payment records, so a
+             newly recorded payment shows up on the invoice straight away. ── */}
         {createPortal((() => {
-          const line = '1px solid #000';
-          const label: React.CSSProperties = { fontSize:'6.5pt', fontWeight:700, textTransform:'uppercase', letterSpacing:'0.5px', color:'#444' };
-          const cell: React.CSSProperties = { border:line, padding:'3px 6px', verticalAlign:'top' };
-          const value: React.CSSProperties = { fontSize:'9pt', fontWeight:700, marginTop:'1px', wordBreak:'break-word' };
+          const divider: React.CSSProperties = { borderTop:'1px dashed #000', margin:'6px 0' };
+          const heading: React.CSSProperties = { fontSize:'7pt', fontWeight:700, textTransform:'uppercase', letterSpacing:'0.6px', color:'#444', marginBottom:'2px' };
+          const row: React.CSSProperties = { display:'flex', justifyContent:'space-between', alignItems:'baseline', gap:'10px' };
           const vehicle = jobOrder.vehicleInfo;
           const car = vehicle ? [vehicle.make, vehicle.model].filter(Boolean).join(' ') : '';
-          const paidUp = (jobOrder.balance || 0) <= 0;
+          const paidUp = isFullySettled;
+          const invoicePayments = [...paymentRecords].sort(
+            (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
           const materialLines = itemBreakdown.filter(item => item.category === 'material' && item.name && item.unitPrice + item.materialCostPerUnit > 0);
+          // Materials at their price × quantity; "Services & Markup" is the rest of the
+          // price before VAT and discount, so the lines always add up
+          const unitOf = (item: typeof materialLines[number]) => item.unitPrice || item.materialCostPerUnit;
+          const materialsTotal = materialLines.reduce((sum, item) => sum + item.quantity * unitOf(item), 0);
+          // The price before any discount, with VAT, split into before-VAT and VAT
+          // (older orders had VAT added on top: their pre-discount price is before VAT)
+          const hasVat = price.vat > 0;
+          const fullPrice = vatBreakdown(price.discount > 0
+            ? (price.vatInclusive ? price.subtotal : Math.round(price.subtotal * (1 + price.vatPercent / 100) * 100) / 100)
+            : (jobOrder.totalPrice || 0), price.vatPercent);
+          const num = (n: number, digits = 2) => n.toLocaleString('en-PH', { maximumFractionDigits: digits });
+          const infoRow = (name: string, val: React.ReactNode) => (
+            <div style={row}>
+              <span style={{color:'#444', whiteSpace:'nowrap'}}>{name}</span>
+              <span style={{fontWeight:700, textAlign:'right', wordBreak:'break-word'}}>{val}</span>
+            </div>
+          );
           const amountRow = (name: string, amount: string, strong = false) => (
-            <tr>
-              <td style={{...cell, borderRight:'none', fontWeight: strong ? 900 : 400, fontSize: strong ? '10pt' : '8.5pt'}}>{name}</td>
-              <td style={{...cell, borderLeft:'none', textAlign:'right', fontWeight: strong ? 900 : 400, fontSize: strong ? '10pt' : '8.5pt', whiteSpace:'nowrap'}}>{amount}</td>
-            </tr>
+            <div style={{...row, fontWeight: strong ? 900 : 400, fontSize: strong ? '10.5pt' : '9pt', padding:'1px 0'}}>
+              <span>{name}</span>
+              <span style={{whiteSpace:'nowrap'}}>{amount}</span>
+            </div>
           );
           return (
-        <div id="print-invoice" style={{display:'none', fontFamily:'Arial,Helvetica,sans-serif', color:'#000', fontSize:'9pt', lineHeight:'1.35', maxWidth:'none', margin:'0', padding:'0'}}>
+        <div id="print-invoice" style={{display:'none', fontFamily:'Arial,Helvetica,sans-serif', color:'#000', fontSize:'9pt', lineHeight:'1.4', maxWidth:'none', margin:'0', padding:'0'}}>
+          <div style={{maxWidth:'110mm', margin:'0 auto'}}>
 
-          {/* Shop header + form title */}
-          <div style={{textAlign:'center', marginBottom:'6px'}}>
-            <div style={{fontSize:'14pt', fontWeight:900, letterSpacing:'1px', textTransform:'uppercase'}}>Seatmakers Avenue</div>
-            <div style={{fontSize:'7.5pt', color:'#444'}}>Premium Automotive Upholstery &amp; Custom Seat Covers</div>
-            <div style={{fontSize:'7.5pt'}}>{jobOrder.branchName}</div>
-            <div style={{display:'inline-block', marginTop:'5px', padding:'2px 14px', border:'2px solid #000', fontSize:'11pt', fontWeight:900, letterSpacing:'2px'}}>INVOICE</div>
-          </div>
+            {/* Shop header + form title */}
+            <div style={{textAlign:'center'}}>
+              <div style={{fontSize:'14pt', fontWeight:900, letterSpacing:'1px', textTransform:'uppercase'}}>Seatmakers Avenue</div>
+              <div style={{fontSize:'7.5pt', color:'#444'}}>Premium Automotive Upholstery &amp; Custom Seat Covers</div>
+              <div style={{fontSize:'7.5pt'}}>{jobOrder.branchName}</div>
+              <div style={{marginTop:'5px', fontSize:'11pt', fontWeight:900, letterSpacing:'3px'}}>INVOICE</div>
+            </div>
 
-          {/* Header boxes: J.O#, date, customer, car, year (as on the Job Order Slip) */}
-          <table style={{width:'100%', borderCollapse:'collapse', tableLayout:'fixed', marginBottom:'6px'}}>
-            <tbody>
-              <tr>
-                <td style={cell} colSpan={2}><div style={label}>J.O#</div><div style={value}>{jobOrder.jobOrderId}</div></td>
-                <td style={cell}><div style={label}>Date</div><div style={value}>{formatDate(jobOrder.createdAt)}</div></td>
-              </tr>
-              <tr>
-                <td style={cell} colSpan={3}><div style={label}>Customer</div><div style={value}>{jobOrder.customerName || '—'}</div></td>
-              </tr>
-              <tr>
-                <td style={cell} colSpan={2}><div style={label}>Car</div><div style={value}>{car || '—'}</div></td>
-                <td style={cell}><div style={label}>Yr</div><div style={value}>{vehicle?.year || '—'}</div></td>
-              </tr>
-              {jobOrder.description && (
-                <tr>
-                  <td style={cell} colSpan={3}><div style={label}>Services</div><div style={{...value, fontWeight:400}}>{jobOrder.description}</div></td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+            <div style={divider} />
 
-          {/* Items (customer copy: no internal costs, labor rates or workers) */}
-          <table style={{width:'100%', borderCollapse:'collapse', fontSize:'8.5pt', marginBottom:'6px'}}>
-            <thead>
-              <tr>
-                <th style={{...cell, ...label, textAlign:'left'}}>Description</th>
-                <th style={{...cell, ...label, textAlign:'center', width:'48px'}}>Qty</th>
-              </tr>
-            </thead>
-            <tbody>
-              {materialLines.map((item, i) => (
-                <tr key={i}>
-                  <td style={cell}>{item.name}</td>
-                  <td style={{...cell, textAlign:'center'}}>{item.quantity}</td>
-                </tr>
+            {/* Order details: J.O#, date, customer, car, year, services */}
+            {infoRow('J.O#', jobOrder.jobOrderId)}
+            {infoRow('Date', formatDate(jobOrder.createdAt))}
+            {infoRow('Customer', jobOrder.customerName || '—')}
+            {infoRow('Car', car || '—')}
+            {infoRow('Yr', vehicle?.year || '—')}
+            {jobOrder.description && (
+              <div style={{marginTop:'2px'}}>
+                <span style={{color:'#444'}}>Services: </span>
+                <span>{jobOrder.description}</span>
+              </div>
+            )}
+
+            <div style={divider} />
+
+            {/* Items (customer copy: no internal costs, labor rates or workers) */}
+            {/* Items as a table: Description | Price | Qty | Total, thin rules between rows */}
+            {(() => {
+              const th: React.CSSProperties = { ...heading, padding:'3px 4px', borderBottom:'1px solid #999', marginBottom:0 };
+              const td: React.CSSProperties = { padding:'4px', borderBottom:'1px solid #ddd', verticalAlign:'top' };
+              const num2: React.CSSProperties = { ...td, textAlign:'right', whiteSpace:'nowrap' };
+              return (
+                <table style={{width:'100%', borderCollapse:'collapse', fontSize:'8.5pt'}}>
+                  <thead>
+                    <tr>
+                      <th style={{...th, textAlign:'left'}}>Description</th>
+                      <th style={{...th, textAlign:'right'}}>Price</th>
+                      <th style={{...th, textAlign:'center'}}>Qty</th>
+                      <th style={{...th, textAlign:'right'}}>Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {materialLines.map((item, i) => (
+                      <tr key={i}>
+                        <td style={{...td, wordBreak:'break-word'}}>{item.name}</td>
+                        <td style={num2}>{formatCurrency(unitOf(item))}</td>
+                        <td style={{...num2, textAlign:'center'}}>{num(item.quantity, 4)}</td>
+                        <td style={num2}>{formatCurrency(item.quantity * unitOf(item))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              );
+            })()}
+
+            <div style={divider} />
+
+            {/* Amounts */}
+            <div style={{breakInside:'avoid'}}>
+              {/* Materials, then the service fee (the rest of the price before VAT), the
+                  VAT, and the price with VAT. A discount comes off that VAT-inclusive price,
+                  as on step 5 of the New Job Order form, so both show the same discount. */}
+              {/* Materials and the service fee (before VAT), the customer discount off
+                  them, then the subtotal before VAT, the VAT on it and the total due.
+                  The discount is the difference, so every line adds up to the total. */}
+              {materialsTotal > 0 && (<>
+                {amountRow('Materials Total', formatCurrency(materialsTotal))}
+                {amountRow('Service Fee', formatCurrency(fullPrice.net - materialsTotal))}
+              </>)}
+              {price.discount > 0 && amountRow(`Discount (${num(price.discountPercent)}%)`, `-${formatCurrency(fullPrice.net - price.net)}`)}
+              {amountRow(hasVat ? 'Subtotal (VAT Excl.)' : 'Subtotal', formatCurrency(price.net), true)}
+              {hasVat && amountRow('VAT', formatCurrency(price.vat))}
+              {amountRow(hasVat ? 'Total Amount Due (VAT Incl.)' : 'Total Amount Due',
+                formatCurrency(jobOrder.totalPrice || 0), true)}
+
+              {/* Payment transactions, in the same block as the amounts */}
+              <div style={{...heading, marginTop:'5px'}}>Payments</div>
+              {invoicePayments.length === 0 ? (
+                totalPaid > 0 ? (
+                  <div style={{...row, padding:'1px 0'}}><span>Down payment</span><span style={{whiteSpace:'nowrap'}}>{formatCurrency(totalPaid)}</span></div>
+                ) : (
+                  <div style={{textAlign:'center', color:'#444', padding:'2px 0'}}>No payments recorded yet.</div>
+                )
+              ) : invoicePayments.map(record => (
+                <div key={record.id} style={{...row, padding:'1px 0'}}>
+                  <span>
+                    {formatDate(record.createdAt)} · <span style={{textTransform:'capitalize'}}>{record.paymentMethod.replace(/_/g, ' ')}</span>
+                  </span>
+                  <span style={{whiteSpace:'nowrap'}}>{formatCurrency(record.amount)}</span>
+                </div>
               ))}
-              <tr>
-                <td style={cell}>Labor &amp; workmanship — {jobOrder.description || 'service'}</td>
-                <td style={cell}></td>
-              </tr>
-            </tbody>
-          </table>
 
-          {/* Amounts box */}
-          <div style={{display:'flex', justifyContent:'flex-end', breakInside:'avoid'}}>
-            <table style={{borderCollapse:'collapse', width:'62%'}}>
-              <tbody>
-                {showPriceBreakdown && amountRow('Price', formatCurrency(price.subtotal))}
-                {price.discount > 0 && amountRow(`Discount (${price.discountPercent}%)`, `− ${formatCurrency(price.discount)}`)}
-                {price.vat > 0 && amountRow(`VAT (${price.vatPercent}%)`, formatCurrency(price.vat))}
-                {amountRow('Total', formatCurrency(jobOrder.totalPrice || 0), true)}
-                {amountRow('Amount Paid', formatCurrency(jobOrder.downPayment || 0))}
-                {amountRow(paidUp ? 'Fully Paid' : 'Balance Due', formatCurrency(Math.max(0, jobOrder.balance || 0)), true)}
-              </tbody>
-            </table>
+              {/* Summary */}
+              <div style={{borderTop:'1px dashed #000', marginTop:'4px', paddingTop:'3px'}} />
+              {amountRow('Amount Paid:', formatCurrency(totalPaid))}
+              {amountRow(paidUp ? 'Fully Paid' : 'Balance Due', formatCurrency(remainingBalance), true)}
+            </div>
+
+            <div style={divider} />
+            <div style={{textAlign:'center', fontSize:'7.5pt', color:'#444'}}>Thank you for your business!</div>
+
           </div>
-
         </div>
           );
         })(), document.body)}

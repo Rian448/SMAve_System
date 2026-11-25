@@ -106,8 +106,16 @@ export default function ReceivingPage() {
                         <Link href={`/purchase-orders/${po.id}`} className="font-semibold text-[#011c72] hover:underline">{po.poNumber}</Link>
                         <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${status.className}`}>{status.label}</span>
                         {late && <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700">Late</span>}
+                        {po.awaitingSupplier ? (
+                          <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">Not sent yet</span>
+                        ) : po.supplierSentAt && (
+                          <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-700"
+                            title={po.supplierSentNote || undefined}>
+                            Sent by supplier{po.supplierSentNote ? ` · ${po.supplierSentNote}` : ''}
+                          </span>
+                        )}
                       </div>
-                      <p className="text-sm text-gray-600 mt-0.5">{po.supplierName} · expected {po.expectedDelivery ? formatDate(po.expectedDelivery) : '—'}</p>
+                      <p className="text-sm text-gray-600 mt-0.5">{po.supplierName} · expected {po.expectedDelivery ? formatDate(po.expectedDelivery) : 'date not set by the supplier yet'}</p>
                       <p className="text-xs text-gray-500 mt-1 break-words">
                         {po.items.map((it) => `${it.name} ${fmtQty(it.receivedQuantity)}/${fmtQty(it.quantity)}`).join(' · ')}
                       </p>
@@ -120,8 +128,10 @@ export default function ReceivingPage() {
                         <div className={`h-full ${progress.percent > 0 ? 'bg-amber-500' : 'bg-gray-200'}`} style={{ width: `${progress.percent}%` }} />
                       </div>
                     </div>
+                    {/* A supplier with a login must mark the delivery sent before it is received */}
                     <button type="button" onClick={() => { setNotice(''); setReceiving(po); }}
-                      className="shrink-0 px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white text-sm font-medium">
+                      disabled={!!po.awaitingSupplier} title={po.awaitingSupplier || undefined}
+                      className="shrink-0 px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-600">
                       Receive
                     </button>
                   </li>

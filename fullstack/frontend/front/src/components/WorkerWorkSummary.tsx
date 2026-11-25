@@ -3,7 +3,6 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { api, type WorkerWorkSummary as Summary } from '@/lib/api';
 import { formatDate, manilaDateString } from '@/lib/dateUtils';
-import { exactPeso } from '@/lib/format';
 import { formatLength } from '@/lib/length';
 
 type Period = 'day' | 'week' | 'month' | 'custom';
@@ -46,7 +45,7 @@ const qty = (n: number, unit: string) => (unit === 'yd' ? formatLength(n) : `${n
 
 /**
  * What a worker finished in a day, week, month or chosen dates: every task with
- * its job order, hours, pay and material, with totals and a per-day breakdown.
+ * its job order, hours and material (no pay: that is for finance), with totals and a per-day breakdown.
  * Without workerId it shows the signed-in worker's own work.
  */
 export default function WorkerWorkSummary({ workerId }: { workerId?: number }) {
@@ -116,9 +115,8 @@ export default function WorkerWorkSummary({ workerId }: { workerId?: number }) {
       {error && <p className="mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">{error}</p>}
 
       {/* Totals */}
-      <div className={`grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5 ${loading ? 'opacity-50' : ''}`}>
+      <div className={`grid grid-cols-3 gap-3 mb-5 ${loading ? 'opacity-50' : ''}`}>
         {[
-          ['Pay', t && t.pay != null ? exactPeso(t.pay) : '—', 'text-green-700'],
           ['Tasks done', t ? `${t.tasks}` : '—', 'text-gray-900'],
           ['Hours', t ? `${t.hours}` : '—', 'text-gray-900'],
           ['Material cut', t ? (t.yardsUsed + t.yardsExcess > 0 ? formatLength(t.yardsUsed + t.yardsExcess) : '—') : '—', 'text-gray-900'],
@@ -146,7 +144,6 @@ export default function WorkerWorkSummary({ workerId }: { workerId?: number }) {
                 <th className="px-3 py-2 text-left font-semibold">Day</th>
                 <th className="px-3 py-2 text-right font-semibold">Tasks</th>
                 <th className="px-3 py-2 text-right font-semibold">Hours</th>
-                <th className="px-3 py-2 text-right font-semibold">Pay</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -157,7 +154,6 @@ export default function WorkerWorkSummary({ workerId }: { workerId?: number }) {
                   </td>
                   <td className="px-3 py-2 text-right text-gray-700">{d.tasks}</td>
                   <td className="px-3 py-2 text-right text-gray-700">{d.hours}</td>
-                  <td className="px-3 py-2 text-right font-medium text-gray-900">{d.pay != null ? exactPeso(d.pay) : '—'}</td>
                 </tr>
               ))}
             </tbody>
@@ -191,8 +187,7 @@ export default function WorkerWorkSummary({ workerId }: { workerId?: number }) {
                     </p>
                   </div>
                   <div className="text-right shrink-0">
-                    {task.pay != null && <p className="text-sm font-bold text-green-700">{exactPeso(task.pay)}</p>}
-                    <p className="text-[11px] text-gray-500">{task.hours}h{task.payOverridden ? ' · pay set by hand' : ''}</p>
+                    <p className="text-[11px] text-gray-500">{task.hours}h</p>
                   </div>
                 </div>
                 {details > 0 && (

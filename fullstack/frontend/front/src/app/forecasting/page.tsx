@@ -8,6 +8,7 @@ import { useAuth } from '@/context/AuthContext';
 import Paginated from '@/components/Paginated';
 import Amount from '@/components/Amount';
 import { exactNumber, exactPeso } from '@/lib/format';
+import UsageTrendChart from '@/components/UsageTrendChart';
 
 export default function ForecastingPage() {
   const { can } = useAuth();
@@ -67,10 +68,6 @@ export default function ForecastingPage() {
     return { label: 'Low', cls: 'bg-green-100 text-green-700' };
   };
 
-  const formatMonth = (ym: string) => {
-    const [y, m] = ym.split('-');
-    return new Date(Number(y), Number(m) - 1).toLocaleDateString('en-PH', { month: 'short', year: '2-digit' });
-  };
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -238,32 +235,12 @@ export default function ForecastingPage() {
                 <div className="h-48 flex items-center justify-center">
                   <p className="text-sm text-gray-400">No usage data yet. Trends will appear as materials are consumed.</p>
                 </div>
-              ) : (() => {
-                const maxVal = Math.max(...data.monthlyUsageTrend.map(m => m.total), 1);
-                return (
-                  // Columns may shrink below their labels' width, so all months fit on a phone
-                  <div className="h-56 flex items-end gap-1 sm:gap-2">
-                    {data.monthlyUsageTrend.map((m, i) => {
-                      const heightPct = (m.total / maxVal) * 100;
-                      return (
-                        <div key={i} className="flex-1 min-w-0 flex flex-col items-center gap-1">
-                          <span className="text-[10px] sm:text-xs text-gray-400 truncate w-full text-center">
-                            {m.total > 0 ? Math.round(m.total) : ''}
-                          </span>
-                          <div className="w-full flex items-end" style={{ height: '160px' }}>
-                            <div
-                              className={`w-full rounded-t-md transition-all duration-500 ${m.projected ? 'bg-[#4a6aff]/70 border-t-2 border-dashed border-[#011c72]' : 'bg-zinc-300'}`}
-                              style={{ height: `${Math.max(heightPct * 1.6, m.total > 0 ? 4 : 0)}px` }}
-                            />
-                          </div>
-                          <span className="text-[10px] sm:text-xs text-gray-500 truncate w-full text-center">{formatMonth(m.month)}</span>
-                          {m.projected && <span className="text-xs text-amber-500 leading-none">~</span>}
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              })()}
+              ) : (
+                <>
+                  <UsageTrendChart months={data.monthlyUsageTrend} />
+                  <p className="mt-3 text-[11px] text-gray-400 text-center">Hover a bar for its top materials; click it for the month&apos;s full details.</p>
+                </>
+              )}
             </div>
 
             {/* Restock Schedule Table */}

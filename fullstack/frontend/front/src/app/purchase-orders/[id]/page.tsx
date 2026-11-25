@@ -168,9 +168,25 @@ export default function PurchaseOrderDetailPage() {
                 </div>
                 <div>
                   <label className="text-sm font-medium text-gray-500">Expected Delivery</label>
-                  <p className="mt-1 text-base font-medium text-gray-900">
-                    {formatDate(purchaseOrder.expectedDelivery)}
-                  </p>
+                  {purchaseOrder.expectedDelivery ? (
+                    <p className="mt-1 text-base font-medium text-gray-900">{formatDate(purchaseOrder.expectedDelivery)}</p>
+                  ) : (
+                    <p className="mt-1 text-sm text-amber-700">
+                      {purchaseOrder.status === 'pending' ? 'Set by the supplier after the PO is approved'
+                        : purchaseOrder.supplierHasLogin ? 'Waiting for the supplier to set it' : 'Not set yet'}
+                    </p>
+                  )}
+                  {purchaseOrder.supplierHasLogin && purchaseOrder.deliverySetAt && (
+                    <p className="text-xs text-gray-500 mt-0.5">Set by the supplier · {formatDate(purchaseOrder.deliverySetAt)}</p>
+                  )}
+                  {purchaseOrder.supplierNote && (
+                    <p className="text-xs text-gray-600 mt-1">Supplier&apos;s note: {purchaseOrder.supplierNote}</p>
+                  )}
+                  {!purchaseOrder.supplierHasLogin && purchaseOrder.status !== 'received' && purchaseOrder.status !== 'cancelled' && (
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      Only the supplier sets this. Create a login for them under Suppliers so they can.
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
@@ -214,7 +230,9 @@ export default function PurchaseOrderDetailPage() {
                           {item.remainingQuantity > 0 && purchaseOrder.receivingStatus === 'closed_short' && <span className="block text-xs">not received</span>}
                         </td>
                         <td className="px-4 py-3 text-right text-sm text-gray-600">
-                          {formatCurrency(item.unitPrice)}
+                          {item.unitPrice > 0 ? formatCurrency(item.unitPrice)
+                            : <span className="text-xs text-amber-700">Waiting for supplier</span>}
+                          {item.priceBySupplier && <span className="block text-[10px] text-gray-400">set by supplier</span>}
                         </td>
                         <td className="px-4 py-3 text-right text-sm font-medium text-gray-900">
                           {formatCurrency(item.quantity * item.unitPrice)}
@@ -302,14 +320,24 @@ export default function PurchaseOrderDetailPage() {
 
                 {can('purchase_orders.receive') && (isOpenForReceiving(purchaseOrder) || canReturnItems) && (
                   <div className="space-y-3">
-                    {isOpenForReceiving(purchaseOrder) && (
+                    {isOpenForReceiving(purchaseOrder) && (<>
                       <button
                         onClick={() => setReceivingOpen(true)}
-                        className="w-full inline-flex items-center justify-center px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
+                        disabled={!!purchaseOrder.awaitingSupplier}
+                        className="w-full inline-flex items-center justify-center px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-600"
                       >
                         {purchaseOrder.status === 'partially_received' ? 'Receive More Items' : 'Receive Items'}
                       </button>
-                    )}
+                      {/* A supplier with a login marks each delivery sent before it can be received */}
+                      {purchaseOrder.awaitingSupplier ? (
+                        <p className="-mt-1 text-xs text-amber-700 text-center">{purchaseOrder.awaitingSupplier}</p>
+                      ) : purchaseOrder.supplierSentAt && (
+                        <p className="-mt-1 text-xs text-blue-700 text-center">
+                          Sent by the supplier {formatDate(purchaseOrder.supplierSentAt)}
+                          {purchaseOrder.supplierSentNote ? ` · ${purchaseOrder.supplierSentNote}` : ''}
+                        </p>
+                      )}
+                    </>)}
                     {/* Always under Receive Items; usable once something has been received */}
                     <button
                       onClick={() => setReturningOpen(true)}

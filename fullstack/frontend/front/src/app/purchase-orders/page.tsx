@@ -192,7 +192,8 @@ export default function PurchaseOrdersPage() {
                         {formatCurrency(po.totalAmount)}
                       </td>
                       <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-600">
-                        {formatDate(po.expectedDelivery)}
+                        {po.expectedDelivery ? formatDate(po.expectedDelivery)
+                          : <span className="text-xs text-gray-400">{po.status === 'pending' ? 'After approval' : 'From supplier'}</span>}
                       </td>
                       <td className="px-4 py-4 whitespace-nowrap">
                         <span className={`px-3 py-1 text-xs font-medium rounded-full whitespace-nowrap ${poStatusInfo(po).className}`}>
@@ -237,14 +238,16 @@ export default function PurchaseOrdersPage() {
                               Approve
                             </button>
                           )}
-                          {isOpenForReceiving(po) && canReceive && (
+                          {isOpenForReceiving(po) && canReceive && (po.awaitingSupplier ? (
+                            <span className="text-gray-400 text-sm" title={po.awaitingSupplier}>Not sent yet</span>
+                          ) : (
                             <button
                               onClick={() => setReceiving(po)}
                               className="text-green-600 hover:text-green-700 text-sm font-medium"
                             >
                               Receive
                             </button>
-                          )}
+                          ))}
                         </div>
                       </td>
                     </tr>

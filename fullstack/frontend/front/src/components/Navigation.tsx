@@ -7,6 +7,7 @@ import { formatDateTime } from '@/lib/dateUtils';
 import { useEffect, useRef, useState } from 'react';
 import { useConfirm } from './ConfirmDialog';
 import { useBranding } from '@/lib/branding';
+import { WORKER_MANAGEMENT_PERMS } from '@/lib/permissions';
 
 type NavItem = { name: string; path: string; icon: () => React.JSX.Element; perms?: string[] };
 type NavGroup = { name: string; icon: () => React.JSX.Element; items: NavItem[] };
@@ -134,7 +135,7 @@ const NAV_ENTRIES: NavEntry[] = [
     { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'premade.receive'] },
     // Product orders are opened from Sales (View Details); /product-orders still works
     // Item History is off the menu (Inventory's Item Trail tab covers usage); /item-history still opens it
-    { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, perms: ['workers.add', 'workers.edit', 'workers.delete'] },
+    { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, perms: WORKER_MANAGEMENT_PERMS },
   ] },
   { name: 'Purchasing', icon: PurchaseOrderIcon, items: [
     { name: 'Purchase Orders', path: '/purchase-orders', icon: PurchaseOrderIcon, perms: ['purchase_orders.view'] },
@@ -664,10 +665,17 @@ function notificationHref(type: string, data: unknown,
   can: (...permissions: string[]) => boolean): string | null {
   const d = (data || {}) as { orderId?: number; jobOrderId?: number; purchaseOrderId?: number };
   switch (type) {
+    case 'po_sent':
+      // A supplier account: a new purchase order to set the delivery date of
+      return '/dashboard';
     case 'po_due_soon':
     case 'po_overdue':
-      // Supplier payment reminders open the purchase order, where it is paid
+    case 'po_delivery_set':
+      // Supplier payment reminders and delivery dates open the purchase order
       return d.purchaseOrderId && can('purchase_orders.view') ? `/purchase-orders/${d.purchaseOrderId}` : null;
+    case 'work_submitted':
+      // A worker's finished task waiting for approval
+      return can('workers.approve') ? '/worker-dashboard' : null;
     case 'transfer_request':
     case 'transfer_dispatched':
     case 'order_cancelled':
