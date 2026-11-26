@@ -201,6 +201,9 @@ export default function MyWork() {
           subtitle={`${finishing.title}${finishing.description ? ` · ${finishing.description}` : ''}`}
           workerName={data.worker?.name || 'you'}
           isSpecialTask={finishing.assignmentType === 'special_task'}
+          // A cutter's task, or one named Cutting (same rule as the server)
+          isCuttingTask={(data.worker?.workType || '').toLowerCase() === 'cutter'
+            || (finishing.description || '').split(' (')[0].trim().toLowerCase() === 'cutting'}
           defaultStart={finishing.startTime}
           previous={finishing.submission}
           returnedNote={finishing.reviewNote}

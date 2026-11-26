@@ -13,7 +13,7 @@ import { useConfirm } from '@/components/ConfirmDialog';
 import { formatDate } from '@/lib/dateUtils';
 import Paginated from '@/components/Paginated';
 import WorkerWorkSummary from '@/components/WorkerWorkSummary';
-import TaskFinishForm, { formatDuration } from '@/components/TaskFinishForm';
+import { formatDuration } from '@/components/TaskFinishForm';
 import { WORKER_MANAGEMENT_PERMS } from '@/lib/permissions';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -535,7 +535,6 @@ export default function WorkerDashboard() {
 
   // Submitted work being checked, and a task being filled in for a worker with no login
   const [reviewFor, setReviewFor] = useState<WorkerAssignment | null>(null);
-  const [fillFor, setFillFor] = useState<WorkerAssignment | null>(null);
   // The task just approved, while asking who does the next part of its job order
   const [handover, setHandover] = useState<WorkerAssignment | null>(null);
   // Assign tab: each worker's work for today (with late and started work), or everything open
@@ -675,9 +674,6 @@ export default function WorkerDashboard() {
   const waitMsg = (a: WorkerAssignment) => (a.status === 'pending' && a.waitingOn
     ? `Waiting for ${a.waitingOn.workerName} to finish ${a.waitingOn.description || 'their part'} first`
     : '');
-  /** An administrator fills in the finished work for a worker who has no login of their own */
-  const canFillIn = (a: WorkerAssignment) =>
-    canApprove && !a.workerHasLogin && (a.status === 'pending' || a.status === 'in_progress');
 
   // ── Click-to-assign ──
   // Picking is per tab (worker vs day), and Esc lets go of it
@@ -889,6 +885,8 @@ export default function WorkerDashboard() {
     setShowWorkerModal(true);
   };
 
+  /** Editing a worker who keeps their login: the password field changes it */
+  const changingPassword = !!editingWorker?.userId && workerForm.userId === String(editingWorker.userId);
   const saveWorker = async () => {
     if (!workerForm.name.trim()) return;
     const makingLogin = workerForm.userId === 'new';
@@ -908,8 +906,14 @@ export default function WorkerDashboard() {
               ...(workerForm.loginEmail.trim() ? { email: workerForm.loginEmail.trim() } : {}) } }
           : { userId: workerForm.userId ? Number(workerForm.userId) : null }),
       };
-      if (editingWorker) await api.managedWorkers.update(editingWorker.id, payload);
-      else await api.managedWorkers.create(payload);
+      if (editingWorker) {
+        // A new password for their current login, if one was typed (checked first, so
+        // a weak password doesn't leave the rest half-saved)
+        if (changingPassword && workerForm.loginPassword) {
+          await api.managedWorkers.setPassword(editingWorker.id, workerForm.loginPassword);
+        }
+        await api.managedWorkers.update(editingWorker.id, payload);
+      } else await api.managedWorkers.create(payload);
       setShowWorkerModal(false);
       fetchWorkers();
     } catch (err) {
@@ -1319,13 +1323,6 @@ export default function WorkerDashboard() {
                                     <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/></svg>
                                   </button>
                                 )}
-                                {canFillIn(a) && (
-                                  <button onClick={() => setFillFor(a)} disabled={blocked(a)}
-                                    title={blocked(a) ? waitMsg(a) : `Fill in finished work for ${a.workerName} (no login)`}
-                                    className="p-1 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50">
-                                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-                                  </button>
-                                )}
                                 {(a.status === 'pending' || a.status === 'in_progress') && (
                                   <button onClick={() => removeAssignment(a)} title="Remove"
                                     className="p-1 rounded-lg bg-red-100 text-red-600 hover:bg-red-200">
@@ -1515,10 +1512,6 @@ export default function WorkerDashboard() {
                             {a.status === 'submitted' && canApprove && (
                               <button onClick={() => setReviewFor(a)}
                                 className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700">Check &amp; approve</button>
-                            )}
-                            {canFillIn(a) && (
-                              <button onClick={() => setFillFor(a)} disabled={blocked(a)} title={waitMsg(a) || 'The worker has no login'}
-                                className="px-3 py-1.5 text-xs border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50">Fill in</button>
                             )}
                             {a.status === 'completed' && canApprove && (
                               <button onClick={() => reopenTask(a)}
@@ -1833,10 +1826,6 @@ export default function WorkerDashboard() {
                     <button type="button" onClick={() => { close(); setReviewFor(a); }}
                       className="px-3 py-2 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700">Check &amp; approve</button>
                   )}
-                  {canFillIn(a) && (
-                    <button type="button" onClick={() => { close(); setFillFor(a); }} disabled={blocked(a)}
-                      className="px-3 py-2 rounded-lg border border-gray-200 text-gray-700 text-xs font-semibold hover:bg-gray-50 disabled:opacity-50">Fill in for worker</button>
-                  )}
                   {a.status === 'completed' && canApprove && (
                     <button type="button" onClick={() => { close(); reopenTask(a); }}
                       className="px-3 py-2 rounded-lg border border-gray-200 text-gray-700 text-xs font-semibold hover:bg-gray-50">Reopen</button>
@@ -2143,10 +2132,22 @@ export default function WorkerDashboard() {
                       uppercase and a lowercase letter, a number and a symbol.
                     </p>
                   </div>
+                ) : changingPassword ? (
+                  <div className="mt-3 space-y-2 rounded-xl border border-gray-200 bg-gray-50 p-3">
+                    <p className="text-xs text-gray-600">Login: <span className="font-medium">{editingWorker?.userName}</span></p>
+                    <input type="password" value={workerForm.loginPassword} autoComplete="new-password"
+                      onChange={e => setWorkerForm(f => ({ ...f, loginPassword: e.target.value }))}
+                      placeholder="New password (leave blank to keep it)" aria-label="New password"
+                      className="w-full px-3 py-2 rounded-lg border border-gray-300 bg-white text-sm" />
+                    <p className="text-[11px] text-gray-500">
+                      8+ characters with an uppercase and a lowercase letter, a number and a symbol. Changing it signs the
+                      worker out; give them the new password.
+                    </p>
+                  </div>
                 ) : (
                   <p className="text-xs text-gray-400 mt-1">
                     With a login, the worker starts their own tasks and submits the time and materials when they finish.
-                    {!workerForm.userId && ' Without one, an administrator fills in their finished work for them.'}
+                    {!workerForm.userId && ' Without one, their tasks can\'t be finished, so give every worker a login.'}
                   </p>
                 )}
               </div>
@@ -2184,33 +2185,6 @@ export default function WorkerDashboard() {
         />
       )}
 
-      {fillFor && (
-        <TaskFinishForm
-          title="Fill in finished work"
-          subtitle={`For ${fillFor.workerName} (no login) · ${fillFor.assignmentType === 'special_task' ? (fillFor.specialTaskTitle || 'Special Task') : fillFor.jobOrderRef}`}
-          workerName={fillFor.workerName}
-          isSpecialTask={fillFor.assignmentType === 'special_task'}
-          defaultStart={fillFor.startTime}
-          previous={fillFor.submission}
-          returnedNote={fillFor.reviewNote}
-          loadMaterials={async () => (await api.workerAssignments.cutMaterials(fillFor.id)).data}
-          onClose={() => setFillFor(null)}
-          onSubmit={async (payload) => {
-            try {
-              await api.workerAssignments.submitForWorker(fillFor.id, payload);
-              const res = await api.workerAssignments.list();
-              const fresh = (res.data?.assignments || []).find(x => x.id === fillFor.id) || null;
-              setAssignments(res.data?.assignments || []);
-              setFillFor(null);
-              // Straight on to checking it, as with any submitted work
-              if (fresh) setReviewFor(fresh);
-              return null;
-            } catch (err) {
-              return err instanceof Error && err.message ? err.message : "Couldn't save. Please try again.";
-            }
-          }}
-        />
-      )}
       {confirmDialog}
     </div>
   );

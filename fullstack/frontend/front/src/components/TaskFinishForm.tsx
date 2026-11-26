@@ -45,13 +45,16 @@ type ConsumableRow = { key: string; materialId: number | ''; kind: 'full' | 'par
  * pay is worked out then.
  */
 export default function TaskFinishForm({
-  title, subtitle, workerName, isSpecialTask, defaultStart, previous, returnedNote,
+  title, subtitle, workerName, isSpecialTask, isCuttingTask, defaultStart, previous, returnedNote,
   loadMaterials, onClose, onSubmit,
 }: {
   title: string;
   subtitle: string;
   workerName: string;
   isSpecialTask: boolean;
+  /** Only cutting records the job order's materials cut; sewing, installation and
+   *  the rest record consumables and any extra material only (no cutting twice) */
+  isCuttingTask: boolean;
   /** When the task was started (fills in the start time) */
   defaultStart?: string | null;
   /** What was submitted before, if it was sent back to correct */
@@ -133,7 +136,9 @@ export default function TaskFinishForm({
   const updateConsumable = (key: string, patch: Partial<ConsumableRow>) =>
     setConsumables((prev) => prev.map((c) => (c.key === key ? { ...c, ...patch } : c)));
 
-  const rowProblems = Object.fromEntries((rows || []).map((r) => [`cut-${r.key}`,
+  // The job order's own material lines are for cutting tasks only; added rows are for any task
+  const activeRows = (rows || []).filter((r) => r.line === null || isCuttingTask);
+  const rowProblems = Object.fromEntries(activeRows.map((r) => [`cut-${r.key}`,
     (r.cut > 0 || r.used > 0 || r.line === null) && (
       !r.materialId ? 'Choose the material.'
       : r.line === null && !(r.cut > 0) ? 'Enter how much was cut, or remove this row.'
@@ -157,7 +162,7 @@ export default function TaskFinishForm({
       : false;
     if (fe.show({ 'finish-times': timeProblem, ...rowProblems, ...consumableProblems })) return;
     setSaving(true);
-    const materialCuts: TaskMaterialCut[] = (rows || [])
+    const materialCuts: TaskMaterialCut[] = activeRows
       .filter((r) => r.materialId && (r.cut > 0 || r.used > 0))
       .map((r) => ({ ...(r.line !== null ? { line: r.line } : { reason: r.reason.trim() }),
         materialId: Number(r.materialId), cut: r.cut, used: r.used }));
@@ -295,7 +300,7 @@ export default function TaskFinishForm({
           {rows === null && (
             <p className="text-xs text-gray-400 text-center">Loading materials…</p>
           )}
-          {rows !== null && !isSpecialTask && (
+          {rows !== null && !isSpecialTask && isCuttingTask && (
             <div className="border border-gray-200 rounded-xl overflow-hidden">
               <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-200">
                 <p className="text-xs font-semibold text-gray-600">Materials cut by {workerName}</p>
