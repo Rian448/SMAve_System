@@ -189,7 +189,6 @@ function MonthDetails({ month: m, onClose }: { month: UsageTrendMonth; onClose: 
                     <tr>
                       <th className={`${th} text-left`}>Material</th>
                       <th className={`${th} text-right`}>Used</th>
-                      <th className={`${th} text-right`}>Times used</th>
                       <th className={`${th} text-right`}>Job orders</th>
                       <th className={`${th} text-right`}>Avg per job order</th>
                     </tr>
@@ -231,7 +230,6 @@ function MonthDetails({ month: m, onClose }: { month: UsageTrendMonth; onClose: 
                       <tr key={`${x.itemId}-${x.name}`} className="hover:bg-gray-50">
                         {nameCell}
                         <td className={`${td} text-right font-medium text-gray-900`}>{qty(x.quantity, x.unit)}</td>
-                        <td className={`${td} text-right text-gray-700`}>{x.uses ?? '—'}</td>
                         <td className={`${td} text-right text-gray-700`}>{x.jobOrders ?? '—'}</td>
                         {/* How much of it one job order used on average that month */}
                         <td className={`${td} text-right text-gray-700`}>

@@ -62,14 +62,35 @@ export default function SuppliersPage() {
   const [loginFor, setLoginFor] = useState<Supplier | null>(null);
   const [loginForm, setLoginForm] = useState({ username: '', password: '', email: '' });
   const [loginError, setLoginError] = useState('');
+  // 'create' a new login, or change the 'password' of their existing one
+  const [loginMode, setLoginMode] = useState<'create' | 'password'>('create');
 
+  const openPassword = (s: Supplier) => {
+    setLoginFor(s);
+    setLoginMode('password');
+    setLoginError('');
+    setLoginForm({ username: s.loginUsername || '', password: '', email: '' });
+  };
   const openLogin = (s: Supplier) => {
     setLoginFor(s);
+    setLoginMode('create');
     setLoginError('');
     setLoginForm({ username: s.name.toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.|\.$/g, '').slice(0, 40), password: '', email: '' });
   };
   const saveLogin = async () => {
     if (!loginFor) return;
+    if (loginMode === 'password') {
+      if (!loginForm.password) { setLoginError('Enter the new password.'); return; }
+      setSaving(true);
+      setLoginError('');
+      try {
+        await api.inventory.setSupplierPassword(loginFor.id, loginForm.password);
+        setLoginFor(null);
+        await load();
+      } catch (err) { setLoginError((err instanceof Error && err.message) || 'Could not change the password.'); }
+      finally { setSaving(false); }
+      return;
+    }
     if (!loginForm.username.trim() || !loginForm.password) { setLoginError('Enter a username and password.'); return; }
     setSaving(true);
     setLoginError('');
@@ -294,7 +315,13 @@ export default function SuppliersPage() {
                               {s.address && <p className="text-xs text-gray-500 truncate max-w-40">{s.address}</p>}
                               {/* The supplier's own login: shown here so the Actions column keeps one width */}
                               {s.loginUsername ? (
-                                <span className="mt-1 inline-flex px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[11px] font-medium">Login: {s.loginUsername}</span>
+                                <div className="mt-1 flex items-center gap-2">
+                                  <span className="inline-flex px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[11px] font-medium">Login: {s.loginUsername}</span>
+                                  {canEdit && (
+                                    <button type="button" onClick={() => openPassword(s)}
+                                      className="text-[11px] font-medium text-[#011c72] hover:underline">Change password</button>
+                                  )}
+                                </div>
                               ) : canEdit && s.isActive ? (
                                 <button type="button" onClick={() => openLogin(s)}
                                   className="mt-1 block text-[11px] font-medium text-[#011c72] hover:underline">+ Create login</button>
@@ -398,22 +425,31 @@ export default function SuppliersPage() {
           <div role="dialog" aria-modal="true" aria-labelledby="supplier-login-title"
             className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={e => e.stopPropagation()}>
             <div className="p-5 border-b border-gray-200">
-              <h2 id="supplier-login-title" className="text-lg font-semibold text-gray-900">Create login for {loginFor.name}</h2>
+              <h2 id="supplier-login-title" className="text-lg font-semibold text-gray-900">
+                {loginMode === 'password' ? `Change password for ${loginFor.name}` : `Create login for ${loginFor.name}`}
+              </h2>
               <p className="text-sm text-gray-500 mt-0.5">
-                The supplier signs in to see the purchase orders you send them (after approval) and set when they will deliver.
+                {loginMode === 'password'
+                  ? `Login: ${loginFor.loginUsername}. Changing the password signs the supplier out; give them the new one.`
+                  : 'The supplier signs in to see the purchase orders you send them (after approval) and set when they will deliver.'}
               </p>
             </div>
             <div className="p-5 space-y-3">
-              <input type="text" value={loginForm.username} autoComplete="off" aria-label="Username"
-                onChange={e => setLoginForm(f => ({ ...f, username: e.target.value }))} placeholder="Username"
-                className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+              {loginMode === 'create' && (
+                <input type="text" value={loginForm.username} autoComplete="off" aria-label="Username"
+                  onChange={e => setLoginForm(f => ({ ...f, username: e.target.value }))} placeholder="Username"
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+              )}
               <input type="password" value={loginForm.password} autoComplete="new-password" aria-label="Password"
-                onChange={e => setLoginForm(f => ({ ...f, password: e.target.value }))} placeholder="Password"
+                onChange={e => setLoginForm(f => ({ ...f, password: e.target.value }))}
+                placeholder={loginMode === 'password' ? 'New password' : 'Password'}
                 className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
-              <input type="email" value={loginForm.email} autoComplete="off" aria-label="Email"
-                onChange={e => setLoginForm(f => ({ ...f, email: e.target.value.trim() }))}
-                placeholder={loginFor.email ? `Email (blank = ${loginFor.email})` : 'Email (optional)'}
-                className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+              {loginMode === 'create' && (
+                <input type="email" value={loginForm.email} autoComplete="off" aria-label="Email"
+                  onChange={e => setLoginForm(f => ({ ...f, email: e.target.value.trim() }))}
+                  placeholder={loginFor.email ? `Email (blank = ${loginFor.email})` : 'Email (optional)'}
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+              )}
               <p className="text-[11px] text-gray-500">
                 Password: 8+ characters with an uppercase and a lowercase letter, a number and a symbol (e.g. Supplier@2026).
               </p>
@@ -422,7 +458,7 @@ export default function SuppliersPage() {
             <div className="p-5 border-t border-gray-200 flex gap-3">
               <button type="button" onClick={saveLogin} disabled={saving}
                 className="flex-1 py-2.5 bg-[#011c72] hover:bg-[#022a9e] text-white text-sm font-medium rounded-xl disabled:opacity-50">
-                {saving ? 'Creating…' : 'Create login'}
+                {saving ? 'Saving…' : loginMode === 'password' ? 'Change password' : 'Create login'}
               </button>
               <button type="button" onClick={() => setLoginFor(null)} disabled={saving}
                 className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl hover:bg-gray-200 text-sm">Cancel</button>

@@ -4697,6 +4697,41 @@ def update_supplier(supplier_id):
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Inventory', f"Updated supplier: {supplier.name}{term_note}", request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': supplier_to_dict(supplier)})
 
+def set_outside_login_password(user, password, whose):
+    """Set a new password on a worker's or supplier's login, as Settings › Users does:
+    rank checked, lockout cleared, signed out everywhere. Error response or None."""
+    if not user:
+        return _error(f'{whose} has no login yet. Create one first.')
+    error = target_account_error(request.current_user, user)
+    if error:
+        return refuse_account_change(f"change the password of {user.username}", error)
+    error = password_error(password)
+    if error:
+        return _error(error)
+    user.password = hash_password(password)
+    user.failed_login_attempts = 0
+    user.lockout_until = None
+    end_user_sessions(user.id)  # sign them out everywhere
+    db.session.commit()
+    log_action(request.current_user['id'], request.current_user['fullName'], 'PASSWORD_RESET_BY_ADMIN', 'Settings',
+               f"Changed the password of {user.username} ({whose})", request.remote_addr or '0.0.0.0')
+    return None
+
+
+@app.route('/api/inventory/suppliers/<int:supplier_id>/password', methods=['PUT'])
+@require_auth
+@require_permission('suppliers.edit')
+def set_supplier_login_password(supplier_id):
+    """Change the password of a supplier's own login: {password}."""
+    supplier = Supplier.query.get(supplier_id)
+    if not supplier:
+        return _error('Supplier not found', 404)
+    error = set_outside_login_password(supplier.user, (request.get_json(silent=True) or {}).get('password'), supplier.name)
+    if error:
+        return error
+    return jsonify({'status': 'success', 'data': supplier_to_dict(supplier)})
+
+
 @app.route('/api/inventory/suppliers/<int:supplier_id>/login', methods=['POST'])
 @require_auth
 @require_permission('suppliers.edit')
@@ -13426,6 +13461,20 @@ def update_managed_worker(worker_id):
     db.session.commit()
     return jsonify({'status': 'success', 'data': {'worker': managed_worker_to_dict(worker)}})
 
+@app.route('/api/managed-workers/<int:worker_id>/password', methods=['PUT'])
+@require_auth
+@require_permission('workers.edit')
+def set_worker_login_password(worker_id):
+    """Change the password of a worker's own login: {password}."""
+    worker = ManagedWorker.query.get(worker_id)
+    if not worker:
+        return _error('Worker not found', 404)
+    error = set_outside_login_password(worker.user, (request.get_json(silent=True) or {}).get('password'), worker.name)
+    if error:
+        return error
+    return jsonify({'status': 'success', 'data': {'worker': managed_worker_to_dict(worker)}})
+
+
 @app.route('/api/my-work', methods=['GET'])
 @require_auth
 def get_my_work():
@@ -14362,6 +14411,12 @@ def submit_task_work(assignment, data):
     special = assignment.assignment_type == 'special_task'
     order = None if special else _assignment_order(assignment)
     cuts = [] if special else (data.get('materialCuts') or [])
+    # Only cutting records the job order's own materials, so they aren't cut (and
+    # taken from stock) twice; other tasks may only add extra material with a reason
+    if not _is_cutting_task(assignment) and any(
+            isinstance(c, dict) and _int_or_none(c.get('line')) is not None for c in cuts):
+        return _error("Only the cutting task records the job order's materials. "
+                      'Add anything extra under Other materials, with the reason.')
     consumables = [] if special else (data.get('consumables') or [])
     problem = check_submitted_materials(assignment, order, cuts, consumables)
     if problem:
@@ -14431,30 +14486,6 @@ def submit_my_task(assignment_id):
     db.session.commit()
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Workers',
                f"Submitted {assignment.job_order_ref} ({assignment.description or 'task'}) for approval",
-               request.remote_addr or '0.0.0.0')
-    return jsonify({'status': 'success', 'data': _assignment_brief(assignment)})
-
-
-@app.route('/api/worker-assignments/<int:assignment_id>/submit', methods=['POST'])
-@require_auth
-@require_permission('workers.approve')
-def submit_task_for_worker(assignment_id):
-    """An administrator fills in the finished work for a worker who has no login.
-    It still waits for approval like any other submission."""
-    assignment = WorkerAssignment.query.get(assignment_id)
-    if not assignment:
-        return _error('Assignment not found', 404)
-    order = _assignment_order(assignment)
-    if order and branch_access_error(request.current_user, order.branch_id):
-        return _error('This job order belongs to another branch', 403)
-    error = submit_task_work(assignment, request.get_json(silent=True) or {})
-    if error:
-        db.session.rollback()
-        return error
-    db.session.commit()
-    log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Workers',
-               f"Filled in finished work on {assignment.job_order_ref} ({assignment.description or 'task'}) "
-               f"for {assignment.worker.name if assignment.worker else 'a worker'}",
                request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': _assignment_brief(assignment)})
 

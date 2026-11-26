@@ -2006,6 +2006,9 @@ export const api = {
       fetchApi<Supplier>('/api/inventory/suppliers', { method: 'POST', body: JSON.stringify(data) }),
     updateSupplier: (id: number, data: Partial<Omit<Supplier, 'materials'>> & { materials?: SupplierMaterialEntry[] }) =>
       fetchApi<Supplier>(`/api/inventory/suppliers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    /** Change the password of the supplier's own login (signs them out) */
+    setSupplierPassword: (id: number, password: string) =>
+      fetchApi<Supplier>(`/api/inventory/suppliers/${id}/password`, { method: 'PUT', body: JSON.stringify({ password }) }),
     /** Make the supplier's own login (email optional; defaults to the supplier's email) */
     createSupplierLogin: (id: number, data: { username: string; password: string; email?: string }) =>
       fetchApi<Supplier>(`/api/inventory/suppliers/${id}/login`, { method: 'POST', body: JSON.stringify(data) }),
@@ -2636,6 +2639,9 @@ export const api = {
     linkableAccounts: () => fetchApi<LinkableWorkerAccount[]>('/api/managed-workers/linkable-accounts'),
     /** The signed-in worker's own assignments */
     myWork: () => fetchApi<MyWork>('/api/my-work'),
+    /** Change the password of a worker's own login (signs them out) */
+    setPassword: (id: number, password: string) =>
+      fetchApi<{ worker: ManagedWorker }>(`/api/managed-workers/${id}/password`, { method: 'PUT', body: JSON.stringify({ password }) }),
     /** The signed-in worker starts one of their tasks */
     startMyTask: (id: number) => fetchApi<WorkerAssignment>(`/api/my-work/${id}/start`, { method: 'POST' }),
     /** The job order's materials for the worker's finish-task form (no prices) */
@@ -2713,9 +2719,6 @@ export const api = {
     /** The job order's materials a worker can record cuts of when finishing this task */
     cutMaterials: (id: number) =>
       fetchApi<CutMaterialsData>(`/api/worker-assignments/${id}/cut-materials`),
-    /** An administrator fills in the finished work for a worker with no login (still needs approval) */
-    submitForWorker: (id: number, data: TaskSubmitPayload) =>
-      fetchApi<WorkerAssignment>(`/api/worker-assignments/${id}/submit`, { method: 'POST', body: JSON.stringify(data) }),
     /** Approve submitted work (unitsWorked: days or pieces for workers not paid by the hour), or send it back */
     review: (id: number, data: { action: 'approve'; payOverride?: number; unitsWorked?: number } | { action: 'return'; note: string }) =>
       fetchApi<WorkerAssignment & { pay?: number }>(`/api/worker-assignments/${id}/review`, { method: 'POST', body: JSON.stringify(data) }),
