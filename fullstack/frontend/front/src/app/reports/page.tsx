@@ -4,7 +4,8 @@ import { useAuth } from '@/context/AuthContext';
 import Paginated from '@/components/Paginated';
 import Amount from '@/components/Amount';
 import { exactNumber, exactPeso } from '@/lib/format';
-import { api, SalesReport, InventoryReport, BranchSettlementReport, type ExtraMaterialsReport } from '@/lib/api';
+import { api, SalesReport, InventoryReport, BranchSettlementReport, type ExtraMaterialsReport, type PurchaseReturnsReport } from '@/lib/api';
+import { formatLength } from '@/lib/length';
 import { formatShortDate, formatDayLabel, manilaDateString } from '@/lib/dateUtils';
 
 function getDateRange(range: string): { startDate: string; endDate: string } {
@@ -66,6 +67,7 @@ export default function ReportsPage() {
   const [inventoryData, setInventoryData]   = useState<InventoryReport | null>(null);
   const [settlementData, setSettlementData] = useState<BranchSettlementReport | null>(null);
   const [extraData, setExtraData]           = useState<ExtraMaterialsReport | null>(null);
+  const [returnsData, setReturnsData]       = useState<PurchaseReturnsReport | null>(null);
   // '' means all branches; only administrators can pick (the server pins everyone else to their own branch)
   const [salesBranchId, setSalesBranchId]   = useState('');
   const [branches, setBranches]             = useState<{ id: number; name: string; isWarehouse: boolean }[]>([]);
@@ -73,6 +75,7 @@ export default function ReportsPage() {
   // Cross-branch staff pick a branch; everyone else sees their own
   const isAdmin        = can('branches.all');
   const canViewInventory = can('reports.inventory');
+  const canViewReturns = can('reports.inventory', 'purchase_orders.view');
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -109,13 +112,16 @@ export default function ReportsPage() {
           ...(isAdmin && salesBranchId ? { branchId: Number(salesBranchId) } : {}),
         });
         setExtraData(res.data || null);
+      } else if (reportType === 'returns' && canViewReturns) {
+        const res = await api.reports.getPurchaseReturnsReport(dates);
+        setReturnsData(res.data || null);
       }
     } catch {
       setError('Failed to load report data. Please try again.');
     } finally {
       setLoading(false);
     }
-  }, [reportType, dateRange, customStart, customEnd, salesBranchId, canViewInventory, isAdmin]);
+  }, [reportType, dateRange, customStart, customEnd, salesBranchId, canViewInventory, canViewReturns, isAdmin]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -146,6 +152,14 @@ export default function ReportsPage() {
           csvCell(e.createdAt?.slice(0, 10) || ''), csvCell(e.jobOrderNumber), csvCell(e.workerName || ''),
           csvCell(`${e.materialName || ''}${e.materialColor ? ` - ${e.materialColor}` : ''}`), e.quantity,
           csvCell(e.reason), csvCell(e.notes || ''), e.value ?? 0, csvCell(e.loggedByName || ''),
+        ].join(',')).join('\n');
+    } else if (reportType === 'returns' && returnsData) {
+      filename = `purchase-returns-${returnsData.period.startDate}-to-${returnsData.period.endDate}.csv`;
+      csv = 'Date,PO,Supplier,Item,Quantity,Unit,Unit Price,Value,Reason,Replacement,Return Slip / Memo No.,Notes,Recorded By\n' +
+        returnsData.entries.map(e => [
+          csvCell(e.date?.slice(0, 10) || ''), csvCell(e.poNumber), csvCell(e.supplierName), csvCell(e.item), e.quantity,
+          csvCell(e.unit), e.unitPrice, e.value, csvCell(e.reason), e.replacement ? 'Yes' : 'No',
+          csvCell(e.documentNumber || ''), csvCell(e.notes || ''), csvCell(e.byName || ''),
         ].join(',')).join('\n');
     } else if (reportType === 'settlement' && settlementData) {
       filename = 'branch-settlement.csv';
@@ -194,11 +208,11 @@ export default function ReportsPage() {
         </svg>
       ),
     }] : []),
-    ...(can('reports.settlement') ? [{
-      id: 'settlement', name: 'Branch Settlement',
+    ...(canViewReturns ? [{
+      id: 'returns', name: 'Purchase Returns',
       icon: (
         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
         </svg>
       ),
     }] : []),
@@ -651,6 +665,103 @@ export default function ReportsPage() {
           )
         )}
 
+        {/* ── PURCHASE RETURNS ── */}
+        {reportType === 'returns' && (
+          loading ? (
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">{[...Array(4)].map((_, i) => <SkeletonCard key={i} />)}</div>
+          ) : returnsData ? (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <SummaryCard label="Value Returned" value={<Amount value={returnsData.summary.totalValue} />}
+                  sub="Taken off accounts payable" color="text-orange-600" />
+                <SummaryCard label="Returns" value={exactNumber(returnsData.summary.returns)}
+                  sub={`${returnsData.summary.lines} item line${returnsData.summary.lines === 1 ? '' : 's'}`} color="text-gray-500" />
+                <SummaryCard label="Suppliers" value={exactNumber(returnsData.summary.suppliers)}
+                  sub="With at least one return" color="text-gray-500" />
+                <SummaryCard label="To Be Replaced" value={<Amount value={returnsData.summary.replacedValue} />}
+                  sub="Supplier sends replacements" color="text-blue-600" />
+              </div>
+
+              {returnsData.summary.lines === 0 ? (
+                <EmptyState message="Nothing was returned to suppliers in this period." />
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                    {([['By Supplier', returnsData.bySupplier], ['By Reason', returnsData.byReason]] as const).map(([title, rows]) => {
+                      const max = Math.max(...rows.map(r => r.value), 1);
+                      return (
+                        <div key={title} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                          <div className="px-6 py-4 border-b border-gray-200">
+                            <h2 className="text-base font-semibold text-gray-900">{title}</h2>
+                          </div>
+                          <div className="p-6 space-y-3">
+                            {rows.map(r => (
+                              <div key={String(r.key)}>
+                                <div className="flex items-center justify-between text-sm mb-1 gap-3">
+                                  <span className="font-medium text-gray-900 min-w-0 truncate">
+                                    {r.label}
+                                    {title === 'By Supplier' && r.topReason && <span className="font-normal text-gray-500"> · mostly {r.topReason}</span>}
+                                  </span>
+                                  <span className="text-gray-600 shrink-0">{r.returns} return{r.returns === 1 ? '' : 's'} · <span className="font-semibold text-gray-900">{formatCurrency(r.value)}</span></span>
+                                </div>
+                                <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
+                                  <div className="h-full rounded-full bg-orange-400" style={{ width: `${(r.value / max) * 100}%` }} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-200">
+                      <h2 className="text-base font-semibold text-gray-900">Items Returned</h2>
+                    </div>
+                    <Paginated items={returnsData.entries} resetKey={[dateRange, customStart, customEnd]} label="items">{rows => (
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[860px] text-sm">
+                        <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
+                          <tr>
+                            <th className="px-4 py-2 text-left font-medium">Date</th>
+                            <th className="px-4 py-2 text-left font-medium">PO</th>
+                            <th className="px-4 py-2 text-left font-medium">Supplier</th>
+                            <th className="px-4 py-2 text-left font-medium">Item</th>
+                            <th className="px-4 py-2 text-right font-medium">Qty</th>
+                            <th className="px-4 py-2 text-left font-medium">Reason</th>
+                            <th className="px-4 py-2 text-left font-medium">Replaced</th>
+                            <th className="px-4 py-2 text-left font-medium">Slip / Memo</th>
+                            <th className="px-4 py-2 text-right font-medium">Value</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {rows.map(e => (
+                            <tr key={e.id} className="hover:bg-gray-50">
+                              <td className="px-4 py-2 text-gray-600 whitespace-nowrap">{e.date ? formatDate(e.date) : '—'}</td>
+                              <td className="px-4 py-2"><a href={`/purchase-orders/${e.purchaseOrderId}`} className="font-mono text-[#011c72] hover:underline">{e.poNumber}</a></td>
+                              <td className="px-4 py-2 text-gray-700">{e.supplierName}</td>
+                              <td className="px-4 py-2 text-gray-900">{e.item}</td>
+                              <td className="px-4 py-2 text-right text-gray-700 whitespace-nowrap">{e.unit === 'yd' ? formatLength(e.quantity) : `${e.quantity} ${e.unit}`}</td>
+                              <td className="px-4 py-2 text-gray-700">{e.reason}{e.notes ? <span className="block text-xs text-gray-500">{e.notes}</span> : null}</td>
+                              <td className="px-4 py-2 text-gray-700">{e.replacement ? 'Yes' : 'No'}</td>
+                              <td className="px-4 py-2 text-gray-600">{e.documentNumber || '—'}</td>
+                              <td className="px-4 py-2 text-right font-medium text-orange-600">{exactPeso(e.value)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    )}</Paginated>
+                  </div>
+                </>
+              )}
+            </>
+          ) : (
+            <EmptyState message="No purchase return data available." />
+          )
+        )}
+
         {/* ── BRANCH SETTLEMENT ── */}
         {isSettlement && (
           <>
@@ -783,24 +894,28 @@ function EmptyState({ message }: { message: string }) {
 }
 
 function DailyBarChart({ data, color = 'amber' }: { data: Array<{ date: string; orders: number; revenue: number }>; color?: 'amber' | 'teal' }) {
-  const maxRevenue = Math.max(...data.map(d => d.revenue), 1);
   const slice = data.length > 14 ? data.slice(data.length - 14) : data;
+  // Scaled to the days shown, so the tallest visible day fills the chart
+  const maxRevenue = Math.max(...slice.map(d => d.revenue), 1);
   const barClass = color === 'teal'
     ? 'bg-gradient-to-t from-teal-500 to-teal-400 hover:from-teal-400 hover:to-teal-300'
     : 'bg-gradient-to-t from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300';
 
   return (
-    <div className="h-48 flex items-end gap-1">
+    <div className="h-48 flex items-stretch gap-1">
       {slice.map((d, i) => {
         const h = Math.max((d.revenue / maxRevenue) * 100, d.revenue > 0 ? 4 : 0);
         return (
-          <div key={i} className="flex-1 flex flex-col items-center group relative">
-            <div
-              className={`w-full ${barClass} rounded-t transition-colors cursor-pointer`}
-              style={{ height: `${h}%`, minHeight: d.revenue > 0 ? '4px' : '0' }}
-            />
+          <div key={i} className="flex-1 min-w-0 flex flex-col items-center group relative">
+            {/* The bar area has a real height, so the bar's % height has something to be a % of */}
+            <div className="flex-1 w-full flex items-end">
+              <div
+                className={`w-full ${barClass} rounded-t transition-colors cursor-pointer`}
+                style={{ height: `${h}%`, minHeight: d.revenue > 0 ? '4px' : '0' }}
+              />
+            </div>
             {/* Tooltip */}
-            <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-gray-100 text-white text-xs rounded px-2 py-1 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
+            <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-gray-900 text-white text-xs rounded px-2 py-1 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
               <p>{formatDate(d.date)}</p>
               <p>₱{d.revenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
               <p>{d.orders} orders</p>

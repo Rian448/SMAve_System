@@ -8,6 +8,9 @@ export function userCan(permissions: string[] | undefined, ...wanted: string[]):
   return wanted.some(p => permissions.includes(p));
 }
 
+/** Worker Management opens for administrators and supervisors (assigning work) */
+export const WORKER_MANAGEMENT_PERMS = ['workers.manage', 'workers.add', 'workers.edit', 'workers.delete'];
+
 /**
  * Pages and the permissions that open them (any one is enough). The longest
  * matching path wins, so /purchase-orders/new overrides /purchase-orders.
@@ -37,7 +40,7 @@ const PAGE_PERMISSIONS: [string, string[]][] = [
   ['/audit-trail', ['reports.audit_trail']],
   ['/settings', ['settings.edit', 'users.manage', 'branches.manage']],
   ['/announcements', ['announcements.view']],
-  ['/worker-dashboard', ['workers.add', 'workers.edit', 'workers.delete']],
+  ['/worker-dashboard', WORKER_MANAGEMENT_PERMS],
 ];
 
 /**
@@ -47,6 +50,17 @@ const PAGE_PERMISSIONS: [string, string[]][] = [
  */
 export function homePath(can: (...permissions: string[]) => boolean): string {
   return can('owner.view') && !can('dashboard.view') ? '/owner' : '/dashboard';
+}
+
+/**
+ * Deliveries are no longer offered. The pages and API stay in place, but no
+ * link leads to them and their URLs show Access Denied. Set to true to bring them back.
+ */
+export const DELIVERY_ENABLED = false;
+
+/** Pages switched off for everyone, whatever their permissions */
+export function pageDisabled(pathname: string): boolean {
+  return !DELIVERY_ENABLED && (pathname === '/delivery' || pathname.startsWith('/delivery/'));
 }
 
 /** Permissions that open this page, or null when it needs none. */

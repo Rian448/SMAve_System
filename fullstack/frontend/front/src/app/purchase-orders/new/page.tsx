@@ -4,6 +4,16 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, RawMaterial, Supplier } from '@/lib/api';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
+import { PaymentTermPicker, TermValue, termValueError, termExplanation, termLabel } from '@/components/PaymentTerms';
+import LengthInput from '@/components/LengthInput';
+import { formatMaterialQty } from '@/lib/length';
+
+/** Restock suggestions bought from one supplier: one purchase order */
+interface RestockGroup {
+  supplierId: number | null;
+  items: POItem[];
+  done: boolean;
+}
 
 interface POItem {
   material_id: string;
@@ -11,7 +21,13 @@ interface POItem {
   quantity: number;
   unit_cost: number;
   unit: string;
+  /** Glue, thread, staples...: counted in plain units, not picked on job orders */
+  consumable: boolean;
+  /** Typed by hand: changing the supplier doesn't replace it with their last price */
+  priceEdited?: boolean;
 }
+
+type LastPrices = Record<string, { price: number; poNumber: string; date: string | null; bySupplier: boolean }>;
 
 export default function NewPurchaseOrderPage() {
   const router = useRouter();
@@ -26,11 +42,44 @@ export default function NewPurchaseOrderPage() {
   // A saved supplier only (add new ones under Suppliers first); its contact details come with it
   const [supplierId, setSupplierId] = useState('');
   const chosenSupplier = savedSuppliers.find(s => String(s.id) === supplierId);
-  const [expectedDate, setExpectedDate] = useState('');
+  // Starts as the supplier's default term; may be changed for this order only
+  const [term, setTerm] = useState<TermValue>({ term: '', days: null });
+  useEffect(() => {
+    setTerm({ term: chosenSupplier?.paymentTerm || '', days: chosenSupplier?.paymentTermDays ?? null });
+  }, [chosenSupplier?.id, chosenSupplier?.paymentTerm, chosenSupplier?.paymentTermDays]);
+  const supplierTerm: TermValue = { term: chosenSupplier?.paymentTerm || '', days: chosenSupplier?.paymentTermDays ?? null };
+  const termChanged = !!chosenSupplier && (term.term !== supplierTerm.term || (term.term === 'net' && term.days !== supplierTerm.days));
   const [notes, setNotes] = useState('');
   const [items, setItems] = useState<POItem[]>([
-    { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd' }
+    { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd', consumable: false }
   ]);
+  // The chosen supplier's last price for each material (from their earlier POs)
+  const [lastPrices, setLastPrices] = useState<LastPrices>({});
+  /** A line's starting price: the supplier's last price, else the Inventory cost, else
+   *  blank (the supplier fills it in from their account) */
+  const startPrice = (materialId: string, prices: LastPrices = lastPrices) => {
+    const last = prices[materialId];
+    if (last) return last.price;
+    const m = materials.find(x => String(x.id) === materialId);
+    return m ? (m.costPerUnit || 0) : 0;
+  };
+  useEffect(() => {
+    if (!supplierId) { setLastPrices({}); return; }
+    let live = true;
+    api.purchaseOrders.lastPrices(Number(supplierId))
+      .then(res => {
+        if (!live) return;
+        const prices = res.data || {};
+        setLastPrices(prices);
+        // Lines not typed by hand take this supplier's prices
+        setItems(prev => prev.map(it => (it.material_id && !it.priceEdited
+          ? { ...it, unit_cost: startPrice(it.material_id, prices) } : it)));
+      })
+      .catch(() => { if (live) setLastPrices({}); });
+    return () => { live = false; };
+    // Reloaded when the supplier changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supplierId]);
 
   useEffect(() => {
     // Shops order their own stock and the warehouse's (which supplies them)
@@ -48,14 +97,26 @@ export default function NewPurchaseOrderPage() {
       .catch(err => console.error(err));
   }, []);
 
-  // Items picked from the restock recommendations (Forecasting) arrive as
-  // ?restock=CODE:qty,CODE:qty. They fill the lines to review; nothing is saved yet.
-  const [restockNote, setRestockNote] = useState<{ added: number; missing: string[] } | null>(null);
+  // Items picked from the restock recommendations (Forecasting, Inventory → AI
+  // Predictions) arrive as ?restock=CODE:qty,CODE:qty. A purchase order is for one
+  // supplier, so they are split by each material's supplier: one order per
+  // supplier, filled in one after another. Nothing is saved until each is created.
+  const [restockNote, setRestockNote] = useState<{ added: number; missing: string[]; forJobs?: boolean } | null>(null);
+  const [groups, setGroups] = useState<RestockGroup[]>([]);
+  const [groupIndex, setGroupIndex] = useState(0);
+  const [justCreated, setJustCreated] = useState('');
+  const loadGroup = (list: RestockGroup[], index: number) => {
+    const g = list[index];
+    setGroupIndex(index);
+    setItems(g.items.map(it => ({ ...it })));
+    setSupplierId(g.supplierId ? String(g.supplierId) : '');
+  };
   useEffect(() => {
     if (loadingMaterials) return;
     const raw = new URLSearchParams(window.location.search).get('restock');
     if (!raw) return;
-    const lines = new Map<number, POItem>();
+    const bySupplier = new Map<number | null, POItem[]>();
+    const seen = new Set<number>();
     const missing: string[] = [];
     for (const part of raw.split(',')) {
       const at = part.lastIndexOf(':');
@@ -64,22 +125,34 @@ export default function NewPurchaseOrderPage() {
       // Only materials in Inventory can be ordered, once each
       const m = materials.find(x => x.itemId === code && !x.isArchived);
       if (!m || !(qty > 0)) { missing.push(code); continue; }
-      if (lines.has(m.id)) continue;
-      lines.set(m.id, {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      const key = m.supplierId || null;
+      if (!bySupplier.has(key)) bySupplier.set(key, []);
+      bySupplier.get(key)!.push({
         material_id: String(m.id),
         material_name: [m.materialType, m.color, m.pattern].filter(Boolean).join(' - '),
         quantity: qty,
-        unit_cost: m.costPerUnit || m.unitPrice,
-        unit: 'yd',
+        // Replaced by the supplier's last price once their prices load
+        unit_cost: m.costPerUnit || 0,
+        unit: m.isConsumable ? (m.unit || 'pcs') : 'yd',
+        consumable: !!m.isConsumable,
       });
     }
-    if (lines.size) setItems([...lines.values()]);
-    // A purchase order is for one supplier: choose it when every item has the same one
-    const suppliers = new Set([...lines.keys()].map(id => materials.find(m => m.id === id)?.supplierId).filter(Boolean));
-    if (suppliers.size === 1) setSupplierId(String([...suppliers][0]));
-    setRestockNote({ added: lines.size, missing });
+    // Materials with a supplier first; any without one last (the supplier is chosen by hand)
+    const list: RestockGroup[] = [...bySupplier.entries()]
+      .sort(([a], [b]) => (a === null ? 1 : 0) - (b === null ? 1 : 0))
+      .map(([sid, its]) => ({ supplierId: sid, items: its, done: false }));
+    if (list.length) {
+      setGroups(list);
+      loadGroup(list, 0);
+    }
+    // ?from=jobs: from Inventory → Needed for job orders (the amounts are what the jobs are short)
+    setRestockNote({ added: seen.size, missing, forJobs: new URLSearchParams(window.location.search).get('from') === 'jobs' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadingMaterials]);
+  const supplierName = (id: number | null) =>
+    id ? savedSuppliers.find(s => s.id === id)?.name || 'Supplier' : 'No supplier set';
 
   // Lines whose material is normally bought from a different supplier than the one chosen
   const otherSupplierItems = chosenSupplier ? items.filter(it => {
@@ -88,7 +161,7 @@ export default function NewPurchaseOrderPage() {
   }) : [];
 
   const addItem = () => {
-    setItems([...items, { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd' }]);
+    setItems([...items, { material_id: '', material_name: '', quantity: 1, unit_cost: 0, unit: 'yd', consumable: false }]);
   };
 
   const removeItem = (index: number) => {
@@ -97,7 +170,7 @@ export default function NewPurchaseOrderPage() {
     }
   };
 
-  const updateItem = (index: number, field: keyof POItem, value: string | number) => {
+  const updateItem = (index: number, field: keyof POItem, value: string | number | boolean) => {
     const newItems = [...items];
     if (field === 'material_id') {
       // The dropdown gives the id as text
@@ -108,13 +181,23 @@ export default function NewPurchaseOrderPage() {
           ...newItems[index],
           material_id: material.id.toString(),
           material_name: label,
-          // A purchase order pays the supplier's cost, not our selling price
-          unit_cost: material.costPerUnit || material.unitPrice,
-          unit: 'yd'
+          // The supplier's last price, else our Inventory cost (never our selling
+          // price), else blank for the supplier to fill in
+          unit_cost: startPrice(material.id.toString()),
+          priceEdited: false,
+          // Already a consumable in Inventory: stays ticked (and counted in its unit)
+          consumable: !!material.isConsumable,
+          unit: material.isConsumable ? (material.unit || 'pcs') : 'yd',
         };
       }
+    } else if (field === 'consumable') {
+      const material = materials.find(m => String(m.id) === newItems[index].material_id);
+      newItems[index] = {
+        ...newItems[index], consumable: !!value,
+        unit: value ? (material?.isConsumable && material.unit) || 'pcs' : 'yd',
+      };
     } else {
-      newItems[index] = { ...newItems[index], [field]: value };
+      newItems[index] = { ...newItems[index], [field]: value, ...(field === 'unit_cost' ? { priceEdited: true } : {}) };
     }
     setItems(newItems);
   };
@@ -132,7 +215,7 @@ export default function NewPurchaseOrderPage() {
     items.forEach((item, index) => { if (item.material_id && !firstRow.has(item.material_id)) firstRow.set(item.material_id, index); });
     if (fe.show({
       'po-supplier': !chosenSupplier && 'Choose the supplier.',
-      'po-date': !expectedDate && 'Choose the expected delivery date.',
+      'po-term': termValueError(term),
       ...Object.fromEntries(items.flatMap((item, index) => [
         [`po-material-${index}`, !item.material_id ? (anyMaterial ? 'Select a material, or remove this row.'
           : 'Add at least one material to the purchase order.')
@@ -151,12 +234,28 @@ export default function NewPurchaseOrderPage() {
           name: item.material_name,
           quantity: item.quantity,
           unit: item.unit,
-          unitPrice: item.unit_cost
+          unitPrice: item.unit_cost,
+          consumable: item.consumable,
         })),
-        expectedDelivery: expectedDate
+        paymentTerm: term.term,
+        paymentTermDays: term.term === 'net' ? term.days : null,
       };
 
       await api.purchaseOrders.create(purchaseOrder);
+      // Restock suggestions from several suppliers: go on to the next supplier's order
+      if (groups.length > 1) {
+        const updated = groups.map((g, i) => (i === groupIndex ? { ...g, done: true } : g));
+        const next = updated.findIndex(g => !g.done);
+        setGroups(updated);
+        if (next >= 0) {
+          setJustCreated(chosenSupplier!.name);
+          loadGroup(updated, next);
+          setNotes('');
+          setLoading(false);
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          return;
+        }
+      }
       router.push('/purchase-orders');
     } catch (err) {
       console.error(err);
@@ -189,13 +288,42 @@ export default function NewPurchaseOrderPage() {
         {error && (
           <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>
         )}
+        {justCreated && (
+          <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-xl text-sm text-green-800">
+            Purchase order for <b>{justCreated}</b> created. Next: <b>{supplierName(groups[groupIndex]?.supplierId ?? null)}</b>.
+          </div>
+        )}
         {restockNote && (
-          <div className="mb-6 p-4 bg-[#eef1fb] border border-[#c7d2f5] rounded-xl text-sm text-[#011c72] space-y-1">
+          <div className="mb-6 p-4 bg-[#eef1fb] border border-[#c7d2f5] rounded-xl text-sm text-[#011c72] space-y-2">
             <p>
-              <b>{restockNote.added} item{restockNote.added === 1 ? '' : 's'}</b> added from the restock recommendations with the suggested quantities.
-              Review the quantities and remove anything you don&apos;t need. Nothing is ordered until you create the purchase order,
+              <b>{restockNote.added} item{restockNote.added === 1 ? '' : 's'}</b> added from {restockNote.forJobs ? 'the materials job orders are short of, with the amounts they are short' : 'the restock recommendations with the suggested quantities'},
+              {' '}each with its supplier, cost and payment terms filled in.
+              Review them and remove anything you don&apos;t need. Nothing is ordered until you create the purchase order,
               and stock only goes up when it is received.
             </p>
+            {groups.length > 1 && (
+              <div>
+                <p className="font-semibold">
+                  These come from {groups.length} suppliers, so they make {groups.length} purchase orders, one per supplier:
+                </p>
+                <ol className="mt-1 space-y-1">
+                  {groups.map((g, i) => (
+                    <li key={i} className="flex flex-wrap items-center gap-2">
+                      <span className={`inline-flex w-5 h-5 items-center justify-center rounded-full text-[11px] font-bold ${g.done ? 'bg-green-600 text-white' : i === groupIndex ? 'bg-[#011c72] text-white' : 'bg-white text-[#011c72] border border-[#c7d2f5]'}`}>
+                        {g.done ? '✓' : i + 1}
+                      </span>
+                      <span className={i === groupIndex ? 'font-semibold' : ''}>
+                        {supplierName(g.supplierId)}: {g.items.length} item{g.items.length === 1 ? '' : 's'}
+                      </span>
+                      {g.done ? <span className="text-xs text-green-700">created</span>
+                        : i === groupIndex ? <span className="text-xs">(this form)</span>
+                        : <button type="button" onClick={() => loadGroup(groups, i)}
+                            className="text-xs font-medium underline hover:no-underline">Do this one now</button>}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
             {restockNote.missing.length > 0 && (
               <p className="text-amber-800">Not added (not in Inventory): {restockNote.missing.join(', ')}</p>
             )}
@@ -246,18 +374,23 @@ export default function NewPurchaseOrderPage() {
                   {chosenSupplier?.email || <span className="text-gray-400">—</span>}
                 </p>
               </div>
-              <div {...fe.field('po-date')}>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Expected Delivery Date *
-                </label>
-                <input
-                  type="date"
-                  value={expectedDate}
-                  onChange={(e) => setExpectedDate(e.target.value)}
-                  className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                  required
-                />
-                <FieldError message={fe.errors['po-date']} />
+              {/* No delivery date here: once approved, the PO goes to the supplier, who sets it */}
+              <div>
+                <p className="block text-sm font-medium text-gray-700 mb-2">Expected Delivery Date</p>
+                <p className="px-4 py-2 rounded-lg border border-dashed border-gray-300 bg-gray-50 text-sm text-gray-500 min-h-10.5">
+                  {!chosenSupplier ? 'Set by the supplier after approval.'
+                    : chosenSupplier.userId ? `${chosenSupplier.name} sets it from their account once the PO is approved.`
+                    : `${chosenSupplier.name} has no login yet. Create one under Suppliers so they can set it.`}
+                </p>
+              </div>
+              <div {...fe.field('po-term')}>
+                <label htmlFor="po-term" className="block text-sm font-medium text-gray-700 mb-2">Payment Terms</label>
+                <PaymentTermPicker id="po-term" value={term} onChange={setTerm} disabled={!chosenSupplier} />
+                <p className="mt-1 text-xs text-gray-500">
+                  {!chosenSupplier ? 'Choose the supplier first: its usual term is filled in.'
+                    : <>{termExplanation(term.term, term.days)}{termChanged && <> Supplier&apos;s usual term: {termLabel(supplierTerm.term, supplierTerm.days)}.</>}</>}
+                </p>
+                <FieldError message={fe.errors['po-term']} />
               </div>
             </div>
           </div>
@@ -287,6 +420,9 @@ export default function NewPurchaseOrderPage() {
               Only materials already in Inventory can be ordered. For a new material, add it in{' '}
               <Link href="/inventory" className="text-[#011c72] font-medium hover:underline">Inventory</Link> first
               (it starts at 0 yd). Stock goes up only when this order is received.
+              Lengths can be entered in yards, feet, inches and centimeters; they are added together.
+              Tick <b>Consumable</b> for supplies like glue, thread or staples: they are counted in pieces,
+              are not chosen on job orders, and are marked used up in Inventory.
             </p>
             {otherSupplierItems.length > 0 && (
               <p className="mb-4 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
@@ -303,7 +439,7 @@ export default function NewPurchaseOrderPage() {
                 {items.map((item, index) => (
                   <div key={index} className="p-4 bg-gray-50 rounded-lg">
                     <div className="grid grid-cols-12 gap-4 items-end">
-                      <div className="col-span-12 md:col-span-4" {...fe.field(`po-material-${index}`)}>
+                      <div className="col-span-12 md:col-span-5" {...fe.field(`po-material-${index}`)}>
                         <label className="block text-xs font-medium text-gray-500 mb-1">
                           Material
                         </label>
@@ -322,7 +458,7 @@ export default function NewPurchaseOrderPage() {
                           ).filter(([, list]) => list.length > 0).map(([label, list]) => {
                             const opts = list.map(m => (
                               <option key={m.id} value={m.id.toString()}>
-                                {m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} yd in stock)
+                                {m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({formatMaterialQty(m.stockQuantity, m)} in stock){m.isConsumable ? ' · consumable' : ''}
                               </option>
                             ));
                             return label ? <optgroup key={label} label={label}>{opts}</optgroup> : opts;
@@ -330,48 +466,37 @@ export default function NewPurchaseOrderPage() {
                         </select>
                         <FieldError message={fe.errors[`po-material-${index}`]} />
                       </div>
-                      <div className="col-span-4 md:col-span-2" {...fe.field(`po-qty-${index}`)}>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">
-                          Quantity (yd)
+                      <div className="col-span-12 md:col-span-2">
+                        <label className="flex items-center gap-2 py-2 cursor-pointer text-sm text-gray-700">
+                          <input type="checkbox" checked={item.consumable}
+                            onChange={(e) => updateItem(index, 'consumable', e.target.checked)}
+                            className="w-4 h-4 rounded border-gray-300 text-[#011c72] focus:ring-[#011c72]" />
+                          Consumable
                         </label>
-                        <input
-                          type="number"
-                          min="0.01"
-                          step="0.01"
-                          value={item.quantity}
-                          onChange={(e) => updateItem(index, 'quantity', Number(e.target.value))}
-                          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                          required
-                        />
-                        <FieldError message={fe.errors[`po-qty-${index}`]} />
                       </div>
-                      <div className="col-span-4 md:col-span-2">
+                      <div className="col-span-5 md:col-span-2">
                         <label className="block text-xs font-medium text-gray-500 mb-1">
-                          Unit
-                        </label>
-                        <input
-                          type="text"
-                          value={item.unit}
-                          onChange={(e) => updateItem(index, 'unit', e.target.value)}
-                          className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                          readOnly
-                        />
-                      </div>
-                      <div className="col-span-4 md:col-span-2">
-                        <label className="block text-xs font-medium text-gray-500 mb-1">
-                          Unit Cost
+                          Unit Cost (per {item.consumable ? item.unit || 'pc' : 'yd'})
                         </label>
                         <input
                           type="number"
                           min="0"
                           step="0.01"
-                          value={item.unit_cost}
-                          onChange={(e) => updateItem(index, 'unit_cost', Number(e.target.value))}
+                          value={item.unit_cost || ''}
+                          placeholder="Supplier sets"
+                          onChange={(e) => updateItem(index, 'unit_cost', Number(e.target.value) || 0)}
                           className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
-                          required
                         />
+                        {/* Where the starting price came from */}
+                        {item.material_id && !item.priceEdited && (
+                          <p className="mt-0.5 text-[10px] text-gray-400 leading-tight">
+                            {lastPrices[item.material_id]
+                              ? `Last price · ${lastPrices[item.material_id].poNumber}`
+                              : item.unit_cost > 0 ? 'Inventory cost' : 'No price yet: the supplier sets it'}
+                          </p>
+                        )}
                       </div>
-                      <div className="col-span-10 md:col-span-1 text-right">
+                      <div className="col-span-5 md:col-span-2 text-right">
                         <label className="block text-xs font-medium text-gray-500 mb-1">
                           Total
                         </label>
@@ -391,6 +516,29 @@ export default function NewPurchaseOrderPage() {
                           </svg>
                         </button>
                       </div>
+                    </div>
+                    {/* Quantity: a length for yard stock, a plain count for consumables */}
+                    <div className="mt-3" {...fe.field(`po-qty-${index}`)}>
+                      <p className="block text-xs font-medium text-gray-500 mb-1">
+                        Quantity {item.consumable ? `(${item.unit || 'pcs'})` : '(length)'}
+                      </p>
+                      {item.consumable ? (
+                        <div className="flex gap-2 max-w-xs">
+                          <input type="number" min="1" step="1" value={item.quantity}
+                            onChange={(e) => updateItem(index, 'quantity', Number(e.target.value))}
+                            className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                          <input type="text" value={item.unit} aria-label="Unit"
+                            onChange={(e) => updateItem(index, 'unit', e.target.value.slice(0, 20))}
+                            placeholder="pcs"
+                            className="w-24 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 text-sm focus:ring-2 focus:ring-[#011c72] focus:border-transparent" />
+                        </div>
+                      ) : (
+                        <div className="max-w-xl">
+                          <LengthInput value={item.quantity} ariaLabel="Quantity"
+                            onChange={(yards) => updateItem(index, 'quantity', yards)} />
+                        </div>
+                      )}
+                      <FieldError message={fe.errors[`po-qty-${index}`]} />
                     </div>
                   </div>
                 ))}

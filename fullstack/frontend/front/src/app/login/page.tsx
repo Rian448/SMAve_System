@@ -4,7 +4,6 @@ import { homePath } from '@/lib/permissions';
 import { useAuth } from '@/context/AuthContext';
 import { setAuthToken } from '@/lib/api';
 import { useRouter } from 'next/navigation';
-import Link from 'next/link';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import { passwordProblem } from '@/lib/password';
 import PasswordChecklist from '@/components/PasswordChecklist';
@@ -31,8 +30,13 @@ export default function LoginPage() {
   const [lockoutSeconds, setLockoutSeconds] = useState(0);
   const [showPassword, setShowPassword] = useState(false);
 
-  const { checkAuth } = useAuth();
+  const { checkAuth, isAuthenticated, isLoading: authLoading, can } = useAuth();
   const router = useRouter();
+
+  // This is the front page: staff who are already signed in go straight to their home page
+  useEffect(() => {
+    if (!authLoading && isAuthenticated) router.replace(homePath(can));
+  }, [authLoading, isAuthenticated, can, router]);
 
   // Countdown timer when account is locked
   useEffect(() => {
@@ -173,14 +177,14 @@ export default function LoginPage() {
       <div className="max-w-md w-full">
         {/* Logo/Brand */}
         <div className="text-center mb-8">
-          <Link href="/" title="Go to main website" className="inline-block">
+          <div className="inline-block">
             <div className="inline-flex items-center justify-center w-16 h-16 bg-[#011c72] rounded-2xl mb-4">
               <svg className="w-10 h-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
               </svg>
             </div>
             <h1 className="text-3xl font-bold text-gray-900">Seatmakers Avenue</h1>
-          </Link>
+          </div>
           <p className="text-gray-600 mt-2">Sales & Inventory Management System</p>
         </div>
 
@@ -188,17 +192,6 @@ export default function LoginPage() {
         <div className="bg-white rounded-2xl shadow-xl p-8">
           {!showRecovery ? (
             <>
-              <div className="mb-5">
-                <Link
-                  href="/"
-                  className="inline-flex items-center gap-2 text-sm text-gray-600 hover:text-[#011c72] transition-colors"
-                >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-                  </svg>
-                  Back to website
-                </Link>
-              </div>
               <h2 className="text-2xl font-semibold text-gray-900 mb-6">Sign In</h2>
 
               {notice && (
@@ -310,10 +303,7 @@ export default function LoginPage() {
                 </button>
                 <div className="border-t border-gray-200 pt-4">
                   <p className="text-sm text-gray-600">
-                    For Seatmakers Avenue staff only.{' '}
-                    <Link href="/" className="text-[#011c72] font-medium hover:underline">
-                      Back to the website
-                    </Link>
+                    For Seatmakers Avenue staff only. No account yet? Ask your administrator.
                   </p>
                 </div>
               </div>

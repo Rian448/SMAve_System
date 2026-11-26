@@ -6,7 +6,8 @@ import { useNotifications } from '@/context/NotificationContext';
 import { formatDateTime } from '@/lib/dateUtils';
 import { useEffect, useRef, useState } from 'react';
 import { useConfirm } from './ConfirmDialog';
-import { homePath } from '@/lib/permissions';
+import { useBranding } from '@/lib/branding';
+import { WORKER_MANAGEMENT_PERMS } from '@/lib/permissions';
 
 type NavItem = { name: string; path: string; icon: () => React.JSX.Element; perms?: string[] };
 type NavGroup = { name: string; icon: () => React.JSX.Element; items: NavItem[] };
@@ -20,7 +21,6 @@ interface NavigationProps {
   onMobileOpen: () => void;
   onMobileClose: () => void;
 }
-
 const DashboardIcon = () => (
   <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
@@ -97,11 +97,6 @@ const AuditIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
   </svg>
 );
-const HistoryIcon = () => (
-  <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-  </svg>
-);
 const LogoIcon = () => (
   <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
@@ -123,6 +118,76 @@ const LogoutIcon = () => (
   </svg>
 );
 
+// Pages are grouped into categories that open a flyout. Each page needs any one of its permissions.
+const NAV_ENTRIES: NavEntry[] = [
+  { name: 'Overview', icon: DashboardIcon, items: [
+    { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, perms: ['dashboard.view'] },
+    { name: 'Owner Dashboard', path: '/owner', icon: OwnerIcon, perms: ['owner.view'] },
+    { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, perms: ['announcements.view'] },
+  ] },
+  { name: 'Sales', icon: SalesIcon, items: [
+    { name: 'Sales', path: '/sales', icon: SalesIcon, perms: ['sales.view'] },
+    { name: 'Customers', path: '/customers', icon: CustomersIcon, perms: ['customers.view'] },
+  ] },
+  // Its own entry: payments are managed here, and each one still opens its job order
+  { name: 'Payments', path: '/payments', icon: PaymentsIcon, perms: ['payments.view'] },
+  { name: 'Operations', icon: InventoryIcon, items: [
+    { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'premade.receive'] },
+    // Product orders are opened from Sales (View Details); /product-orders still works
+    // Item History is off the menu (Inventory's Item Trail tab covers usage); /item-history still opens it
+    { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, perms: WORKER_MANAGEMENT_PERMS },
+  ] },
+  { name: 'Purchasing', icon: PurchaseOrderIcon, items: [
+    { name: 'Purchase Orders', path: '/purchase-orders', icon: PurchaseOrderIcon, perms: ['purchase_orders.view'] },
+    { name: 'Receiving', path: '/purchase-orders/receiving', icon: ReceivingIcon, perms: ['purchase_orders.receive'] },
+    { name: 'Suppliers', path: '/suppliers', icon: SupplierIcon, perms: ['suppliers.view'] },
+  ] },
+  // Expenses is off the menu; /expenses still opens it
+  { name: 'Costing', path: '/costing', icon: CostingIcon, perms: ['costing.view'] },
+  { name: 'Analytics', icon: ReportsIcon, items: [
+    { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, perms: ['forecasting.view'] },
+    { name: 'Reports', path: '/reports', icon: ReportsIcon, perms: ['reports.sales', 'reports.inventory', 'reports.settlement'] },
+  ] },
+  // Its own entry so the full log isn't buried under Settings
+  { name: 'Audit Trail', path: '/audit-trail', icon: AuditIcon, perms: ['reports.audit_trail'] },
+  { name: 'Settings', path: '/settings', icon: SettingsIcon, perms: ['settings.edit', 'users.manage', 'branches.manage'] },
+];
+
+/** Key a custom sidebar icon is saved under: the page's path, or "group:Name" for a category */
+const iconKey = (entry: NavEntry) => ('items' in entry ? `group:${entry.name}` : entry.path);
+
+/** Every sidebar icon that can be changed in Settings > Appearance, with its built-in one */
+export const NAV_ICON_SLOTS: { key: string; label: string; group?: string; Icon: () => React.JSX.Element }[] =
+  NAV_ENTRIES.flatMap((entry) => 'items' in entry
+    ? [{ key: iconKey(entry), label: `${entry.name} (menu group)`, Icon: entry.icon },
+       ...entry.items.map((i) => ({ key: iconKey(i), label: i.name, group: entry.name, Icon: i.icon }))]
+    : [{ key: iconKey(entry), label: entry.name, Icon: entry.icon }]);
+
+/** The built-in logo mark, for Settings to show next to an uploaded one */
+export const DefaultLogo = () => (
+  <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0"><LogoIcon /></div>
+);
+
+/** A custom icon from Settings when there is one, else the built-in icon */
+function NavIcon({ entry, custom }: { entry: NavEntry; custom: Record<string, string> }) {
+  const src = custom[iconKey(entry)];
+  const Icon = entry.icon;
+  // eslint-disable-next-line @next/next/no-img-element
+  return src ? <img src={src} alt="" className="w-5 h-5 shrink-0 object-contain" /> : <Icon />;
+}
+
+/** The logo square: the uploaded logo, or the built-in mark */
+function LogoMark({ logo }: { logo: string | null }) {
+  return logo ? (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={logo} alt="Logo" className="w-8 h-8 rounded-lg object-contain shrink-0 bg-white" />
+  ) : (
+    <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0">
+      <LogoIcon />
+    </div>
+  );
+}
+
 export default function Navigation({ collapsed: collapsedSetting, onToggle, mobileOpen, onMobileOpen, onMobileClose }: NavigationProps) {
   // The open drawer always shows full labels, whatever the desktop collapse setting is
   const collapsed = collapsedSetting && !mobileOpen;
@@ -132,7 +197,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
   const { notifications, unreadCount, markRead, markAllRead, archived, loadArchived, archive, restore, remove } = useNotifications();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const { confirm, confirmDialog } = useConfirm();
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const branding = useBranding();
   const [notifOpen, setNotifOpen] = useState(false);
   // The account menu under the name and initial, top right
   const [accountOpen, setAccountOpen] = useState(false);
@@ -166,7 +231,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
 
   useEffect(() => () => { if (flyoutCloseTimer.current) clearTimeout(flyoutCloseTimer.current); }, []);
 
-  // The promotional website and the staff sign-in are the only pages open to visitors
+  // The front page (which forwards to sign-in) and the sign-in page are open to visitors
   const publicRoutes = ['/', '/login'];
   const mustSignIn = !isLoading && !isAuthenticated && !publicRoutes.includes(pathname);
 
@@ -175,140 +240,21 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     if (mustSignIn) router.push('/login');
   }, [mustSignIn, router]);
 
-  if (pathname === '/login') return null;
+  if (pathname === '/login' || pathname === '/') return null;
   if (isLoading) return null;
 
-  // The website's own top bar: for visitors, and for signed-in staff who opened the
-  // website (from the logo). Staff get their profile bubble instead of Staff Login.
-  if (!isAuthenticated || pathname === '/') {
-    if (mustSignIn) return null;
-    const navLinks = [
-      { label: 'Home',       href: '/#home' },
-      { label: 'About Us',   href: '/#about' },
-      { label: 'Products & Services', href: '/#products' },
-      { label: 'Promotions', href: '/#promotions' },
-      { label: 'Branches',   href: '/#branches' },
-      { label: 'Contact Us', href: '/#contact' },
-    ];
+  // Signed-out visitors only ever see the sign-in page (the front page forwards there)
+  if (!isAuthenticated) return null;
 
-    return (
-      <nav className="fixed top-0 left-0 right-0 bg-white border-b border-gray-200 z-50 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center h-16 gap-4">
-
-            {/* Logo */}
-            <Link href="/#home" className="flex items-center gap-2.5 flex-shrink-0">
-              <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center">
-                <LogoIcon />
-              </div>
-              <span className="font-bold text-gray-900 text-sm tracking-wide hidden sm:block">Seatmakers Avenue</span>
-            </Link>
-
-            {/* Desktop nav links */}
-            <div className="hidden lg:flex items-center gap-1 ml-6 flex-1">
-              {navLinks.map(link => (
-                <a
-                  key={link.label}
-                  href={link.href}
-                  className="px-3 py-2 text-sm font-medium text-gray-600 hover:text-[#011c72] hover:bg-gray-50 rounded-md transition-colors"
-                >
-                  {link.label}
-                </a>
-              ))}
-            </div>
-
-            {/* Right side: staff sign-in + hamburger */}
-            <div className="ml-auto flex items-center gap-3">
-              {isAuthenticated ? <ProfileBubble /> : (
-              <Link
-                href="/login"
-                className="px-4 py-2 rounded-md border border-gray-300 hover:border-[#011c72] text-gray-700 hover:text-[#011c72] text-xs font-semibold uppercase tracking-wide transition-colors"
-              >
-                Staff Login
-              </Link>
-              )}
-              {/* Mobile hamburger */}
-              <button
-                onClick={() => setMobileMenuOpen(o => !o)}
-                className="lg:hidden p-2 rounded-md text-gray-600 hover:text-[#011c72] hover:bg-gray-50 transition-colors"
-                aria-label="Toggle menu"
-              >
-                {mobileMenuOpen ? (
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                ) : (
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                  </svg>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Mobile dropdown */}
-        {mobileMenuOpen && (
-          <div className="lg:hidden border-t border-gray-100 bg-white px-4 py-3 space-y-1">
-            {navLinks.map(link => (
-              <a
-                key={link.label}
-                href={link.href}
-                onClick={() => setMobileMenuOpen(false)}
-                className="block px-3 py-2.5 text-sm font-medium text-gray-600 hover:text-[#011c72] hover:bg-gray-50 rounded-md transition-colors"
-              >
-                {link.label}
-              </a>
-            ))}
-          </div>
-        )}
-      </nav>
-    );
-  }
-
-  // Pages are grouped into categories that open a flyout. Each page needs any one of its permissions.
-  const navEntries: NavEntry[] = [
-    { name: 'Overview', icon: DashboardIcon, items: [
-      { name: 'Dashboard', path: '/dashboard', icon: DashboardIcon, perms: ['dashboard.view'] },
-      { name: 'Owner Dashboard', path: '/owner', icon: OwnerIcon, perms: ['owner.view'] },
-      { name: 'Announcements', path: '/announcements', icon: AnnouncementsIcon, perms: ['announcements.view'] },
-    ] },
-    { name: 'Sales', icon: SalesIcon, items: [
-      { name: 'Sales', path: '/sales', icon: SalesIcon, perms: ['sales.view'] },
-      { name: 'Customers', path: '/customers', icon: CustomersIcon, perms: ['customers.view'] },
-    ] },
-    // Its own entry: payments are managed here, and each one still opens its job order
-    { name: 'Payments', path: '/payments', icon: PaymentsIcon, perms: ['payments.view'] },
-    { name: 'Operations', icon: InventoryIcon, items: [
-      { name: 'Inventory', path: '/inventory', icon: InventoryIcon, perms: ['inventory.view', 'premade.view', 'premade.receive'] },
-      // Product orders are opened from Sales (View Details); /product-orders still works
-      // Replaces Item Trail (branch transfers from the retired online ordering; /delivery still opens it)
-      { name: 'Item History', path: '/item-history', icon: HistoryIcon, perms: ['inventory.view', 'premade.view'] },
-      { name: 'Worker Management', path: '/worker-dashboard', icon: WorkerIcon, perms: ['workers.add', 'workers.edit', 'workers.delete'] },
-    ] },
-    { name: 'Purchasing', icon: PurchaseOrderIcon, items: [
-      { name: 'Purchase Orders', path: '/purchase-orders', icon: PurchaseOrderIcon, perms: ['purchase_orders.view'] },
-      { name: 'Receiving', path: '/purchase-orders/receiving', icon: ReceivingIcon, perms: ['purchase_orders.receive'] },
-      { name: 'Suppliers', path: '/suppliers', icon: SupplierIcon, perms: ['suppliers.view'] },
-    ] },
-    { name: 'Finance', icon: CostingIcon, items: [
-      { name: 'Expenses', path: '/expenses', icon: ExpensesIcon, perms: ['expenses.view', 'expenses.add'] },
-      { name: 'Costing', path: '/costing', icon: CostingIcon, perms: ['costing.view'] },
-    ] },
-    { name: 'Analytics', icon: ReportsIcon, items: [
-      { name: 'Forecasting', path: '/forecasting', icon: ForecastIcon, perms: ['forecasting.view'] },
-      { name: 'Reports', path: '/reports', icon: ReportsIcon, perms: ['reports.sales', 'reports.inventory', 'reports.settlement'] },
-    ] },
-    // Its own entry so the full log isn't buried under Settings
-    { name: 'Audit Trail', path: '/audit-trail', icon: AuditIcon, perms: ['reports.audit_trail'] },
-    { name: 'Settings', path: '/settings', icon: SettingsIcon, perms: ['settings.edit', 'users.manage', 'branches.manage'] },
-  ];
+  const navEntries = NAV_ENTRIES;
 
   const allowed = (item: NavItem) => (item.perms ? can(...item.perms) : true);
   // Drop pages the user can't open; a category left with a single page shows as that page
   const visibleEntries: NavEntry[] = navEntries.flatMap((entry): NavEntry[] => {
     if (!('items' in entry)) return allowed(entry) ? [entry] : [];
-    const items = entry.items.filter(allowed);
+    // Without the day-to-day Dashboard (the owner role), the owner one is just "Dashboard"
+    const items = entry.items.filter(allowed).map((i) =>
+      i.path === '/owner' && !can('dashboard.view') ? { ...i, name: 'Dashboard' } : i);
     if (items.length === 0) return [];
     if (items.length === 1) return [items[0]];
     return [{ ...entry, items }];
@@ -335,7 +281,6 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
   const badgeFor = (path: string) => (path === '/delivery' && unreadCount > 0 ? unreadCount : 0);
 
   const renderLink = (item: NavItem, inFlyout = false) => {
-    const Icon = item.icon;
     const isActive = isActivePath(item.path);
     const badge = badgeFor(item.path);
     const iconOnly = collapsed && !inFlyout;
@@ -354,7 +299,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
         }`}
       >
         <span className="relative shrink-0">
-          <Icon />
+          <NavIcon entry={item} custom={branding.navIcons} />
           {iconOnly && badge > 0 && (
             <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-0.5 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">
               {badge > 9 ? '9+' : badge}
@@ -394,7 +339,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     setIsLoggingOut(true);
     try {
       await logout();
-      router.push('/');
+      router.push('/login');
     } finally {
       setIsLoggingOut(false);
     }
@@ -413,9 +358,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
         </svg>
       </button>
       <Link href="/" className="md:hidden flex items-center gap-2 min-w-0">
-        <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0">
-          <LogoIcon />
-        </div>
+        <LogoMark logo={branding.logo} />
       </Link>
       <span className="min-w-0 truncate px-3 md:px-4 py-1.5 rounded-xl border border-gray-200 bg-white text-sm font-bold text-gray-900 shadow-sm">
         {pageName}
@@ -491,10 +434,8 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
     >
       {/* Header */}
       <div className={`flex items-center h-16 px-3 border-b border-gray-200 shrink-0 ${collapsed ? 'justify-center' : 'gap-2'}`}>
-        <Link href="/" title="Go to main website" className={`flex items-center gap-2 min-w-0 ${collapsed ? '' : 'flex-1'}`}>
-          <div className="w-8 h-8 bg-[#011c72] rounded-lg flex items-center justify-center shrink-0">
-            <LogoIcon />
-          </div>
+        <Link href="/" title="Home" className={`flex items-center gap-2 min-w-0 ${collapsed ? '' : 'flex-1'}`}>
+          <LogoMark logo={branding.logo} />
           {!collapsed && (
             <span className="font-bold text-gray-900 text-sm flex-1 truncate">
               Seatmakers Ave
@@ -527,7 +468,6 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
         {visibleEntries.map((entry) => {
           if (!('items' in entry)) return renderLink(entry);
 
-          const Icon = entry.icon;
           const isActive = entry.items.some((i) => isActivePath(i.path));
           const badge = entry.items.reduce((n, i) => n + badgeFor(i.path), 0);
           const isOpen = mobileOpen
@@ -559,7 +499,7 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
                 }`}
               >
                 <span className="relative shrink-0">
-                  <Icon />
+                  <NavIcon entry={entry} custom={branding.navIcons} />
                   {collapsed && badge > 0 && (
                     <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-red-500" />
                   )}
@@ -721,8 +661,19 @@ export default function Navigation({ collapsed: collapsedSetting, onToggle, mobi
  */
 function notificationHref(type: string, data: unknown,
   can: (...permissions: string[]) => boolean): string | null {
-  const d = (data || {}) as { orderId?: number; jobOrderId?: number };
+  const d = (data || {}) as { orderId?: number; jobOrderId?: number; purchaseOrderId?: number };
   switch (type) {
+    case 'po_sent':
+      // A supplier account: a new purchase order to set the delivery date of
+      return '/dashboard';
+    case 'po_due_soon':
+    case 'po_overdue':
+    case 'po_delivery_set':
+      // Supplier payment reminders and delivery dates open the purchase order
+      return d.purchaseOrderId && can('purchase_orders.view') ? `/purchase-orders/${d.purchaseOrderId}` : null;
+    case 'work_submitted':
+      // A worker's finished task waiting for approval
+      return can('workers.approve') ? '/worker-dashboard' : null;
     case 'transfer_request':
     case 'transfer_dispatched':
     case 'order_cancelled':
@@ -769,63 +720,5 @@ function TrashIcon() {
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
         d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
     </svg>
-  );
-}
-
-/** Signed-in staff on the website: their initial in a bubble, with a small menu
- *  back to the system, to My Profile, or to log out. */
-function ProfileBubble() {
-  const { user, logout, can } = useAuth();
-  const router = useRouter();
-  const { confirm, confirmDialog } = useConfirm();
-  const [open, setOpen] = useState(false);
-  const boxRef = useRef<HTMLDivElement>(null);
-
-  // A click anywhere else, or Escape, closes the menu
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => { if (!boxRef.current?.contains(e.target as Node)) setOpen(false); };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', onDown);
-    window.addEventListener('keydown', onKey);
-    return () => { document.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey); };
-  }, [open]);
-
-  const signOut = async () => {
-    setOpen(false);
-    const ok = await confirm({
-      title: 'Log out?',
-      message: 'You will need to log in again to use your account.',
-      confirmLabel: 'Logout',
-      variant: 'warning',
-    });
-    if (!ok) return;
-    await logout();
-    router.push('/');
-  };
-
-  const item = 'block w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 hover:text-[#011c72] transition-colors';
-  return (
-    <div ref={boxRef} className="relative">
-      <button type="button" onClick={() => setOpen(o => !o)} aria-haspopup="menu" aria-expanded={open}
-        aria-label={`Account menu for ${user?.fullName || 'you'}`} title={user?.fullName}
-        className="w-10 h-10 rounded-full bg-[#011c72] text-white text-sm font-bold flex items-center justify-center ring-2 ring-transparent hover:ring-[#4a6aff] focus:outline-none focus-visible:ring-[#4a6aff] transition">
-        {user?.fullName?.charAt(0).toUpperCase() || '?'}
-      </button>
-      {open && (
-        <div role="menu" className="absolute right-0 mt-2 w-60 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden z-50">
-          <div className="px-4 py-3 border-b border-gray-100">
-            <p className="text-sm font-semibold text-gray-900 truncate">{user?.fullName}</p>
-            {user?.email && <p className="text-xs text-gray-500 truncate">{user.email}</p>}
-          </div>
-          <Link href={homePath(can)} role="menuitem" className={item} onClick={() => setOpen(false)}>Back to Dashboard</Link>
-          <Link href="/profile" role="menuitem" className={item} onClick={() => setOpen(false)}>My Profile</Link>
-          <button type="button" role="menuitem" onClick={signOut} className={`${item} text-red-600 hover:text-red-700 border-t border-gray-100`}>
-            Log out
-          </button>
-        </div>
-      )}
-      {confirmDialog}
-    </div>
   );
 }

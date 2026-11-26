@@ -4,13 +4,21 @@ import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api, PurchaseOrder } from '@/lib/api';
+import { formatLength } from '@/lib/length';
 import { useAuth } from '@/context/AuthContext';
 import ReceivePurchaseOrderDialog from '@/components/ReceivePurchaseOrderDialog';
+import ReturnToSupplierDialog from '@/components/ReturnToSupplierDialog';
+import SupplierCreditPanel from '@/components/SupplierCreditPanel';
 import SupplierPayments from '@/components/SupplierPayments';
+import { PurchaseOrderTermCard } from '@/components/PaymentTerms';
 import { poStatusInfo, isOpenForReceiving, poReceivingProgress } from '@/lib/purchaseOrderStatus';
 import { exactPeso } from '@/lib/format';
 
 const fmtQty = (n: number) => (Number(n) || 0).toLocaleString('en-PH', { maximumFractionDigits: 4 });
+
+/** A PO line's quantity: length for yard stock (39 yd 2 ft 1 in), else the number and unit */
+const poQty = (n: number, unit?: string) =>
+  !unit || unit === 'yd' ? formatLength(n) : `${(Number(n) || 0).toLocaleString('en-PH', { maximumFractionDigits: 4 })} ${unit}`;
 
 export default function PurchaseOrderDetailPage() {
   const router = useRouter();
@@ -22,6 +30,7 @@ export default function PurchaseOrderDetailPage() {
   const [error, setError] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
   const [receivingOpen, setReceivingOpen] = useState(false);
+  const [returningOpen, setReturningOpen] = useState(false);
   const { can } = useAuth();
 
   useEffect(() => {
@@ -92,6 +101,10 @@ export default function PurchaseOrderDetailPage() {
     );
   }
 
+  // Received items can be sent back (bad quality, damaged...)
+  const canReturnItems = !!purchaseOrder && ['partially_received', 'received'].includes(purchaseOrder.status)
+    && purchaseOrder.items.some((it) => it.receivedQuantity > 0);
+
   return (
     <div className="min-h-screen bg-gray-50">
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -155,9 +168,25 @@ export default function PurchaseOrderDetailPage() {
                 </div>
                 <div>
                   <label className="text-sm font-medium text-gray-500">Expected Delivery</label>
-                  <p className="mt-1 text-base font-medium text-gray-900">
-                    {formatDate(purchaseOrder.expectedDelivery)}
-                  </p>
+                  {purchaseOrder.expectedDelivery ? (
+                    <p className="mt-1 text-base font-medium text-gray-900">{formatDate(purchaseOrder.expectedDelivery)}</p>
+                  ) : (
+                    <p className="mt-1 text-sm text-amber-700">
+                      {purchaseOrder.status === 'pending' ? 'Set by the supplier after the PO is approved'
+                        : purchaseOrder.supplierHasLogin ? 'Waiting for the supplier to set it' : 'Not set yet'}
+                    </p>
+                  )}
+                  {purchaseOrder.supplierHasLogin && purchaseOrder.deliverySetAt && (
+                    <p className="text-xs text-gray-500 mt-0.5">Set by the supplier · {formatDate(purchaseOrder.deliverySetAt)}</p>
+                  )}
+                  {purchaseOrder.supplierNote && (
+                    <p className="text-xs text-gray-600 mt-1">Supplier&apos;s note: {purchaseOrder.supplierNote}</p>
+                  )}
+                  {!purchaseOrder.supplierHasLogin && purchaseOrder.status !== 'received' && purchaseOrder.status !== 'cancelled' && (
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      Only the supplier sets this. Create a login for them under Suppliers so they can.
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
@@ -191,17 +220,19 @@ export default function PurchaseOrderDetailPage() {
                       <tr key={index} className="hover:bg-gray-50">
                         <td className="px-4 py-3 text-sm text-gray-900">{item.name}</td>
                         <td className="px-4 py-3 text-right text-sm text-gray-600 whitespace-nowrap">
-                          {fmtQty(item.quantity)} {item.unit}
+                          {poQty(item.quantity, item.unit)}
                         </td>
                         <td className={`px-4 py-3 text-right text-sm whitespace-nowrap ${item.receivedQuantity > 0 ? 'text-green-700 font-medium' : 'text-gray-400'}`}>
-                          {fmtQty(item.receivedQuantity)}
+                          {poQty(item.receivedQuantity, item.unit)}
                         </td>
                         <td className={`px-4 py-3 text-right text-sm whitespace-nowrap ${item.remainingQuantity > 0 ? (purchaseOrder.receivingStatus === 'closed_short' ? 'text-orange-700' : 'text-gray-900') : 'text-gray-400'}`}>
-                          {item.remainingQuantity > 0 ? fmtQty(item.remainingQuantity) : '—'}
+                          {item.remainingQuantity > 0 ? poQty(item.remainingQuantity, item.unit) : '—'}
                           {item.remainingQuantity > 0 && purchaseOrder.receivingStatus === 'closed_short' && <span className="block text-xs">not received</span>}
                         </td>
                         <td className="px-4 py-3 text-right text-sm text-gray-600">
-                          {formatCurrency(item.unitPrice)}
+                          {item.unitPrice > 0 ? formatCurrency(item.unitPrice)
+                            : <span className="text-xs text-amber-700">Waiting for supplier</span>}
+                          {item.priceBySupplier && <span className="block text-[10px] text-gray-400">set by supplier</span>}
                         </td>
                         <td className="px-4 py-3 text-right text-sm font-medium text-gray-900">
                           {formatCurrency(item.quantity * item.unitPrice)}
@@ -235,10 +266,19 @@ export default function PurchaseOrderDetailPage() {
               </div>
             </div>
 
+            {/* When the supplier must be paid; changeable while pending by those who raise POs, later by approvers */}
+            {purchaseOrder.status !== 'cancelled' && (
+              <PurchaseOrderTermCard po={purchaseOrder} onChange={setPurchaseOrder}
+                canChange={can('purchase_orders.approve') || (purchaseOrder.status === 'pending' && can('purchase_orders.add'))} />
+            )}
+
             {/* Paying the supplier (separate from receiving the goods) */}
             {purchaseOrder.status !== 'cancelled' || purchaseOrder.payments.length > 0 ? (
               <SupplierPayments po={purchaseOrder} onChange={setPurchaseOrder} />
             ) : null}
+
+            {/* Paid more than the order now comes to (e.g. after a return): refund or use elsewhere */}
+            <SupplierCreditPanel po={purchaseOrder} onChange={setPurchaseOrder} canPay={can('purchase_orders.pay')} />
 
             {/* Actions */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -278,13 +318,39 @@ export default function PurchaseOrderDetailPage() {
                   );
                 })()}
 
-                {isOpenForReceiving(purchaseOrder) && can('purchase_orders.receive') && (
-                  <button
-                    onClick={() => setReceivingOpen(true)}
-                    className="w-full inline-flex items-center justify-center px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
-                  >
-                    {purchaseOrder.status === 'partially_received' ? 'Receive More Items' : 'Receive Items'}
-                  </button>
+                {can('purchase_orders.receive') && (isOpenForReceiving(purchaseOrder) || canReturnItems) && (
+                  <div className="space-y-3">
+                    {isOpenForReceiving(purchaseOrder) && (<>
+                      <button
+                        onClick={() => setReceivingOpen(true)}
+                        disabled={!!purchaseOrder.awaitingSupplier}
+                        className="w-full inline-flex items-center justify-center px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-600"
+                      >
+                        {purchaseOrder.status === 'partially_received' ? 'Receive More Items' : 'Receive Items'}
+                      </button>
+                      {/* A supplier with a login marks each delivery sent before it can be received */}
+                      {purchaseOrder.awaitingSupplier ? (
+                        <p className="-mt-1 text-xs text-amber-700 text-center">{purchaseOrder.awaitingSupplier}</p>
+                      ) : purchaseOrder.supplierSentAt && (
+                        <p className="-mt-1 text-xs text-blue-700 text-center">
+                          Sent by the supplier {formatDate(purchaseOrder.supplierSentAt)}
+                          {purchaseOrder.supplierSentNote ? ` · ${purchaseOrder.supplierSentNote}` : ''}
+                        </p>
+                      )}
+                    </>)}
+                    {/* Always under Receive Items; usable once something has been received */}
+                    <button
+                      onClick={() => setReturningOpen(true)}
+                      disabled={!canReturnItems}
+                      title={canReturnItems ? undefined : 'Items can be returned once they have been received'}
+                      className="w-full inline-flex items-center justify-center px-4 py-2 border border-orange-300 text-orange-700 hover:bg-orange-50 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                    >
+                      Return to Supplier
+                    </button>
+                    {!canReturnItems && (
+                      <p className="-mt-1 text-xs text-gray-500 text-center">Available once items have been received.</p>
+                    )}
+                  </div>
                 )}
 
                 {purchaseOrder.status === 'received' && (
@@ -350,19 +416,29 @@ export default function PurchaseOrderDetailPage() {
                 {purchaseOrder.receipts.map((r, i) => (
                   <div key={`${r.id ?? 'all'}-${i}`} className="flex gap-3">
                     <div className="flex flex-col items-center">
-                      <div className={`w-3 h-3 rounded-full mt-1.5 ${r.kind === 'closed' ? 'bg-orange-500' : 'bg-green-500'}`}></div>
+                      <div className={`w-3 h-3 rounded-full mt-1.5 ${r.kind === 'closed' ? 'bg-orange-500' : r.kind === 'return' ? 'bg-red-500' : 'bg-green-500'}`}></div>
                       {i < purchaseOrder.receipts.length - 1 && <div className="w-0.5 h-12 bg-gray-200 my-1"></div>}
                     </div>
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-gray-900">
-                        {r.kind === 'closed' ? 'Closed – rest not received' : purchaseOrder.receipts.length > 1 ? `Delivery ${i + 1} received` : 'Order Received'}
+                        {r.kind === 'closed' ? 'Closed – rest not received'
+                          : r.kind === 'return' ? `Returned to supplier${r.returnReason ? ` – ${r.returnReason}` : ''}`
+                          : purchaseOrder.receipts.filter((x) => x.kind === 'delivery').length > 1
+                            ? `Delivery ${purchaseOrder.receipts.slice(0, i + 1).filter((x) => x.kind === 'delivery').length} received` : 'Order Received'}
                       </p>
                       <p className="text-xs text-gray-500">
                         {r.receivedAt ? formatDate(r.receivedAt) : '—'}
                         {r.receivedByName && <> · {r.receivedByName}</>}
                       </p>
-                      {r.kind === 'delivery' && (
+                      {(r.kind === 'delivery' || r.kind === 'return') && (
                         <p className="text-xs text-gray-600 mt-0.5 break-words">{r.items.map((it) => `${it.name} × ${fmtQty(it.quantity)}`).join(', ')}</p>
+                      )}
+                      {r.kind === 'delivery' && r.invoiceNumber && <p className="text-xs text-gray-500 mt-0.5">Invoice no. {r.invoiceNumber}</p>}
+                      {r.kind === 'return' && (
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          {r.replacement ? 'Supplier will send replacements' : 'No replacement: taken off the order'}
+                          {r.invoiceNumber ? ` · Return slip / memo no. ${r.invoiceNumber}` : ''}
+                        </p>
                       )}
                       {r.notes && <p className="text-xs text-gray-500 mt-0.5 italic break-words">{r.notes}</p>}
                     </div>
@@ -375,7 +451,12 @@ export default function PurchaseOrderDetailPage() {
       </main>
       {receivingOpen && (
         <ReceivePurchaseOrderDialog po={purchaseOrder} onClose={() => setReceivingOpen(false)}
-          onSaved={(po) => { setReceivingOpen(false); setPurchaseOrder(po); }} />
+          onSaved={(po) => { setReceivingOpen(false); setPurchaseOrder(po); }}
+          onReturn={() => { setReceivingOpen(false); setReturningOpen(true); }} />
+      )}
+      {returningOpen && (
+        <ReturnToSupplierDialog po={purchaseOrder} onClose={() => setReturningOpen(false)}
+          onSaved={(po) => { setReturningOpen(false); setPurchaseOrder(po); }} />
       )}
     </div>
   );

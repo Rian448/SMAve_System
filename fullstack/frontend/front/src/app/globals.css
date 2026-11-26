@@ -62,6 +62,29 @@ body {
 .table-sticky-actions tbody tr:hover > td:last-child:not([colspan]) {
   background-color: #f9fafb; /* gray-50, as the header and row hover */
 }
+/* Phones: the pinned actions column wraps its buttons into a narrow stack instead of
+   a long row that covers the rest of the table */
+@media (max-width: 639px) {
+  .table-sticky-actions tr > th:last-child:not([colspan]),
+  .table-sticky-actions tr > td:last-child:not([colspan]) {
+    white-space: normal;
+    width: 7.5rem;
+    min-width: 7.5rem;
+    max-width: 7.5rem;
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+  .table-sticky-actions tr > td:last-child:not([colspan]) > div {
+    flex-wrap: wrap;
+    row-gap: 0.25rem;
+  }
+  .table-sticky-actions tr > td:last-child:not([colspan]) button,
+  .table-sticky-actions tr > td:last-child:not([colspan]) a {
+    display: inline-block;
+    margin-top: 0.125rem;
+    margin-bottom: 0.125rem;
+  }
+}
 
 /* Rows of summary cards: equal-width cards, and a row that isn't full sits in
    the middle instead of hugging the left edge. Columns per row come from

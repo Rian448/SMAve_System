@@ -5,16 +5,19 @@ import { api, Branch, User as UserType, Role } from '@/lib/api';
 import { useConfirm } from '@/components/ConfirmDialog';
 import PermissionsDialog from '@/components/PermissionsDialog';
 import VatRateSetting from '@/components/VatRateSetting';
+import PaymentTermsSetting from '@/components/PaymentTermsSetting';
+import AppearanceSetting from '@/components/AppearanceSetting';
 import { formatDate } from '@/lib/dateUtils';
 import { useFieldErrors, FieldError, emailProblem } from '@/lib/useFieldErrors';
 import Paginated from '@/components/Paginated';
 import { passwordProblem } from '@/lib/password';
 import PasswordChecklist from '@/components/PasswordChecklist';
 
-type TabType = 'general' | 'users' | 'branches' | 'notifications';
+type TabType = 'general' | 'users' | 'branches' | 'notifications' | 'appearance';
 
-// Roles not offered when adding a user: workers are managed in Worker Management
-const HIDDEN_ROLES = ['seat_maker', 'sewer'];
+// Roles not offered when adding a user: workers are managed in Worker Management,
+// supplier logins are made from Suppliers
+const HIDDEN_ROLES = ['seat_maker', 'sewer', 'supplier'];
 
 export default function SettingsPage() {
   const { user, can, checkAuth } = useAuth();
@@ -135,6 +138,16 @@ export default function SettingsPage() {
     }
   };
 
+  // Supervisors are always based at the main warehouse (and see every branch from
+  // there); sales managers work at a shop branch, never the warehouse
+  const mainWarehouse = branches.find((b) => b.isWarehouse && b.isActive) || branches.find((b) => b.isWarehouse);
+  const shopBranches = branches.filter((b) => !b.isWarehouse);
+  const branchForRole = (role: string, current: number) => {
+    if (role === 'supervisor') return mainWarehouse?.id || 0;
+    if (role === 'sales_manager' && branches.find((b) => b.id === current)?.isWarehouse) return shopBranches[0]?.id || 0;
+    return current;
+  };
+
   const handleAddUser = () => {
     setUserFormData({ 
       username: '', 
@@ -142,7 +155,7 @@ export default function SettingsPage() {
       email: '', 
       fullName: '', 
       role: 'sales_manager',
-      branchId: branches.length > 0 ? branches[0].id : 0
+      branchId: shopBranches[0]?.id || 0
     });
     setEditingUser(null);
     setUserError('');
@@ -157,7 +170,7 @@ export default function SettingsPage() {
       email: user.email,
       fullName: user.fullName,
       role: user.role,
-      branchId: user.branchId || 0
+      branchId: branchForRole(user.role, user.branchId || 0)
     });
     setEditingUser(user);
     setUserError('');
@@ -181,7 +194,9 @@ export default function SettingsPage() {
         : password && passwordProblem(password),
       'user-adminPassword': changingPassword && !adminPassword && 'Enter your own password to confirm the password change.',
       'user-role': !userFormData.role && 'Choose a role.',
-      'user-branch': !userFormData.branchId && 'Choose a branch.',
+      'user-branch': userFormData.role === 'supervisor'
+        ? !mainWarehouse && 'Set up the main warehouse (Branches tab) before adding a supervisor.'
+        : !userFormData.branchId && 'Choose a branch.',
     })) return;
 
     if (changingPassword) {
@@ -516,6 +531,11 @@ export default function SettingsPage() {
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
       </svg>
     )},
+    { id: 'appearance' as TabType, name: 'Appearance', icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+      </svg>
+    )},
     { id: 'notifications' as TabType, name: 'Notifications', icon: (
       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
@@ -527,10 +547,13 @@ export default function SettingsPage() {
 
   const renderContent = () => {
     switch (activeTab) {
+      case 'appearance':
+        return <AppearanceSetting canEdit={can('settings.edit')} />;
       case 'general':
         return (
           <div className="space-y-6">
             <VatRateSetting canEdit={can('settings.edit')} />
+            <PaymentTermsSetting canEdit={can('settings.edit')} />
             <div>
               <h3 className="text-lg font-semibold text-gray-900 mb-4">Company Information</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -605,6 +628,7 @@ export default function SettingsPage() {
                     className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   >
                     <option value="all">All Users</option>
+                    <option value="owner">Owner</option>
                     <option value="administrator">Administrator</option>
                     <option value="supervisor">Supervisor</option>
                     <option value="sales_manager">Sales Manager</option>
@@ -674,6 +698,8 @@ export default function SettingsPage() {
                               ? 'bg-purple-100 text-purple-700'
                               : u.role === 'sewer'
                               ? 'bg-pink-100 text-pink-700'
+                              : u.role === 'supplier'
+                              ? 'bg-amber-100 text-amber-800'
                             : 'bg-gray-100 text-gray-700'
                         }`}>
                             {(u.roleName || u.role.replace('_', ' ')).toUpperCase()}
@@ -694,11 +720,14 @@ export default function SettingsPage() {
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                           {can('users.manage') && (
                             <>
+                              {/* Even gaps instead of a margin on all but the last, so the links
+                                  line up when the narrow phone column stacks them */}
+                              <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
                               <button 
                                 onClick={() => handleEditUser(u)}
                                 disabled={!!offLimitsReason(u)}
                                 title={offLimitsReason(u) || undefined}
-                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300"
+                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium disabled:cursor-not-allowed disabled:text-gray-300"
                               >
                           Edit
                         </button>
@@ -706,7 +735,7 @@ export default function SettingsPage() {
                                 onClick={() => setPermTarget(u)}
                                 disabled={!!offLimitsReason(u)}
                                 title={offLimitsReason(u) || undefined}
-                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300"
+                                className="text-[#011c72] hover:text-[#011c72] text-sm font-medium disabled:cursor-not-allowed disabled:text-gray-300"
                               >
                                 Permissions
                               </button>
@@ -714,7 +743,7 @@ export default function SettingsPage() {
                                 onClick={() => handleToggleUserStatus(u)}
                                 disabled={!!protectedReason(u)}
                                 title={protectedReason(u) || undefined}
-                                className={`text-sm font-medium mr-3 disabled:cursor-not-allowed disabled:text-gray-300 ${
+                                className={`text-sm font-medium disabled:cursor-not-allowed disabled:text-gray-300 ${
                                   u.isActive
                                     ? 'text-yellow-600 hover:text-yellow-700'
                                     : 'text-green-600 hover:text-green-700'
@@ -730,6 +759,7 @@ export default function SettingsPage() {
                               >
                                 Delete
                               </button>
+                              </div>
                               {/* Say why up front rather than failing after a dialog. */}
                               {protectedReason(u) && (
                                 <p className="mt-1 text-xs text-gray-400">{protectedReason(u)}</p>
@@ -1307,7 +1337,8 @@ export default function SettingsPage() {
                   </label>
                   <select
                     value={userFormData.role}
-                    onChange={(e) => setUserFormData({ ...userFormData, role: e.target.value })}
+                    onChange={(e) => setUserFormData({ ...userFormData, role: e.target.value,
+                      branchId: branchForRole(e.target.value, userFormData.branchId) })}
                     className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   >
                     {/* An existing account keeps its own role in the list so editing it still works */}
@@ -1329,18 +1360,29 @@ export default function SettingsPage() {
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Branch *
                   </label>
+                  {userFormData.role === 'supervisor' ? (
+                    // Not a choice: supervisors are based at the main warehouse
+                    <div className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-700">
+                      {mainWarehouse ? `${mainWarehouse.name} (${mainWarehouse.code})` : 'No main warehouse set up'}
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        Supervisors are based at the main warehouse and can see every branch.
+                      </p>
+                    </div>
+                  ) : (
                   <select
                     value={userFormData.branchId}
                     onChange={(e) => setUserFormData({ ...userFormData, branchId: Number(e.target.value) })}
                     className="w-full px-4 py-2 rounded-lg border border-gray-200 bg-white text-gray-900 focus:ring-2 focus:ring-[#011c72] focus:border-transparent"
                   >
                     <option value={0}>Select a branch</option>
-                    {branches.map((branch) => (
+                    {/* Sales managers work at a shop branch, never the main warehouse */}
+                    {(userFormData.role === 'sales_manager' ? shopBranches : branches).map((branch) => (
                       <option key={branch.id} value={branch.id}>
                         {branch.name} ({branch.code})
                       </option>
                     ))}
                   </select>
+                  )}
                   <FieldError message={fe.errors['user-branch']} />
                 </div>
               </div>

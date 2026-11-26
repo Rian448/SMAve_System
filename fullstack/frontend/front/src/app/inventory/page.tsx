@@ -6,10 +6,14 @@ import { useAuth } from '@/context/AuthContext';
 import { api, ApiError, RawMaterial, FinishedGood, MaterialUsageLog, Supplier, MaterialWasteLog, AIStatus, PremadeTransfer, FORECAST_METHOD_LABELS, type PremadeRecipe } from '@/lib/api';
 import PremadeItemPicker from '@/components/PremadeItemPicker';
 import { useConfirm } from '@/components/ConfirmDialog';
+import NeededMaterialsPanel from '@/components/NeededMaterialsPanel';
 import { useFieldErrors, FieldError } from '@/lib/useFieldErrors';
 import Link from 'next/link';
 import Paginated from '@/components/Paginated';
 import { exactPeso } from '@/lib/format';
+import LengthInput from '@/components/LengthInput';
+import { formatLength, formatMaterialQty } from '@/lib/length';
+import { findSimilarName, normalizeName } from '@/lib/similarNames';
 
 type TabType = 'raw-materials' | 'finished-goods' | 'material-usage' | 'waste-log' | 'ai-predictions';
 
@@ -75,7 +79,7 @@ function InventoryContent() {
   const [saving, setSaving] = useState(false);
   const [searchTerm, setSearchTerm] = useState(searchParams.get('q') || '');
   const statusParam = searchParams.get('status');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'in-stock' | 'low-stock' | 'out-of-stock'>(
+  const [statusFilter, setStatusFilter] = useState<'all' | 'in-stock' | 'low-stock' | 'out-of-stock' | 'consumables'>(
     statusParam === 'low-stock' || statusParam === 'out-of-stock' || statusParam === 'in-stock'
       ? statusParam
       : 'all'
@@ -110,7 +114,9 @@ function InventoryContent() {
     unitPrice: '',
     priceMode: 'markup' as 'markup' | 'manual',
     supplierId: '',
-    stockQuantity: ''
+    stockQuantity: '',
+    isConsumable: false,
+    unit: 'pcs',
   });
 
   const [globalThreshold, setGlobalThreshold] = useState(0);
@@ -141,15 +147,17 @@ function InventoryContent() {
   // AI Predictions
   const [aiStatus, setAiStatus] = useState<AIStatus | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
-  const [uploadSuccess, setUploadSuccess] = useState('');
   // Confirmation after waste is saved or undone (shown on the waste form)
   const [wasteSuccess, setWasteSuccess] = useState('');
   const [predSearch, setPredSearch] = useState('');
   const [predUrgencyFilter, setPredUrgencyFilter] = useState<'all' | 'urgent' | 'soon' | 'ok'>('all');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [aiAlertDismissed, setAiAlertDismissed] = useState(false);
+  // Suggestions picked to order: each material's supplier and unit come from Inventory
+  const [predMaterials, setPredMaterials] = useState<RawMaterial[]>([]);
+  const [predSuppliers, setPredSuppliers] = useState<Supplier[]>([]);
+  const [predPicked, setPredPicked] = useState<Set<string>>(new Set());
 
   const [branches, setBranches] = useState<{ id: number; name: string; isWarehouse: boolean; isActive: boolean }[]>([]);
   const [newPremade, setNewPremade] = useState({
@@ -230,6 +238,8 @@ function InventoryContent() {
   // their own. Premade stock is produced and sent out from the warehouse.
   const managesAllInventory = can('branches.all');
   const canDistribute = can('premade.distribute') && managesAllInventory;
+  // Ready-made table: no Actions column for someone with none of its buttons (e.g. a sales manager)
+  const premadeHasActions = can('premade.edit') || can('premade.adjust_stock') || canDistribute;
   /** Admin/supervisor approve on someone's behalf, so they get a confirm step first. */
   const confirmsViaDialog = can('branches.all', 'premade.distribute');
   // Only all-branch access sees every branch's inventory (the server enforces the
@@ -315,6 +325,13 @@ function InventoryContent() {
         .catch(() => {});
     }
   }, [newPremade.branchId, activeTab, can]);
+
+  // AI Predictions: each material's supplier and unit, to show and to order from
+  useEffect(() => {
+    if (activeTab !== 'ai-predictions') return;
+    api.inventory.getRawMaterials({ includeWarehouse: true }).then(res => setPredMaterials(res.data || [])).catch(() => {});
+    api.inventory.getSuppliers().then(res => setPredSuppliers(res.data || [])).catch(() => {});
+  }, [activeTab]);
 
   const fetchInventory = async () => {
     setLoading(true);
@@ -419,8 +436,38 @@ function InventoryContent() {
       unitPrice: String(material.unitPrice),
       priceMode: 'markup',
       supplierId: material.supplierId != null ? String(material.supplierId) : '',
-      stockQuantity: String(material.stockQuantity)
+      stockQuantity: String(material.stockQuantity),
+      isConsumable: !!material.isConsumable,
+      unit: material.isConsumable ? (material.unit || 'pcs') : 'pcs',
     });
+  };
+
+  // Consumables: marked fully used (leaves stock) or partly used (recorded only)
+  const [consumableBusyId, setConsumableBusyId] = useState<number | null>(null);
+  const markConsumable = async (material: RawMaterial, kind: 'full' | 'partial') => {
+    const name = [material.materialType, material.color, material.pattern].filter(Boolean).join(' - ');
+    const unit = material.unit || 'pcs';
+    const ok = await confirm(kind === 'full' ? {
+      title: 'Mark as fully used?',
+      message: <>One {unit === 'pcs' ? 'piece' : unit} of {name} is used up and leaves stock
+        ({formatMaterialQty(material.stockQuantity, material)} now, {formatMaterialQty(Math.max(0, material.stockQuantity - 1), material)} after).</>,
+      confirmLabel: 'Fully used',
+    } : {
+      title: 'Mark as partially used?',
+      message: <>{name} is recorded as opened and partly used. Stock stays at {formatMaterialQty(material.stockQuantity, material)} until it is marked fully used.</>,
+      confirmLabel: 'Partially used',
+    });
+    if (!ok) return;
+    setConsumableBusyId(material.id);
+    setFormError('');
+    try {
+      await api.inventory.consumableUse(material.id, { kind, quantity: kind === 'full' ? 1 : undefined });
+      await fetchInventory();
+    } catch (err) {
+      setFormError(err instanceof Error && err.message ? err.message : 'Could not record the use.');
+    } finally {
+      setConsumableBusyId(null);
+    }
   };
 
   const handleSaveMaterial = async (materialId: number) => {
@@ -446,6 +493,8 @@ function InventoryContent() {
         markupPercent: Number.isNaN(markupPercent) ? 25 : markupPercent,
         ...(editMaterial.priceMode === 'manual' ? { unitPrice: Number(editMaterial.unitPrice) } : {}),
         supplierId: editMaterial.supplierId ? Number(editMaterial.supplierId) : null,
+        isConsumable: editMaterial.isConsumable,
+        ...(editMaterial.isConsumable ? { unit: editMaterial.unit.trim() || 'pcs' } : {}),
       });
 
       setEditingMaterialId(null);
@@ -470,7 +519,8 @@ function InventoryContent() {
     const restocking = premadeMode === 'restock';
     if (fe.show({
       'premade-product': restocking && !restockProductId && 'Choose the product to add stock to.',
-      'premade-name': !restocking && !newPremade.name.trim() && 'Enter the product name.',
+      'premade-name': !restocking && (!newPremade.name.trim() ? 'Enter the product name.'
+        : sameNameAndCategory && nameMatch && `${nameMatch.item.name} (${nameMatch.item.category}) already exists. Use "Add stock to it instead".`),
       'premade-quantity': (Number.isNaN(quantity) || !(quantity > 0)) && 'Enter how many pieces (more than 0).',
       'premade-price': !restocking && Number.isNaN(price) && 'Price must be a number.',
       'premade-branch': !branchId && 'Choose where this product goes.',
@@ -598,6 +648,18 @@ function InventoryContent() {
   // Warehouse rows are the ones stock is made into (branches get theirs by delivery)
   const restockable = finishedGoods.filter((g) => g.isWarehouse && !g.isArchived);
   const restockProduct = restockable.find((g) => g.id === restockProductId);
+
+  // A new product named like one already in stock: the same name in other capitals
+  // or spacing ("TESLA" / "tesla"), or a typo away ("Telsa" / "Tesla")
+  const [similarDismissed, setSimilarDismissed] = useState('');
+  const nameMatch = premadeMode === 'new' ? findSimilarName(newPremade.name, restockable, (g) => g.name) : null;
+  const sameNameAndCategory = nameMatch?.kind === 'same'
+    && normalizeName(nameMatch.item.category || '') === normalizeName(newPremade.category || '');
+  const showNameMatch = !!nameMatch && (nameMatch.kind === 'same' || similarDismissed !== normalizeName(newPremade.name));
+  const switchToExistingProduct = (id: number) => {
+    switchPremadeMode('restock');
+    chooseRestockProduct(id);
+  };
   const recipeById = new Map((recipe?.materials || []).map((m) => [String(m.materialId), m]));
 
   // ── Distribution ──────────────────────────────────────────────────────────
@@ -830,24 +892,6 @@ function InventoryContent() {
     }
   };
 
-  const handleUploadHistorical = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setUploading(true);
-    setUploadError('');
-    setUploadSuccess('');
-    try {
-      const res = await api.inventory.ai.uploadHistorical(file);
-      setUploadSuccess(res.message || `Uploaded ${res.data?.rowsSaved} rows. Computing predictions...`);
-      await fetchAIPredictions();
-    } catch (err) {
-      setUploadError((err as Error)?.message || 'Upload failed.');
-    } finally {
-      setUploading(false);
-      e.target.value = '';
-    }
-  };
-
   const handleRecompute = async () => {
     try {
       await api.inventory.ai.recompute();
@@ -896,9 +940,13 @@ function InventoryContent() {
         statusFilter === 'all' ||
         (statusFilter === 'out-of-stock' && qty <= 0) ||
         (statusFilter === 'low-stock' && isLowStock(qty, m.lowStockThreshold)) ||
-        (statusFilter === 'in-stock' && qty > 0 && !isLowStock(qty, m.lowStockThreshold));
+        (statusFilter === 'in-stock' && qty > 0 && !isLowStock(qty, m.lowStockThreshold)) ||
+        (statusFilter === 'consumables' && !!m.isConsumable);
       return matchesSearch && matchesType && matchesStatus;
-    });
+    })
+      // Latest activity first: a material just added, used on a job, restocked
+      // from a purchase order or edited sits at the top
+      .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '') || b.id - a.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rawMaterials, searchTerm, statusFilter, materialTypeFilter, globalThreshold]);
 
@@ -962,7 +1010,7 @@ function InventoryContent() {
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
       </svg>
     )},
-    { id: 'material-usage' as TabType, name: 'Material Usage', icon: (
+    { id: 'material-usage' as TabType, name: 'Item Trail', icon: (
       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
       </svg>
@@ -1146,7 +1194,7 @@ function InventoryContent() {
                         <ul className="mt-1 space-y-0.5">
                           {lowStockItems.map(m => (
                             <li key={m.id} className="text-xs text-orange-600">
-                              {m.materialType}{m.color ? ` (${m.color})` : ''}{m.pattern ? ` / ${m.pattern}` : ''} — {m.stockQuantity} yd remaining
+                              {m.materialType}{m.color ? ` (${m.color})` : ''}{m.pattern ? ` / ${m.pattern}` : ''} — {formatMaterialQty(m.stockQuantity, m)} remaining
                             </li>
                           ))}
                         </ul>
@@ -1323,6 +1371,28 @@ function InventoryContent() {
                   className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
                 />
                 <FieldError message={fe.errors['premade-name']} />
+                {nameMatch && showNameMatch && (
+                  <div role="status" className={`mt-2 rounded-lg border px-3 py-2 text-sm ${nameMatch.kind === 'same'
+                    ? 'border-red-200 bg-red-50 text-red-800' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
+                    <p>
+                      {nameMatch.kind === 'same'
+                        ? <>This product already exists: <b>{nameMatch.item.name}</b></>
+                        : <>Did you mean <b>{nameMatch.item.name}</b>? It is already in stock.</>}
+                      <span className="text-xs"> ({nameMatch.item.category} · {nameMatch.item.quantity} in stock)</span>
+                    </p>
+                    {nameMatch.kind === 'same' && !sameNameAndCategory && (
+                      <p className="text-xs mt-0.5">It is under another category, so a new one here is a separate variant.</p>
+                    )}
+                    <div className="mt-1.5 flex flex-wrap gap-3">
+                      <button type="button" onClick={() => switchToExistingProduct(nameMatch.item.id)}
+                        className="text-xs font-semibold text-[#011c72] hover:underline">Add stock to it instead</button>
+                      {nameMatch.kind === 'similar' && (
+                        <button type="button" onClick={() => setSimilarDismissed(normalizeName(newPremade.name))}
+                          className="text-xs text-gray-600 hover:underline">No, it&apos;s a different product</button>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>}
               <div {...fe.field('premade-quantity')}>
                 <input
@@ -1407,24 +1477,15 @@ function InventoryContent() {
                     <select
                       value={entry.materialId}
                       onChange={(e) => updatePremadeMaterialRow(index, 'materialId', e.target.value)}
-                      className="md:col-span-7 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
+                      className="md:col-span-10 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
                     >
                       <option value="">Select material</option>
                       {rawMaterials.map((material) => (
                         <option key={material.id} value={material.id}>
-                          {material.materialType}{material.color ? ` - ${material.color}` : ''}{material.pattern ? ` (${material.pattern})` : ''} ({material.stockQuantity} yd available)
+                          {material.materialType}{material.color ? ` - ${material.color}` : ''}{material.pattern ? ` (${material.pattern})` : ''} ({formatMaterialQty(material.stockQuantity, material)} available)
                         </option>
                       ))}
                     </select>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={entry.quantityUsed}
-                      onChange={(e) => updatePremadeMaterialRow(index, 'quantityUsed', e.target.value)}
-                      placeholder="Yards used"
-                      className="md:col-span-3 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900"
-                    />
                     <button
                       type="button"
                       onClick={() => removePremadeMaterialRow(index)}
@@ -1432,14 +1493,36 @@ function InventoryContent() {
                     >
                       Remove
                     </button>
+                    {/* Amount used: a length (yd / ft / in / cm, added up) for yard stock, a count for consumables */}
+                    {(() => {
+                      const mat = rawMaterials.find((x) => String(x.id) === entry.materialId);
+                      return (
+                        <div className="md:col-span-12">
+                          <p className="text-xs font-medium text-gray-500 mb-1">
+                            Amount used {mat?.isConsumable ? `(${mat.unit || 'pcs'})` : '(yd / ft / in / cm)'}
+                          </p>
+                          {mat?.isConsumable ? (
+                            <input type="number" min="0" step="1" value={entry.quantityUsed}
+                              onChange={(e) => updatePremadeMaterialRow(index, 'quantityUsed', e.target.value)}
+                              placeholder={mat.unit || 'pcs'}
+                              className="w-40 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900" />
+                          ) : (
+                            <div className="max-w-xl">
+                              <LengthInput value={entry.quantityUsed === '' ? '' : Number(entry.quantityUsed)} ariaLabel="Amount used"
+                                onChange={(yards) => updatePremadeMaterialRow(index, 'quantityUsed', yards ? String(yards) : '')} />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                     {premadeMode === 'restock' && recipeById.get(entry.materialId) && (() => {
                       const r = recipeById.get(entry.materialId)!;
                       const needed = Number(entry.quantityUsed) || 0;
                       return (
                         <p className={`md:col-span-12 -mt-1 text-xs ${needed > r.stock ? 'text-red-600' : 'text-gray-500'}`}>
-                          Previously {r.perPiece != null ? `${r.perPiece.toLocaleString('en-PH', { maximumFractionDigits: 4 })} yd per piece` : `${r.batchQuantity} yd for a batch`}
+                          Previously {r.perPiece != null ? `${formatLength(r.perPiece)} per piece` : `${formatLength(r.batchQuantity)} for a batch`}
                           {r.costPerUnit > 0 && ` · ₱${r.costPerUnit.toLocaleString('en-PH', { minimumFractionDigits: 2 })} per yard (≈ ₱${(needed * r.costPerUnit).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} for this)`}
-                          {` · ${r.stock.toLocaleString('en-PH')} yd in stock`}{needed > r.stock && ' — not enough'}
+                          {` · ${formatLength(r.stock)} in stock`}{needed > r.stock && ' — not enough'}
                         </p>
                       );
                     })()}
@@ -1521,49 +1604,26 @@ function InventoryContent() {
           );
         })()}
 
-        {/* AI Historical Upload */}
-        {/* Uploading or recomputing the AI data changes it, so it needs Manage AI data */}
+        {/* AI forecast: refresh the predictions (uploading historical files was removed to keep it simple) */}
         {activeTab === 'ai-predictions' && can('forecasting.manage') && (
           <div className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
               <div>
-                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                  <svg className="w-5 h-5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                  </svg>
-                  Upload Historical Data
-                </h2>
-                <p className="text-sm text-gray-500 mt-1">
-                  Upload an Excel file (.xlsx) with columns: <span className="font-mono text-xs bg-gray-100 px-1 rounded">Item_ID, Stock_Quantity, Incoming_Date, Outgoing_Date</span>. Optional: <span className="font-mono text-xs bg-gray-100 px-1 rounded">Restock_Date, Restock_Quantity, Restock_Cycle</span>
-                </p>
-                {aiStatus?.lastUploadedAt && (
-                  <p className="text-xs text-gray-400 mt-1">
-                    Last upload: {formatDateTime(aiStatus.lastUploadedAt)} — {aiStatus.uploadRows} rows, {aiStatus.uploadItems} items
-                  </p>
-                )}
+                <h2 className="text-lg font-semibold text-gray-900">AI Forecast</h2>
+                <p className="text-sm text-gray-500 mt-1">Restock predictions for your materials. Use Recompute to refresh them.</p>
               </div>
-              <div className="flex items-center gap-3 flex-shrink-0">
-                <label className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-colors cursor-pointer ${uploading ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-[#011c72] hover:bg-[#01268c] text-white'}`}>
+              {aiStatus?.status !== 'computing' && (
+                <button onClick={handleRecompute} className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-600 hover:bg-gray-50 transition-colors flex-shrink-0">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                   </svg>
-                  {uploading ? 'Uploading...' : 'Choose File'}
-                  <input type="file" accept=".xlsx,.xls" className="hidden" disabled={uploading} onChange={handleUploadHistorical} />
-                </label>
-                {aiStatus?.uploadRows && aiStatus.uploadRows > 0 && aiStatus.status !== 'computing' && (
-                  <button onClick={handleRecompute} className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-600 hover:bg-gray-50 transition-colors">
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                    Recompute
-                  </button>
-                )}
-              </div>
+                  Recompute
+                </button>
+              )}
             </div>
             {uploadError && <p className="mt-3 text-sm text-red-600">{uploadError}</p>}
-            {uploadSuccess && <p className="mt-3 text-sm text-green-600">{uploadSuccess}</p>}
 
-            {/* Prominent progress bar shown directly in upload section */}
+            {/* Progress while the AI is training */}
             {aiStatus?.status === 'computing' && (
               <div className="mt-4 p-4 rounded-lg bg-[#eef1fb] border border-[#c7d2f5]">
                 <div className="flex items-center justify-between mb-2">
@@ -1606,7 +1666,7 @@ function InventoryContent() {
                 <select value={newWaste.materialId} onChange={e => setNewWaste(p => ({ ...p, materialId: e.target.value }))} className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-900">
                   <option value="">Select Material *</option>
                   {rawMaterials.map(m => (
-                    <option key={m.id} value={m.id}>{m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({m.stockQuantity} yd available)</option>
+                    <option key={m.id} value={m.id}>{m.materialType}{m.color ? ` - ${m.color}` : ''}{m.pattern ? ` (${m.pattern})` : ''} ({formatMaterialQty(m.stockQuantity, m)} available)</option>
                   ))}
                 </select>
                 <FieldError message={fe.errors['waste-material']} />
@@ -1633,12 +1693,13 @@ function InventoryContent() {
         {/* Tabs */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 mb-6">
           <div className="border-b border-gray-200">
-            <nav className="flex -mb-px">
+            {/* Swipe sideways on phones instead of pushing the page wider */}
+            <nav className="flex -mb-px overflow-x-auto">
               {tabs.map((tab) => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center px-6 py-4 text-sm font-medium border-b-2 transition-colors ${
+                  className={`flex items-center shrink-0 whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4 text-sm font-medium border-b-2 transition-colors ${
                     activeTab === tab.id
                       ? 'border-[#011c72] text-[#011c72]'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -1689,6 +1750,7 @@ function InventoryContent() {
                     <option value="in-stock">In Stock</option>
                     <option value="low-stock">Low Stock</option>
                     <option value="out-of-stock">Out of Stock</option>
+                    <option value="consumables">Consumables</option>
                   </select>
                   {(searchTerm || materialTypeFilter || statusFilter !== 'all') && (
                     <button
@@ -1714,6 +1776,8 @@ function InventoryContent() {
               )}
               {activeTab === 'finished-goods' && (
                 <>
+                  {/* Sales managers only see their own branch's stock, so no location to pick */}
+                  {user?.role !== 'sales_manager' && (
                   <select
                     value={premadeBranchFilter}
                     onChange={(e) => setPremadeBranchFilter(e.target.value)}
@@ -1731,6 +1795,7 @@ function InventoryContent() {
                       </option>
                     ))}
                   </select>
+                  )}
                   {(searchTerm || premadeBranchFilter !== 'all') && (
                     <button
                       onClick={() => { setSearchTerm(''); setPremadeBranchFilter('all'); }}
@@ -1743,6 +1808,11 @@ function InventoryContent() {
               )}
             </div>
           </div>}
+
+          {/* What open job orders still need and don't have in stock */}
+          {activeTab === 'raw-materials' && !loading && (
+            <NeededMaterialsPanel branchId={listBranchId} onChanged={fetchInventory} />
+          )}
 
           {/* Content */}
           {loading && activeTab !== 'ai-predictions' ? (
@@ -1823,6 +1893,25 @@ function InventoryContent() {
                               className="px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900"
                             />
                           </div>
+                          <div className="flex items-center gap-3 flex-wrap">
+                            <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                              <input type="checkbox" checked={editMaterial.isConsumable}
+                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, isConsumable: e.target.checked }))}
+                                className="w-4 h-4 rounded border-gray-300 text-[#011c72] focus:ring-[#011c72]" />
+                              Consumable (glue, thread, staples...)
+                            </label>
+                            {editMaterial.isConsumable && (
+                              <input type="text" value={editMaterial.unit} aria-label="Counted in"
+                                onChange={(e) => setEditMaterial((prev) => ({ ...prev, unit: e.target.value.slice(0, 20) }))}
+                                placeholder="pcs"
+                                className="w-24 px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+                            )}
+                            <span className="text-xs text-gray-500">
+                              {editMaterial.isConsumable
+                                ? 'Counted in plain units, not chosen on job orders, marked used here.'
+                                : 'Length stock in yards (shown as yd / ft / in).'}
+                            </span>
+                          </div>
                           {/* Pricing */}
                           <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
                             <div className="flex items-center gap-3 mb-2">
@@ -1842,7 +1931,7 @@ function InventoryContent() {
                             </div>
                             <div className="grid grid-cols-3 gap-2 items-end">
                               <div>
-                                <label className="block text-xs text-gray-500 mb-1">Cost/Yard (₱)</label>
+                                <label className="block text-xs text-gray-500 mb-1">Cost/{editMaterial.isConsumable ? (editMaterial.unit || 'pc') : 'Yard'} (₱)</label>
                                 <input type="number" min="0" step="0.01" value={editMaterial.costPerUnit}
                                   onChange={(e) => setEditMaterial((prev) => ({ ...prev, costPerUnit: e.target.value }))}
                                   placeholder="0.00"
@@ -1888,8 +1977,8 @@ function InventoryContent() {
                           </div>
                         </div>
                       ) : (
-                        /* View mode */
-                        <div className="flex items-center gap-4">
+                        /* View mode: on phones the status and buttons go under the details */
+                        <div className="flex flex-wrap sm:flex-nowrap items-center gap-x-4 gap-y-2">
                           {/* Color swatch */}
                           <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-[#dde6ff] flex items-center justify-center">
                             <svg className="w-5 h-5 text-[#011c72]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1909,6 +1998,13 @@ function InventoryContent() {
                               {material.sku && (
                                 <span className="text-xs font-mono text-gray-400">{material.sku}</span>
                               )}
+                              {material.isConsumable && (
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-purple-50 text-purple-700">Consumable</span>
+                              )}
+                              {material.isConsumable && material.partialUseAt && (
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-amber-50 text-amber-700"
+                                  title={`Marked partially used ${formatDateTime(material.partialUseAt)}`}>Partially used</span>
+                              )}
                               {material.supplierName && (
                                 <span className="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700">{material.supplierName}</span>
                               )}
@@ -1923,11 +2019,11 @@ function InventoryContent() {
                                 </span>
                               )}
                               <span>Selling: <span className="font-medium text-gray-700">{formatCurrency(material.unitPrice)}</span></span>
-                              <span>Stock: <span className="font-medium text-gray-700">{material.stockQuantity} yd</span></span>
+                              <span>Stock: <span className="font-medium text-gray-700">{formatMaterialQty(material.stockQuantity, material)}</span></span>
                             </div>
                           </div>
                           {/* Status + actions */}
-                          <div className="flex-shrink-0 flex items-center gap-3">
+                          <div className="flex-shrink-0 flex flex-wrap items-center gap-x-3 gap-y-1 w-full sm:w-auto pl-14 sm:pl-0">
                             <span className={`px-2 py-1 text-xs font-medium rounded-full ${status.class}`}>
                               {status.label}
                             </span>
@@ -1942,11 +2038,26 @@ function InventoryContent() {
                             {canChangeMaterial(material) && can('inventory.adjust_stock') && (
                               <button
                                 onClick={() => openAdjust({ kind: 'material', id: material.id, current: material.stockQuantity,
-                                  name: [material.materialType, material.color, material.pattern].filter(Boolean).join(' - '), unit: 'yd' })}
+                                  name: [material.materialType, material.color, material.pattern].filter(Boolean).join(' - '),
+                                  unit: material.isConsumable ? (material.unit || 'pcs') : 'yd' })}
                                 className="text-sm font-medium text-amber-700 hover:text-amber-800 transition-colors"
                               >
                                 Adjust stock
                               </button>
+                            )}
+                            {material.isConsumable && canChangeMaterial(material) && can('inventory.log_waste', 'inventory.adjust_stock') && (
+                              <>
+                                <button type="button" disabled={consumableBusyId === material.id || material.stockQuantity <= 0}
+                                  onClick={() => markConsumable(material, 'full')}
+                                  className="text-sm font-medium text-red-700 hover:text-red-800 disabled:opacity-40 transition-colors">
+                                  Fully used
+                                </button>
+                                <button type="button" disabled={consumableBusyId === material.id || material.stockQuantity <= 0}
+                                  onClick={() => markConsumable(material, 'partial')}
+                                  className="text-sm font-medium text-gray-600 hover:text-gray-800 disabled:opacity-40 transition-colors">
+                                  Partially used
+                                </button>
+                              </>
                             )}
                           </div>
                         </div>
@@ -2051,7 +2162,7 @@ function InventoryContent() {
                 </div>
               ) : (
                 <Paginated items={filteredFinishedGoods} resetKey={[searchTerm, premadeBranchFilter]} label="products">{rows => (
-                <table className="w-full table-sticky-actions">
+                <table className={`w-full ${premadeHasActions ? 'table-sticky-actions' : ''}`}>
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Product</th>
@@ -2060,7 +2171,7 @@ function InventoryContent() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Price</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                      <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                      {premadeHasActions && <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
@@ -2126,6 +2237,7 @@ function InventoryContent() {
                               {status.label}
                             </span>
                           </td>
+                          {premadeHasActions && (
                           <td className="px-6 py-4 whitespace-nowrap text-right">
                             {editingPremadeId === item.id ? (
                               <div className="flex items-center justify-end gap-2">
@@ -2177,6 +2289,7 @@ function InventoryContent() {
                               </button>
                             )}
                           </td>
+                          )}
                         </tr>
                       );
                     })}
@@ -2192,19 +2305,19 @@ function InventoryContent() {
                   <svg className="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
-                  <h3 className="text-lg font-medium text-gray-900 mb-2">No material usage yet</h3>
-                  <p className="text-gray-500">Material usage entries appear here when premade products are added or job orders are completed.</p>
+                  <h3 className="text-lg font-medium text-gray-900 mb-2">Nothing in the item trail yet</h3>
+                  <p className="text-gray-500">Entries appear here when materials come in or go out: purchase order deliveries and returns, premade products added, workers&apos; cuts, job orders completed and consumables marked used.</p>
                 </div>
               ) : (
                 <Paginated items={filteredUsageLogs} resetKey={searchTerm} label="entries">{rows => (
                 <table className="w-full">
                   <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">When Used</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">When</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Material</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Where Used</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">What Happened</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">How Much</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Used By</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">By</th>
                       {seesAllInventory && (
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Branch</th>
                       )}
@@ -2219,11 +2332,23 @@ function InventoryContent() {
                           <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                             {log.materialName || 'N/A'}
                           </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                            {log.usedInReference}
+                          <td className="px-6 py-4 text-sm text-gray-600">
+                            {log.kind === 'purchase_order' && log.purchaseOrderId ? (
+                              <Link href={`/purchase-orders/${log.purchaseOrderId}`} className="text-[#011c72] hover:underline">{log.usedInReference}</Link>
+                            ) : log.usedInReference}
+                            {log.kind === 'purchase_order' && log.notes && <span className="block text-xs text-gray-400">{log.notes}</span>}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                            {log.quantityUsed}
+                            {(() => {
+                              // yd / ft / in for length stock, the count and unit for consumables
+                              const mat = rawMaterials.find((x) => x.id === log.materialId);
+                              const incoming = log.direction === 'in';
+                              return (
+                                <span className={`font-medium ${incoming ? 'text-green-700' : 'text-gray-900'}`}>
+                                  {incoming ? '+' : '−'}{formatMaterialQty(Math.abs(Number(log.quantityUsed) || 0), mat)}
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
                             {log.workerName ? (
@@ -2307,7 +2432,7 @@ function InventoryContent() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
                   </svg>
                   <h3 className="text-base font-medium text-gray-900 mb-1">No predictions yet</h3>
-                  <p className="text-sm text-gray-500">Upload your historical Excel data above to generate AI restock recommendations.</p>
+                  <p className="text-sm text-gray-500">No AI restock recommendations yet. Use Recompute above to generate them.</p>
                 </div>
               )}
 
@@ -2325,6 +2450,33 @@ function InventoryContent() {
                 });
                 const urgent = aiStatus.predictions.filter(p => p.daysUntilStockout <= 7).length;
                 const soon = aiStatus.predictions.filter(p => p.daysUntilStockout > 7 && p.daysUntilStockout <= 30).length;
+
+                // Ordering: each suggestion's material in Inventory gives its supplier, unit and cost
+                const matByItem = new Map(predMaterials.filter(m => m.itemId && !m.isArchived).map(m => [m.itemId as string, m]));
+                const unitOf = (itemId: string) => {
+                  const m = matByItem.get(itemId);
+                  return m?.isConsumable ? (m.unit || 'pcs') : 'yd';
+                };
+                const supplierOf = (itemId: string) =>
+                  predSuppliers.find(s => s.id === matByItem.get(itemId)?.supplierId)?.name;
+                const canOrder = can('purchase_orders.add');
+                const orderable = (p: typeof aiStatus.predictions[number]) =>
+                  canOrder && p.hasCurrentInventory && p.suggestedRestockQty > 0 && matByItem.has(p.itemId);
+                const orderQty = (p: typeof aiStatus.predictions[number]) =>
+                  unitOf(p.itemId) === 'yd' ? Math.ceil(p.suggestedRestockQty * 100) / 100 : Math.ceil(p.suggestedRestockQty);
+                const pickedPreds = aiStatus.predictions.filter(p => predPicked.has(p.itemId) && orderable(p));
+                const pickedSuppliers = new Set(pickedPreds.map(p => supplierOf(p.itemId) || '—')).size;
+                /** Open New Purchase Order with these items; it splits them into one order per supplier */
+                const orderPreds = (list: typeof aiStatus.predictions) => {
+                  const lines = list.map(p => `${encodeURIComponent(p.itemId)}:${orderQty(p)}`);
+                  if (lines.length) router.push(`/purchase-orders/new?restock=${lines.join(',')}`);
+                };
+                const togglePred = (itemId: string) => setPredPicked(prev => {
+                  const next = new Set(prev);
+                  if (next.has(itemId)) next.delete(itemId); else next.add(itemId);
+                  return next;
+                });
+                const needSoon = aiStatus.predictions.filter(p => orderable(p) && p.daysUntilStockout <= 30);
 
                 return (
                   <div>
@@ -2358,6 +2510,29 @@ function InventoryContent() {
                           <option value="ok">OK (&gt;30 days)</option>
                         </select>
                       </div>
+                      {canOrder && (
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <button type="button" onClick={() => setPredPicked(new Set(needSoon.map(p => p.itemId)))}
+                            disabled={needSoon.length === 0}
+                            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-100 disabled:opacity-40">
+                            Select urgent &amp; soon ({needSoon.length})
+                          </button>
+                          {pickedPreds.length > 0 && (
+                            <button type="button" onClick={() => setPredPicked(new Set())}
+                              className="px-3 py-1.5 text-xs font-medium rounded-lg text-gray-500 hover:bg-gray-100">
+                              Clear
+                            </button>
+                          )}
+                          <button type="button" onClick={() => orderPreds(pickedPreds)} disabled={pickedPreds.length === 0}
+                            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#011c72] text-white hover:bg-[#022a9e] disabled:opacity-40">
+                            Create purchase order{pickedPreds.length > 0 && ` (${pickedPreds.length} item${pickedPreds.length === 1 ? '' : 's'}`}
+                            {pickedPreds.length > 0 && (pickedSuppliers > 1 ? `, ${pickedSuppliers} suppliers)` : ')')}
+                          </button>
+                          {pickedSuppliers > 1 && (
+                            <span className="text-xs text-gray-500">One purchase order is made per supplier.</span>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     {/* Predictions table */}
@@ -2366,6 +2541,7 @@ function InventoryContent() {
                       <table className="w-full">
                         <thead className="bg-gray-50">
                           <tr>
+                            {canOrder && <th className="pl-4 py-3 w-8"><span className="sr-only">Pick to order</span></th>}
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Item</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Current Stock</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Avg Daily Use</th>
@@ -2396,13 +2572,21 @@ function InventoryContent() {
                             };
                             return (
                               <tr key={p.itemId} className={`hover:bg-gray-50 transition-colors ${isUrgent ? 'bg-red-50/30' : ''}`}>
+                                {canOrder && (
+                                  <td className="pl-4 py-3 align-top">
+                                    <input type="checkbox" checked={predPicked.has(p.itemId)} disabled={!orderable(p)}
+                                      onChange={() => togglePred(p.itemId)} aria-label={`Order ${p.itemId}`}
+                                      className="mt-1 w-4 h-4 rounded border-gray-300 text-[#011c72] focus:ring-[#011c72] disabled:opacity-30" />
+                                  </td>
+                                )}
                                 <td className="px-4 py-3">
                                   <div className="text-sm font-semibold text-gray-900">{p.itemId}</div>
                                   <div className="text-xs text-gray-500">{p.materialType}{p.color ? ` · ${p.color}` : ''}{p.pattern ? ` · ${p.pattern}` : ''}</div>
+                                  {supplierOf(p.itemId) && <div className="text-xs text-[#011c72] mt-0.5">Supplier: {supplierOf(p.itemId)}</div>}
                                   {!p.hasCurrentInventory && <span className="text-xs text-orange-500">Not in current inventory</span>}
                                 </td>
-                                <td className="px-4 py-3 text-sm text-gray-700">{p.currentStock} yd</td>
-                                <td className="px-4 py-3 text-sm text-gray-700">{p.avgDailyUsage} yd/day</td>
+                                <td className="px-4 py-3 text-sm text-gray-700">{p.currentStock} {unitOf(p.itemId)}</td>
+                                <td className="px-4 py-3 text-sm text-gray-700">{p.avgDailyUsage} {unitOf(p.itemId)}/day</td>
                                 <td className="px-4 py-3">
                                   <span className={`text-sm ${daysClass}`}>
                                     {p.daysUntilStockout >= 9999 ? '—' : `${p.daysUntilStockout} days`}
@@ -2419,7 +2603,15 @@ function InventoryContent() {
                                     </div>
                                   ) : <span className="text-sm text-gray-400">—</span>}
                                 </td>
-                                <td className="px-4 py-3 text-sm font-medium text-gray-900">{p.suggestedRestockQty} yd</td>
+                                <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                                  {orderQty(p)} {unitOf(p.itemId)}
+                                  {orderable(p) && (
+                                    <button type="button" onClick={() => orderPreds([p])}
+                                      className="block mt-1 text-xs font-semibold text-[#011c72] hover:underline">
+                                      Order
+                                    </button>
+                                  )}
+                                </td>
                                 <td className="px-4 py-3">
                                   <div className="flex flex-col gap-1">
                                     <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${srcColors[p.dataSource]}`}>
@@ -2442,7 +2634,7 @@ function InventoryContent() {
                           })}
                           {filtered.length === 0 && (
                             <tr>
-                              <td colSpan={7} className="px-4 py-10 text-center text-sm text-gray-500">No predictions match your filters.</td>
+                              <td colSpan={canOrder ? 8 : 7} className="px-4 py-10 text-center text-sm text-gray-500">No predictions match your filters.</td>
                             </tr>
                           )}
                         </tbody>
@@ -2707,23 +2899,28 @@ function InventoryContent() {
                   {adjusting.kind === 'material' ? 'purchase orders' : 'Add Stock (made from raw materials) or deliveries'}.
                   Every adjustment is recorded with your name and reason.
                 </p>
-                <div className="grid grid-cols-2 gap-3">
+                <div className={`grid gap-3 ${adjusting.unit === 'yd' ? 'grid-cols-1' : 'grid-cols-2'}`}>
                   <div>
                     <p className="text-xs text-gray-500 mb-1">Current stock</p>
                     <p className="px-3 py-2 rounded-lg bg-gray-50 border border-gray-200 text-sm font-medium text-gray-900">
-                      {adjusting.current.toLocaleString('en-PH')} {adjusting.unit}
+                      {adjusting.unit === 'yd' ? formatLength(adjusting.current) : `${adjusting.current.toLocaleString('en-PH')} ${adjusting.unit}`}
                     </p>
                   </div>
                   <div>
-                    <label htmlFor="adjust-qty" className="block text-xs text-gray-500 mb-1">Correct stock ({adjusting.unit}) *</label>
-                    <input id="adjust-qty" type="number" min="0" step={adjusting.kind === 'premade' ? '1' : '0.01'} autoFocus
-                      value={adjustForm.newQuantity} onChange={e => setAdjustForm(f => ({ ...f, newQuantity: e.target.value }))}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+                    <label htmlFor="adjust-qty" className="block text-xs text-gray-500 mb-1">Correct stock ({adjusting.unit === 'yd' ? 'length' : adjusting.unit}) *</label>
+                    {adjusting.unit === 'yd' ? (
+                      <LengthInput value={adjustForm.newQuantity === '' ? '' : Number(adjustForm.newQuantity)} ariaLabel="Correct stock"
+                        onChange={(yards) => setAdjustForm(f => ({ ...f, newQuantity: String(yards) }))} />
+                    ) : (
+                      <input id="adjust-qty" type="number" min="0" step={adjusting.kind === 'premade' ? '1' : '0.01'} autoFocus
+                        value={adjustForm.newQuantity} onChange={e => setAdjustForm(f => ({ ...f, newQuantity: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900" />
+                    )}
                   </div>
                 </div>
                 {change !== null && change !== 0 && (
                   <p className={`text-sm font-medium ${change > 0 ? 'text-green-700' : 'text-red-600'}`}>
-                    {change > 0 ? '+' : ''}{Math.round(change * 100) / 100} {adjusting.unit}
+                    {change > 0 ? '+' : ''}{adjusting.unit === 'yd' ? formatLength(change) : `${Math.round(change * 100) / 100} ${adjusting.unit}`}
                   </p>
                 )}
                 <div>

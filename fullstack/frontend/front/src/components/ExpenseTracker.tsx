@@ -23,10 +23,12 @@ const EXPENSE_COLOR = '#eb6834';
  * showPaymentBreakdown: also show the Expense Log (totals by payment method) as
  * its own section, for the same dates and category as the list.
  */
-export default function ExpenseTracker({ startOfYear = false, showPaymentBreakdown = false, initialStart, initialEnd }: {
+export default function ExpenseTracker({ startOfYear = false, showPaymentBreakdown = false, initialStart, initialEnd, initialBranchId }: {
   startOfYear?: boolean; showPaymentBreakdown?: boolean;
   /** Open on these dates (e.g. the Owner Overview's), instead of this month / this year */
   initialStart?: string; initialEnd?: string;
+  /** Open on this branch (for users who see every branch); '' or omitted = all branches */
+  initialBranchId?: number | '';
 }) {
   const { user, can } = useAuth();
   const { confirm, confirmDialog } = useConfirm();
@@ -34,6 +36,7 @@ export default function ExpenseTracker({ startOfYear = false, showPaymentBreakdo
   const [startDate, setStartDate] = useState(initialStart || (startOfYear ? `${today.slice(0, 4)}-01-01` : `${today.slice(0, 7)}-01`));
   const [endDate, setEndDate] = useState(initialEnd || today);
   const [category, setCategory] = useState('');
+  const [branchFilter, setBranchFilter] = useState<number | ''>(initialBranchId || '');
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [total, setTotal] = useState(0);
   const [categories, setCategories] = useState<string[]>([]);
@@ -60,7 +63,10 @@ export default function ExpenseTracker({ startOfYear = false, showPaymentBreakdo
   const load = useCallback(async () => {
     setLoading(true); setError('');
     try {
-      const res = await api.expenses.list({ startDate, endDate, category: category || undefined });
+      const res = await api.expenses.list({
+        startDate, endDate, category: category || undefined,
+        branchId: managesAllBranches && branchFilter ? branchFilter : undefined,
+      });
       if (res.data) {
         setExpenses(res.data.expenses); setTotal(res.data.total);
         setCategories(res.data.categories); setMethods(res.data.paymentMethods);
@@ -72,13 +78,18 @@ export default function ExpenseTracker({ startOfYear = false, showPaymentBreakdo
     } finally {
       setLoading(false);
     }
-  }, [startDate, endDate, category]);
+  }, [startDate, endDate, category, branchFilter, managesAllBranches]);
 
   useEffect(() => { load(); }, [load]);
+  // All branches, for the list's branch filter; only active ones can be logged against
+  const [allBranches, setAllBranches] = useState<{ id: number; name: string }[]>([]);
   useEffect(() => {
-    if (!canAdd || !managesAllBranches) return;
-    api.settings.getBranches().then(r => setBranches((r.data || []).filter(b => b.isActive))).catch(() => {});
-  }, [canAdd, managesAllBranches]);
+    if (!managesAllBranches) return;
+    api.settings.getBranches().then(r => {
+      setAllBranches(r.data || []);
+      setBranches((r.data || []).filter(b => b.isActive));
+    }).catch(() => {});
+  }, [managesAllBranches]);
 
   // The Expense Log: the same entries, totalled by how they were paid
   const byMethod = useMemo(() => {
@@ -203,8 +214,17 @@ export default function ExpenseTracker({ startOfYear = false, showPaymentBreakdo
               {filterCategories.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           </label>
+          {managesAllBranches && allBranches.length > 1 && (
+            <label className="text-xs text-gray-500">Branch
+              <select value={branchFilter} onChange={e => setBranchFilter(e.target.value ? Number(e.target.value) : '')} className={`${input} mt-1`}>
+                <option value="">All branches</option>
+                {allBranches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+              </select>
+            </label>
+          )}
           <div className="ml-auto text-right">
-            <p className="text-xs text-gray-500">Total spent</p>
+            {/* On the Owner Dashboard, named as cash so it isn't read as the P&L's operating expenses */}
+            <p className="text-xs text-gray-500">{showPaymentBreakdown ? 'Cash paid out' : 'Total spent'}</p>
             <p className="text-xl font-bold text-gray-900 min-w-0"><Amount value={total} /></p>
           </div>
         </div>
@@ -275,7 +295,7 @@ export default function ExpenseTracker({ startOfYear = false, showPaymentBreakdo
         ) : expenses.length === 0 ? (
           <p className="p-8 text-center text-sm text-gray-400">No expenses in this period.</p>
         ) : (
-          <Paginated items={expenses} resetKey={[startDate, endDate, category]} label="expenses">{rows => (
+          <Paginated items={expenses} resetKey={[startDate, endDate, category, branchFilter]} label="expenses">{rows => (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>

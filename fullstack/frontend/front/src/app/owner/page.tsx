@@ -1,6 +1,8 @@
 'use client';
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import Link from 'next/link';
+import { useAuth } from '@/context/AuthContext';
 import {
   api, OwnerSummary, ProfitAndLoss, OwnerJobCosting, JobCostingRow, OwnerReceivables, ReceivableInvoice,
   OwnerInventory, MonthlyFinancials, MethodAmount, PAYMENT_METHOD_LABELS,
@@ -41,6 +43,15 @@ type BranchOption = { id: number; name: string };
 const ALL_TIME_START = '2000-01-01';
 const isDate = (s: string | null): s is string => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
+/** A margin %: positive as it is; a loss is shown with at most 4 digits (down to
+ *  -999.9%), since a tiny sale against big costs gives numbers like -12,345.6% */
+const MIN_SHOWN_MARGIN = -999.9;
+function pct(value: number): string {
+  const v = Number(value) || 0;
+  if (v < MIN_SHOWN_MARGIN) return `< ${MIN_SHOWN_MARGIN.toFixed(1)}%`;
+  return `${v.toFixed(1)}%`;
+}
+
 export default function OwnerPage() {
   return (
     <Suspense fallback={<div className="p-8 text-gray-400">Loading…</div>}>
@@ -51,6 +62,9 @@ export default function OwnerPage() {
 
 function OwnerDashboard() {
   const router = useRouter();
+  // Just "Dashboard" for accounts that don't also have the day-to-day one (the owner role)
+  const { can: canDo } = useAuth();
+  const title = canDo('dashboard.view') ? 'Owner Dashboard' : 'Dashboard';
   const params = useSearchParams();
   const tab = (TABS.some(t => t.id === params.get('tab')) ? params.get('tab') : 'overview') as Tab;
   const today = manilaDateString();
@@ -78,8 +92,7 @@ function OwnerDashboard() {
     <div className="min-h-screen bg-gray-50">
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="mb-6">
-          <h1 className="text-2xl font-bold text-gray-900">Owner Dashboard</h1>
-          <p className="text-gray-500 mt-1">How the business is doing, at a glance. Sales and profit exclude VAT, which is collected for the government.</p>
+          <h1 className="text-2xl font-bold text-gray-900">{title}</h1>
         </div>
         <div className="mb-6 border-b border-gray-200 overflow-x-auto">
           <nav className="flex gap-1 -mb-px min-w-max">
@@ -101,7 +114,7 @@ function OwnerDashboard() {
         {tab === 'pnl' && <ProfitLoss filters={filters} />}
         {tab === 'receivables' && <Receivables filters={filters} />}
         {/* Opens on the Overview's dates, so its total matches the "paid out" figure there */}
-        {tab === 'expenses' && <ExpenseTracker showPaymentBreakdown initialStart={filters.start} initialEnd={filters.end} />}
+        {tab === 'expenses' && <ExpenseTracker showPaymentBreakdown initialStart={filters.start} initialEnd={filters.end} initialBranchId={filters.branchId} />}
         {tab === 'inventory' && <InventoryOversight filters={filters} />}
       </main>
     </div>
@@ -136,8 +149,8 @@ function State({ loading, error }: { loading: boolean; error: string }) {
   return null;
 }
 
-function Tile({ label, value, sub, tone, large, onOpen, openLabel }: {
-  label: string; value: React.ReactNode; sub?: React.ReactNode; tone?: 'good' | 'bad';
+function Tile({ label, value, sub, large, onOpen, openLabel }: {
+  label: string; value: React.ReactNode; sub?: React.ReactNode;
   /** The headline figures at the top of the Overview: a little taller, bigger numbers */
   large?: boolean;
   /** Clicking the card opens the details (the eye button beside the amount still just toggles it) */
@@ -150,11 +163,6 @@ function Tile({ label, value, sub, tone, large, onOpen, openLabel }: {
         onOpen ? 'cursor-pointer hover:border-[#011c72] hover:shadow-sm transition' : ''}`}>
       <p className="text-xs font-medium uppercase tracking-wide text-gray-500">{label}</p>
       <p className={`font-bold text-gray-900 min-w-0 tabular-nums ${large ? 'mt-2.5 text-2xl sm:text-[1.75rem] leading-tight' : 'mt-2 text-xl sm:text-2xl'}`}>{value}</p>
-      {tone && (
-        <p className={`mt-1 text-xs font-medium ${tone === 'good' ? 'text-green-700' : 'text-red-700'}`}>
-          {tone === 'good' ? '▲ Making money' : '▼ Losing money'}
-        </p>
-      )}
       {sub && <p className="mt-1 text-xs text-gray-500">{sub}</p>}
       {onOpen && (
         <button type="button" onClick={(e) => { e.stopPropagation(); onOpen(); }}
@@ -239,79 +247,91 @@ function FilterBar({ filters, branches, onChange, dates }: {
   );
 }
 
-/** Customer payments split into the VAT owed to the government and the sales the business keeps */
-function VatBreakdown({ grossReceipts, vat, sales, compact }: {
-  grossReceipts: number; vat: number; sales: number;
-  /** Smaller version for the bottom of the Overview (the P&L keeps the full one) */
-  compact?: boolean;
-}) {
-  const amount = compact ? 'text-base' : 'text-xl';
-  const cell = compact ? 'px-3 py-2' : 'p-3';
-  return (
-    <div className={`rounded-xl border border-amber-300 bg-amber-50 ${compact ? 'p-4' : 'p-5'}`}>
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <h2 className={`font-semibold text-amber-900 ${compact ? 'text-sm' : 'text-base'}`}>VAT is not income</h2>
-        <p className={`text-amber-800 ${compact ? 'text-[11px]' : 'text-xs'}`}>Customer prices include VAT. It is collected for the government (BIR), so it is left out of sales and profit.</p>
-      </div>
-      <div className={`grid grid-cols-1 sm:grid-cols-3 ${compact ? 'mt-3 gap-2' : 'mt-4 gap-3'}`}>
-        <div className={`rounded-lg bg-white/70 ${cell}`}>
-          <p className="text-xs text-gray-600">Customers paid (incl. VAT)</p>
-          <p className={`mt-0.5 font-semibold text-gray-900 ${amount}`}><Amount value={grossReceipts} /></p>
-        </div>
-        <div className={`rounded-lg bg-white ring-2 ring-amber-400 ${cell}`}>
-          <p className="text-xs font-medium text-amber-900">− VAT collected (owed to the government)</p>
-          <p className={`mt-0.5 font-bold text-amber-900 ${amount}`}><Amount value={vat} /></p>
-        </div>
-        <div className={`rounded-lg bg-white/70 ${cell}`}>
-          <p className="text-xs text-gray-600">= Sales (excl. VAT)</p>
-          <p className={`mt-0.5 font-semibold text-gray-900 ${amount}`}><Amount value={sales} /></p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ─────────────────────────── 1. Overview ───────────────────────────
 
 function Overview({ filters, onOpen }: { filters: Filters; onOpen: (t: Tab) => void }) {
+  const { can } = useAuth();
   const { data, error, loading } = useLoad<OwnerSummary>(
     () => api.owner.summary(query(filters)), [filters.start, filters.end, filters.branchId]);
   if (!data || loading) return <State loading={loading} error={error} />;
   const { totals } = data;
   const counts = `${totals.orderCounts.jobOrders} job orders · ${totals.orderCounts.premadeOrders} premade sales`;
+  const scope = filters.branchId ? 'this branch' : 'all branches';
+  const link = 'text-sm font-medium text-[#011c72] hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-[#011c72] rounded';
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Tile large label="Sales (excl. VAT)" value={<Amount value={totals.sales} />} sub={counts} />
-        {/* Cost (what Net income uses); "paid out" is every expense entry, supplier payments included */}
-        <Tile large label="Expenses" value={<Amount value={totals.totalExpenses} />}
-          sub={<>Cost of goods sold + operating expenses<br />All expenses paid out: {peso(data.cashflowByMethod.totalOut)}</>}
-          onOpen={() => onOpen('expenses')} openLabel="View expenses" />
-        <Tile large label="Net income" value={<Amount value={totals.netIncome} />} tone={totals.netIncome >= 0 ? 'good' : 'bad'} />
-        <Tile large label="Profit margin" value={`${totals.profitMargin.toFixed(1)}%`} sub="Net income ÷ sales" />
+      {/* Sales → cost of goods sold → gross profit → operating expenses → net income.
+          Cards show short amounts; the exact ones are in the tables and the P&L. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+        <Tile large label="Sales (excl. VAT)" value={<Amount value={totals.sales} />}
+          sub={<>{counts}<br />VAT on sales: {compactPeso(totals.vatCollected)} · billed incl. VAT: {compactPeso(totals.grossReceipts)}</>} />
+        <Tile large label="Cost of goods sold" value={<Amount value={totals.cogs} />}
+          sub="Materials, labor and other costs of finished job orders, plus premade items sold"
+          onOpen={() => onOpen('inventory')} openLabel="View inventory & COGS" />
+        <Tile large label="Gross profit" value={<Amount value={totals.grossProfit} />}
+          sub={`${pct(totals.grossMargin)} gross margin`} />
+        <Tile large label="Operating expenses" value={<Amount value={totals.operatingExpenses} />}
+          sub="Logged expenses and material waste (supplier payments excluded)"
+          onOpen={() => onOpen('pnl')} openLabel="View profit & loss" />
+        <Tile large label="Net income"
+          value={<span className={totals.netIncome < 0 ? 'text-red-700' : ''}><Amount value={totals.netIncome} /></span>}
+          sub={`${pct(totals.profitMargin)} net margin`} />
       </div>
 
-      {/* A box with its own button: the amount's eye button can't sit inside another button */}
-      <div className="flex flex-wrap items-center justify-between gap-3 bg-white rounded-xl border border-gray-200 px-5 py-4">
-        <div className="min-w-0">
+      {/* What is owed today, both ways (not limited to the period). Boxes with their own
+          links: the amount's eye button can't sit inside another button. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="flex flex-col bg-white rounded-xl border border-gray-200 px-5 py-4 min-w-0">
           <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Accounts Receivable</p>
           <p className="mt-1 text-xl sm:text-2xl font-bold text-gray-900 tabular-nums"><Amount value={data.receivables} /></p>
-          <p className="mt-0.5 text-xs text-gray-500">Still owed by customers as of today · {filters.branchId ? 'this branch' : 'all branches'}</p>
+          <p className="mt-0.5 text-xs text-gray-500">Still owed by customers as of today · {scope}</p>
+          <div className="mt-auto pt-3">
+            <button type="button" onClick={() => onOpen('receivables')} className={link}>View receivables →</button>
+          </div>
         </div>
-        <button type="button" onClick={() => onOpen('receivables')}
-          className="text-sm font-medium text-[#011c72] hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-[#011c72] rounded">
-          View receivables →
-        </button>
+
+        {/* Owed to suppliers: unpaid balances of approved / received purchase orders. Not an
+            expense until it is paid (payments reach the Expense Log on the day they're made). */}
+        <div className={`flex flex-col rounded-xl border px-5 py-4 min-w-0 ${
+          data.payables.overdueCount > 0 ? 'bg-red-50 border-red-200' : data.payables.dueSoonCount > 0 ? 'bg-amber-50 border-amber-200' : 'bg-white border-gray-200'}`}>
+          <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Accounts Payable</p>
+          <p className="mt-1 text-xl sm:text-2xl font-bold text-gray-900 tabular-nums"><Amount value={data.payables.total} /></p>
+          <p className="mt-0.5 text-xs text-gray-500">
+            Still owed to suppliers as of today · {data.payables.count} purchase order{data.payables.count === 1 ? '' : 's'} · {scope}
+          </p>
+          {(data.payables.overdueCount > 0 || data.payables.dueSoonCount > 0) && (
+            <p className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+              {data.payables.overdueCount > 0 && (
+                <span className="font-semibold text-red-700">Overdue: {compactPeso(data.payables.overdue)} ({data.payables.overdueCount})</span>
+              )}
+              {data.payables.dueSoonCount > 0 && (
+                <span className="font-semibold text-amber-800">Due soon: {compactPeso(data.payables.dueSoon)} ({data.payables.dueSoonCount})</span>
+              )}
+            </p>
+          )}
+          {/* Only for those who may open Purchase Orders (an admin can turn that off for the owner) */}
+          {can('purchase_orders.view') && (
+            <div className="mt-auto pt-3">
+              <Link href="/purchase-orders?tab=due" className={link}>View due payments →</Link>
+            </div>
+          )}
+        </div>
       </div>
 
       <CashflowChart monthly={data.monthly} start={data.period.startDate} end={data.period.endDate} />
 
-      {/* Money paid out by payment method (the Expense Log) is on the Expenses tab */}
-      <MethodBars title="Money received by mode of payment" rows={data.cashflowByMethod.in}
-        total={data.cashflowByMethod.totalIn} color={SALES_COLOR} empty="No payments received in this period." />
-
-      <VatBreakdown compact grossReceipts={totals.grossReceipts} vat={totals.vatCollected} sales={totals.sales} />
+      {/* Cash actually moved in the period: not the same as sales and costs above, which
+          count a job when it is finished and stock when it is used */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-2 min-w-0">
+          <MethodBars title="Cash received by mode of payment" rows={data.cashflowByMethod.in}
+            total={data.cashflowByMethod.totalIn} color={SALES_COLOR} empty="No payments received in this period." />
+        </div>
+        <Tile label="Cash paid out" value={<Amount value={data.cashflowByMethod.totalOut} />}
+          sub="Every expense paid in this period, supplier payments for stock included. Differs from cost of goods sold and operating expenses, which count stock when it is used."
+          onOpen={() => onOpen('expenses')} openLabel="View expense log" />
+      </div>
     </div>
   );
 }
@@ -488,7 +508,7 @@ function JobCosting({ filters }: { filters: Filters }) {
             <Tile label="Materials" value={<Amount value={data.totals.materials} />} />
             <Tile label="Direct labor" value={<Amount value={data.totals.labor} />} />
             <Tile label="Other job costs" value={<Amount value={data.totals.otherCosts} />} />
-            <Tile label="Gross margin" value={<Amount value={data.totals.grossMargin} />} sub={`${data.totals.marginPercent.toFixed(1)}% of selling price`} />
+            <Tile label="Gross margin" value={<Amount value={data.totals.grossMargin} />} sub={`${pct(data.totals.marginPercent)} of selling price`} />
           </div>
           {data.jobs.length === 0 ? (
             <p className="bg-white rounded-xl border border-gray-200 p-10 text-center text-sm text-gray-400">No finished job orders in this period.</p>
@@ -536,7 +556,7 @@ function JobRow({ job, open, onToggle }: { job: JobCostingRow; open: boolean; on
         <td className={`px-4 py-2.5 text-right font-semibold ${losing ? 'text-red-700' : 'text-gray-900'}`}><Money v={job.grossMargin} /></td>
         <td className="px-4 py-2.5 text-right whitespace-nowrap">
           <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${losing ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
-            {losing ? '▼ ' : '▲ '}{job.marginPercent.toFixed(1)}%
+            {losing ? '▼ ' : '▲ '}{pct(job.marginPercent)}
           </span>
         </td>
       </tr>
@@ -552,7 +572,7 @@ function JobRow({ job, open, onToggle }: { job: JobCostingRow; open: boolean; on
                 <Line label="Materials (COGS)" value={`− ${peso(job.materials)}`} />
                 <Line label="Direct labor" value={`− ${peso(job.labor)}`} />
                 <Line label="Other job costs" value={`− ${peso(job.otherCosts)}`} />
-                <Line label="Gross margin" value={`${peso(job.grossMargin)} (${job.marginPercent.toFixed(1)}%)`} strong />
+                <Line label="Gross margin" value={`${peso(job.grossMargin)} (${pct(job.marginPercent)})`} strong />
               </div>
               <table className="w-full text-xs">
                 <thead><tr className="text-left text-gray-500 border-b border-gray-200">
@@ -598,14 +618,11 @@ function ProfitLoss({ filters }: { filters: Filters }) {
     <div>
       {!data || loading ? <State loading={loading} error={error} /> : (
         <div className="space-y-5">
-        <VatBreakdown grossReceipts={data.grossReceipts} vat={data.vatCollected} sales={data.sales} />
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
           <div className="lg:col-span-3 bg-white rounded-xl border border-gray-200 p-5 text-sm space-y-1.5">
             <h2 className="text-base font-semibold text-gray-900 mb-2">Profit and loss statement</h2>
-            <Line label="Customers paid (incl. VAT)" value={peso(data.grossReceipts)} muted />
-            <p className="flex justify-between gap-6 rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-900">
-              <span>Less: VAT collected (owed to the government)</span><span>− {peso(data.vatCollected)}</span>
-            </p>
+            <Line label="Billed to customers (incl. VAT)" value={peso(data.grossReceipts)} muted />
+            <Line label="Less: VAT on sales" value={`− ${peso(data.vatCollected)}`} muted />
             <Line label="Job order sales (excl. VAT)" value={peso(data.jobSales)} />
             <Line label="Premade product sales (excl. VAT)" value={peso(data.premadeSales)} />
             <Line label="Total sales" value={peso(data.sales)} strong />
@@ -622,7 +639,7 @@ function ProfitLoss({ filters }: { filters: Filters }) {
               : data.operatingExpenses.byCategory.map(c => <Line key={c.category} label={c.category} value={peso(c.amount)} />)}
             <Line label="Total operating expenses" value={peso(data.operatingExpenses.total)} strong />
             <p className={`flex justify-between gap-6 text-base font-bold border-t-2 border-gray-300 pt-2 mt-2 ${data.netIncome < 0 ? 'text-red-700' : 'text-gray-900'}`}>
-              <span>Net income</span><span>{peso(data.netIncome)} ({data.profitMargin.toFixed(1)}%)</span>
+              <span>Net income</span><span>{peso(data.netIncome)} ({pct(data.profitMargin)})</span>
             </p>
             <p className="pt-2 text-xs text-gray-500">
               {data.orderCounts.jobOrders} job orders and {data.orderCounts.premadeOrders} premade orders finished in this period.
