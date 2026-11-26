@@ -25,7 +25,10 @@ interface Props {
 export default function ReceivePurchaseOrderDialog({ po, onClose, onSaved, onReturn }: Props) {
   const open = po.items.filter((it) => it.remainingQuantity > 0);
   const canReturn = !!onReturn && po.items.some((it) => it.receivedQuantity > 0);
-  const [qty, setQty] = useState<Record<number, string>>({});
+  // Starts from what the supplier said they sent; staff change it to what really arrived
+  const sentBySupplier = Object.fromEntries((po.supplierSentItems || []).map((s) => [s.line, s.quantity]));
+  const [qty, setQty] = useState<Record<number, string>>(
+    () => Object.fromEntries(Object.entries(sentBySupplier).map(([line, q]) => [line, String(q)])));
   const [notes, setNotes] = useState('');
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [saving, setSaving] = useState(false);
@@ -93,7 +96,10 @@ export default function ReceivePurchaseOrderDialog({ po, onClose, onSaved, onRet
         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
           {!closing ? (<>
             <div className="flex items-center justify-between gap-3">
-              <p className="text-sm text-gray-600">Enter how much of each item arrived now. Only these amounts are added to stock.</p>
+              <p className="text-sm text-gray-600">
+                Enter how much of each item arrived now. Only these amounts are added to stock.
+                {po.supplierSentItems?.length ? ' Filled in from what the supplier sent; change it if something differs.' : ''}
+              </p>
               <button type="button" onClick={() => setQty(Object.fromEntries(open.map((it) => [it.line, String(it.remainingQuantity)])))}
                 className="shrink-0 text-xs font-medium text-[#011c72] hover:underline">Fill all remaining</button>
             </div>
@@ -128,6 +134,9 @@ export default function ReceivePurchaseOrderDialog({ po, onClose, onSaved, onRet
                               placeholder="0" aria-label={`Quantity of ${it.name} arrived now`}
                               className={`${input} ${problem ? 'border-red-400' : 'border-gray-200'}`} />
                             {problem && <p className="mt-1 text-xs text-red-600">{problem}</p>}
+                            {sentBySupplier[it.line] != null && (
+                              <p className="mt-1 text-[11px] text-blue-700">Supplier sent {poQty(sentBySupplier[it.line], it.unit)}</p>
+                            )}
                           </>)}
                         </td>
                       </tr>

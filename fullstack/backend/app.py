@@ -965,6 +965,8 @@ class PurchaseOrder(db.Model):
     # partial delivery (the rest must be sent again) and after a return for replacement
     supplier_sent_at = db.Column(db.DateTime, nullable=True)
     supplier_sent_note = db.Column(db.String(255), nullable=True)
+    # What the supplier said they are sending: [{line, quantity}] (Receiving starts from it)
+    supplier_sent_items = db.Column(db.JSON, nullable=True)
     created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     approved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
@@ -1556,6 +1558,7 @@ def run_migrations():
         "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS delivery_set_at TIMESTAMP",
         "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS supplier_sent_at TIMESTAMP",
         "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS supplier_sent_note VARCHAR(255)",
+        "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS supplier_sent_items JSON",
         # Track which managed worker used materials (FK to managed_workers)
         "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS managed_worker_id INTEGER REFERENCES managed_workers(id)",
         "ALTER TABLE material_usage_logs ADD COLUMN IF NOT EXISTS batch_id VARCHAR(36)",
@@ -4799,6 +4802,19 @@ def supplier_po_to_dict(po):
         # When they marked the current delivery sent (cleared after a partial delivery)
         'sentAt': fmt_dt(po.supplier_sent_at),
         'sentNote': po.supplier_sent_note,
+        'sentItems': po.supplier_sent_items or [],
+        # What arrived and what was sent back, and when (no staff names or notes)
+        'deliveries': [{
+            'kind': r['kind'], 'date': _iso(r['at']),
+            'invoiceNumber': r.get('invoiceNumber') if r['kind'] == 'delivery' else None,
+            'returnReason': r.get('returnReason') if r['kind'] == 'return' else None,
+            'replacement': bool(r.get('replacement')) if r['kind'] == 'return' else None,
+            'items': [{'name': it.get('name'), 'quantity': float(it.get('quantity') or 0),
+                       'unit': (po.items[it['line']].get('unit') if isinstance(it.get('line'), int)
+                                and 0 <= it['line'] < len(po.items or []) else '') or ''}
+                      for it in r['items']],
+        } for r in receipts if r['kind'] in ('delivery', 'return')],
+        'receivedAt': po.received_at.strftime('%Y-%m-%d') if po.received_at else None,
     }
 
 
@@ -4923,9 +4939,30 @@ def supplier_mark_sent(po_id):
     unpriced = [it.get('name') for it in (po.items or []) if not float(it.get('unitPrice') or 0) > 0]
     if unpriced:
         return _error('Set the price of every item before sending: ' + ', '.join(unpriced[:5]))
-    note = str((request.get_json(silent=True) or {}).get('note') or '').strip()[:255] or None
+    data = request.get_json(silent=True) or {}
+    note = str(data.get('note') or '').strip()[:255] or None
+    # How much of each line they are sending: up to what is still to be delivered
+    remaining = purchase_order_remaining_by_line(po)
+    lines = po.items or []
+    sent = {}
+    for entry in data.get('items') or []:
+        line = _int_or_none(entry.get('line') if isinstance(entry, dict) else None)
+        if line is None or not 0 <= line < len(lines):
+            return _error('That line is not on this purchase order')
+        qty = finite_number(entry.get('quantity'), 0.0)
+        if qty is None or qty < 0:
+            return _error('Quantities must be numbers of 0 or more')
+        if qty == 0:
+            continue
+        if qty > remaining[line] + QTY_TOLERANCE:
+            return _error(f"Only {remaining[line]:g} {lines[line].get('unit') or ''} of "
+                          f"{lines[line].get('name') or 'that item'} is still to be delivered")
+        sent[line] = round(min(qty, remaining[line]), 4)
+    if not sent:
+        return _error('Enter how much of each item you are sending')
     po.supplier_sent_at = datetime.utcnow()
     po.supplier_sent_note = note
+    po.supplier_sent_items = [{'line': line, 'quantity': qty} for line, qty in sorted(sent.items())]
     if not po.expected_delivery or po.expected_delivery < manila_today().isoformat():
         # Sent without a date (or a passed one): it is on its way now
         po.expected_delivery = manila_today().isoformat()
@@ -4934,12 +4971,14 @@ def supplier_mark_sent(po_id):
     branch_ids = purchase_order_branch_ids(po)
     branch_id = (warehouse.id if warehouse and warehouse.id in branch_ids
                  else next(iter(branch_ids), warehouse.id if warehouse else None))
+    what = '; '.join(f"{lines[line].get('name')} × {qty:g} {lines[line].get('unit') or ''}".strip()
+                     for line, qty in sorted(sent.items()))
     notify_branch_users(branch_id, 'po_delivery_set', f'{po.po_number}: sent by {supplier.name}',
-                        f'{supplier.name} sent the order. It can now be received.' + (f' Note: {note}' if note else ''),
+                        f'{supplier.name} sent: {what}. It can now be received.' + (f' Note: {note}' if note else ''),
                         {'purchaseOrderId': po.id})
     db.session.commit()
     log_action(request.current_user['id'], request.current_user['fullName'], 'UPDATE', 'Purchase Orders',
-               f"{supplier.name} marked {po.po_number} as sent" + (f": {note}" if note else ''),
+               f"{supplier.name} marked {po.po_number} as sent: {what}" + (f" ({note})" if note else ''),
                request.remote_addr or '0.0.0.0')
     return jsonify({'status': 'success', 'data': supplier_po_to_dict(po)})
 
@@ -8021,6 +8060,8 @@ def purchase_order_to_dict(po):
         # login) it can't be received, and this says why
         'supplierSentAt': fmt_dt(po.supplier_sent_at),
         'supplierSentNote': po.supplier_sent_note,
+        # How much of each line the supplier sent: [{line, quantity}]
+        'supplierSentItems': po.supplier_sent_items or [],
         'awaitingSupplier': awaiting_supplier_send(po),
         'createdAt': day(po.created_at),
         'createdBy': po.created_by,
@@ -8806,6 +8847,7 @@ def receive_purchase_order(po_id):
         # Part of it came: the supplier marks the rest sent when they send it
         po.supplier_sent_at = None
         po.supplier_sent_note = None
+        po.supplier_sent_items = None
     db.session.commit()
 
     summary = ', '.join(f"{it['name']} × {it['quantity']:g}" for it in receipt_items)
@@ -8891,6 +8933,7 @@ def return_purchase_order_items(po_id):
         # The replacement has to be sent before it can be received
         po.supplier_sent_at = None
         po.supplier_sent_note = None
+        po.supplier_sent_items = None
         supplier = Supplier.query.get(po.supplier_id) if po.supplier_id else None
         if supplier and supplier.user_id:
             db.session.add(Notification(
